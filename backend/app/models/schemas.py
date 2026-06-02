@@ -137,6 +137,23 @@ class AccountState(BaseModel):
     trading_paused: bool = False
 
 
+class RiskLimits(BaseModel):
+    """The active risk limits handed to the deterministic Risk Manager.
+
+    Mirrors the RiskConfig DB row. ``risk_per_trade_ceiling`` is a hard cap (RISK.md: 2%)
+    that the manager re-clamps against defensively, regardless of the stored value.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    risk_per_trade: float = 0.01
+    max_open_positions: int = 3
+    max_daily_loss: float = 0.03
+    max_total_exposure: float = 0.06
+    per_pair_cooldown_minutes: int = 30
+    risk_per_trade_ceiling: float = 0.02
+
+
 class RiskDecision(BaseModel):
     """Final, deterministic verdict on a proposal. The Risk Manager's word is final."""
 
@@ -237,6 +254,43 @@ class RiskStateView(BaseModel):
     pause_reason: str | None = None
     max_daily_loss: float
     daily_loss_limit_amount: float | None = None
+
+
+class AnalyzeRequest(BaseModel):
+    symbol: str
+    asset_class: AssetClass = AssetClass.STOCK
+    timeframe: str = "1h"
+
+
+class ProposalView(BaseModel):
+    """API view of a stored proposal + its risk outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+    symbol: str
+    asset_class: str
+    timeframe: str
+    direction: str
+    entry: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    confidence: float
+    rationale: str
+    status: str
+    risk_decision: str | None = None
+    risk_reason: str | None = None
+    approved_qty: float | None = None
+    risk_amount: float | None = None
+    reasoning: dict = Field(default_factory=dict)
+
+
+class AnalyzeResponse(BaseModel):
+    proposal_id: int
+    status: str
+    proposal: TradeProposal
+    risk: RiskDecision
 
 
 class HealthResponse(BaseModel):

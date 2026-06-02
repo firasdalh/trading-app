@@ -25,9 +25,12 @@ from app.models.schemas import (
     AppSettingsView,
     HealthResponse,
     RiskConfigView,
+    RiskDecision,
     RiskStateView,
     SettingsResponse,
+    TradeProposal,
 )
+from app.risk.service import assess
 
 log = get_logger("api")
 router = APIRouter()
@@ -78,6 +81,19 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
         max_daily_loss=risk.max_daily_loss,
         daily_loss_limit_amount=limit_amount,
     )
+
+
+@router.post("/api/risk/preview", response_model=RiskDecision, tags=["risk"])
+def preview_risk(
+    proposal: TradeProposal,
+    session: Session = Depends(get_session),
+) -> RiskDecision:
+    """Run a proposal through the DETERMINISTIC Risk Manager without executing anything.
+
+    Returns the approved (possibly resized) size or a veto with reason. This is the same
+    gate the agent pipeline (M4) uses; exposing it lets the UI show sizing before approval.
+    """
+    return assess(session, proposal)
 
 
 @router.post("/api/kill-switch/{engage}", tags=["safety"])
