@@ -1,0 +1,85 @@
+"""Shared enums used across agents, risk, brokers, and the API.
+
+Kept in one place so the Pydantic schemas and SQLAlchemy models agree on string values
+(we store the enum *value*, not its name, in the DB).
+"""
+from __future__ import annotations
+
+from enum import Enum
+
+
+class StrEnum(str, Enum):
+    """str-backed enum so values serialize cleanly to JSON and DB columns."""
+
+    def __str__(self) -> str:  # pragma: no cover - cosmetic
+        return self.value
+
+
+class AssetClass(StrEnum):
+    STOCK = "stock"
+    CRYPTO = "crypto"
+    FOREX = "forex"
+    METAL = "metal"
+
+
+class Direction(StrEnum):
+    """Direction of a trade idea. ``NO_TRADE`` lets the orchestrator decline."""
+
+    LONG = "long"
+    SHORT = "short"
+    NO_TRADE = "no_trade"
+
+
+class OrderSide(StrEnum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderType(StrEnum):
+    MARKET = "market"
+    LIMIT = "limit"
+
+
+class OrderStatus(StrEnum):
+    PENDING = "pending"           # created locally, not yet sent
+    SUBMITTED = "submitted"       # accepted by broker
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    CANCELED = "canceled"
+    REJECTED = "rejected"         # broker rejected
+    ERROR = "error"               # submission errored; needs reconciliation
+
+
+class PositionStatus(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class TradingBias(StrEnum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    NEUTRAL = "neutral"
+
+
+class ExecutionMode(StrEnum):
+    """User-selectable execution mode (stored in AppSettings)."""
+
+    A_PROPOSE_APPROVE = "A_PROPOSE_APPROVE"   # default: AI proposes, user approves
+    B_AUTO_PAPER = "B_AUTO_PAPER"             # auto-execute, paper broker only
+    C_AUTO_LIVE = "C_AUTO_LIVE"               # auto-execute, live (gated + warned)
+
+
+class RiskDecisionType(StrEnum):
+    APPROVED = "approved"     # accepted as proposed
+    RESIZED = "resized"       # accepted but position size reduced
+    VETOED = "vetoed"         # rejected outright
+
+
+class ProposalStatus(StrEnum):
+    PENDING_RISK = "pending_risk"           # awaiting Risk Manager
+    RISK_VETOED = "risk_vetoed"             # Risk Manager rejected
+    PENDING_APPROVAL = "pending_approval"   # risk-approved, awaiting user (Mode A)
+    APPROVED = "approved"                   # user (or auto-mode) approved
+    REJECTED = "rejected"                   # user rejected
+    EXECUTED = "executed"                   # order submitted
+    EXPIRED = "expired"                     # went stale before action
