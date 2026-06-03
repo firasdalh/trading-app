@@ -114,7 +114,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       borderUpColor: "#26a69a", borderDownColor: "#ef5350",
       wickUpColor: "#26a69a", wickDownColor: "#ef5350",
     });
-    const volume = chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "vol" });
+    const volume = chart.addHistogramSeries({
+      priceFormat: { type: "volume" }, priceScaleId: "vol",
+      lastValueVisible: false, priceLineVisible: false,  // keep the right axis clean
+    });
     volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
     chartRef.current = chart;
@@ -315,15 +318,24 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       );
     };
     for (const p of mine) {
-      const tag = p.direction === "long" ? "▲ pos" : "▼ pos";
-      add(p.entry_price, "#3b82f6", tag);
-      add(p.stop_loss, "#ef5350", "pos SL");
-      add(p.take_profit, "#26a69a", "pos TP");
+      const arrow = p.direction === "long" ? "▲" : "▼";
+      // When the stop has been moved to breakeven (SL ≈ entry) the two labels would stack on
+      // the same axis pixel — merge them into one instead of overlapping.
+      const be =
+        p.stop_loss != null && Math.abs(p.stop_loss - p.entry_price) <= Math.abs(p.entry_price) * 1e-4;
+      add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL` : `${arrow} entry`);
+      if (!be) add(p.stop_loss, "#ef5350", "SL");
+      add(p.take_profit, "#26a69a", "TP");
     }
   }, [positions, symbol]);
 
   const change = legend ? legend.close - legend.open : 0;
   const changePct = legend && legend.open ? (change / legend.open) * 100 : 0;
+
+  const myPos = (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase());
+  const posBE =
+    myPos?.stop_loss != null &&
+    Math.abs(myPos.stop_loss - myPos.entry_price) <= Math.abs(myPos.entry_price) * 1e-4;
 
   return (
     <div className="relative">
@@ -354,6 +366,26 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmt(legend.close)}</span></span>
           <span className={change >= 0 ? "text-bull" : "text-bear"}>
             {change >= 0 ? "+" : ""}{fmt(change)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
+          </span>
+        </div>
+      )}
+
+      {myPos && (
+        <div className="pointer-events-none absolute left-2 top-[3.5rem] z-10 flex flex-wrap items-center gap-2 text-xs tabular-nums">
+          <span
+            className={`rounded px-1.5 py-0.5 font-semibold ${
+              myPos.direction === "long" ? "bg-bull/20 text-bull" : "bg-bear/20 text-bear"
+            }`}
+          >
+            {myPos.direction === "long" ? "▲ LONG" : "▼ SHORT"} @ {fmt(myPos.entry_price)}
+          </span>
+          {myPos.stop_loss != null && (
+            <span className="text-bear">SL {fmt(myPos.stop_loss)}{posBE ? " (BE)" : ""}</span>
+          )}
+          {myPos.take_profit != null && <span className="text-bull">TP {fmt(myPos.take_profit)}</span>}
+          <span className={myPos.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}>
+            {myPos.unrealized_pnl >= 0 ? "+" : ""}
+            {myPos.unrealized_pnl.toFixed(2)}
           </span>
         </div>
       )}

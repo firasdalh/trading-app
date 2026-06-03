@@ -15,18 +15,18 @@ export function PositionsTable({ positions, onClose, onSetSlTp }: Props) {
       {!positions || positions.length === 0 ? (
         <div className="text-sm text-neutral-500">No open positions.</div>
       ) : (
-        <table className="w-full text-sm">
-          <thead className="text-left text-xs text-neutral-400">
+        <table className="w-full border-separate border-spacing-0 text-sm">
+          <thead className="text-left text-xs uppercase tracking-wide text-neutral-500">
             <tr>
-              <th className="py-1">Symbol</th>
-              <th>Side</th>
-              <th className="text-right">Qty</th>
-              <th className="text-right">Entry</th>
-              <th className="text-right">Last</th>
-              <th className="text-right">P&amp;L</th>
-              <th>Stop</th>
-              <th>Target</th>
-              <th className="text-right">Action</th>
+              <th className="px-3 py-2">Symbol</th>
+              <th className="px-3 py-2">Side</th>
+              <th className="px-3 py-2 text-right">Qty</th>
+              <th className="px-3 py-2 text-right">Entry</th>
+              <th className="px-3 py-2 text-right">Last</th>
+              <th className="px-3 py-2 pr-6 text-right">P&amp;L</th>
+              <th className="px-3 py-2">Stop</th>
+              <th className="px-3 py-2">Target</th>
+              <th className="px-3 py-2 text-right">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -65,13 +65,17 @@ function PositionRow({
   const missingProtection = p.stop_loss == null && p.take_profit == null;
 
   return (
-    <tr className="border-t border-neutral-800">
-      <td className="py-1">{p.symbol}</td>
-      <td className={p.direction === "long" ? "text-bull" : "text-bear"}>{p.direction}</td>
+    <tr className="border-t border-neutral-800 [&>td]:px-3 [&>td]:py-2 [&>td]:align-middle">
+      <td className="font-medium">{p.symbol}</td>
+      <td className={`uppercase ${p.direction === "long" ? "text-bull" : "text-bear"}`}>
+        {p.direction}
+      </td>
       <td className="text-right tabular-nums">{p.qty}</td>
       <td className="text-right tabular-nums">{p.entry_price}</td>
       <td className="text-right tabular-nums">{p.last_price ?? "—"}</td>
-      <td className={`text-right tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}>
+      <td
+        className={`pr-6 text-right tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}
+      >
         {p.unrealized_pnl >= 0 ? "+" : ""}
         {p.unrealized_pnl.toFixed(2)}
       </td>
@@ -81,7 +85,7 @@ function PositionRow({
           onChange={(e) => setSl(e.target.value)}
           placeholder="SL"
           inputMode="decimal"
-          className={`w-20 rounded bg-neutral-800 px-1.5 py-1 text-xs ${
+          className={`w-24 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums ${
             missingProtection ? "ring-1 ring-warn/50" : ""
           }`}
         />
@@ -92,11 +96,11 @@ function PositionRow({
           onChange={(e) => setTp(e.target.value)}
           placeholder="TP"
           inputMode="decimal"
-          className="w-20 rounded bg-neutral-800 px-1.5 py-1 text-xs"
+          className="w-24 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums"
         />
       </td>
       <td className="text-right">
-        <div className="flex items-center justify-end gap-1">
+        <div className="flex items-center justify-end gap-2">
           {onSetSlTp && (
             <button
               disabled={busy}

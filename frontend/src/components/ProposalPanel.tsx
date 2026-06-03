@@ -251,7 +251,7 @@ function Reasoning({ result }: { result: AnalyzeResponse }) {
                 <div className="text-warn">
                   Stand aside around:{" "}
                   {fund.stand_aside_windows
-                    .map((w) => `${w.label} (${new Date(w.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}–${new Date(w.end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})`)
+                    .map((w) => `${w.label} (${fmtWindow(w.start, w.end)})`)
                     .join(", ")}
                 </div>
               )}
@@ -265,6 +265,27 @@ function Reasoning({ result }: { result: AnalyzeResponse }) {
 
 function nf(v: number | undefined): string {
   return v == null ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: 5 });
+}
+
+// Format a stand-aside window with its DATE (relative day when close) + a "passed" marker, so
+// it's clear whether the event is still ahead. Times/dates render in the user's local zone.
+function fmtWindow(startIso: string, endIso: string): string {
+  const start = new Date(startIso);
+  const end = new Date(endIso);
+  const now = new Date();
+  const time = (d: Date) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  const startDay = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayDiff = Math.round((startDay.getTime() - today.getTime()) / 86_400_000);
+  const day =
+    dayDiff === 0 ? "Today"
+    : dayDiff === 1 ? "Tomorrow"
+    : dayDiff === -1 ? "Yesterday"
+    : start.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+
+  const passed = end.getTime() < now.getTime() ? " · passed" : "";
+  return `${day} ${time(start)}–${time(end)}${passed}`;
 }
 
 function TimeframeBlock({ tf }: { tf: TimeframeRead }) {
