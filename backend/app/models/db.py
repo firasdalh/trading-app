@@ -123,6 +123,8 @@ class TradeProposalRecord(Base):
     risk_reason: Mapped[str | None] = mapped_column(Text)
     approved_qty: Mapped[float | None] = mapped_column(Float)
     risk_amount: Mapped[float | None] = mapped_column(Float)
+    review_decision: Mapped[str | None] = mapped_column(String(16))  # LLM reviewer: confirm/veto
+    watch: Mapped[bool] = mapped_column(Boolean, default=False)       # setup forming (wait for trigger)
 
     orders: Mapped[list["Order"]] = relationship(back_populates="proposal")
 
@@ -209,6 +211,71 @@ class DailyRiskState(Base):
     trades_count: Mapped[int] = mapped_column(Integer, default=0)
     trading_paused: Mapped[bool] = mapped_column(Boolean, default=False)
     pause_reason: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class Mt5Credentials(Base):
+    """Singleton (id=1) MT5/Exness connection details entered from the UI.
+
+    Stored locally in the gitignored SQLite DB. The password is write-only over the API
+    (never returned). Leaving login/password blank attaches to whatever account the running
+    MT5 terminal is already logged into — the recommended, no-secret-stored path.
+    """
+
+    __tablename__ = "mt5_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    login: Mapped[int | None] = mapped_column(Integer)
+    password: Mapped[str | None] = mapped_column(String(128))
+    server: Mapped[str | None] = mapped_column(String(64))
+    path: Mapped[str | None] = mapped_column(String(255))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class LlmConfig(Base):
+    """Singleton (id=1) AI-provider selection set from the UI.
+
+    Stored locally in the gitignored DB. The API key is write-only over the API (never
+    returned). Falls back to .env when unset.
+    """
+
+    __tablename__ = "llm_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    provider: Mapped[str | None] = mapped_column(String(16))   # "anthropic" | "gemini"
+    model: Mapped[str | None] = mapped_column(String(64))
+    api_key: Mapped[str | None] = mapped_column(String(256))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class WatchItem(Base):
+    """A pair the autonomous scanner watches (and may auto-trade, per execution mode)."""
+
+    __tablename__ = "watch_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32))
+    asset_class: Mapped[str] = mapped_column(String(16))
+    timeframe: Mapped[str] = mapped_column(String(8), default="1h")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ScanConfig(Base):
+    """Singleton (id=1) controlling the autonomous watchlist scanner."""
+
+    __tablename__ = "scan_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)  # off by default (safety)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

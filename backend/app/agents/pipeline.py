@@ -34,9 +34,37 @@ def _timeframes_for(primary: str) -> list[str]:
     return list(dict.fromkeys([primary, *_CONTEXT_TIMEFRAMES]))
 
 
+def _maybe_auto_execute(session: Session, record: TradeProposalRecord, broker) -> None:
+    """Auto-execute under Modes B/C. Mode A leaves the proposal awaiting user approval."""
+    from app.execution.executor import ExecutionBlocked, execute_proposal
+    from app.models.enums import ExecutionMode
+
+    settings = get_or_create_settings(session)
+    mode = settings.execution_mode
+
+    if mode == ExecutionMode.A_PROPOSE_APPROVE.value:
+        return  # human-in-the-loop
+
+    if mode == ExecutionMode.B_AUTO_PAPER.value and not broker.is_paper:
+        # Mode B can never touch a live broker (safety: B is paper-only).
+        log.warning("Mode B requested but broker is live; leaving for manual approval",
+                    extra={"symbol": record.symbol})
+        return
+
+    try:
+        execute_proposal(session, record)  # marks EXECUTED + opens a position on fill
+        log.info("auto-executed proposal", extra={"symbol": record.symbol, "mode": mode})
+    except ExecutionBlocked as exc:
+        log.warning("auto-execute blocked; left for approval",
+                    extra={"symbol": record.symbol, "reason": str(exc)})
+
+
 def analyze_symbol(
     session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
+    use_llm: bool = True,
 ) -> AnalyzeResponse:
+    """Run the full pipeline for one symbol. ``use_llm=False`` forces the deterministic
+    agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
     broker = get_broker_for(asset_class, settings.broker_map)
@@ -50,9 +78,10 @@ def analyze_symbol(
             log.warning("ohlcv fetch failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
 
     # 2. Agents.
-    technical = run_technical(symbol, series)
-    fundamental = run_fundamental(symbol)
-    proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now)
+    technical = run_technical(symbol, series, use_llm=use_llm)
+    fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)
+    proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental,
+                                now=now, use_llm=use_llm)
 
     # 3. Persist the proposal + full reasoning bundle (audit trail).
     record = TradeProposalRecord(
@@ -65,6 +94,8 @@ def analyze_symbol(
         take_profit=proposal.take_profit,
         confidence=proposal.confidence,
         rationale=proposal.rationale,
+        review_decision=proposal.review_decision,
+        watch=proposal.watch,
         reasoning={
             "technical": technical.model_dump(mode="json"),
             "fundamental": fundamental.model_dump(mode="json"),
@@ -82,11 +113,17 @@ def analyze_symbol(
     record.risk_amount = decision.risk_amount
 
     if decision.approved:
-        # Mode A: queue for the user's approval (auto-exec lands in M6).
         record.status = ProposalStatus.PENDING_APPROVAL.value
     else:
         record.status = ProposalStatus.RISK_VETOED.value
     session.add(record)
+    session.commit()
+
+    # 5. Execution mode: Mode A waits for the user; Modes B/C auto-execute risk-approved
+    #    proposals (B paper-only, C live with the confirmation gate enforced in the executor).
+    if decision.approved:
+        _maybe_auto_execute(session, record, broker)
+
     session.add(AgentRun(
         agent="pipeline", symbol=symbol, event="analyze",
         detail={"direction": proposal.direction.value, "risk": decision.decision.value,

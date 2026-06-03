@@ -1,0 +1,202 @@
+"""Tests for the Execution & Monitor agents and Modes B/C gating (the dangerous parts)."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.core.state import get_or_create_daily_state, get_or_create_settings, live_execution_allowed
+from app.execution.executor import ExecutionBlocked, execute_proposal
+from app.execution.kill_switch import flatten_all
+from app.execution.monitor import monitor_positions
+from app.models.db import AppSettings, Order, Position, TradeProposalRecord
+from app.models.enums import AssetClass, Direction, OrderStatus, PositionStatus, ProposalStatus
+from sqlalchemy import select
+
+NOW = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _make_record(session, *, symbol="AAPL", direction=Direction.LONG, entry=100.0,
+                 stop=95.0, tp=110.0, qty=10.0) -> TradeProposalRecord:
+    rec = TradeProposalRecord(
+        symbol=symbol, asset_class="stock", timeframe="1h", direction=direction.value,
+        entry=entry, stop_loss=stop, take_profit=tp, confidence=0.7, rationale="test",
+        reasoning={}, status=ProposalStatus.PENDING_APPROVAL.value,
+        risk_decision="approved", approved_qty=qty, risk_amount=qty * abs(entry - stop),
+    )
+    session.add(rec)
+    session.commit()
+    return rec
+
+
+# ---- executor ----
+
+def test_execute_fills_logs_and_opens_position(db_session):
+    rec = _make_record(db_session)
+    result = execute_proposal(db_session, rec)
+    assert result.status == OrderStatus.FILLED
+
+    orders = db_session.scalars(select(Order)).all()
+    assert len(orders) == 1
+    order = orders[0]
+    # Logged both before (submit_payload) and after (broker_response) submission.
+    assert order.submit_payload is not None
+    assert order.broker_response is not None
+    assert order.status == OrderStatus.FILLED.value
+
+    positions = db_session.scalars(select(Position)).all()
+    assert len(positions) == 1 and positions[0].status == PositionStatus.OPEN.value
+    db_session.refresh(rec)
+    assert rec.status == ProposalStatus.EXECUTED.value
+
+
+def test_kill_switch_blocks_execution(db_session):
+    settings = get_or_create_settings(db_session)
+    settings.kill_switch_engaged = True
+    db_session.commit()
+    rec = _make_record(db_session)
+    with pytest.raises(ExecutionBlocked):
+        execute_proposal(db_session, rec)
+    # Nothing should have been submitted.
+    assert db_session.scalars(select(Order)).all() == []
+
+
+def test_execute_requires_approved_qty(db_session):
+    rec = _make_record(db_session, qty=10.0)
+    rec.approved_qty = 0.0
+    db_session.commit()
+    with pytest.raises(ExecutionBlocked):
+        execute_proposal(db_session, rec)
+
+
+# ---- live gating (unit) ----
+
+def test_live_execution_gate():
+    paper = AppSettings(id=1, broker_env="paper")
+    assert live_execution_allowed(paper) is True
+
+    live_unconfirmed = AppSettings(id=1, broker_env="live", live_confirmed_at=None)
+    assert live_execution_allowed(live_unconfirmed) is False
+
+    # A confirmation from before the process started must NOT count (re-confirm each restart).
+    stale = AppSettings(id=1, broker_env="live",
+                        live_confirmed_at=datetime(2000, 1, 1, tzinfo=timezone.utc))
+    assert live_execution_allowed(stale) is False
+
+    fresh = AppSettings(id=1, broker_env="live",
+                        live_confirmed_at=datetime.now(timezone.utc) + timedelta(minutes=1))
+    assert live_execution_allowed(fresh) is True
+
+
+# ---- monitor ----
+
+def _open_position(session, *, direction, entry, stop, tp, qty=1.0, symbol="AAPL",
+                   starting_equity=100_000.0):
+    daily = get_or_create_daily_state(session, starting_equity=starting_equity)
+    daily.starting_equity = starting_equity
+    pos = Position(symbol=symbol, asset_class="stock", direction=direction.value, qty=qty,
+                   entry_price=entry, stop_loss=stop, take_profit=tp,
+                   status=PositionStatus.OPEN.value, last_price=entry, risk_amount=qty * abs(entry - stop))
+    session.add_all([pos, daily])
+    session.commit()
+    return pos
+
+
+def test_monitor_closes_on_target(db_session):
+    # Long with target well below the synthetic price (~100.7) -> target hit immediately.
+    pos = _open_position(db_session, direction=Direction.LONG, entry=50.0, stop=1.0, tp=60.0)
+    summary = monitor_positions(db_session)
+    assert summary["closed"] == 1
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.CLOSED.value
+    assert pos.realized_pnl is not None and pos.realized_pnl > 0
+
+
+def test_monitor_closes_on_stop_and_pauses_on_daily_loss(db_session):
+    # Long entered far above price with a high stop -> stop hit -> large loss -> daily pause.
+    _open_position(db_session, direction=Direction.LONG, entry=200.0, stop=300.0, tp=400.0,
+                   qty=1.0, starting_equity=1000.0)
+    summary = monitor_positions(db_session)
+    assert summary["closed"] == 1
+    daily = get_or_create_daily_state(db_session)
+    assert daily.realized_pnl < 0
+    assert daily.trading_paused is True  # loss exceeded 3% of 1000
+
+
+# ---- flatten ----
+
+def test_close_one_books_pnl(db_session):
+    from app.execution.monitor import close_one
+    pos = _open_position(db_session, direction=Direction.LONG, entry=100.0, stop=90.0, tp=110.0)
+    res = close_one(db_session, pos.id)
+    assert res["closed"] is True
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.CLOSED.value
+    assert pos.realized_pnl is not None
+    # Closing an already-closed position is rejected.
+    assert close_one(db_session, pos.id)["closed"] is False
+
+
+def test_daily_pause_triggers_on_loss_beyond_limit(db_session):
+    from app.risk.service import evaluate_daily_pause
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = -40.0  # > 3% of 1000 = 30 (sim brokers report no deal history)
+    db_session.commit()
+    assert evaluate_daily_pause(db_session) is True
+    db_session.refresh(daily)
+    assert daily.trading_paused is True and daily.pause_reason
+
+
+def test_daily_pause_not_triggered_on_small_loss(db_session):
+    from app.risk.service import evaluate_daily_pause
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = -10.0  # < 30 limit
+    db_session.commit()
+    assert evaluate_daily_pause(db_session) is False
+    db_session.refresh(daily)
+    assert daily.trading_paused is False
+
+
+def test_paused_account_vetoes_new_trade(db_session):
+    # When paused, the risk manager must veto new entries.
+    from app.risk.service import assess
+    from app.models.schemas import TradeProposal
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.trading_paused = True
+    db_session.commit()
+    proposal = TradeProposal(symbol="AAPL", asset_class=AssetClass.STOCK, direction=Direction.LONG,
+                             entry=100.0, stop_loss=95.0, take_profit=110.0, confidence=0.8)
+    decision = assess(db_session, proposal)
+    assert decision.approved is False
+
+
+def test_flatten_closes_all(db_session):
+    _open_position(db_session, direction=Direction.LONG, entry=100.0, stop=90.0, tp=110.0, symbol="AAPL")
+    _open_position(db_session, direction=Direction.SHORT, entry=100.0, stop=110.0, tp=90.0, symbol="TSLA")
+    res = flatten_all(db_session)
+    assert res["closed"] == 2
+    open_left = db_session.scalars(
+        select(Position).where(Position.status == PositionStatus.OPEN.value)
+    ).all()
+    assert open_left == []
+
+
+# ---- Mode B auto-execute ----
+
+def test_mode_b_auto_executes_paper(db_session):
+    from app.agents.pipeline import analyze_symbol
+    from app.models.enums import ExecutionMode
+
+    settings = get_or_create_settings(db_session)
+    settings.execution_mode = ExecutionMode.B_AUTO_PAPER.value
+    settings.broker_env = "paper"
+    db_session.commit()
+
+    res = analyze_symbol(db_session, "AAPL", AssetClass.STOCK, "1h")
+    # Mode B never leaves an approved proposal merely pending — it executes (paper).
+    assert res.status != ProposalStatus.PENDING_APPROVAL.value
+    if res.risk.approved:
+        assert res.status == ProposalStatus.EXECUTED.value
+        assert db_session.scalars(select(Position)).all()

@@ -5,7 +5,7 @@ LLM output into these defensively; malformed output is rejected, never executed.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +18,7 @@ from app.models.enums import (
     OrderType,
     PositionStatus,
     ProposalStatus,
+    ReviewDecision,
     RiskDecisionType,
     TradingBias,
 )
@@ -95,6 +96,49 @@ class TechnicalRead(BaseModel):
     notes: str = ""
 
 
+# --- Gemini-safe LLM output schemas (no free-form dict maps; Gemini structured output
+#     only supports a strict OpenAPI subset). We enrich these with computed indicators after. ---
+
+
+class TimeframeReadLLM(BaseModel):
+    timeframe: str
+    trend: str
+    support_levels: list[float] = Field(default_factory=list)
+    resistance_levels: list[float] = Field(default_factory=list)
+    patterns: list[str] = Field(default_factory=list)
+    comment: str = ""
+
+
+class TechnicalReadLLM(BaseModel):
+    symbol: str
+    timeframes: list[TimeframeReadLLM] = Field(default_factory=list)
+    overall_trend: str = "sideways"
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    notes: str = ""
+
+
+class TradeProposalLLM(BaseModel):
+    """Flat decision the orchestrator LLM returns; we attach the reasoning bundle after."""
+
+    symbol: str
+    direction: Direction
+    entry: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    rationale: str = ""
+
+
+class TradeReviewLLM(BaseModel):
+    """The LLM's review of a deterministic setup. It can only confirm or veto (never create,
+    flip, or widen a trade) and may only lower confidence."""
+
+    decision: ReviewDecision
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    rationale: str = ""
+    concerns: list[str] = Field(default_factory=list)
+
+
 class TradeProposal(BaseModel):
     """Output of the Orchestrator. ``direction == NO_TRADE`` is a valid, encouraged result."""
 
@@ -107,6 +151,13 @@ class TradeProposal(BaseModel):
     take_profit: float | None = None
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     rationale: str = ""
+
+    # True when the setup is forming (e.g. trend aligned but momentum not yet) — "watching",
+    # waiting for a trigger, rather than a flat reject.
+    watch: bool = False
+
+    # LLM reviewer outcome on the deterministic setup: "confirm" | "veto" | None (rules only).
+    review_decision: str | None = None
 
     # The full reasoning bundle that produced this proposal (for audit + UI).
     fundamental: FundamentalRead | None = None
@@ -216,6 +267,21 @@ class PositionView(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+class PositionAdvice(BaseModel):
+    """Management guidance for an OPEN position (distinct from new-entry analysis) — e.g.
+    protect a winner / cut a loser ahead of a high-impact event."""
+
+    symbol: str
+    direction: str
+    unrealized_pnl: float
+    has_stop: bool
+    severity: str            # info | warn | danger
+    headline: str
+    detail: str
+    event_label: str | None = None
+    minutes_to_event: int | None = None
+
+
 class RiskConfigView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -249,6 +315,8 @@ class RiskStateView(BaseModel):
     trade_date: str
     starting_equity: float | None = None
     realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0          # floating P&L of open broker positions
+    total_risk_amount: float = 0.0       # exposure: risk-at-entry across open positions
     trades_count: int = 0
     trading_paused: bool = False
     pause_reason: str | None = None
@@ -283,6 +351,8 @@ class ProposalView(BaseModel):
     risk_reason: str | None = None
     approved_qty: float | None = None
     risk_amount: float | None = None
+    review_decision: str | None = None
+    watch: bool = False
     reasoning: dict = Field(default_factory=dict)
 
 
@@ -291,6 +361,82 @@ class AnalyzeResponse(BaseModel):
     status: str
     proposal: TradeProposal
     risk: RiskDecision
+
+
+class BacktestRequest(BaseModel):
+    symbol: str
+    asset_class: AssetClass = AssetClass.STOCK
+    timeframe: str = "1h"
+    bars: int = Field(400, ge=50, le=2000)
+    starting_equity: float = Field(100_000.0, gt=0)
+
+
+class BacktestTrade(BaseModel):
+    entry_time: datetime
+    exit_time: datetime
+    direction: Direction
+    entry: float
+    exit: float
+    qty: float
+    pnl: float
+    r_multiple: float          # pnl / risk_at_entry
+    bars_held: int
+    exit_reason: str           # stop | target | end_of_data
+
+
+class EquityPoint(BaseModel):
+    ts: datetime
+    equity: float
+
+
+class BacktestMetrics(BaseModel):
+    total_trades: int
+    wins: int
+    losses: int
+    win_rate: float
+    avg_r_multiple: float
+    avg_win_r: float
+    avg_loss_r: float
+    profit_factor: float | None   # None when there are no losses (undefined)
+    net_pnl: float
+    return_pct: float
+    max_drawdown_pct: float
+    starting_equity: float
+    ending_equity: float
+
+
+class BacktestResult(BaseModel):
+    symbol: str
+    asset_class: AssetClass
+    timeframe: str
+    bars: int
+    metrics: BacktestMetrics
+    equity_curve: list[EquityPoint]
+    trades: list[BacktestTrade]
+    disclaimer: str = (
+        "Backtest results are hypothetical and do not guarantee live (or even paper) results."
+    )
+
+
+class ReflectionReport(BaseModel):
+    """Output of the read-only Reflection/Journal agent. It NEVER places trades."""
+
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    trades_reviewed: int = 0
+    win_rate: float = 0.0
+    net_pnl: float = 0.0
+    profit_factor: float | None = None
+    summary: str = ""
+    patterns: list[str] = Field(default_factory=list)
+    lessons: list[str] = Field(default_factory=list)
+
+
+class ReflectionInsights(BaseModel):
+    """The free-form part the LLM fills in (stats are computed deterministically)."""
+
+    summary: str = ""
+    patterns: list[str] = Field(default_factory=list)
+    lessons: list[str] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

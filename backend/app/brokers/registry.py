@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from app.brokers.alpaca import AlpacaBrokerAdapter
 from app.brokers.base import BrokerAdapter, BrokerError
+from app.brokers.ccxt_adapter import CcxtBrokerAdapter
+from app.brokers.mt5_adapter import Mt5BrokerAdapter
+from app.brokers.oanda import OandaBrokerAdapter
 from app.brokers.sim import SimPaperBroker
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -19,8 +22,7 @@ from app.models.enums import AssetClass
 
 log = get_logger("broker.registry")
 
-# Brokers implemented so far. oanda/ccxt arrive in M7.
-_IMPLEMENTED = {"sim", "alpaca"}
+_IMPLEMENTED = {"sim", "alpaca", "ccxt", "oanda", "mt5"}
 
 _cache: dict[str, BrokerAdapter] = {}
 _data_provider: MarketDataProvider | None = None
@@ -28,9 +30,15 @@ _data_provider: MarketDataProvider | None = None
 
 def _build(name: str) -> BrokerAdapter:
     cfg = get_settings()
+    paper = cfg.broker_env != "live"
     if name == "alpaca":
-        # paper unless the app/env is explicitly live (gated elsewhere).
-        return AlpacaBrokerAdapter(paper=(cfg.broker_env != "live"))
+        return AlpacaBrokerAdapter(paper=paper)
+    if name == "ccxt":
+        return CcxtBrokerAdapter(paper=paper)
+    if name == "oanda":
+        return OandaBrokerAdapter()
+    if name == "mt5":
+        return Mt5BrokerAdapter()
     # default / fallback
     return SimPaperBroker(data=get_data_provider())
 

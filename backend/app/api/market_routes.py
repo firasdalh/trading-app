@@ -72,6 +72,25 @@ def positions(
     return broker.get_open_positions()
 
 
+@router.get("/market/symbols")
+def symbols(
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Available tradable symbols for the active broker + asset class (for the UI dropdown).
+
+    Empty list means the broker doesn't enumerate symbols (e.g. sim) — the UI falls back to
+    free-text entry.
+    """
+    broker = _broker_for(asset_class, session)
+    try:
+        syms = broker.list_symbols(asset_class)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("list_symbols failed", extra={"broker": broker.name, "error": str(exc)})
+        syms = []
+    return {"broker": broker.name, "asset_class": asset_class.value, "symbols": syms}
+
+
 @router.get("/broker/info")
 def broker_info(
     asset_class: AssetClass = Query(AssetClass.STOCK),

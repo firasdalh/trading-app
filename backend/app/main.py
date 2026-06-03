@@ -13,9 +13,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.backtest_routes import router as backtest_router
+from app.api.journal_routes import router as journal_router
 from app.api.market_routes import router as market_router
 from app.api.proposal_routes import router as proposal_router
 from app.api.routes import router
+from app.api.settings_routes import router as settings_router
+from app.api.watchlist_routes import router as watchlist_router
+from app.api.ws import router as ws_router
 from app.core.config import get_settings
 from app.core.database import init_db, session_scope
 from app.core.logging import configure_logging, get_logger
@@ -55,6 +60,42 @@ def _reconcile_brokers(session) -> None:
             log.warning("broker reconcile failed", extra={"asset_class": asset_class.value, "error": str(exc)})
 
 
+def _monitor_tick() -> None:
+    """Scheduled position-monitor pass. Runs in its own session; never raises."""
+    from app.core.database import session_scope
+    from app.execution.monitor import monitor_positions
+
+    try:
+        with session_scope() as session:
+            monitor_positions(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("monitor tick failed", extra={"error": str(exc)})
+
+
+def _scan_tick() -> None:
+    """Scheduled autonomous watchlist scan. Honors its own enabled flag + interval."""
+    from app.agents.scanner import scan_tick
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            scan_tick(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("scan tick failed", extra={"error": str(exc)})
+
+
+def _register_monitor_job() -> None:
+    from app.core.scheduler import get_scheduler
+
+    sched = get_scheduler()
+    sched.add_job(_monitor_tick, "interval", seconds=10, id="position_monitor",
+                  replace_existing=True, max_instances=1)
+    # Polls every 20s; the scanner itself enforces the user-configured interval.
+    sched.add_job(_scan_tick, "interval", seconds=20, id="watchlist_scan",
+                  replace_existing=True, max_instances=1)
+    log.info("position monitor (10s) + watchlist scanner (20s poll) scheduled")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
@@ -73,6 +114,7 @@ async def lifespan(app: FastAPI):
             log.warning("KILL SWITCH ACTIVE at startup — no new orders will be submitted")
         _reconcile_brokers(session)
     start_scheduler()
+    _register_monitor_job()
     try:
         yield
     finally:
@@ -100,6 +142,11 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(market_router)
 app.include_router(proposal_router)
+app.include_router(settings_router)
+app.include_router(backtest_router)
+app.include_router(journal_router)
+app.include_router(watchlist_router)
+app.include_router(ws_router)
 
 
 @app.get("/", tags=["system"])

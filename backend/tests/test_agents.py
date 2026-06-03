@@ -112,30 +112,75 @@ def test_orchestrator_stands_aside_in_event_window():
     assert "event window" in prop.rationale.lower()
 
 
-# ---- full pipeline (DB + risk) ----
+def test_llm_review_can_veto(monkeypatch):
+    from app.agents import orchestrator
+    from app.models.enums import ReviewDecision
+    from app.models.schemas import TradeReviewLLM
 
-@pytest.fixture
-def db_session(tmp_path, monkeypatch):
-    """Fresh SQLite DB per test, with deterministic synthetic data."""
-    import importlib
+    tech = run_technical("TEST", [_uptrend_series()])  # deterministic -> LONG
+    monkeypatch.setattr(orchestrator, "llm_available", lambda: True)
+    monkeypatch.setattr(orchestrator, "analyze",
+                        lambda **k: TradeReviewLLM(decision=ReviewDecision.VETO, confidence=0.2,
+                                                   rationale="higher-timeframe conflict"))
+    p = orchestrator.run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(),
+                                      now=NOW, use_llm=True)
+    assert p.direction == Direction.NO_TRADE and "veto" in p.rationale.lower()
+    assert p.entry is None and p.stop_loss is None
 
-    db_url = f"sqlite:///{tmp_path/'test.sqlite3'}"
-    monkeypatch.setenv("DATABASE_URL", db_url)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")  # force deterministic agents
 
-    from app.core import config
-    config.get_settings.cache_clear()
+def test_llm_review_confirm_only_lowers_confidence(monkeypatch):
+    from app.agents import orchestrator
+    from app.models.enums import ReviewDecision
+    from app.models.schemas import TradeReviewLLM
 
-    # Rebuild modules bound to the engine/registry with the new DB + clean caches.
-    from app.core import database as db_mod
-    importlib.reload(db_mod)
-    from app.brokers import registry
-    registry.reset_registry()
+    tech = run_technical("TEST", [_uptrend_series()])
+    det = orchestrator._deterministic_decision("TEST", AssetClass.STOCK, "1h", tech,
+                                               _neutral_fundamental(), NOW)
+    assert det.direction == Direction.LONG
+    monkeypatch.setattr(orchestrator, "llm_available", lambda: True)
+    # Reviewer tries to set a HIGH confidence; we must cap to the deterministic value.
+    monkeypatch.setattr(orchestrator, "analyze",
+                        lambda **k: TradeReviewLLM(decision=ReviewDecision.CONFIRM, confidence=0.99,
+                                                   rationale="looks good"))
+    p = orchestrator.run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(),
+                                      now=NOW, use_llm=True)
+    assert p.direction == Direction.LONG
+    assert p.confidence <= det.confidence  # LLM can only narrow, never raise
+    # levels unchanged (LLM cannot move them)
+    assert p.entry == det.entry and p.stop_loss == det.stop_loss
 
-    db_mod.init_db()
-    with db_mod.session_scope() as s:
-        yield s
 
+def test_llm_cannot_create_trade_when_rules_decline(monkeypatch):
+    from app.agents import orchestrator
+    from app.models.enums import ReviewDecision
+    from app.models.schemas import TradeReviewLLM
+
+    tech = run_technical("TEST", [_uptrend_series()])  # up
+    bearish = FundamentalRead(symbol="TEST", bias=TradingBias.BEARISH)  # -> deterministic no_trade
+    called = []
+    monkeypatch.setattr(orchestrator, "llm_available", lambda: True)
+    monkeypatch.setattr(orchestrator, "analyze",
+                        lambda **k: called.append(1) or TradeReviewLLM(decision=ReviewDecision.CONFIRM, confidence=0.9))
+    p = orchestrator.run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, bearish, now=NOW, use_llm=True)
+    assert p.direction == Direction.NO_TRADE
+    assert called == []  # the LLM is never even consulted when the rules decline
+
+
+def test_use_llm_flag_gates_llm_calls(monkeypatch):
+    from app.agents import technical
+    calls = []
+    monkeypatch.setattr(technical, "llm_available", lambda: True)
+    monkeypatch.setattr(technical, "analyze", lambda **kw: calls.append(kw.get("schema")) or None)
+
+    series = [_uptrend_series()]
+    technical.run_technical("X", series, use_llm=False)
+    assert calls == []  # scanner path: LLM never called
+
+    technical.run_technical("X", series, use_llm=True)
+    assert len(calls) == 1  # manual path: LLM attempted once
+
+
+# ---- full pipeline (DB + risk); db_session fixture is in conftest.py ----
 
 def test_pipeline_persists_and_risk_gates(db_session):
     from app.agents.pipeline import analyze_symbol

@@ -39,9 +39,17 @@ class Settings(BaseSettings):
     kill_switch: bool = False
     broker_env: BrokerEnv = "paper"
 
+    # ---- LLM provider selection ----
+    # "anthropic" (Claude) or "gemini" (Google). UI can override per the DB LlmConfig.
+    llm_provider: str = "anthropic"
+
     # ---- Anthropic ----
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-4-8"
+
+    # ---- Google Gemini ----
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
 
     # ---- Alpaca (paper) ----
     alpaca_api_key: str = ""
@@ -57,6 +65,13 @@ class Settings(BaseSettings):
     ccxt_exchange: str = "binance"
     ccxt_api_key: str = ""
     ccxt_api_secret: str = ""
+
+    # ---- MetaTrader 5 (Exness and other MT5 brokers) ----
+    # Requires a locally-installed MT5 terminal logged into the account. Windows only.
+    mt5_login: int = 0
+    mt5_password: str = ""
+    mt5_server: str = ""        # e.g. "Exness-MT5Trial" (demo) or your Exness real server
+    mt5_path: str = ""          # optional full path to terminal64.exe
 
     # ---- Live confirmation ----
     live_confirm_phrase: str = "I understand this trades real money"
@@ -84,6 +99,8 @@ class Settings(BaseSettings):
             "oanda_account_id",
             "ccxt_api_key",
             "ccxt_api_secret",
+            "mt5_password",
+            "gemini_api_key",
             "live_confirm_phrase",
             "database_url",
         }

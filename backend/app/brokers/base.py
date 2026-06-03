@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from app.models.enums import AssetClass
+from app.models.enums import AssetClass, OrderStatus
 from app.models.schemas import (
     AccountState,
     OHLCVSeries,
@@ -77,7 +77,32 @@ class BrokerAdapter(ABC):
     def close_all_positions(self) -> list[OrderResult]:
         """Flatten everything. Used by the kill-switch."""
 
+    def set_sl_tp(self, symbol: str, stop_loss: float | None = None,
+                  take_profit: float | None = None) -> OrderResult:
+        """Attach/modify the stop-loss and/or take-profit on an existing open position.
+
+        Default: not supported. Brokers that can modify positions (MT5, sim) override this.
+        """
+        return OrderResult(status=OrderStatus.REJECTED, error="set_sl_tp not supported by this broker")
+
     # ---- lifecycle ----
+
+    def get_realized_pnl(self, since) -> float | None:
+        """Realized P&L booked at the broker since ``since`` (a tz-aware datetime).
+
+        Default None = the broker can't report it (we fall back to app-tracked realized).
+        Brokers with a closed-trade/deal history (MT5) override this so realized P&L is
+        accurate even for trades closed directly in the terminal.
+        """
+        return None
+
+    def list_symbols(self, asset_class: AssetClass | None = None) -> list[str]:
+        """Available tradable symbols for an asset class. Default: none (free-text entry).
+
+        Brokers that can enumerate their instruments (MT5, ccxt) override this so the UI can
+        offer a dropdown.
+        """
+        return []
 
     def reconcile(self) -> dict:
         """Reconcile local state against the broker on startup. Default: report positions.

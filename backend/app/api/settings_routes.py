@@ -1,0 +1,409 @@
+"""Settings + execution-control routes (Milestone 6).
+
+Covers the execution-mode switch (A/B/C), the paper↔live switch, the live-confirmation
+phrase flow, risk-parameter updates (clamped to the RISK.md ceilings — never weakened
+beyond them), the kill-switch flatten, a manual monitor trigger, and the DB-backed open
+positions view.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.api.routes import build_settings_response
+from app.core.config import get_settings
+from app.core.database import get_session
+from app.core.logging import get_logger
+from app.core.state import get_or_create_risk_config, get_or_create_settings
+from app.execution.kill_switch import flatten_all
+from app.execution.monitor import monitor_positions
+from app.models.db import Position
+from app.models.enums import AssetClass, ExecutionMode, PositionStatus
+from app.models.schemas import PositionAdvice, PositionView, SettingsResponse
+
+log = get_logger("api.settings")
+router = APIRouter(prefix="/api", tags=["settings"])
+
+
+class ModeRequest(BaseModel):
+    mode: ExecutionMode
+    confirm_phrase: str | None = None
+
+
+class BrokerEnvRequest(BaseModel):
+    env: str  # "paper" | "live"
+    confirm_phrase: str | None = None
+
+
+class LiveConfirmRequest(BaseModel):
+    confirm_phrase: str
+
+
+class Mt5ConnectRequest(BaseModel):
+    # All optional: leave login/password blank to attach to the terminal's current account.
+    login: int | None = None
+    password: str | None = None
+    server: str | None = None
+    path: str | None = None
+
+
+class LlmConfigRequest(BaseModel):
+    provider: str                 # "anthropic" | "gemini"
+    model: str | None = None
+    api_key: str | None = None    # write-only; omit to keep existing
+
+
+class BrokerMapRequest(BaseModel):
+    # asset class -> broker name, e.g. {"forex": "mt5", "metal": "mt5"}
+    broker_map: dict[str, str]
+
+
+class RiskUpdateRequest(BaseModel):
+    risk_per_trade: float | None = None
+    max_open_positions: int | None = None
+    max_daily_loss: float | None = None
+    max_total_exposure: float | None = None
+    per_pair_cooldown_minutes: int | None = None
+
+
+def _check_phrase(phrase: str | None) -> None:
+    expected = get_settings().live_confirm_phrase
+    if not phrase or phrase.strip() != expected:
+        raise HTTPException(status_code=403, detail="live confirmation phrase does not match")
+
+
+@router.post("/settings/mode", response_model=SettingsResponse)
+def set_mode(req: ModeRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    settings = get_or_create_settings(session)
+
+    if req.mode == ExecutionMode.C_AUTO_LIVE:
+        # Live auto-exec: require the typed phrase, switch to live, and record confirmation.
+        _check_phrase(req.confirm_phrase)
+        settings.broker_env = "live"
+        settings.live_confirmed_at = datetime.now(timezone.utc)
+        log.warning("execution mode -> C_AUTO_LIVE (live confirmed)")
+    elif req.mode == ExecutionMode.B_AUTO_PAPER:
+        # Mode B is paper-only by definition.
+        settings.broker_env = "paper"
+        log.warning("execution mode -> B_AUTO_PAPER (paper)")
+    else:
+        log.info("execution mode -> A_PROPOSE_APPROVE")
+
+    settings.execution_mode = req.mode.value
+    session.commit()
+    return build_settings_response(session)
+
+
+@router.post("/settings/broker-env", response_model=SettingsResponse)
+def set_broker_env(req: BrokerEnvRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    if req.env not in ("paper", "live"):
+        raise HTTPException(status_code=400, detail="env must be 'paper' or 'live'")
+    settings = get_or_create_settings(session)
+    if req.env == "live":
+        _check_phrase(req.confirm_phrase)
+        settings.broker_env = "live"
+        settings.live_confirmed_at = datetime.now(timezone.utc)
+        log.warning("broker env -> LIVE (confirmed)")
+    else:
+        settings.broker_env = "paper"
+        settings.live_confirmed_at = None
+        # Demote Mode C to A when leaving live, so we never auto-trade unintentionally.
+        if settings.execution_mode == ExecutionMode.C_AUTO_LIVE.value:
+            settings.execution_mode = ExecutionMode.A_PROPOSE_APPROVE.value
+        log.info("broker env -> paper")
+    session.commit()
+    return build_settings_response(session)
+
+
+@router.post("/settings/live-confirm", response_model=SettingsResponse)
+def live_confirm(req: LiveConfirmRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Re-confirm live trading for the current process (required after each restart)."""
+    _check_phrase(req.confirm_phrase)
+    settings = get_or_create_settings(session)
+    settings.live_confirmed_at = datetime.now(timezone.utc)
+    session.commit()
+    log.warning("live trading re-confirmed for this session")
+    return build_settings_response(session)
+
+
+_VALID_BROKERS = {"sim", "alpaca", "ccxt", "oanda", "mt5"}
+_VALID_ASSETS = {"stock", "crypto", "forex", "metal"}
+
+
+@router.post("/settings/broker-map", response_model=SettingsResponse)
+def set_broker_map(req: BrokerMapRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Point asset classes at a broker (e.g. forex/metal -> 'mt5' for Exness).
+
+    Merges into the existing map. Unknown asset classes or brokers are rejected.
+    """
+    settings = get_or_create_settings(session)
+    merged = dict(settings.broker_map or {})
+    for asset, broker in req.broker_map.items():
+        if asset not in _VALID_ASSETS:
+            raise HTTPException(status_code=400, detail=f"unknown asset class: {asset}")
+        if broker not in _VALID_BROKERS:
+            raise HTTPException(status_code=400, detail=f"unknown broker: {broker}")
+        merged[asset] = broker
+    settings.broker_map = merged
+    session.commit()
+    log.info("broker_map updated", extra={"broker_map": merged})
+    return build_settings_response(session)
+
+
+@router.post("/settings/risk", response_model=SettingsResponse)
+def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Update risk parameters. Hard ceilings from RISK.md are enforced server-side; values
+    that would weaken protection beyond the ceiling are rejected (never silently clamped up)."""
+    cfg = get_settings()
+    risk = get_or_create_risk_config(session)
+
+    if req.risk_per_trade is not None:
+        if not (0 < req.risk_per_trade <= cfg.risk_per_trade_ceiling):
+            raise HTTPException(
+                status_code=400,
+                detail=f"risk_per_trade must be in (0, {cfg.risk_per_trade_ceiling}] per RISK.md",
+            )
+        risk.risk_per_trade = req.risk_per_trade
+    if req.max_open_positions is not None:
+        if req.max_open_positions < 1:
+            raise HTTPException(status_code=400, detail="max_open_positions must be >= 1")
+        risk.max_open_positions = req.max_open_positions
+    if req.max_daily_loss is not None:
+        if not (0 < req.max_daily_loss <= 1):
+            raise HTTPException(status_code=400, detail="max_daily_loss must be in (0, 1]")
+        risk.max_daily_loss = req.max_daily_loss
+    if req.max_total_exposure is not None:
+        if not (0 < req.max_total_exposure <= 1):
+            raise HTTPException(status_code=400, detail="max_total_exposure must be in (0, 1]")
+        risk.max_total_exposure = req.max_total_exposure
+    if req.per_pair_cooldown_minutes is not None:
+        if req.per_pair_cooldown_minutes < 0:
+            raise HTTPException(status_code=400, detail="per_pair_cooldown_minutes must be >= 0")
+        risk.per_pair_cooldown_minutes = req.per_pair_cooldown_minutes
+
+    session.commit()
+    log.info("risk config updated")
+    return build_settings_response(session)
+
+
+def _try_mt5_connect() -> dict:
+    """Attempt an MT5 connection and return a status dict (never raises)."""
+    from app.brokers.base import BrokerError
+    from app.brokers.mt5_adapter import Mt5BrokerAdapter
+
+    try:
+        broker = Mt5BrokerAdapter()
+        acct = broker.get_account()
+        return {"connected": True, "is_paper": broker.is_paper,
+                "equity": acct.equity, "cash": acct.cash, "open_positions": acct.open_positions}
+    except BrokerError as exc:
+        return {"connected": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"connected": False, "error": str(exc)}
+
+
+@router.get("/settings/mt5/status", tags=["broker"])
+def mt5_status(session: Session = Depends(get_session)) -> dict:
+    """Report whether MT5/Exness is configured and currently reachable. Password never returned."""
+    from app.brokers.mt5_credentials import resolve_mt5_credentials
+    from app.models.db import Mt5Credentials
+
+    row = session.get(Mt5Credentials, 1)
+    creds = resolve_mt5_credentials()
+    configured = bool(creds["login"] or creds["server"] or creds["path"] or (row is not None))
+    status = _try_mt5_connect()
+    return {
+        "configured": configured,
+        "login": creds["login"] or None,
+        "server": creds["server"] or None,
+        **status,
+    }
+
+
+@router.post("/settings/mt5", tags=["broker"])
+def connect_mt5(req: Mt5ConnectRequest, session: Session = Depends(get_session)) -> dict:
+    """Save MT5/Exness connection details from the UI and attempt to connect.
+
+    Leave login/password blank to attach to the account the running terminal is logged into.
+    On success, forex + metals are routed to MT5 automatically.
+    """
+    from app.brokers.registry import reset_registry
+    from app.models.db import Mt5Credentials
+
+    row = session.get(Mt5Credentials, 1) or Mt5Credentials(id=1)
+    row.login = req.login or 0
+    row.server = (req.server or "").strip()
+    row.path = (req.path or "").strip()
+    if req.password is not None:  # only overwrite when provided
+        row.password = req.password
+    session.add(row)
+    session.commit()
+
+    # Drop cached adapters so the next resolution rebuilds with the new credentials.
+    reset_registry()
+
+    status = _try_mt5_connect()
+    if status.get("connected"):
+        settings = get_or_create_settings(session)
+        merged = dict(settings.broker_map or {})
+        merged.update({"forex": "mt5", "metal": "mt5"})
+        settings.broker_map = merged
+        session.commit()
+        log.warning("MT5 connected via UI", extra={"login": row.login or None, "server": row.server})
+    else:
+        log.warning("MT5 connect attempt failed", extra={"error": status.get("error")})
+    return status
+
+
+@router.get("/settings/llm", tags=["settings"])
+def llm_status(session: Session = Depends(get_session)) -> dict:
+    """Active AI provider/model and whether a key is configured (key never returned)."""
+    from app.agents.llm_config import resolve_llm_config
+
+    cfg = resolve_llm_config()
+    return {"provider": cfg.provider, "model": cfg.model, "available": cfg.available}
+
+
+@router.post("/settings/llm", tags=["settings"])
+def set_llm(req: LlmConfigRequest, session: Session = Depends(get_session)) -> dict:
+    """Select the AI provider (Claude/Gemini) + model + key from the UI, then test it."""
+    from app.agents import llm
+    from app.agents.llm_config import resolve_llm_config
+    from app.models.db import LlmConfig
+
+    if req.provider not in ("anthropic", "gemini"):
+        raise HTTPException(status_code=400, detail="provider must be 'anthropic' or 'gemini'")
+    row = session.get(LlmConfig, 1) or LlmConfig(id=1)
+    row.provider = req.provider
+    row.model = (req.model or "").strip() or None
+    if req.api_key:  # only overwrite when provided
+        row.api_key = req.api_key
+    session.add(row)
+    session.commit()
+
+    tested_ok, error = True, None
+    try:
+        llm.probe()
+    except Exception as exc:  # noqa: BLE001
+        tested_ok, error = False, str(exc)
+        log.warning("llm probe failed", extra={"provider": req.provider, "error": error})
+
+    cfg = resolve_llm_config()
+    return {"provider": cfg.provider, "model": cfg.model, "available": cfg.available,
+            "tested_ok": tested_ok, "error": error}
+
+
+@router.get("/positions", response_model=list[PositionView], tags=["positions"])
+def db_positions(session: Session = Depends(get_session)) -> list[PositionView]:
+    """Open positions from our own records (app-opened trades; used for exposure accounting)."""
+    rows = session.scalars(
+        select(Position).where(Position.status == PositionStatus.OPEN.value).order_by(Position.id.desc())
+    ).all()
+    return [PositionView.model_validate(r) for r in rows]
+
+
+@router.get("/positions/live", response_model=list[PositionView], tags=["positions"])
+def live_positions(session: Session = Depends(get_session)) -> list[PositionView]:
+    """Open positions reported by the BROKER itself — the real account truth, including
+    trades opened directly in MT5/Exness (not just app-opened ones)."""
+    from app.risk.service import live_broker_positions
+
+    out = live_broker_positions(session)
+    for i, p in enumerate(out):
+        p.id = i + 1
+    return out
+
+
+@router.get("/positions/advice", response_model=list[PositionAdvice], tags=["positions"])
+def positions_advice(session: Session = Depends(get_session)) -> list[PositionAdvice]:
+    """Management guidance for OPEN positions — protect a winner / cut a loser, with special
+    attention to imminent high-impact events. Advisory only; the user acts via the table."""
+    from app.agents.position_advisor import advise_positions
+
+    return advise_positions(session)
+
+
+class LiveCloseRequest(BaseModel):
+    symbol: str
+    asset_class: AssetClass
+
+
+class SlTpRequest(BaseModel):
+    symbol: str
+    asset_class: AssetClass
+    stop_loss: float | None = None
+    take_profit: float | None = None
+
+
+@router.post("/positions/live/close", tags=["positions"])
+def live_close(req: LiveCloseRequest, session: Session = Depends(get_session)) -> dict:
+    """Close a broker position by symbol (works for trades opened in MT5 directly).
+
+    Also reconciles any matching app-tracked DB position so the Monitor stops managing it.
+    """
+    from datetime import datetime, timezone
+
+    from app.brokers.registry import get_broker_for
+
+    settings = get_or_create_settings(session)
+    broker = get_broker_for(req.asset_class, settings.broker_map)
+    result = broker.close_position(req.symbol)
+
+    # Reconcile DB-tracked positions for this symbol (book their last unrealized as realized).
+    rows = session.scalars(
+        select(Position).where(Position.symbol == req.symbol,
+                               Position.status == PositionStatus.OPEN.value)
+    ).all()
+    if rows:
+        daily = get_or_create_daily_state(session)
+        for r in rows:
+            r.status = PositionStatus.CLOSED.value
+            r.closed_at = datetime.now(timezone.utc)
+            r.realized_pnl = r.unrealized_pnl or 0.0
+            daily.realized_pnl = round(daily.realized_pnl + (r.unrealized_pnl or 0.0), 2)
+        session.commit()
+
+    if result.status.value in ("error", "rejected"):
+        raise HTTPException(status_code=409, detail=result.error or "broker close failed")
+    return {"status": result.status.value, "symbol": req.symbol}
+
+
+@router.post("/positions/{position_id}/close", tags=["positions"])
+def close_position(position_id: int, session: Session = Depends(get_session)) -> dict:
+    """Close a single open position (manual exit from the UI)."""
+    from app.execution.monitor import close_one
+
+    result = close_one(session, position_id)
+    if not result.get("closed"):
+        raise HTTPException(status_code=409, detail=result.get("error", "could not close"))
+    return result
+
+
+@router.post("/positions/sl-tp", tags=["positions"])
+def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)) -> dict:
+    """Attach/modify SL and/or TP on an open position (e.g. protect a manual MT5 trade)."""
+    from app.brokers.registry import get_broker_for
+
+    settings = get_or_create_settings(session)
+    broker = get_broker_for(req.asset_class, settings.broker_map)
+    result = broker.set_sl_tp(req.symbol, req.stop_loss, req.take_profit)
+    if result.status.value in ("error", "rejected"):
+        raise HTTPException(status_code=409, detail=result.error or "could not set SL/TP")
+    return {"status": result.status.value, "symbol": req.symbol,
+            "stop_loss": req.stop_loss, "take_profit": req.take_profit}
+
+
+@router.post("/execution/flatten", tags=["safety"])
+def flatten(session: Session = Depends(get_session)) -> dict:
+    """Close ALL open positions immediately (kill-switch flatten)."""
+    return flatten_all(session)
+
+
+@router.post("/execution/monitor", tags=["execution"])
+def run_monitor(session: Session = Depends(get_session)) -> dict:
+    """Run one position-monitor pass (also runs automatically on the scheduler)."""
+    return monitor_positions(session)

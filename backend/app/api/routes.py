@@ -30,7 +30,7 @@ from app.models.schemas import (
     SettingsResponse,
     TradeProposal,
 )
-from app.risk.service import assess
+from app.risk.service import assess, realized_today, total_unrealized
 
 log = get_logger("api")
 router = APIRouter()
@@ -48,8 +48,7 @@ def health(session: Session = Depends(get_session)) -> HealthResponse:
     )
 
 
-@router.get("/api/settings", response_model=SettingsResponse, tags=["settings"])
-def read_settings(session: Session = Depends(get_session)) -> SettingsResponse:
+def build_settings_response(session: Session) -> SettingsResponse:
     cfg = get_settings()
     app_settings = get_or_create_settings(session)
     risk = get_or_create_risk_config(session)
@@ -62,6 +61,11 @@ def read_settings(session: Session = Depends(get_session)) -> SettingsResponse:
     )
 
 
+@router.get("/api/settings", response_model=SettingsResponse, tags=["settings"])
+def read_settings(session: Session = Depends(get_session)) -> SettingsResponse:
+    return build_settings_response(session)
+
+
 @router.get("/api/risk/state", response_model=RiskStateView, tags=["risk"])
 def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
     risk = get_or_create_risk_config(session)
@@ -71,10 +75,23 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
         if state.starting_equity is not None
         else None
     )
+    # Broker-truth realized today (counts terminal-side closes); falls back to app-tracked.
+    realized = realized_today(session)
+    # Exposure = sum of risk-at-entry across app-tracked open positions.
+    from sqlalchemy import select
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    open_rows = session.scalars(
+        select(Position).where(Position.status == PositionStatus.OPEN.value)
+    ).all()
+    total_risk = round(sum((p.risk_amount or 0.0) for p in open_rows), 2)
     return RiskStateView(
         trade_date=state.trade_date,
         starting_equity=state.starting_equity,
-        realized_pnl=state.realized_pnl,
+        realized_pnl=realized,
+        unrealized_pnl=total_unrealized(session),
+        total_risk_amount=total_risk,
         trades_count=state.trades_count,
         trading_paused=state.trading_paused,
         pause_reason=state.pause_reason,

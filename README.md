@@ -56,6 +56,30 @@ Then open:
 3. The SQLite DB file is created on first boot and the settings/risk rows are seeded.
 4. `GET /api/risk/state` shows a fresh daily risk state (0 P&L, not paused).
 
+## Frontend — local dev (Milestone 5)
+
+Requirements: Node 18+ (tested on 25). Start the backend first (above), then:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The Vite dev server proxies `/api`, `/health`, and `/ws` to
+the backend on `:8000` (no CORS juggling). Use `localhost`, not `127.0.0.1` (Vite binds to
+the `localhost` hostname).
+
+The dashboard has: a TradingView Lightweight candlestick chart with the AI proposal's
+entry/stop/target drawn as overlay lines, a symbol/asset-class/timeframe selector and
+"Run analysis" button, a proposal panel (confidence, risk-adjusted size, expandable agent
+reasoning, Approve/Reject in Mode A), a positions table, a risk dashboard (daily P&L vs
+limit, exposure, open positions with warnings), and an always-visible header with the
+paper/live indicator and the kill-switch (plus a persistent red banner under live
+auto-execution).
+
+`npm run build` type-checks and produces a production bundle.
+
 ## Milestones
 
 1. ✅ Scaffold, config, secrets, DB models, FastAPI skeleton.

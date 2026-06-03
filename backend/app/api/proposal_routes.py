@@ -31,12 +31,20 @@ def analyze(request: AnalyzeRequest, session: Session = Depends(get_session)) ->
 def list_proposals(
     limit: int = Query(50, ge=1, le=200),
     status: str | None = Query(None),
+    symbol: str | None = Query(None),
+    timeframe: str | None = Query(None),
     session: Session = Depends(get_session),
 ) -> list[ProposalView]:
-    stmt = select(TradeProposalRecord).order_by(TradeProposalRecord.id.desc()).limit(limit)
+    from sqlalchemy import func
+
+    stmt = select(TradeProposalRecord).order_by(TradeProposalRecord.id.desc())
     if status:
         stmt = stmt.where(TradeProposalRecord.status == status)
-    rows = session.scalars(stmt).all()
+    if symbol:
+        stmt = stmt.where(func.lower(TradeProposalRecord.symbol) == symbol.lower())
+    if timeframe:
+        stmt = stmt.where(TradeProposalRecord.timeframe == timeframe)
+    rows = session.scalars(stmt.limit(limit)).all()
     return [ProposalView.model_validate(r) for r in rows]
 
 
@@ -50,15 +58,28 @@ def get_proposal(proposal_id: int, session: Session = Depends(get_session)) -> P
 
 @router.post("/{proposal_id}/approve", response_model=ProposalView)
 def approve_proposal(proposal_id: int, session: Session = Depends(get_session)) -> ProposalView:
-    """Mode A approval. Marks APPROVED; execution is wired in Milestone 6."""
+    """Mode A approval — the user confirms, and we submit the order via the active broker.
+
+    Execution gates (kill-switch, live-confirmation) are enforced in the executor; if a gate
+    refuses, we surface 423 and leave the proposal approved-but-unexecuted.
+    """
+    from app.execution.executor import ExecutionBlocked, execute_proposal
+
     row = session.get(TradeProposalRecord, proposal_id)
     if row is None:
         raise HTTPException(status_code=404, detail="proposal not found")
     if row.status != ProposalStatus.PENDING_APPROVAL.value:
         raise HTTPException(status_code=409, detail=f"cannot approve a proposal in status '{row.status}'")
+
     row.status = ProposalStatus.APPROVED.value
     session.commit()
-    log.warning("proposal approved (execution arrives in M6)", extra={"proposal_id": proposal_id})
+    try:
+        execute_proposal(session, row)  # sets EXECUTED + opens a position on fill
+    except ExecutionBlocked as exc:
+        log.warning("approve blocked by safety gate", extra={"proposal_id": proposal_id, "reason": str(exc)})
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
+    session.refresh(row)
+    log.warning("proposal approved + executed", extra={"proposal_id": proposal_id, "status": row.status})
     return ProposalView.model_validate(row)
 
 

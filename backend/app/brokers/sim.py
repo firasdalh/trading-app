@@ -174,6 +174,17 @@ class SimPaperBroker(BrokerAdapter):
             )
         )
 
+    def set_sl_tp(self, symbol: str, stop_loss: float | None = None,
+                  take_profit: float | None = None) -> OrderResult:
+        pos = self._positions.get(symbol)
+        if not pos or pos.net_qty == 0:
+            return OrderResult(status=OrderStatus.REJECTED, error=f"no open position for {symbol}")
+        if stop_loss is not None:
+            pos.stop_loss = stop_loss
+        if take_profit is not None:
+            pos.take_profit = take_profit
+        return OrderResult(status=OrderStatus.SUBMITTED, raw={"sim_sltp": True})
+
     def close_all_positions(self) -> list[OrderResult]:
         results = [self.close_position(sym) for sym in list(self._positions.keys())]
         log.warning("sim close_all_positions", extra={"count": len(results)})

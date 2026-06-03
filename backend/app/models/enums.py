@@ -75,6 +75,13 @@ class RiskDecisionType(StrEnum):
     VETOED = "vetoed"         # rejected outright
 
 
+class ReviewDecision(StrEnum):
+    """The LLM reviewer's verdict on a deterministic setup. It may only confirm or veto."""
+
+    CONFIRM = "confirm"
+    VETO = "veto"
+
+
 class ProposalStatus(StrEnum):
     PENDING_RISK = "pending_risk"           # awaiting Risk Manager
     RISK_VETOED = "risk_vetoed"             # Risk Manager rejected

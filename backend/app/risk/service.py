@@ -15,10 +15,141 @@ from app.brokers.base import BrokerAdapter
 from app.brokers.registry import get_broker_for
 from app.core.config import get_settings
 from app.core.state import get_or_create_daily_state, get_or_create_risk_config, get_or_create_settings
+from app.core.logging import get_logger
 from app.models.db import Position
 from app.models.enums import AssetClass, PositionStatus
-from app.models.schemas import AccountState, RiskDecision, RiskLimits, TradeProposal
+from app.models.schemas import AccountState, PositionView, RiskDecision, RiskLimits, TradeProposal
 from app.risk.manager import evaluate_proposal
+
+_log = get_logger("risk.service")
+
+
+def live_broker_positions(session: Session) -> list[PositionView]:
+    """Aggregate the brokers' real open positions across the configured broker map.
+
+    One call per distinct broker (MT5 returns all its positions at once). Includes trades
+    opened directly in the terminal, not just app-opened ones.
+    """
+    settings = get_or_create_settings(session)
+    bm = settings.broker_map or {}
+    seen: set[str] = set()
+    out: list[PositionView] = []
+    for ac in AssetClass:
+        name = bm.get(ac.value, "sim")
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            out.extend(get_broker_for(ac, bm).get_open_positions())
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("live broker positions failed", extra={"broker": name, "error": str(exc)})
+    return out
+
+
+def total_unrealized(session: Session) -> float:
+    return round(sum(p.unrealized_pnl for p in live_broker_positions(session)), 2)
+
+
+def broker_realized_today(session: Session) -> float | None:
+    """Realized P&L today from the broker's own deal history (the account truth, including
+    trades closed directly in the terminal). Returns None if no configured broker supports
+    it — the caller then falls back to app-tracked realized P&L."""
+    from datetime import datetime, timezone
+
+    settings = get_or_create_settings(session)
+    bm = settings.broker_map or {}
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    seen: set[str] = set()
+    total = 0.0
+    supported = False
+    for ac in AssetClass:
+        name = bm.get(ac.value, "sim")
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            val = get_broker_for(ac, bm).get_realized_pnl(day_start)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("broker realized lookup failed", extra={"broker": name, "error": str(exc)})
+            continue
+        if val is not None:
+            supported = True
+            total += val
+    return round(total, 2) if supported else None
+
+
+def realized_today(session: Session) -> float:
+    """Realized P&L today: broker truth if available, else app-tracked."""
+    b = broker_realized_today(session)
+    if b is not None:
+        return b
+    return get_or_create_daily_state(session).realized_pnl
+
+
+def current_equity(session: Session) -> float | None:
+    """Equity of the live trading account(s). Prefers REAL brokers over the sim fallback so a
+    simulator's fake $100k balance never pollutes the real-account baseline. Sums across
+    distinct real brokers; if only the sim is configured, returns the sim equity."""
+    settings = get_or_create_settings(session)
+    bm = settings.broker_map or {}
+    seen: set[str] = set()
+    equities: dict[str, float] = {}
+    for ac in AssetClass:
+        name = bm.get(ac.value, "sim")
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            broker = get_broker_for(ac, bm)
+            equities[broker.name] = broker.get_account().equity
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("equity lookup failed", extra={"broker": name, "error": str(exc)})
+    if not equities:
+        return None
+    real = {k: v for k, v in equities.items() if k != "sim"}
+    use = real or equities
+    return round(sum(use.values()), 2)
+
+
+def evaluate_daily_pause(session: Session) -> bool:
+    """Pause NEW trades for the day if the account's loss (realized today + floating) reaches
+    the RISK.md max-daily-loss limit. Uses broker truth, so it protects the live account no
+    matter where trades were placed. Never auto-unpauses (a new UTC day resets it).
+    """
+    daily = get_or_create_daily_state(session)
+    if daily.trading_paused:
+        return True
+
+    if daily.starting_equity is None:
+        eq = current_equity(session)
+        if eq is not None:
+            daily.starting_equity = eq
+            session.add(daily)
+            session.commit()
+
+    equity = daily.starting_equity
+    if not equity or equity <= 0:
+        return False
+
+    risk = get_or_create_risk_config(session)
+    # The daily-loss breaker fires on REALIZED losses (closed trades), like a pro desk —
+    # not on open-position floating P&L, which swings and recovers (open trades are managed
+    # by their stops, not this circuit breaker).
+    realized = realized_today(session)
+    drawdown = -realized  # positive when realized losses exceed gains today
+    limit = equity * risk.max_daily_loss
+    if drawdown >= limit:
+        daily.trading_paused = True
+        daily.pause_reason = (
+            f"daily loss limit reached: realized {realized} "
+            f"(>= {limit:.2f} = {risk.max_daily_loss*100:.0f}% of {equity})"
+        )
+        session.add(daily)
+        session.commit()
+        _log.warning("daily loss limit hit (realized) — trading paused",
+                     extra={"realized": realized, "limit": round(limit, 2)})
+        return True
+    return False
 
 # Per-asset-class default tradable increment used for position sizing.
 _QTY_STEP = {

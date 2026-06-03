@@ -30,9 +30,36 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
+# Columns added after a table's first release — applied to pre-existing SQLite DBs so we
+# don't need a full migration tool for local dev. (Postgres deployments should use Alembic.)
+_SQLITE_ADDED_COLUMNS = {
+    "trade_proposals": [
+        ("review_decision", "VARCHAR(16)"),
+        ("watch", "BOOLEAN DEFAULT 0"),
+    ],
+}
+
+
+def _migrate_sqlite() -> None:
+    if not _settings.is_sqlite:
+        return
+    with engine.begin() as conn:
+        for table, cols in _SQLITE_ADDED_COLUMNS.items():
+            try:
+                existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            except Exception:
+                continue
+            if not existing:  # table doesn't exist yet (create_all will make it fresh)
+                continue
+            for name, ddl in cols:
+                if name not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
 def init_db() -> None:
-    """Create all tables. Idempotent."""
+    """Create all tables, then add any columns missing on a pre-existing DB. Idempotent."""
     Base.metadata.create_all(bind=engine)
+    _migrate_sqlite()
 
 
 def get_session() -> Iterator[Session]:

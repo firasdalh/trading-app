@@ -83,6 +83,22 @@ def live_reconfirm_required(settings: AppSettings) -> bool:
     return confirmed < PROCESS_START
 
 
+def live_execution_allowed(settings: AppSettings) -> bool:
+    """Whether LIVE orders may be submitted right now.
+
+    Paper is always allowed. Live requires a confirmation recorded *after* this process
+    started (so the user re-confirms on every restart — safety requirement #7).
+    """
+    if settings.broker_env != "live":
+        return True
+    if settings.live_confirmed_at is None:
+        return False
+    confirmed = settings.live_confirmed_at
+    if confirmed.tzinfo is None:
+        confirmed = confirmed.replace(tzinfo=timezone.utc)
+    return confirmed >= PROCESS_START
+
+
 def kill_switch_active(session: Session) -> bool:
     """True if EITHER the env backstop OR the UI toggle is engaged."""
     if get_settings().kill_switch:
