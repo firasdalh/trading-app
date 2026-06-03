@@ -41,12 +41,10 @@ def _exit_reason(direction: str, price: float, stop: float | None, target: float
 
 
 def _close_position(session: Session, pos: Position, broker, exit_price: float, reason: str) -> None:
-    side = OrderSide.SELL if pos.direction == Direction.LONG.value else OrderSide.BUY
-    req = OrderRequest(
-        symbol=pos.symbol, asset_class=AssetClass(pos.asset_class), side=side,
-        order_type=OrderType.MARKET, qty=pos.qty,
-    )
-    result = broker.submit_order(req)
+    # Close the EXISTING position by ticket — never fire a fresh opposite order. On a hedging
+    # MT5 account (Exness default) an opposing market order opens a NEW opposite position
+    # instead of closing, which would silently flip a short into a long.
+    result = broker.close_position(pos.symbol)
     fill = result.avg_fill_price or exit_price
     sign = 1 if pos.direction == Direction.LONG.value else -1
     realized = round(sign * pos.qty * (fill - pos.entry_price), 2)
