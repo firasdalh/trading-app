@@ -296,11 +296,39 @@ class Mt5BrokerAdapter(BrokerAdapter):
             # Normalize prices to the symbol's tick precision — MT5 rejects ("Invalid stops")
             # levels with more decimals than the instrument allows (e.g. an auto-computed
             # trailing stop of 4473.54231 on XAUUSD, which has 2-3 digits).
-            digits = getattr(mt5.symbol_info(sym), "digits", None)
+            info = mt5.symbol_info(sym)
+            digits = getattr(info, "digits", None)
+            point = getattr(info, "point", None)
+            stops_level = getattr(info, "trade_stops_level", None)
+            # MT5 also rejects stops placed CLOSER than this many points to the current price.
+            min_dist = (stops_level * point) if (stops_level and point) else None
+            try:
+                tick = mt5.symbol_info_tick(sym)
+            except Exception:  # noqa: BLE001
+                tick = None
 
             def _norm(v: float | None, current) -> float:
                 v = float(v) if v is not None else float(current or 0)
                 return round(v, digits) if (v and digits is not None) else v
+
+            def _clamp(value: float, p, is_sl: bool) -> float:
+                """Push a too-close level just past MT5's minimum stop distance so the modify
+                isn't rejected. Only ever moves a level that would otherwise be invalid."""
+                if not value or not min_dist or tick is None:
+                    return value
+                bid, ask = getattr(tick, "bid", None), getattr(tick, "ask", None)
+                if bid is None or ask is None:
+                    return value
+                is_long = getattr(p, "type", None) == mt5.POSITION_TYPE_BUY
+                # Stop sits opposite the trade direction; target sits with it.
+                below = (is_long and is_sl) or (not is_long and not is_sl)
+                if below:  # must be at least min_dist BELOW the close price
+                    limit = bid - min_dist
+                    value = min(value, limit)
+                else:      # must be at least min_dist ABOVE the close price
+                    limit = ask + min_dist
+                    value = max(value, limit)
+                return round(value, digits) if digits is not None else value
 
             last: OrderResult | None = None
             for p in positions:
@@ -309,8 +337,8 @@ class Mt5BrokerAdapter(BrokerAdapter):
                     "symbol": sym,
                     "position": p.ticket,
                     # 0.0 clears the level; keep the existing one when not provided.
-                    "sl": _norm(stop_loss, getattr(p, "sl", 0)),
-                    "tp": _norm(take_profit, getattr(p, "tp", 0)),
+                    "sl": _clamp(_norm(stop_loss, getattr(p, "sl", 0)), p, is_sl=True),
+                    "tp": _clamp(_norm(take_profit, getattr(p, "tp", 0)), p, is_sl=False),
                 }
                 result = mt5.order_send(req)
                 done = result is not None and result.retcode == mt5.TRADE_RETCODE_DONE

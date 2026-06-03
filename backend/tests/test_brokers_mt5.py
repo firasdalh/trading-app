@@ -159,6 +159,34 @@ def test_set_sl_tp_rounds_to_symbol_digits():
     assert fake.sent["sl"] == 4473.54 and fake.sent["tp"] == 4397.49
 
 
+def test_set_sl_tp_clamps_to_min_stop_distance():
+    # A short whose breakeven SL lands too close to the ask must be pushed to ask + min_dist.
+    class _Fake(FakeMt5):
+        def __init__(self):
+            super().__init__()
+            self.sent = None
+
+        def symbol_info(self, sym):
+            # digits=2, point=0.01, stops_level=50 -> min distance = 0.50
+            return SimpleNamespace(digits=2, point=0.01, trade_stops_level=50)
+
+        def symbol_info_tick(self, sym):
+            return SimpleNamespace(bid=4434.80, ask=4434.90)
+
+        def positions_get(self, symbol=None):
+            return [SimpleNamespace(symbol="XAUUSDm", type=self.POSITION_TYPE_SELL, volume=1.0,
+                                    price_open=4449.19, sl=4473.54, tp=4397.48, ticket=777)]
+
+        def order_send(self, req):
+            self.sent = req
+            return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, comment="done")
+
+    fake = _Fake()
+    # Requested breakeven SL (4434.95) is only 0.05 above the ask — closer than the 0.50 min.
+    _adapter(fake).set_sl_tp("XAUUSDm", stop_loss=4434.95)
+    assert fake.sent["sl"] == round(4434.90 + 0.50, 2)  # pushed to ask + min_dist = 4435.40
+
+
 def test_open_positions_lots_to_units():
     views = _adapter().get_open_positions()
     assert len(views) == 1
