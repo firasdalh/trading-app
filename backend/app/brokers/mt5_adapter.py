@@ -292,6 +292,16 @@ class Mt5BrokerAdapter(BrokerAdapter):
             positions = mt5.positions_get(symbol=sym) or []
             if not positions:
                 return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
+
+            # Normalize prices to the symbol's tick precision — MT5 rejects ("Invalid stops")
+            # levels with more decimals than the instrument allows (e.g. an auto-computed
+            # trailing stop of 4473.54231 on XAUUSD, which has 2-3 digits).
+            digits = getattr(mt5.symbol_info(sym), "digits", None)
+
+            def _norm(v: float | None, current) -> float:
+                v = float(v) if v is not None else float(current or 0)
+                return round(v, digits) if (v and digits is not None) else v
+
             last: OrderResult | None = None
             for p in positions:
                 req = {
@@ -299,8 +309,8 @@ class Mt5BrokerAdapter(BrokerAdapter):
                     "symbol": sym,
                     "position": p.ticket,
                     # 0.0 clears the level; keep the existing one when not provided.
-                    "sl": float(stop_loss) if stop_loss is not None else float(getattr(p, "sl", 0) or 0),
-                    "tp": float(take_profit) if take_profit is not None else float(getattr(p, "tp", 0) or 0),
+                    "sl": _norm(stop_loss, getattr(p, "sl", 0)),
+                    "tp": _norm(take_profit, getattr(p, "tp", 0)),
                 }
                 result = mt5.order_send(req)
                 done = result is not None and result.retcode == mt5.TRADE_RETCODE_DONE

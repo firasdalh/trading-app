@@ -140,6 +140,25 @@ def test_set_sl_tp():
     assert res.status == OrderStatus.SUBMITTED
 
 
+def test_set_sl_tp_rounds_to_symbol_digits():
+    # MT5 rejects over-precise stops; the adapter must normalize to the symbol's digits.
+    class _Fake(FakeMt5):
+        def __init__(self):
+            super().__init__()
+            self.sent = None
+
+        def symbol_info(self, sym):
+            return SimpleNamespace(digits=2)
+
+        def order_send(self, req):
+            self.sent = req
+            return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, comment="done")
+
+    fake = _Fake()
+    _adapter(fake).set_sl_tp("XAUUSDm", stop_loss=4473.54231, take_profit=4397.48999)
+    assert fake.sent["sl"] == 4473.54 and fake.sent["tp"] == 4397.49
+
+
 def test_open_positions_lots_to_units():
     views = _adapter().get_open_positions()
     assert len(views) == 1
