@@ -329,24 +329,51 @@ def positions_advice(session: Session = Depends(get_session)) -> list[PositionAd
 
 class AdvisorConfigRequest(BaseModel):
     enabled: bool | None = None
+    auto_execute: bool | None = None
     interval_seconds: int | None = Field(None, ge=30, le=3600)
+
+
+class AdvisorAction(BaseModel):
+    symbol: str
+    action: str
+    kind: str | None = None        # close | protect | breakeven | trail
+    stop: float | None = None
+    ok: bool = False
+    reason: str = ""
+    intended: str | None = None
+    error: str | None = None
 
 
 class AdvisorView(BaseModel):
     enabled: bool
+    auto_execute: bool
     interval_seconds: int
     last_run_at: str | None = None
     advice: list[PositionAdvice]
+    actions: list[AdvisorAction] = []
 
 
-def _advisor_view(session: Session) -> AdvisorView:
+def _iso_utc(dt) -> str | None:
+    """SQLite drops tzinfo, so stamp naive timestamps as UTC before serializing — otherwise the
+    browser reads them as local time and the 'last check' age is off by the UTC offset."""
+    if dt is None:
+        return None
+    from datetime import timezone
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _advisor_view(session: Session, actions: list[dict] | None = None) -> AdvisorView:
     from app.agents.position_advisor import advise_positions, get_or_create_advisor_config
 
     cfg = get_or_create_advisor_config(session)
     return AdvisorView(
-        enabled=cfg.enabled, interval_seconds=cfg.interval_seconds,
-        last_run_at=cfg.last_run_at.isoformat() if cfg.last_run_at else None,
+        enabled=cfg.enabled, auto_execute=cfg.auto_execute, interval_seconds=cfg.interval_seconds,
+        last_run_at=_iso_utc(cfg.last_run_at),
         advice=advise_positions(session),
+        actions=[AdvisorAction(**a) for a in (actions or [])],
     )
 
 
@@ -363,20 +390,23 @@ def advisor_set_config(req: AdvisorConfigRequest, session: Session = Depends(get
     cfg = get_or_create_advisor_config(session)
     if req.enabled is not None:
         cfg.enabled = req.enabled
+    if req.auto_execute is not None:
+        cfg.auto_execute = req.auto_execute
     if req.interval_seconds is not None:
         cfg.interval_seconds = req.interval_seconds
     session.commit()
-    log.warning("advisor config updated", extra={"enabled": cfg.enabled, "interval": cfg.interval_seconds})
+    log.warning("advisor config updated", extra={"enabled": cfg.enabled,
+                "auto_execute": cfg.auto_execute, "interval": cfg.interval_seconds})
     return _advisor_view(session)
 
 
 @router.post("/positions/advisor/run", response_model=AdvisorView, tags=["positions"])
 def advisor_run_now(session: Session = Depends(get_session)) -> AdvisorView:
-    """Run the advisor immediately (the 'Run now' button) and stamp last_run_at."""
+    """Run the advisor immediately (the 'Run now' button); auto-executes if that toggle is on."""
     from app.agents.position_advisor import run_advisor
 
-    run_advisor(session)
-    return _advisor_view(session)
+    out = run_advisor(session)
+    return _advisor_view(session, actions=out.get("actions", []))
 
 
 class LiveCloseRequest(BaseModel):

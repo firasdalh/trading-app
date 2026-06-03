@@ -288,6 +288,9 @@ class AdvisorConfig(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)  # off by default
+    # When True the advisor may autonomously act on its highest-confidence, risk-reducing
+    # decisions (close an invalidated trade, lock a winner's stop to breakeven). Off by default.
+    auto_execute: Mapped[bool] = mapped_column(Boolean, default=False)
     interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(

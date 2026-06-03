@@ -3,11 +3,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import app.agents.position_advisor as advisor
 from app.data.providers import CalendarEvent
-from app.models.schemas import PositionView
+from app.models.schemas import PositionAdvice, PositionView
 
 NOW = datetime.now(timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _reset_advisor_state():
+    advisor._reset_auto_state()
+    yield
+    advisor._reset_auto_state()
 
 
 def _pos(symbol="XAUUSDm", direction="short", pnl=10.0, stop=4473.0) -> PositionView:
@@ -31,7 +40,8 @@ def _patch(monkeypatch, positions, events, thesis=None):
     monkeypatch.setattr(advisor, "get_calendar_provider", lambda: _Cal(events))
     # Isolate the event/protection logic from the (broker-dependent) thesis re-check unless a
     # test explicitly wants a thesis.
-    monkeypatch.setattr(advisor, "_position_thesis", lambda session, p: thesis)
+    monkeypatch.setattr(advisor, "_position_context", lambda session, p: None)
+    monkeypatch.setattr(advisor, "_position_thesis", lambda session, p, ctx=None: thesis)
 
 
 def _event(mins_from_now=45, importance="high"):
@@ -138,3 +148,133 @@ def test_advisor_tick_runs_when_enabled(db_session, monkeypatch):
     # Interval hasn't elapsed -> should not run again immediately.
     second = advisor.advisor_tick(db_session)
     assert second["ran"] is False and second["reason"] == "interval not elapsed"
+
+
+# ---- auto-execute ----
+
+def _adv(symbol="XAUUSDm", thesis="intact", event=None, sev="info"):
+    return PositionAdvice(symbol=symbol, direction="short", unrealized_pnl=10.0, has_stop=True,
+                          severity=sev, headline="h", detail="d", thesis=thesis, event_label=event)
+
+
+class _Result:
+    def __init__(self, value="filled", error=None):
+        self.status = type("S", (), {"value": value})()
+        self.error = error
+
+
+class _Broker:
+    def __init__(self, is_paper=True):
+        self.is_paper = is_paper
+        self.closed = []
+        self.sltp = []
+
+    def close_position(self, symbol):
+        self.closed.append(symbol)
+        return _Result("filled")
+
+    def set_sl_tp(self, symbol, sl, tp):
+        self.sltp.append((symbol, sl, tp))
+        return _Result("filled")
+
+
+def test_auto_decision_closes_invalidated():
+    p = _pos(direction="short")
+    assert advisor._auto_decision(_adv(thesis="invalidated"), p, {}, None)["action"] == "close"
+
+
+def test_auto_decision_breakeven_winning_into_news():
+    # short winning, stop above entry (worse side) -> lock to breakeven.
+    p = _pos(direction="short", pnl=10.0, stop=4460.0)  # entry 4449 -> stop above = worse
+    decision = advisor._auto_decision(_adv(thesis="intact", event="US: ISM"), p, {}, None)
+    assert decision is not None and decision["kind"] == "breakeven"
+
+
+def test_auto_decision_protects_naked_position():
+    p = _pos(direction="short", stop=None)
+    decision = advisor._auto_decision(_adv(thesis="intact"), p, {"atr": 10.0, "last": 4449.0}, None)
+    assert decision is not None and decision["kind"] == "protect"
+    assert decision["stop"] > 4449.0  # protective stop above price for a short
+
+
+def test_auto_decision_trails_beyond_target_r():
+    # short, big profit (last well below entry) -> trail; plan_risk 10, profit ~50 = 5R.
+    p = _pos(direction="short", stop=4460.0)
+    decision = advisor._auto_decision(_adv(thesis="intact"), p,
+                                      {"atr": 5.0, "last": 4399.0}, 10.0)
+    assert decision is not None and decision["kind"] == "trail"
+    assert decision["stop"] < 4460.0  # tighter than the current stop
+
+
+def test_auto_decision_none_when_intact_no_event():
+    assert advisor._auto_decision(_adv(thesis="intact"), _pos(), {}, None) is None
+
+
+def _patch_exec(monkeypatch, broker, *, kill=False, live_ok=True):
+    import app.brokers.registry as reg
+    import app.core.state as state
+    monkeypatch.setattr(state, "kill_switch_active", lambda session: kill)
+    monkeypatch.setattr(state, "live_execution_allowed", lambda settings: live_ok)
+    monkeypatch.setattr(state, "get_or_create_settings",
+                        lambda session: type("S", (), {"broker_map": {}})())
+    monkeypatch.setattr(reg, "get_broker_for", lambda ac, bm: broker)
+
+
+def test_auto_execute_closes_on_paper(db_session, monkeypatch):
+    broker = _Broker(is_paper=True)
+    monkeypatch.setattr(advisor, "_CLOSE_CONFIRM", 1)  # close on first invalidation for this test
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [_pos(direction="short")])
+    _patch_exec(monkeypatch, broker)
+    actions = advisor._auto_execute(db_session, [_adv(thesis="invalidated", sev="danger")])
+    assert broker.closed == ["XAUUSDm"]
+    assert actions[0]["action"] == "close" and actions[0]["ok"] is True
+
+
+def test_close_requires_hysteresis(db_session, monkeypatch):
+    # Default _CLOSE_CONFIRM=2: first invalidation is pending, second confirms the close.
+    broker = _Broker(is_paper=True)
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [_pos(direction="short")])
+    _patch_exec(monkeypatch, broker)
+    first = advisor._auto_execute(db_session, [_adv(thesis="invalidated")])
+    assert broker.closed == [] and first[0]["action"] == "close_pending"
+    second = advisor._auto_execute(db_session, [_adv(thesis="invalidated")])
+    assert broker.closed == ["XAUUSDm"] and second[0]["ok"] is True
+
+
+def test_auto_execute_halts_on_kill_switch(db_session, monkeypatch):
+    broker = _Broker(is_paper=True)
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [_pos(direction="short")])
+    _patch_exec(monkeypatch, broker, kill=True)
+    actions = advisor._auto_execute(db_session, [_adv(thesis="invalidated")])
+    assert actions == [] and broker.closed == []
+
+
+def test_auto_execute_blocks_unconfirmed_live(db_session, monkeypatch):
+    broker = _Broker(is_paper=False)
+    monkeypatch.setattr(advisor, "_CLOSE_CONFIRM", 1)  # pass hysteresis so we reach the live gate
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [_pos(direction="short")])
+    _patch_exec(monkeypatch, broker, live_ok=False)
+    actions = advisor._auto_execute(db_session, [_adv(thesis="invalidated")])
+    assert broker.closed == [] and actions[0]["action"] == "blocked_live_unconfirmed"
+
+
+def test_run_advisor_skips_execution_when_toggle_off(db_session, monkeypatch):
+    monkeypatch.setattr(advisor, "advise_positions", lambda session: [_adv(thesis="invalidated")])
+    called = {"n": 0}
+    monkeypatch.setattr(advisor, "_auto_execute", lambda s, a: called.__setitem__("n", called["n"] + 1) or [])
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    cfg.auto_execute = False
+    db_session.commit()
+    out = advisor.run_advisor(db_session)
+    assert out["actions"] == [] and called["n"] == 0
+
+
+def test_run_advisor_executes_when_toggle_on(db_session, monkeypatch):
+    monkeypatch.setattr(advisor, "advise_positions", lambda session: [_adv(thesis="invalidated")])
+    monkeypatch.setattr(advisor, "_auto_execute",
+                        lambda s, a: [{"symbol": "XAUUSDm", "action": "close", "ok": True}])
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    cfg.auto_execute = True
+    db_session.commit()
+    out = advisor.run_advisor(db_session)
+    assert out["actions"][0]["action"] == "close"

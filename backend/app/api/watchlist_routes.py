@@ -47,6 +47,17 @@ class WatchlistResponse(BaseModel):
     last_scan_at: str | None = None
 
 
+def _iso_utc(dt) -> str | None:
+    """Stamp naive (SQLite) timestamps as UTC so the browser doesn't read them as local time."""
+    if dt is None:
+        return None
+    from datetime import timezone
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 def _response(session: Session) -> WatchlistResponse:
     cfg = get_or_create_scan_config(session)
     items = session.scalars(select(WatchItem).order_by(WatchItem.id)).all()
@@ -55,7 +66,7 @@ def _response(session: Session) -> WatchlistResponse:
                              timeframe=i.timeframe, enabled=i.enabled) for i in items],
         scan_enabled=cfg.enabled,
         interval_seconds=cfg.interval_seconds,
-        last_scan_at=cfg.last_scan_at.isoformat() if cfg.last_scan_at else None,
+        last_scan_at=_iso_utc(cfg.last_scan_at),
     )
 
 

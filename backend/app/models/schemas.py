@@ -280,6 +280,7 @@ class PositionAdvice(BaseModel):
     detail: str
     # Re-check of the original plan against the current read: is the trade still on track?
     thesis: str = "unknown"  # intact | weakening | invalidated | unknown
+    r_multiple: float | None = None   # progress in R (profit / planned risk)
     event_label: str | None = None
     minutes_to_event: int | None = None
 

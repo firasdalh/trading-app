@@ -37,6 +37,9 @@ _SQLITE_ADDED_COLUMNS = {
         ("review_decision", "VARCHAR(16)"),
         ("watch", "BOOLEAN DEFAULT 0"),
     ],
+    "advisor_config": [
+        ("auto_execute", "BOOLEAN DEFAULT 0"),
+    ],
 }
 
 

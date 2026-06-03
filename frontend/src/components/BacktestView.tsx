@@ -6,10 +6,20 @@ import { EquityChart } from "./EquityChart";
 const TIMEFRAMES = ["15m", "1h", "4h", "1d"];
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal"];
 
+// Read a value the Dashboard persisted, so the backtest opens on the pair you were viewing.
+function lsGet<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw != null ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function BacktestView() {
-  const [symbol, setSymbol] = useState("AAPL");
-  const [assetClass, setAssetClass] = useState<AssetClass>("stock");
-  const [timeframe, setTimeframe] = useState("1h");
+  const [symbol, setSymbol] = useState(() => lsGet("ta.symbol", "AAPL"));
+  const [assetClass, setAssetClass] = useState<AssetClass>(() => lsGet("ta.assetClass", "stock"));
+  const [timeframe, setTimeframe] = useState(() => lsGet("ta.timeframe", "1h"));
   const [bars, setBars] = useState(400);
   const [equity, setEquity] = useState(100000);
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -63,6 +73,19 @@ export function BacktestView() {
 
       {error && (
         <div className="rounded-md border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">{error}</div>
+      )}
+
+      {!result && !busy && !error && (
+        <div className="card text-sm text-neutral-400">
+          Press <span className="font-semibold text-neutral-200">Run backtest</span> to replay the
+          deterministic strategy over historical candles and see the equity curve, win rate, R-multiples,
+          drawdown and every trade.
+          <div className="mt-1 text-xs text-neutral-500">
+            Use <code>metal</code> / <code>forex</code> / <code>crypto</code> for your Exness pairs
+            (e.g. <code>XAUUSDm</code>) to test on real MT5 history; <code>stock</code> uses the simulator.
+            Results are hypothetical and don’t guarantee live results.
+          </div>
+        </div>
       )}
 
       {result && m && (

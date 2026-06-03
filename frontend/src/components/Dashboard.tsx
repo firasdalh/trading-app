@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { useQuoteSocket } from "../hooks/useQuoteSocket";
 import type { AnalyzeResponse, AssetClass, ProposalView, SettingsResponse } from "../types";
@@ -43,7 +44,13 @@ import { ProposalPanel } from "./ProposalPanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
 import { RiskDashboard } from "./RiskDashboard";
+import { SymbolPicker } from "./SymbolPicker";
 import { WatchlistPanel } from "./WatchlistPanel";
+
+interface Favorite {
+  symbol: string;
+  assetClass: AssetClass;
+}
 
 interface Props {
   settings: SettingsResponse | null;
@@ -53,10 +60,11 @@ const TIMEFRAMES = ["15m", "1h", "4h", "1d"];
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal"];
 
 export function Dashboard({ settings }: Props) {
-  const [symbol, setSymbol] = useState("EURUSD");
-  const [symbolInput, setSymbolInput] = useState("EURUSD");
-  const [assetClass, setAssetClass] = useState<AssetClass>("forex");
-  const [timeframe, setTimeframe] = useState("1h");
+  // Persisted across refresh / navigation so the desk reopens on the last pair you used.
+  const [symbol, setSymbol] = useLocalStorage("ta.symbol", "EURUSD");
+  const [assetClass, setAssetClass] = useLocalStorage<AssetClass>("ta.assetClass", "forex");
+  const [timeframe, setTimeframe] = useLocalStorage("ta.timeframe", "1h");
+  const [favorites, setFavorites] = useLocalStorage<Favorite[]>("ta.favorites", []);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -77,9 +85,9 @@ export function Dashboard({ settings }: Props) {
       .then((r) => {
         if (cancelled) return;
         setSymbols(r.symbols);
+        // Only fall back to the first symbol if the (persisted) one truly isn't offered here.
         if (r.symbols.length && !r.symbols.includes(symbol)) {
           setSymbol(r.symbols[0]);
-          setSymbolInput(r.symbols[0]);
         }
       })
       .catch(() => setSymbols([]));
@@ -185,9 +193,27 @@ export function Dashboard({ settings }: Props) {
     }
   };
 
-  const applySymbol = () => {
-    const s = symbolInput.trim().toUpperCase();
-    if (s) setSymbol(s);
+  const favForClass = useMemo(
+    () => favorites.filter((f) => f.assetClass === assetClass).map((f) => f.symbol),
+    [favorites, assetClass],
+  );
+
+  const toggleFavorite = (s: string) => {
+    setFavorites((prev) => {
+      const exists = prev.some((f) => f.symbol === s && f.assetClass === assetClass);
+      return exists
+        ? prev.filter((f) => !(f.symbol === s && f.assetClass === assetClass))
+        : [...prev, { symbol: s, assetClass }];
+    });
+  };
+
+  const removeFavorite = (f: Favorite) => {
+    setFavorites((prev) => prev.filter((x) => !(x.symbol === f.symbol && x.assetClass === f.assetClass)));
+  };
+
+  const openFavorite = (f: Favorite) => {
+    if (f.assetClass !== assetClass) setAssetClass(f.assetClass);
+    setSymbol(f.symbol);
   };
 
   return (
@@ -196,31 +222,13 @@ export function Dashboard({ settings }: Props) {
       <div className="card flex flex-wrap items-end gap-3">
         <label className="text-sm">
           <div className="mb-1 text-xs text-neutral-400">Symbol</div>
-          {symbols.length > 0 ? (
-            <select
-              value={symbols.includes(symbol) ? symbol : symbols[0]}
-              onChange={(e) => {
-                setSymbol(e.target.value);
-                setSymbolInput(e.target.value);
-              }}
-              className="w-48 rounded bg-neutral-800 px-2 py-1.5"
-            >
-              {symbols.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              value={symbolInput}
-              onChange={(e) => setSymbolInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && applySymbol()}
-              onBlur={applySymbol}
-              placeholder="Type a symbol"
-              className="w-44 rounded bg-neutral-800 px-2 py-1.5 uppercase"
-            />
-          )}
+          <SymbolPicker
+            value={symbol}
+            symbols={symbols}
+            favorites={favForClass}
+            onChange={setSymbol}
+            onToggleFavorite={toggleFavorite}
+          />
         </label>
         <label className="text-sm">
           <div className="mb-1 text-xs text-neutral-400">Asset class</div>
@@ -286,6 +294,34 @@ export function Dashboard({ settings }: Props) {
           </button>
         </div>
       </div>
+
+      {favorites.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-neutral-500">★ Favourites</span>
+          {favorites.map((f) => {
+            const active = f.symbol === symbol && f.assetClass === assetClass;
+            return (
+              <span
+                key={`${f.assetClass}-${f.symbol}`}
+                className={`group flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
+                  active ? "bg-blue-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                }`}
+              >
+                <button onClick={() => openFavorite(f)} title={`${f.symbol} · ${f.assetClass}`}>
+                  {f.symbol}
+                </button>
+                <button
+                  onClick={() => removeFavorite(f)}
+                  title="Remove favourite"
+                  className="text-neutral-500 hover:text-bear"
+                >
+                  ×
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {error && (
         <div className="rounded-md border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">

@@ -33,6 +33,27 @@ _IMMINENT_BEFORE_MIN = 90   # an event this soon is "imminent"
 _IN_WINDOW_AFTER_MIN = 30   # still relevant up to 30 min after the release
 _SEV_RANK = {"info": 0, "warn": 1, "danger": 2}
 
+# --- precision: don't cry wolf on tiny moves ---
+_MOM_ATR_FRAC = 0.10        # momentum counts as "against" only if |MACD hist| >= 10% of ATR
+
+# --- auto-manage thresholds (R = profit / planned risk) ---
+_BREAKEVEN_R = 1.0          # at +1R, lock the stop to breakeven
+_TRAIL_R = 1.5             # beyond +1.5R, trail the stop by ATR
+_TRAIL_ATR_MULT = 1.0       # trailing distance = 1 ATR behind price
+_PROTECT_ATR_MULT = 1.5     # protective stop for a naked position = 1.5 ATR from price
+
+# --- hysteresis + cooldown so auto-execute doesn't thrash ---
+_CLOSE_CONFIRM = 2          # require N consecutive "invalidated" reads before auto-closing
+_ACTION_COOLDOWN_S = 600    # min seconds between auto-CLOSE actions on the same symbol
+_INVALID_STREAK: dict[str, int] = {}
+_LAST_CLOSE_AT: dict[str, datetime] = {}
+
+
+def _reset_auto_state() -> None:
+    """Clear hysteresis/cooldown trackers (used by tests; also safe to call on restart)."""
+    _INVALID_STREAK.clear()
+    _LAST_CLOSE_AT.clear()
+
 
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -47,12 +68,26 @@ def _planned_timeframe(session: Session, symbol: str) -> str:
     return row.timeframe if (row and row.timeframe) else "1h"
 
 
-def _position_thesis(session: Session, p) -> dict | None:
-    """Best-effort deterministic re-check: does the open position's side still agree with the
-    current trend/momentum? Returns ``{"label", "note"}`` or ``None`` if data is unavailable.
+def _plan_risk(session: Session, symbol: str, atr: float | None) -> float | None:
+    """The risk-per-unit the trade was planned with (|entry − stop|), used to express progress
+    in R. Falls back to the engine's default ATR stop distance when no plan is on record."""
+    try:
+        row = session.scalars(
+            select(TradeProposalRecord).where(TradeProposalRecord.symbol == symbol)
+            .order_by(TradeProposalRecord.id.desc())
+        ).first()
+        if row and row.entry and row.stop_loss:
+            r = abs(row.entry - row.stop_loss)
+            if r > 0:
+                return r
+    except Exception:  # noqa: BLE001
+        pass
+    return _PROTECT_ATR_MULT * atr if atr else None
 
-    Deterministic only (no LLM) so it can run on every auto-watch tick for free.
-    """
+
+def _position_context(session: Session, p) -> dict | None:
+    """Fresh deterministic read for one open position (trend, momentum, ATR, last price). Best
+    effort — returns ``None`` if data/broker is unavailable. No LLM, so it's free per tick."""
     try:
         from app.agents.orchestrator import _trend_from_indicators
         from app.agents.technical import run_technical
@@ -74,11 +109,20 @@ def _position_thesis(session: Session, p) -> dict | None:
         if not tech.timeframes:
             return None
         prim = next((x for x in tech.timeframes if x.timeframe == tf), tech.timeframes[0])
-        trend = _trend_from_indicators(prim.indicators, prim.trend)
-        macd_hist = prim.indicators.get("macd_hist")
+        ind = prim.indicators
+        return {"tf": tf, "trend": _trend_from_indicators(ind, prim.trend),
+                "macd_hist": ind.get("macd_hist"), "atr": ind.get("atr14"),
+                "last": ind.get("last_close")}
     except Exception:  # noqa: BLE001 - the advisor must never crash the scan/endpoint
         return None
 
+
+def _thesis_from_context(p, ctx: dict) -> dict:
+    """Classify the plan vs. the current read: intact / weakening / invalidated. A trend FLIP
+    (EMA structure) invalidates; a flattening trend or *meaningful* counter-momentum weakens;
+    trivial counter-momentum (noise) is ignored."""
+    tf, trend = ctx["tf"], ctx["trend"]
+    macd_hist, atr = ctx.get("macd_hist"), ctx.get("atr")
     want = "up" if p.direction == "long" else "down"
     opp = "down" if p.direction == "long" else "up"
 
@@ -88,17 +132,38 @@ def _position_thesis(session: Session, p) -> dict | None:
                          f"{p.direction}. The setup that justified this trade no longer holds — "
                          "consider exiting rather than hoping.")}
 
-    mom_against = macd_hist is not None and (
+    against = macd_hist is not None and (
         (p.direction == "long" and macd_hist < 0) or (p.direction == "short" and macd_hist > 0)
     )
-    if trend != want or mom_against:
-        why = "trend is flattening" if trend != want else "momentum is rolling over"
+    meaningful = against and atr and abs(macd_hist) >= _MOM_ATR_FRAC * atr
+    if trend != want:  # sideways: EMAs no longer aligned with the position
         return {"label": "weakening",
-                "note": (f"Plan check: {why} on {tf} (trend {trend}, MACD hist {macd_hist}). "
+                "note": (f"Plan check: the {tf} trend is flattening (now {trend}). "
                          "Thesis weakening — tighten the stop or consider trimming.")}
-
+    if meaningful:
+        return {"label": "weakening",
+                "note": (f"Plan check: momentum is rolling over on {tf} (MACD hist {macd_hist}). "
+                         "Thesis weakening — tighten the stop or consider trimming.")}
     return {"label": "intact",
             "note": f"Plan check: thesis intact — the {tf} trend is still {trend}, in your favour."}
+
+
+def _position_thesis(session: Session, p, ctx: dict | None = None) -> dict | None:
+    """Thesis re-check; reuses a precomputed context when given (avoids a second broker fetch)."""
+    if ctx is None:
+        ctx = _position_context(session, p)
+    return _thesis_from_context(p, ctx) if ctx else None
+
+
+def _r_multiple(session: Session, p, ctx: dict | None) -> float | None:
+    if not ctx:
+        return None
+    last = ctx.get("last") or p.last_price
+    risk = _plan_risk(session, p.symbol, ctx.get("atr"))
+    if not last or not risk:
+        return None
+    profit = (last - p.entry_price) if p.direction == "long" else (p.entry_price - last)
+    return round(profit / risk, 2)
 
 
 def _base_advice(p, ev_label, ev_mins, winning, has_stop) -> tuple[str, str, str]:
@@ -152,10 +217,14 @@ def advise_positions(session: Session) -> list[PositionAdvice]:
 
         severity, headline, detail = _base_advice(p, ev_label, ev_mins, winning, has_stop)
 
-        thesis = _position_thesis(session, p)
+        ctx = _position_context(session, p)
+        thesis = _position_thesis(session, p, ctx)
+        r_mult = _r_multiple(session, p, ctx)
         thesis_label = thesis["label"] if thesis else "unknown"
         if thesis is not None:
             detail = f"{detail} {thesis['note']}"
+            if r_mult is not None:
+                detail = f"{detail} (currently {r_mult:+.1f}R)"
             # The thesis can escalate urgency. News keeps its headline (it's the nearer concern);
             # otherwise the thesis drives the headline too.
             if thesis_label == "invalidated":
@@ -170,7 +239,7 @@ def advise_positions(session: Session) -> list[PositionAdvice]:
         out.append(PositionAdvice(
             symbol=p.symbol, direction=p.direction, unrealized_pnl=round(p.unrealized_pnl, 2),
             has_stop=has_stop, severity=severity, headline=headline, detail=detail,
-            thesis=thesis_label, event_label=ev_label, minutes_to_event=ev_mins,
+            thesis=thesis_label, r_multiple=r_mult, event_label=ev_label, minutes_to_event=ev_mins,
         ))
     return out
 
@@ -183,26 +252,185 @@ def advise_positions(session: Session) -> list[PositionAdvice]:
 def get_or_create_advisor_config(session: Session) -> AdvisorConfig:
     cfg = session.get(AdvisorConfig, 1)
     if cfg is None:
-        cfg = AdvisorConfig(id=1, enabled=False, interval_seconds=300)
+        cfg = AdvisorConfig(id=1, enabled=False, auto_execute=False, interval_seconds=300)
         session.add(cfg)
         session.commit()
     return cfg
 
 
+def _stop_worse_than_entry(p) -> bool:
+    """True if the stop is on the losing side of entry (i.e. not yet locked to breakeven)."""
+    if p.stop_loss is None:
+        return True
+    return p.stop_loss < p.entry_price if p.direction == "long" else p.stop_loss > p.entry_price
+
+
+def _tightens(direction: str, current: float | None, new: float) -> bool:
+    """A new stop is only ever accepted if it REDUCES risk (moves toward price). Never loosen."""
+    if current is None:
+        return True
+    return new > current if direction == "long" else new < current
+
+
+def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None) -> dict | None:
+    """The bounded, deterministic set of actions the advisor may take autonomously — only
+    highest-confidence, RISK-REDUCING moves: close an invalidated trade, attach a protective
+    stop, lock to breakeven, or trail. It never opens, sizes up, flips, or loosens a stop."""
+    if a.thesis == "invalidated":
+        return {"action": "close", "kind": "close",
+                "reason": "thesis invalidated — the trend has flipped against the position"}
+
+    atr = (ctx or {}).get("atr")
+    last = (ctx or {}).get("last") or p.last_price
+    d = p.direction
+
+    # 1) Naked position -> attach an ATR protective stop (always risk-reducing).
+    if (p.stop_loss is None or p.stop_loss == 0) and atr and last:
+        stop = (last - _PROTECT_ATR_MULT * atr) if d == "long" else (last + _PROTECT_ATR_MULT * atr)
+        return {"action": "set_stop", "kind": "protect", "stop": round(stop, 5),
+                "reason": "no stop set — attaching an ATR protective stop"}
+
+    # 2) R-based management once we have a risk reference and a price.
+    if plan_risk and last and atr:
+        profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
+        r = profit / plan_risk
+        if r >= _TRAIL_R:
+            trail = (last - _TRAIL_ATR_MULT * atr) if d == "long" else (last + _TRAIL_ATR_MULT * atr)
+            if _tightens(d, p.stop_loss, trail):
+                return {"action": "set_stop", "kind": "trail", "stop": round(trail, 5),
+                        "reason": f"+{r:.1f}R — trailing the stop to lock gains"}
+        if r >= _BREAKEVEN_R and _stop_worse_than_entry(p):
+            return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
+                    "reason": f"reached +{r:.1f}R — moving the stop to breakeven"}
+
+    # 3) Winning into imminent news -> lock breakeven even before +1R.
+    if a.event_label is not None and p.unrealized_pnl > 0 and _stop_worse_than_entry(p):
+        return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
+                "reason": f"winning into {a.event_label} — locking the stop to breakeven"}
+    return None
+
+
+def _reconcile_closed_symbol(session: Session, symbol: str) -> None:
+    """Book any app-tracked open position for this symbol as closed (mirrors live_close)."""
+    from app.core.state import get_or_create_daily_state
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    rows = session.scalars(
+        select(Position).where(Position.symbol == symbol,
+                               Position.status == PositionStatus.OPEN.value)
+    ).all()
+    if not rows:
+        return
+    daily = get_or_create_daily_state(session)
+    for r in rows:
+        r.status = PositionStatus.CLOSED.value
+        r.closed_at = datetime.now(timezone.utc)
+        r.realized_pnl = r.unrealized_pnl or 0.0
+        daily.realized_pnl = round(daily.realized_pnl + (r.unrealized_pnl or 0.0), 2)
+
+
+def _auto_execute(session: Session, advice: list[PositionAdvice]) -> list[dict]:
+    """Act on the bounded auto-decisions. Hard safety gates: kill switch halts everything; live
+    brokers require this session's live-confirmation; paper acts freely. Closing requires the
+    invalidation to persist (hysteresis) and is rate-limited per symbol (cooldown); protective
+    stop moves act immediately (they only ever reduce risk)."""
+    from app.brokers.registry import get_broker_for
+    from app.core.state import (
+        get_or_create_settings,
+        kill_switch_active,
+        live_execution_allowed,
+    )
+    from app.models.enums import AssetClass
+
+    actions: list[dict] = []
+    if kill_switch_active(session):
+        log.warning("advisor auto-execute skipped: kill switch active")
+        return actions
+
+    now = datetime.now(timezone.utc)
+    settings = get_or_create_settings(session)
+    positions = {p.symbol: p for p in live_broker_positions(session)}
+
+    for a in advice:
+        p = positions.get(a.symbol)
+        if p is None:
+            continue
+
+        # Track consecutive invalidations for the close-hysteresis gate.
+        if a.thesis == "invalidated":
+            _INVALID_STREAK[a.symbol] = _INVALID_STREAK.get(a.symbol, 0) + 1
+        else:
+            _INVALID_STREAK[a.symbol] = 0
+
+        ctx = _position_context(session, p)
+        plan_risk = _plan_risk(session, a.symbol, (ctx or {}).get("atr"))
+        decision = _auto_decision(a, p, ctx or {}, plan_risk)
+        if decision is None:
+            continue
+        action, kind, reason = decision["action"], decision["kind"], decision["reason"]
+
+        if action == "close":
+            if _INVALID_STREAK.get(a.symbol, 0) < _CLOSE_CONFIRM:
+                actions.append({"symbol": a.symbol, "action": "close_pending", "kind": "close",
+                                "ok": False, "reason": (
+                                    f"awaiting confirmation "
+                                    f"({_INVALID_STREAK[a.symbol]}/{_CLOSE_CONFIRM} checks)")})
+                continue
+            last_close = _LAST_CLOSE_AT.get(a.symbol)
+            if last_close and (now - last_close).total_seconds() < _ACTION_COOLDOWN_S:
+                continue
+
+        broker = get_broker_for(AssetClass(p.asset_class), settings.broker_map)
+        if not broker.is_paper and not live_execution_allowed(settings):
+            log.warning("advisor auto-execute blocked (live not confirmed)",
+                        extra={"symbol": a.symbol, "intended": action, "kind": kind})
+            actions.append({"symbol": a.symbol, "action": "blocked_live_unconfirmed", "kind": kind,
+                            "intended": action, "ok": False, "reason": reason})
+            continue
+
+        try:
+            if action == "close":
+                result = broker.close_position(p.symbol)
+                ok = result.status.value not in ("error", "rejected")
+                if ok:
+                    _reconcile_closed_symbol(session, p.symbol)
+                    _LAST_CLOSE_AT[a.symbol] = now
+                    _INVALID_STREAK[a.symbol] = 0
+            else:  # set_stop (protect | breakeven | trail)
+                result = broker.set_sl_tp(p.symbol, decision["stop"], p.take_profit)
+                ok = result.status.value not in ("error", "rejected")
+            actions.append({"symbol": a.symbol, "action": action, "kind": kind, "ok": ok,
+                            "reason": reason, "stop": decision.get("stop"),
+                            "error": None if ok else (result.error or "broker rejected")})
+            log.warning("advisor AUTO-EXECUTED", extra={"symbol": a.symbol, "action": action,
+                        "kind": kind, "stop": decision.get("stop"), "ok": ok, "paper": broker.is_paper})
+        except Exception as exc:  # noqa: BLE001
+            actions.append({"symbol": a.symbol, "action": action, "kind": kind, "ok": False,
+                            "reason": reason, "error": str(exc)})
+            log.warning("advisor auto-execute failed", extra={"symbol": a.symbol, "error": str(exc)})
+    return actions
+
+
 def run_advisor(session: Session) -> dict:
-    """Compute advisories now, record actionable ones to the audit log, stamp last_run_at."""
+    """Compute advisories now, optionally auto-execute, record to the audit log, stamp last_run."""
     advice = advise_positions(session)
     cfg = get_or_create_advisor_config(session)
     cfg.last_run_at = datetime.now(timezone.utc)
+
+    actions = _auto_execute(session, advice) if cfg.auto_execute else []
+
     actionable = [a for a in advice if a.severity in ("warn", "danger")]
     for a in actionable:
         log.warning("position advisory", extra={"symbol": a.symbol, "severity": a.severity,
                                                  "thesis": a.thesis, "advice": a.headline})
     session.add(AgentRun(agent="advisor", event="check",
-                         detail={"positions": len(advice),
-                                 "advisories": [a.model_dump(mode="json") for a in actionable]}))
+                         detail={"positions": len(advice), "auto_execute": cfg.auto_execute,
+                                 "advisories": [a.model_dump(mode="json") for a in actionable],
+                                 "actions": actions}))
     session.commit()
-    return {"last_run_at": cfg.last_run_at.isoformat(), "advice": [a.model_dump(mode="json") for a in advice]}
+    return {"last_run_at": cfg.last_run_at.isoformat(),
+            "advice": [a.model_dump(mode="json") for a in advice], "actions": actions}
 
 
 def advisor_tick(session: Session) -> dict:

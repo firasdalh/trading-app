@@ -63,14 +63,15 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
 
   return (
     <div className="fixed inset-0 z-30 flex items-start justify-center bg-black/60 p-4">
-      <div className="card mt-12 w-full max-w-lg space-y-4">
-        <div className="flex items-center justify-between">
+      <div className="card mt-12 flex max-h-[88vh] w-full max-w-lg flex-col">
+        <div className="flex shrink-0 items-center justify-between">
           <h2 className="text-lg font-semibold">Settings</h2>
           <button onClick={onClose} className="text-neutral-400 hover:text-white">
             ✕
           </button>
         </div>
 
+        <div className="mt-4 space-y-4 overflow-y-auto pr-1">
         {error && (
           <div className="rounded border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">{error}</div>
         )}
@@ -191,6 +192,7 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             Flatten all positions
           </button>
         </section>
+        </div>
       </div>
     </div>
   );

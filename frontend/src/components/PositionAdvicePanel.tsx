@@ -22,10 +22,22 @@ const THESIS: Record<PositionAdvice["thesis"], { text: string; cls: string }> = 
 
 function ago(iso: string | null): string {
   if (!iso) return "never";
-  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  // If the backend ever sends a timezone-less timestamp, treat it as UTC (not local time).
+  const safe = /[Z+]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const secs = Math.max(0, Math.round((Date.now() - new Date(safe).getTime()) / 1000));
   if (secs < 60) return `${secs}s ago`;
   if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
   return `${Math.round(secs / 3600)}h ago`;
+}
+
+function actionText(a: { action: string; kind?: string | null; stop?: number | null }): string {
+  if (a.action === "close" || a.kind === "close") return "closed position";
+  if (a.action === "close_pending") return "close pending confirmation";
+  const at = a.stop != null ? ` @ ${a.stop}` : "";
+  if (a.kind === "protect") return `attached protective stop${at}`;
+  if (a.kind === "breakeven") return `moved stop → breakeven${at}`;
+  if (a.kind === "trail") return `trailed stop${at}`;
+  return a.action;
 }
 
 // AI guidance for OPEN positions — is each trade still on track vs. its plan, protect winners /
@@ -64,10 +76,32 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
     return () => clearInterval(id);
   }, [enabled, intervalSecs]);
 
+  const autoExecute = state?.auto_execute ?? false;
+
   const toggleAuto = async () => {
     setBusy(true);
     try {
       setState(await api.advisorConfig({ enabled: !enabled }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleAutoExecute = async () => {
+    // Turning ON means the advisor may close an invalidated trade / lock a winner's stop by itself.
+    if (!autoExecute) {
+      const ok = window.confirm(
+        "Enable AUTO-EXECUTE?\n\nThe advisor will then act on its own on open positions:\n" +
+          "• CLOSE a position when its thesis is invalidated (trend flipped against you)\n" +
+          "• move a winning trade's stop to breakeven before high-impact news\n\n" +
+          "It never opens, sizes up, or flips a trade, respects the kill switch, and needs live\n" +
+          "confirmation for a live account. Proceed?",
+      );
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      setState(await api.advisorConfig({ auto_execute: !autoExecute }));
     } finally {
       setBusy(false);
     }
@@ -116,6 +150,16 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
             Auto-watch {enabled ? "ON" : "OFF"}
           </button>
           <button
+            onClick={toggleAutoExecute}
+            disabled={busy}
+            className={`btn text-xs ${
+              autoExecute ? "bg-bear/20 text-bear hover:bg-bear/30" : "bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
+            }`}
+            title="Let the advisor act on its own: close an invalidated trade / lock a winner's stop to breakeven"
+          >
+            Auto-execute {autoExecute ? "ON" : "OFF"}
+          </button>
+          <button
             onClick={() => load(true)}
             disabled={busy}
             className="btn bg-blue-600 text-white hover:bg-blue-500"
@@ -124,6 +168,35 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
           </button>
         </div>
       </div>
+
+      {autoExecute && (
+        <div className="mb-2 rounded border border-bear/40 bg-bear/10 px-2 py-1 text-[11px] text-bear">
+          Auto-execute is ON — the advisor may close an invalidated trade or move a winner's stop
+          to breakeven by itself. It never opens or sizes up, and respects the kill switch.
+        </div>
+      )}
+
+      {(state?.actions?.length ?? 0) > 0 && (
+        <div className="mb-2 space-y-1">
+          {state!.actions.map((act, i) => (
+            <div
+              key={`${act.symbol}-${i}`}
+              className={`rounded px-2 py-1 text-xs ${
+                act.ok
+                  ? "bg-bull/15 text-bull"
+                  : act.action === "close_pending"
+                    ? "bg-warn/15 text-warn"
+                    : "bg-bear/15 text-bear"
+              }`}
+            >
+              {act.ok ? "✓ Auto-executed" : act.action === "close_pending" ? "⏳ Pending" : "✗ Auto-execute blocked"}:{" "}
+              {act.symbol} · {actionText(act)}
+              {act.reason ? ` — ${act.reason}` : ""}
+              {act.error ? ` (${act.error})` : ""}
+            </div>
+          ))}
+        </div>
+      )}
 
       {advice.length === 0 ? (
         <div className="text-sm text-neutral-500">
@@ -142,6 +215,17 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
                   </span>
                   <span className="text-sm font-medium">{a.headline}</span>
                   <span className={`text-[10px] font-semibold uppercase ${th.cls}`}>{th.text}</span>
+                  {a.r_multiple != null && (
+                    <span
+                      className={`rounded bg-neutral-800 px-1 py-0.5 text-[10px] tabular-nums ${
+                        a.r_multiple >= 0 ? "text-bull" : "text-bear"
+                      }`}
+                      title="Progress in R (profit ÷ planned risk)"
+                    >
+                      {a.r_multiple >= 0 ? "+" : ""}
+                      {a.r_multiple.toFixed(1)}R
+                    </span>
+                  )}
                   <span
                     className={`ml-auto text-xs tabular-nums ${
                       a.unrealized_pnl >= 0 ? "text-bull" : "text-bear"

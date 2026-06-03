@@ -128,15 +128,29 @@ export interface PositionAdvice {
   headline: string;
   detail: string;
   thesis: "intact" | "weakening" | "invalidated" | "unknown";
+  r_multiple: number | null;
   event_label: string | null;
   minutes_to_event: number | null;
 }
 
+export interface AdvisorAction {
+  symbol: string;
+  action: string;
+  kind?: string | null;
+  stop?: number | null;
+  ok: boolean;
+  reason: string;
+  intended?: string | null;
+  error?: string | null;
+}
+
 export interface AdvisorState {
   enabled: boolean;
+  auto_execute: boolean;
   interval_seconds: number;
   last_run_at: string | null;
   advice: PositionAdvice[];
+  actions: AdvisorAction[];
 }
 
 export interface SettingsResponse {
