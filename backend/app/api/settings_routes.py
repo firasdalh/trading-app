@@ -330,6 +330,7 @@ def positions_advice(session: Session = Depends(get_session)) -> list[PositionAd
 class AdvisorConfigRequest(BaseModel):
     enabled: bool | None = None
     auto_execute: bool | None = None
+    auto_reenter: bool | None = None
     interval_seconds: int | None = Field(None, ge=30, le=3600)
 
 
@@ -347,6 +348,7 @@ class AdvisorAction(BaseModel):
 class AdvisorView(BaseModel):
     enabled: bool
     auto_execute: bool
+    auto_reenter: bool
     interval_seconds: int
     last_run_at: str | None = None
     advice: list[PositionAdvice]
@@ -370,10 +372,11 @@ def _advisor_view(session: Session, actions: list[dict] | None = None) -> Adviso
 
     cfg = get_or_create_advisor_config(session)
     return AdvisorView(
-        enabled=cfg.enabled, auto_execute=cfg.auto_execute, interval_seconds=cfg.interval_seconds,
-        last_run_at=_iso_utc(cfg.last_run_at),
+        enabled=cfg.enabled, auto_execute=cfg.auto_execute, auto_reenter=cfg.auto_reenter,
+        interval_seconds=cfg.interval_seconds, last_run_at=_iso_utc(cfg.last_run_at),
         advice=advise_positions(session),
-        actions=[AdvisorAction(**a) for a in (actions or [])],
+        actions=[AdvisorAction(**{k: v for k, v in a.items() if k != "asset_class"})
+                 for a in (actions or [])],
     )
 
 
@@ -392,11 +395,14 @@ def advisor_set_config(req: AdvisorConfigRequest, session: Session = Depends(get
         cfg.enabled = req.enabled
     if req.auto_execute is not None:
         cfg.auto_execute = req.auto_execute
+    if req.auto_reenter is not None:
+        cfg.auto_reenter = req.auto_reenter
     if req.interval_seconds is not None:
         cfg.interval_seconds = req.interval_seconds
     session.commit()
     log.warning("advisor config updated", extra={"enabled": cfg.enabled,
-                "auto_execute": cfg.auto_execute, "interval": cfg.interval_seconds})
+                "auto_execute": cfg.auto_execute, "auto_reenter": cfg.auto_reenter,
+                "interval": cfg.interval_seconds})
     return _advisor_view(session)
 
 

@@ -33,6 +33,9 @@ function ago(iso: string | null): string {
 function actionText(a: { action: string; kind?: string | null; stop?: number | null }): string {
   if (a.action === "close" || a.kind === "close") return "closed position";
   if (a.action === "close_pending") return "close pending confirmation";
+  if (a.action === "reenter") return "re-entered (new analyzed trade)";
+  if (a.action === "reenter_skip") return "re-checked — no fresh setup, stayed flat";
+  if (a.action === "reenter_blocked") return "re-entry blocked";
   const at = a.stop != null ? ` @ ${a.stop}` : "";
   if (a.kind === "protect") return `attached protective stop${at}`;
   if (a.kind === "breakeven") return `moved stop → breakeven${at}`;
@@ -137,6 +140,27 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
     }
   };
 
+  const autoReenter = state?.auto_reenter ?? false;
+
+  const toggleAutoReenter = async () => {
+    if (!autoReenter) {
+      const ok = window.confirm(
+        "Enable AUTO RE-ENTER?\n\nAfter the advisor closes a trade whose thesis broke, it will " +
+          "re-run the full analysis and — only if the engine AND risk manager approve a fresh " +
+          "setup — open a new position in that direction, properly sized with stop-loss & " +
+          "take-profit.\n\nIt never forces a trade (stays flat if there's no valid setup), and " +
+          "respects the kill switch / live confirmation. Requires Auto-execute. Proceed?",
+      );
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      setState(await api.advisorConfig({ auto_reenter: !autoReenter }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveInterval = async () => {
     const secs = Math.min(3600, Math.max(30, Number(intervalInput) || 300));
     setBusy(true);
@@ -188,6 +212,16 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
             title="Let the advisor act on its own: close an invalidated trade / lock a winner's stop to breakeven"
           >
             Auto-execute {autoExecute ? "ON" : "OFF"}
+          </button>
+          <button
+            onClick={toggleAutoReenter}
+            disabled={busy || !autoExecute}
+            className={`btn text-xs ${
+              autoReenter ? "bg-blue-600/30 text-blue-300 hover:bg-blue-600/40" : "bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
+            } ${!autoExecute ? "opacity-50" : ""}`}
+            title="After closing an invalidated trade, re-analyze and open a fresh, properly-sized setup (requires Auto-execute)"
+          >
+            Auto re-enter {autoReenter ? "ON" : "OFF"}
           </button>
           <button
             onClick={() => load(true)}

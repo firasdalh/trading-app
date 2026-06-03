@@ -284,6 +284,73 @@ def test_advisor_activity_flattens_actions(db_session):
     assert {i.symbol for i in items} == {"XAUUSDm", "BTCUSDm"}
 
 
+def test_reenter_opens_when_engine_and_risk_approve(db_session, monkeypatch):
+    import app.agents.pipeline as pipeline
+    import app.execution.executor as executor
+    from app.models.db import TradeProposalRecord
+    from app.models.enums import AssetClass, Direction, ProposalStatus, RiskDecisionType
+    from app.models.schemas import AnalyzeResponse, RiskDecision, TradeProposal
+
+    rec = TradeProposalRecord(symbol="EURUSDm", asset_class="forex", timeframe="1h", direction="long",
+                              entry=1.16, stop_loss=1.155, take_profit=1.17, confidence=0.6,
+                              rationale="x", status=ProposalStatus.PENDING_APPROVAL.value)
+    db_session.add(rec)
+    db_session.commit()
+
+    prop = TradeProposal(symbol="EURUSDm", asset_class=AssetClass.FOREX, direction=Direction.LONG,
+                         entry=1.16, stop_loss=1.155, take_profit=1.17, confidence=0.6)
+    risk = RiskDecision(decision=RiskDecisionType.APPROVED, approved=True, reason="ok", symbol="EURUSDm")
+    monkeypatch.setattr(pipeline, "analyze_symbol",
+                        lambda s, sym, ac, tf, use_llm=False:
+                        AnalyzeResponse(proposal_id=rec.id, status="pending_approval", proposal=prop, risk=risk))
+    monkeypatch.setattr(executor, "execute_proposal",
+                        lambda session, record: setattr(record, "status", ProposalStatus.EXECUTED.value))
+
+    out = advisor._maybe_reenter(db_session, "EURUSDm", "forex")
+    assert out["action"] == "reenter" and out["ok"] is True and "opened long" in out["reason"].lower()
+
+
+def test_reenter_skips_when_no_fresh_setup(db_session, monkeypatch):
+    import app.agents.pipeline as pipeline
+    from app.models.enums import AssetClass, Direction, RiskDecisionType
+    from app.models.schemas import AnalyzeResponse, RiskDecision, TradeProposal
+
+    prop = TradeProposal(symbol="EURUSDm", asset_class=AssetClass.FOREX, direction=Direction.NO_TRADE)
+    risk = RiskDecision(decision=RiskDecisionType.VETOED, approved=False, reason="no", symbol="EURUSDm")
+    monkeypatch.setattr(pipeline, "analyze_symbol",
+                        lambda *a, **k: AnalyzeResponse(proposal_id=0, status="x", proposal=prop, risk=risk))
+    out = advisor._maybe_reenter(db_session, "EURUSDm", "forex")
+    assert out["action"] == "reenter_skip" and out["ok"] is False
+
+
+def test_run_advisor_reenters_after_close_when_enabled(db_session, monkeypatch):
+    monkeypatch.setattr(advisor, "advise_positions", lambda s: [])
+    monkeypatch.setattr(advisor, "_auto_execute",
+                        lambda s, a: [{"symbol": "EURUSDm", "action": "close", "ok": True, "asset_class": "forex"}])
+    monkeypatch.setattr(advisor, "_maybe_reenter",
+                        lambda s, sym, ac: {"symbol": sym, "action": "reenter", "kind": "open", "ok": True, "reason": "opened long"})
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    cfg.auto_execute = True
+    cfg.auto_reenter = True
+    db_session.commit()
+    out = advisor.run_advisor(db_session)
+    assert any(x["action"] == "reenter" for x in out["actions"])
+
+
+def test_run_advisor_no_reenter_when_toggle_off(db_session, monkeypatch):
+    monkeypatch.setattr(advisor, "advise_positions", lambda s: [])
+    monkeypatch.setattr(advisor, "_auto_execute",
+                        lambda s, a: [{"symbol": "EURUSDm", "action": "close", "ok": True, "asset_class": "forex"}])
+    monkeypatch.setattr(advisor, "_maybe_reenter",
+                        lambda s, sym, ac: (_ for _ in ()).throw(AssertionError("should not re-enter")))
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    cfg.auto_execute = True
+    cfg.auto_reenter = False
+    db_session.commit()
+    out = advisor.run_advisor(db_session)
+    assert not any(x["action"] == "reenter" for x in out["actions"])
+
+
 def test_run_advisor_executes_when_toggle_on(db_session, monkeypatch):
     monkeypatch.setattr(advisor, "advise_positions", lambda session: [_adv(thesis="invalidated")])
     monkeypatch.setattr(advisor, "_auto_execute",

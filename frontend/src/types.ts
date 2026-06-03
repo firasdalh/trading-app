@@ -147,6 +147,7 @@ export interface AdvisorAction {
 export interface AdvisorState {
   enabled: boolean;
   auto_execute: boolean;
+  auto_reenter: boolean;
   interval_seconds: number;
   last_run_at: string | null;
   advice: PositionAdvice[];
