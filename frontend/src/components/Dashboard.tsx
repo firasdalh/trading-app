@@ -216,6 +216,11 @@ export function Dashboard({ settings }: Props) {
     setSymbol(f.symbol);
   };
 
+  const openPositionSymbol = (p: { symbol: string; asset_class: string }) => {
+    if (p.asset_class !== assetClass) setAssetClass(p.asset_class as AssetClass);
+    setSymbol(p.symbol);
+  };
+
   return (
     <div className="mx-auto max-w-7xl space-y-4 p-4">
       {/* Controls */}
@@ -367,7 +372,12 @@ export function Dashboard({ settings }: Props) {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
           <PositionAdvicePanel refreshSignal={posBump} />
-          <PositionsTable positions={positions} onClose={closePosition} onSetSlTp={setSlTp} />
+          <PositionsTable
+            positions={positions}
+            onClose={closePosition}
+            onSetSlTp={setSlTp}
+            onSelect={openPositionSymbol}
+          />
         </div>
         <RiskDashboard risk={risk} account={account} settings={settings} />
       </div>

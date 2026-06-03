@@ -5,10 +5,11 @@ interface Props {
   positions: PositionView[] | null;
   onClose?: (p: PositionView) => Promise<void> | void;
   onSetSlTp?: (p: PositionView, sl: number | null, tp: number | null) => Promise<void> | void;
+  onSelect?: (p: PositionView) => void;
 }
 
 // Broker's live open positions with editable SL/TP and a per-row Close.
-export function PositionsTable({ positions, onClose, onSetSlTp }: Props) {
+export function PositionsTable({ positions, onClose, onSetSlTp, onSelect }: Props) {
   return (
     <div className="card">
       <div className="mb-2 text-sm font-semibold">Open Positions (broker)</div>
@@ -31,7 +32,7 @@ export function PositionsTable({ positions, onClose, onSetSlTp }: Props) {
           </thead>
           <tbody>
             {positions.map((p) => (
-              <PositionRow key={p.id} p={p} onClose={onClose} onSetSlTp={onSetSlTp} />
+              <PositionRow key={p.id} p={p} onClose={onClose} onSetSlTp={onSetSlTp} onSelect={onSelect} />
             ))}
           </tbody>
         </table>
@@ -44,10 +45,12 @@ function PositionRow({
   p,
   onClose,
   onSetSlTp,
+  onSelect,
 }: {
   p: PositionView;
   onClose?: (p: PositionView) => Promise<void> | void;
   onSetSlTp?: (p: PositionView, sl: number | null, tp: number | null) => Promise<void> | void;
+  onSelect?: (p: PositionView) => void;
 }) {
   const [sl, setSl] = useState(p.stop_loss != null ? String(p.stop_loss) : "");
   const [tp, setTp] = useState(p.take_profit != null ? String(p.take_profit) : "");
@@ -66,7 +69,19 @@ function PositionRow({
 
   return (
     <tr className="border-t border-neutral-800 [&>td]:px-3 [&>td]:py-2 [&>td]:align-middle">
-      <td className="font-medium">{p.symbol}</td>
+      <td className="font-medium">
+        {onSelect ? (
+          <button
+            onClick={() => onSelect(p)}
+            className="hover:text-blue-400 hover:underline"
+            title={`Open ${p.symbol} on the chart`}
+          >
+            {p.symbol}
+          </button>
+        ) : (
+          p.symbol
+        )}
+      </td>
       <td className={`uppercase ${p.direction === "long" ? "text-bull" : "text-bear"}`}>
         {p.direction}
       </td>
