@@ -39,6 +39,7 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
     },
   };
 }
+import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
 import { ProposalPanel } from "./ProposalPanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
@@ -379,7 +380,10 @@ export function Dashboard({ settings }: Props) {
             onSelect={openPositionSymbol}
           />
         </div>
-        <RiskDashboard risk={risk} account={account} settings={settings} />
+        <div className="space-y-4">
+          <RiskDashboard risk={risk} account={account} settings={settings} />
+          <AdvisorActivity refreshSignal={posBump} />
+        </div>
       </div>
     </div>
   );
