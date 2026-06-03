@@ -153,6 +153,19 @@ export interface AdvisorState {
   actions: AdvisorAction[];
 }
 
+export interface AdvisorActivityItem {
+  run_id: number;
+  seq: number;
+  at: string | null;
+  symbol: string;
+  action: string;
+  kind?: string | null;
+  stop?: number | null;
+  ok: boolean;
+  reason: string;
+  error?: string | null;
+}
+
 export interface SettingsResponse {
   app: {
     execution_mode: ExecutionMode;

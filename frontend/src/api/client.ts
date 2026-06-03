@@ -57,6 +57,8 @@ export const api = {
   // Advisor auto-watch config + current advisories (one read for the panel).
   advisorState: () => request<AdvisorState>("/api/positions/advisor"),
   advisorRun: () => request<AdvisorState>("/api/positions/advisor/run", { method: "POST" }),
+  advisorActivity: () =>
+    request<import("../types").AdvisorActivityItem[]>("/api/positions/advisor/activity"),
   advisorConfig: (cfg: { enabled?: boolean; auto_execute?: boolean; interval_seconds?: number }) =>
     request<AdvisorState>("/api/positions/advisor/config", {
       method: "POST",

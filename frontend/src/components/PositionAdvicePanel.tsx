@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { AdvisorState, PositionAdvice } from "../types";
+import type { AdvisorActivityItem, AdvisorState, PositionAdvice } from "../types";
 
 interface Props {
   // Bump to force a refresh (e.g. after a position is closed).
@@ -43,8 +43,31 @@ function actionText(a: { action: string; kind?: string | null; stop?: number | n
 // AI guidance for OPEN positions — is each trade still on track vs. its plan, protect winners /
 // cut losers, especially around news. Run on demand, or auto-watch on a set interval.
 // Advisory only: it tells you what to consider; you act via the positions table below.
+const SEEN_KEY = "ta.advisorSeenRun";
+const key = (it: AdvisorActivityItem) => it.run_id * 1000 + it.seq;
+
+// Fire a browser notification for newly-executed actions (so headless auto-execute reaches you).
+function notifyNew(items: AdvisorActivityItem[]) {
+  if (!items.length) return;
+  const maxKey = Math.max(...items.map(key));
+  const seen = Number(localStorage.getItem(SEEN_KEY) || 0);
+  if (seen === 0) {
+    localStorage.setItem(SEEN_KEY, String(maxKey)); // baseline on first load — no backlog spam
+    return;
+  }
+  if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+    for (const it of items.filter((i) => key(i) > seen && i.ok).slice(0, 3)) {
+      new Notification("Position advisor", {
+        body: `${it.symbol}: ${actionText(it)}${it.reason ? ` — ${it.reason}` : ""}`,
+      });
+    }
+  }
+  localStorage.setItem(SEEN_KEY, String(Math.max(maxKey, seen)));
+}
+
 export function PositionAdvicePanel({ refreshSignal }: Props) {
   const [state, setState] = useState<AdvisorState | null>(null);
+  const [activity, setActivity] = useState<AdvisorActivityItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [intervalInput, setIntervalInput] = useState("300");
 
@@ -54,6 +77,9 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
       const s = run ? await api.advisorRun() : await api.advisorState();
       setState(s);
       setIntervalInput(String(s.interval_seconds));
+      const acts = await api.advisorActivity().catch(() => [] as AdvisorActivityItem[]);
+      setActivity(acts);
+      notifyNew(acts);
     } finally {
       setBusy(false);
     }
@@ -98,6 +124,10 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
           "confirmation for a live account. Proceed?",
       );
       if (!ok) return;
+      // Good moment to ask for alert permission so headless auto-actions reach you.
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        void Notification.requestPermission();
+      }
     }
     setBusy(true);
     try {
@@ -239,6 +269,24 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {activity.length > 0 && (
+        <div className="mt-3 border-t border-neutral-800 pt-2">
+          <div className="mb-1 text-xs font-semibold text-neutral-400">Recent actions</div>
+          <ul className="space-y-1">
+            {activity.slice(0, 6).map((it) => (
+              <li key={`${it.run_id}-${it.seq}`} className="flex items-center gap-2 text-xs">
+                <span className={it.ok ? "text-bull" : it.action === "close_pending" ? "text-warn" : "text-bear"}>
+                  {it.ok ? "✓" : it.action === "close_pending" ? "⏳" : "✗"}
+                </span>
+                <span className="font-medium">{it.symbol}</span>
+                <span className="text-neutral-300">{actionText(it)}</span>
+                <span className="ml-auto text-neutral-500">{ago(it.at)}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

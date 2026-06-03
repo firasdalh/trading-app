@@ -409,6 +409,42 @@ def advisor_run_now(session: Session = Depends(get_session)) -> AdvisorView:
     return _advisor_view(session, actions=out.get("actions", []))
 
 
+class AdvisorActivityItem(BaseModel):
+    run_id: int
+    seq: int
+    at: str | None = None
+    symbol: str
+    action: str
+    kind: str | None = None
+    stop: float | None = None
+    ok: bool = False
+    reason: str = ""
+    error: str | None = None
+
+
+@router.get("/positions/advisor/activity", response_model=list[AdvisorActivityItem], tags=["positions"])
+def advisor_activity(limit: int = 30, session: Session = Depends(get_session)) -> list[AdvisorActivityItem]:
+    """Timeline of what the advisor actually DID (auto-executed / blocked / pending), newest
+    first — pulled from the audit log so headless actions show up too."""
+    from app.models.db import AgentRun
+
+    rows = session.scalars(
+        select(AgentRun).where(AgentRun.agent == "advisor", AgentRun.event == "check")
+        .order_by(AgentRun.id.desc()).limit(60)
+    ).all()
+    items: list[AdvisorActivityItem] = []
+    for r in rows:
+        for i, a in enumerate(((r.detail or {}).get("actions") or [])):
+            items.append(AdvisorActivityItem(
+                run_id=r.id, seq=i, at=_iso_utc(r.created_at), symbol=a.get("symbol", ""),
+                action=a.get("action", ""), kind=a.get("kind"), stop=a.get("stop"),
+                ok=bool(a.get("ok")), reason=a.get("reason", ""), error=a.get("error"),
+            ))
+            if len(items) >= limit:
+                return items
+    return items
+
+
 class LiveCloseRequest(BaseModel):
     symbol: str
     asset_class: AssetClass

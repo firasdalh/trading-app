@@ -269,6 +269,21 @@ def test_run_advisor_skips_execution_when_toggle_off(db_session, monkeypatch):
     assert out["actions"] == [] and called["n"] == 0
 
 
+def test_advisor_activity_flattens_actions(db_session):
+    from app.api.settings_routes import advisor_activity
+    from app.models.db import AgentRun
+
+    db_session.add(AgentRun(agent="advisor", event="check", detail={"actions": [
+        {"symbol": "XAUUSDm", "action": "set_stop", "kind": "breakeven", "ok": True, "reason": "+1R"},
+        {"symbol": "BTCUSDm", "action": "close", "kind": "close", "ok": True, "reason": "invalidated"},
+    ]}))
+    db_session.commit()
+    items = advisor_activity(limit=30, session=db_session)
+    assert len(items) == 2
+    assert items[0].symbol == "XAUUSDm" and items[0].kind == "breakeven" and items[0].ok is True
+    assert {i.symbol for i in items} == {"XAUUSDm", "BTCUSDm"}
+
+
 def test_run_advisor_executes_when_toggle_on(db_session, monkeypatch):
     monkeypatch.setattr(advisor, "advise_positions", lambda session: [_adv(thesis="invalidated")])
     monkeypatch.setattr(advisor, "_auto_execute",
