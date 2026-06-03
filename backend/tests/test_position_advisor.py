@@ -26,9 +26,12 @@ class _Cal:
         return self._events
 
 
-def _patch(monkeypatch, positions, events):
+def _patch(monkeypatch, positions, events, thesis=None):
     monkeypatch.setattr(advisor, "live_broker_positions", lambda session: positions)
     monkeypatch.setattr(advisor, "get_calendar_provider", lambda: _Cal(events))
+    # Isolate the event/protection logic from the (broker-dependent) thesis re-check unless a
+    # test explicitly wants a thesis.
+    monkeypatch.setattr(advisor, "_position_thesis", lambda session, p: thesis)
 
 
 def _event(mins_from_now=45, importance="high"):
@@ -72,3 +75,66 @@ def test_far_off_event_is_not_imminent(monkeypatch):
     _patch(monkeypatch, [_pos(pnl=8.0)], [_event(360)])
     [a] = advisor.advise_positions(session=None)
     assert a.event_label is None and a.severity == "info"
+
+
+# ---- thesis re-check folding ----
+
+def test_invalidated_thesis_escalates_to_danger(monkeypatch):
+    _patch(monkeypatch, [_pos(pnl=8.0)], [],
+           thesis={"label": "invalidated", "note": "Plan check: trend flipped."})
+    [a] = advisor.advise_positions(session=None)
+    assert a.severity == "danger" and a.thesis == "invalidated"
+    assert "thesis broken" in a.headline.lower()
+    assert "plan check" in a.detail.lower()
+
+
+def test_weakening_thesis_escalates_info_to_warn(monkeypatch):
+    _patch(monkeypatch, [_pos(pnl=8.0)], [],
+           thesis={"label": "weakening", "note": "Plan check: momentum rolling over."})
+    [a] = advisor.advise_positions(session=None)
+    assert a.severity == "warn" and a.thesis == "weakening"
+
+
+def test_intact_thesis_stays_info_and_appends_note(monkeypatch):
+    _patch(monkeypatch, [_pos(pnl=8.0)], [],
+           thesis={"label": "intact", "note": "Plan check: thesis intact."})
+    [a] = advisor.advise_positions(session=None)
+    assert a.severity == "info" and a.thesis == "intact"
+    assert "thesis intact" in a.detail.lower()
+
+
+def test_event_keeps_headline_even_when_thesis_invalidated(monkeypatch):
+    # News is the nearer concern: it keeps the headline, but the thesis still bumps severity.
+    _patch(monkeypatch, [_pos(pnl=10.0)], [_event(30)],
+           thesis={"label": "invalidated", "note": "Plan check: trend flipped."})
+    [a] = advisor.advise_positions(session=None)
+    assert "winning into" in a.headline.lower() and a.severity == "danger"
+
+
+# ---- auto-watch config + tick ----
+
+def test_run_advisor_stamps_last_run(db_session, monkeypatch):
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [])
+    out = advisor.run_advisor(db_session)
+    assert "last_run_at" in out and out["advice"] == []
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    assert cfg.last_run_at is not None
+
+
+def test_advisor_tick_respects_disabled(db_session):
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    cfg.enabled = False
+    db_session.commit()
+    assert advisor.advisor_tick(db_session)["ran"] is False
+
+
+def test_advisor_tick_runs_when_enabled(db_session, monkeypatch):
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [])
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    cfg.enabled = True
+    cfg.interval_seconds = 60
+    db_session.commit()
+    assert advisor.advisor_tick(db_session)["ran"] is True
+    # Interval hasn't elapsed -> should not run again immediately.
+    second = advisor.advisor_tick(db_session)
+    assert second["ran"] is False and second["reason"] == "interval not elapsed"

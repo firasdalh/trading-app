@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -325,6 +325,58 @@ def positions_advice(session: Session = Depends(get_session)) -> list[PositionAd
     from app.agents.position_advisor import advise_positions
 
     return advise_positions(session)
+
+
+class AdvisorConfigRequest(BaseModel):
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(None, ge=30, le=3600)
+
+
+class AdvisorView(BaseModel):
+    enabled: bool
+    interval_seconds: int
+    last_run_at: str | None = None
+    advice: list[PositionAdvice]
+
+
+def _advisor_view(session: Session) -> AdvisorView:
+    from app.agents.position_advisor import advise_positions, get_or_create_advisor_config
+
+    cfg = get_or_create_advisor_config(session)
+    return AdvisorView(
+        enabled=cfg.enabled, interval_seconds=cfg.interval_seconds,
+        last_run_at=cfg.last_run_at.isoformat() if cfg.last_run_at else None,
+        advice=advise_positions(session),
+    )
+
+
+@router.get("/positions/advisor", response_model=AdvisorView, tags=["positions"])
+def advisor_state(session: Session = Depends(get_session)) -> AdvisorView:
+    """Advisor auto-watch config plus the current advisories (one read for the panel)."""
+    return _advisor_view(session)
+
+
+@router.post("/positions/advisor/config", response_model=AdvisorView, tags=["positions"])
+def advisor_set_config(req: AdvisorConfigRequest, session: Session = Depends(get_session)) -> AdvisorView:
+    from app.agents.position_advisor import get_or_create_advisor_config
+
+    cfg = get_or_create_advisor_config(session)
+    if req.enabled is not None:
+        cfg.enabled = req.enabled
+    if req.interval_seconds is not None:
+        cfg.interval_seconds = req.interval_seconds
+    session.commit()
+    log.warning("advisor config updated", extra={"enabled": cfg.enabled, "interval": cfg.interval_seconds})
+    return _advisor_view(session)
+
+
+@router.post("/positions/advisor/run", response_model=AdvisorView, tags=["positions"])
+def advisor_run_now(session: Session = Depends(get_session)) -> AdvisorView:
+    """Run the advisor immediately (the 'Run now' button) and stamp last_run_at."""
+    from app.agents.position_advisor import run_advisor
+
+    run_advisor(session)
+    return _advisor_view(session)
 
 
 class LiveCloseRequest(BaseModel):

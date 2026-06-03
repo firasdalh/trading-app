@@ -127,8 +127,16 @@ export interface PositionAdvice {
   severity: "info" | "warn" | "danger";
   headline: string;
   detail: string;
+  thesis: "intact" | "weakening" | "invalidated" | "unknown";
   event_label: string | null;
   minutes_to_event: number | null;
+}
+
+export interface AdvisorState {
+  enabled: boolean;
+  interval_seconds: number;
+  last_run_at: string | null;
+  advice: PositionAdvice[];
 }
 
 export interface SettingsResponse {

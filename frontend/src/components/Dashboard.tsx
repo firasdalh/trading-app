@@ -121,7 +121,6 @@ export function Dashboard({ settings }: Props) {
 
   const { data: account } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
   const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
-  const { data: advice } = usePolling(() => api.positionAdvice(), 8000, [posBump]);
 
   const closePosition = async (p: { symbol: string; asset_class: string }) => {
     try {
@@ -331,7 +330,7 @@ export function Dashboard({ settings }: Props) {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
-          <PositionAdvicePanel advice={advice} />
+          <PositionAdvicePanel refreshSignal={posBump} />
           <PositionsTable positions={positions} onClose={closePosition} onSetSlTp={setSlTp} />
         </div>
         <RiskDashboard risk={risk} account={account} settings={settings} />

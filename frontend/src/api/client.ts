@@ -1,6 +1,7 @@
 // Tiny typed fetch wrapper. Uses relative paths (Vite proxies to the backend in dev).
 import type {
   AccountState,
+  AdvisorState,
   AnalyzeResponse,
   AssetClass,
   BacktestResult,
@@ -53,6 +54,14 @@ export const api = {
   livePositions: () => request<PositionView[]>("/api/positions/live"),
   // Management guidance for open positions (protect winners / cut losers around news).
   positionAdvice: () => request<PositionAdvice[]>("/api/positions/advice"),
+  // Advisor auto-watch config + current advisories (one read for the panel).
+  advisorState: () => request<AdvisorState>("/api/positions/advisor"),
+  advisorRun: () => request<AdvisorState>("/api/positions/advisor/run", { method: "POST" }),
+  advisorConfig: (cfg: { enabled?: boolean; interval_seconds?: number }) =>
+    request<AdvisorState>("/api/positions/advisor/config", {
+      method: "POST",
+      body: JSON.stringify(cfg),
+    }),
   closePosition: (id: number) =>
     request<{ closed: boolean; symbol: string; realized_pnl: number }>(
       `/api/positions/${id}/close`,

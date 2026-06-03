@@ -84,6 +84,18 @@ def _scan_tick() -> None:
         log.warning("scan tick failed", extra={"error": str(exc)})
 
 
+def _advisor_tick() -> None:
+    """Scheduled open-position advisor pass. Honors its own enabled flag + interval."""
+    from app.agents.position_advisor import advisor_tick
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            advisor_tick(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("advisor tick failed", extra={"error": str(exc)})
+
+
 def _register_monitor_job() -> None:
     from app.core.scheduler import get_scheduler
 
@@ -93,7 +105,10 @@ def _register_monitor_job() -> None:
     # Polls every 20s; the scanner itself enforces the user-configured interval.
     sched.add_job(_scan_tick, "interval", seconds=20, id="watchlist_scan",
                   replace_existing=True, max_instances=1)
-    log.info("position monitor (10s) + watchlist scanner (20s poll) scheduled")
+    # Polls every 30s; the advisor enforces the user-configured auto-watch interval.
+    sched.add_job(_advisor_tick, "interval", seconds=30, id="position_advisor",
+                  replace_existing=True, max_instances=1)
+    log.info("position monitor (10s) + watchlist scanner (20s) + advisor (30s poll) scheduled")
 
 
 @asynccontextmanager

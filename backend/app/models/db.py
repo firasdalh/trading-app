@@ -281,6 +281,20 @@ class ScanConfig(Base):
     )
 
 
+class AdvisorConfig(Base):
+    """Singleton (id=1) controlling the open-position advisor's auto-watch."""
+
+    __tablename__ = "advisor_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)  # off by default
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class AgentRun(Base):
     """A record of one agent-cycle / event for transparency and the reflection agent."""
 

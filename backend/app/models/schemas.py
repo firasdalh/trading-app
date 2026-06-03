@@ -278,6 +278,8 @@ class PositionAdvice(BaseModel):
     severity: str            # info | warn | danger
     headline: str
     detail: str
+    # Re-check of the original plan against the current read: is the trade still on track?
+    thesis: str = "unknown"  # intact | weakening | invalidated | unknown
     event_label: str | None = None
     minutes_to_event: int | None = None
 
