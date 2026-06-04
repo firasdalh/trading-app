@@ -58,7 +58,7 @@ interface Props {
 }
 
 const TIMEFRAMES = ["15m", "1h", "4h", "1d"];
-const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal"];
+const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy"];
 
 export function Dashboard({ settings }: Props) {
   // Persisted across refresh / navigation so the desk reopens on the last pair you used.

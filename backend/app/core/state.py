@@ -28,7 +28,8 @@ def get_or_create_settings(session: Session) -> AppSettings:
             id=1,
             execution_mode="A_PROPOSE_APPROVE",  # default per RISK.md
             broker_env=cfg.broker_env,            # paper by default
-            broker_map={"stock": "alpaca", "crypto": "alpaca", "forex": "oanda", "metal": "oanda"},
+            broker_map={"stock": "alpaca", "crypto": "alpaca", "forex": "oanda",
+                        "metal": "oanda", "energy": "sim"},
             kill_switch_engaged=False,
         )
         session.add(settings)

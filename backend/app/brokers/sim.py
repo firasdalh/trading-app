@@ -47,6 +47,7 @@ class SimPaperBroker(BrokerAdapter):
         AssetClass.CRYPTO,
         AssetClass.FOREX,
         AssetClass.METAL,
+        AssetClass.ENERGY,
     )
 
     def __post_init__(self) -> None:

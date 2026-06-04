@@ -20,6 +20,7 @@ class AssetClass(StrEnum):
     CRYPTO = "crypto"
     FOREX = "forex"
     METAL = "metal"
+    ENERGY = "energy"   # oil, natural gas, etc.
 
 
 class Direction(StrEnum):

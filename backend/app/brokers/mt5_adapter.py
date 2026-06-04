@@ -50,7 +50,8 @@ def normalize_symbol(symbol: str) -> str:
 
 class Mt5BrokerAdapter(BrokerAdapter):
     name = "mt5"
-    supported_asset_classes = (AssetClass.FOREX, AssetClass.METAL, AssetClass.CRYPTO)
+    supported_asset_classes = (AssetClass.FOREX, AssetClass.METAL, AssetClass.CRYPTO,
+                               AssetClass.STOCK, AssetClass.ENERGY)
 
     def __init__(self) -> None:
         from app.brokers.mt5_credentials import resolve_mt5_credentials
@@ -376,6 +377,8 @@ class Mt5BrokerAdapter(BrokerAdapter):
         AssetClass.METAL: ("metal", "xau", "xag", "gold", "silver"),
         AssetClass.CRYPTO: ("crypto", "coin"),
         AssetClass.STOCK: ("stock", "share", "equit"),
+        AssetClass.ENERGY: ("energ", "oil", "brent", "wti", "ngas", "gas",
+                            "xbr", "xti", "xng"),
     }
 
     def list_symbols(self, asset_class: AssetClass | None = None) -> list[str]:
