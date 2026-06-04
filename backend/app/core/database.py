@@ -41,6 +41,9 @@ _SQLITE_ADDED_COLUMNS = {
         ("auto_execute", "BOOLEAN DEFAULT 0"),
         ("auto_reenter", "BOOLEAN DEFAULT 0"),
     ],
+    "risk_config": [
+        ("daily_loss_breaker_enabled", "BOOLEAN DEFAULT 1"),
+    ],
 }
 
 

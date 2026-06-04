@@ -116,6 +116,11 @@ def evaluate_daily_pause(session: Session) -> bool:
     the RISK.md max-daily-loss limit. Uses broker truth, so it protects the live account no
     matter where trades were placed. Never auto-unpauses (a new UTC day resets it).
     """
+    risk = get_or_create_risk_config(session)
+    # Breaker disabled (e.g. demo-account testing): never auto-pause on daily loss.
+    if not risk.daily_loss_breaker_enabled:
+        return False
+
     daily = get_or_create_daily_state(session)
     if daily.trading_paused:
         return True
@@ -131,7 +136,6 @@ def evaluate_daily_pause(session: Session) -> bool:
     if not equity or equity <= 0:
         return False
 
-    risk = get_or_create_risk_config(session)
     # The daily-loss breaker fires on REALIZED losses (closed trades), like a pro desk —
     # not on open-position floating P&L, which swings and recovers (open trades are managed
     # by their stops, not this circuit breaker).
@@ -170,6 +174,7 @@ def build_limits(session: Session) -> RiskLimits:
         max_total_exposure=rc.max_total_exposure,
         per_pair_cooldown_minutes=rc.per_pair_cooldown_minutes,
         risk_per_trade_ceiling=cfg.risk_per_trade_ceiling,
+        daily_loss_breaker_enabled=rc.daily_loss_breaker_enabled,
     )
 
 

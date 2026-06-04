@@ -130,7 +130,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ confirm_phrase: confirmPhrase }),
     }),
-  updateRisk: (patch: Record<string, number>) =>
+  updateRisk: (patch: Record<string, number | boolean>) =>
     request<SettingsResponse>("/api/settings/risk", {
       method: "POST",
       body: JSON.stringify(patch),

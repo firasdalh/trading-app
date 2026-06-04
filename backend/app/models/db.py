@@ -88,6 +88,11 @@ class RiskConfig(Base):
     max_daily_loss: Mapped[float] = mapped_column(Float, default=0.03)
     max_total_exposure: Mapped[float] = mapped_column(Float, default=0.06)
     per_pair_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    # Master switch for the max-daily-loss circuit breaker. ON by default (RISK.md). May be
+    # turned OFF for testing on a demo account; when off, the daily-loss auto-pause and veto
+    # are skipped. Disabling it removes a real-money protection, so the UI warns loudly and
+    # every toggle is logged at WARNING.
+    daily_loss_breaker_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

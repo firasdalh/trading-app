@@ -34,6 +34,17 @@ When cumulative losses for the day hit this, the app auto-pauses new trades unti
   default is 3% for the reason above; at 10% a single bad day takes a much larger bite, and the
   daily circuit-breaker fires far later. Consider returning to 3% once the strategy is proven.
 
+### `daily_loss_breaker_enabled` (default: ON)
+Master on/off switch for the `max_daily_loss` circuit breaker (the auto-pause above). Added
+2026-06-04 at the user's explicit request for **demo-account testing**, so a paused day doesn't
+block test trades.
+- When **OFF**: there is no daily-loss auto-pause and no daily-loss veto on new trades. Every
+  other limit (per-trade risk, exposure, position count, cooldown) still applies.
+- Per the user's explicit choice, the toggle works in **live** mode too — i.e. it CAN disable a
+  real-money protection. Turning it off is logged at WARNING, the UI shows a persistent warning,
+  and turning it on live prompts a confirmation. **Default to ON; turn it back on before trading
+  the live account for real.**
+
 ### `max_total_exposure` (default: 6% of equity at risk across all open trades)
 The sum of all open trades' risk cannot exceed this.
 - Why: it backstops the per-trade and position-count limits so they can't combine into

@@ -203,6 +203,9 @@ class RiskLimits(BaseModel):
     max_total_exposure: float = 0.06
     per_pair_cooldown_minutes: int = 30
     risk_per_trade_ceiling: float = 0.02
+    # Effective state of the daily-loss circuit breaker handed to the manager (already
+    # resolved by the service layer). When False, the daily-loss gate is skipped.
+    daily_loss_breaker_enabled: bool = True
 
 
 class RiskDecision(BaseModel):
@@ -293,6 +296,7 @@ class RiskConfigView(BaseModel):
     max_daily_loss: float
     max_total_exposure: float
     per_pair_cooldown_minutes: int
+    daily_loss_breaker_enabled: bool = True
 
 
 class AppSettingsView(BaseModel):
@@ -325,6 +329,9 @@ class RiskStateView(BaseModel):
     pause_reason: str | None = None
     max_daily_loss: float
     daily_loss_limit_amount: float | None = None
+    # Whether the daily-loss circuit breaker is currently armed. When False the breaker is
+    # OFF (e.g. demo-account testing): no auto-pause and no daily-loss veto.
+    daily_loss_breaker_enabled: bool = True
 
 
 class AnalyzeRequest(BaseModel):

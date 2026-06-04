@@ -97,6 +97,7 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
         pause_reason=state.pause_reason,
         max_daily_loss=risk.max_daily_loss,
         daily_loss_limit_amount=limit_amount,
+        daily_loss_breaker_enabled=risk.daily_loss_breaker_enabled,
     )
 
 

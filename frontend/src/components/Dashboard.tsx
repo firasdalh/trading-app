@@ -56,12 +56,13 @@ interface Favorite {
 
 interface Props {
   settings: SettingsResponse | null;
+  onSettingsChanged?: () => void;
 }
 
 const TIMEFRAMES = ["15m", "1h", "4h", "1d"];
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy"];
 
-export function Dashboard({ settings }: Props) {
+export function Dashboard({ settings, onSettingsChanged }: Props) {
   // Persisted across refresh / navigation so the desk reopens on the last pair you used.
   const [symbol, setSymbol] = useLocalStorage("ta.symbol", "EURUSD");
   const [assetClass, setAssetClass] = useLocalStorage<AssetClass>("ta.assetClass", "forex");
@@ -393,7 +394,7 @@ export function Dashboard({ settings }: Props) {
           />
         </div>
         <div className="space-y-4">
-          <RiskDashboard risk={risk} account={account} settings={settings} />
+          <RiskDashboard risk={risk} account={account} settings={settings} onChanged={onSettingsChanged} />
           <AdvisorActivity refreshSignal={posBump} />
         </div>
       </div>

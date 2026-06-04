@@ -52,7 +52,7 @@ export default function App() {
         ))}
       </nav>
 
-      {view === "dashboard" && <Dashboard settings={settings} />}
+      {view === "dashboard" && <Dashboard settings={settings} onSettingsChanged={refresh} />}
       {view === "backtest" && <BacktestView />}
       {view === "journal" && <JournalView />}
     </div>

@@ -181,6 +181,7 @@ export interface SettingsResponse {
     max_daily_loss: number;
     max_total_exposure: number;
     per_pair_cooldown_minutes: number;
+    daily_loss_breaker_enabled: boolean;
   };
   env_kill_switch: boolean;
   env_broker_env: string;
@@ -198,6 +199,7 @@ export interface RiskState {
   pause_reason: string | null;
   max_daily_loss: number;
   daily_loss_limit_amount: number | null;
+  daily_loss_breaker_enabled: boolean;
 }
 
 export interface BacktestMetrics {

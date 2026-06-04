@@ -130,11 +130,16 @@ def evaluate_proposal(
         return _veto(symbol, "account equity is non-positive", checks)
 
     # --- 3. daily loss / pause gate ---
-    daily_loss_limit = account.equity * limits.max_daily_loss
-    daily_breached = account.trading_paused or (-account.daily_realized_pnl >= daily_loss_limit)
-    checks["daily_loss_ok"] = not daily_breached
-    if daily_breached:
-        return _veto(symbol, "daily loss limit reached — trading paused for the day", checks)
+    # The breaker can be turned OFF (demo-account testing). When off, we skip the daily-loss
+    # veto entirely so a prior pause doesn't block new test trades.
+    if limits.daily_loss_breaker_enabled:
+        daily_loss_limit = account.equity * limits.max_daily_loss
+        daily_breached = account.trading_paused or (-account.daily_realized_pnl >= daily_loss_limit)
+        checks["daily_loss_ok"] = not daily_breached
+        if daily_breached:
+            return _veto(symbol, "daily loss limit reached — trading paused for the day", checks)
+    else:
+        checks["daily_loss_ok"] = True
 
     # --- 4. max open positions ---
     room_for_positions = account.open_positions < limits.max_open_positions

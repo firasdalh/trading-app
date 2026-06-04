@@ -1,16 +1,43 @@
+import { useState } from "react";
+import { api } from "../api/client";
 import type { AccountState, RiskState, SettingsResponse } from "../types";
 
 interface Props {
   risk: RiskState | null;
   account: AccountState | null;
   settings: SettingsResponse | null;
+  // Lets a toggle here force an immediate settings/risk refetch.
+  onChanged?: () => void;
 }
 
 // Daily P&L vs the daily-loss limit, current exposure, and open-position count, with
 // visual warnings as limits approach.
-export function RiskDashboard({ risk, account, settings }: Props) {
+export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
   const equity = account?.equity ?? risk?.starting_equity ?? null;
   const limits = settings?.risk;
+  const isLive = settings?.app.broker_env === "live";
+
+  // Breaker state: prefer the settings value, fall back to risk-state echo.
+  const breakerOn = limits?.daily_loss_breaker_enabled ?? risk?.daily_loss_breaker_enabled ?? true;
+  const [busy, setBusy] = useState(false);
+
+  async function toggleBreaker(next: boolean) {
+    if (!next && isLive) {
+      const ok = window.confirm(
+        "Disable the daily-loss circuit breaker on a LIVE account?\n\n" +
+          "This removes a hard real-money protection: the app will no longer auto-pause " +
+          "after a losing day. Only do this if you really mean to.",
+      );
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      await api.updateRisk({ daily_loss_breaker_enabled: next });
+      onChanged?.();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const dailyLoss = risk ? -Math.min(0, risk.realized_pnl) : 0;
   const dailyLimit = risk?.daily_loss_limit_amount ?? null;
@@ -53,10 +80,26 @@ export function RiskDashboard({ risk, account, settings }: Props) {
         />
       </div>
 
-      <Meter
-        label={`Daily loss vs limit${dailyLimit ? ` ($${dailyLimit.toFixed(0)})` : ""}`}
-        pct={dailyPct}
-      />
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <span className="text-xs text-neutral-400">
+            Daily loss vs limit{dailyLimit ? ` ($${dailyLimit.toFixed(0)})` : ""}
+          </span>
+          <BreakerToggle on={breakerOn} busy={busy} onChange={toggleBreaker} />
+        </div>
+        {breakerOn ? (
+          <Meter pct={dailyPct} />
+        ) : (
+          <div
+            className={`rounded px-2 py-1 text-xs font-semibold ${
+              isLive ? "bg-bear/20 text-bear" : "bg-warn/20 text-warn"
+            }`}
+            title="The daily-loss auto-pause and veto are disabled. New trades are NOT blocked on daily-loss grounds."
+          >
+            ⚠ Breaker OFF{isLive ? " on LIVE" : " (testing)"} — daily-loss pause disabled
+          </div>
+        )}
+      </div>
       <Meter
         label={`Exposure vs limit${exposureLimit ? ` ($${exposureLimit.toFixed(0)})` : ""}`}
         pct={exposurePct}
@@ -73,18 +116,53 @@ export function RiskDashboard({ risk, account, settings }: Props) {
   );
 }
 
-function Meter({ label, pct }: { label: string; pct: number }) {
+function Meter({ label, pct }: { label?: string; pct: number }) {
   const color = pct >= 0.9 ? "bg-bear" : pct >= 0.6 ? "bg-warn" : "bg-bull";
   return (
     <div>
-      <div className="mb-1 flex justify-between text-xs text-neutral-400">
-        <span>{label}</span>
-        <span>{Math.round(pct * 100)}%</span>
-      </div>
+      {label && (
+        <div className="mb-1 flex justify-between text-xs text-neutral-400">
+          <span>{label}</span>
+          <span>{Math.round(pct * 100)}%</span>
+        </div>
+      )}
       <div className="h-2 rounded bg-neutral-800">
         <div className={`h-2 rounded ${color}`} style={{ width: `${Math.round(pct * 100)}%` }} />
       </div>
     </div>
+  );
+}
+
+// Small on/off switch for the daily-loss circuit breaker. Green = armed (safe default),
+// amber = OFF. Disabling removes a hard protection, so the label says so plainly.
+function BreakerToggle({
+  on,
+  busy,
+  onChange,
+}: {
+  on: boolean;
+  busy: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => onChange(!on)}
+      title={
+        on
+          ? "Daily-loss circuit breaker is ARMED. Click to turn OFF (no daily-loss auto-pause)."
+          : "Daily-loss circuit breaker is OFF. Click to re-arm the protection."
+      }
+      className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] font-semibold transition ${
+        on ? "bg-bull/15 text-bull hover:bg-bull/25" : "bg-warn/20 text-warn hover:bg-warn/30"
+      } ${busy ? "opacity-50" : ""}`}
+    >
+      <span
+        className={`inline-block h-2 w-2 rounded-full ${on ? "bg-bull" : "bg-warn"}`}
+      />
+      Breaker {on ? "ON" : "OFF"}
+    </button>
   );
 }
 
