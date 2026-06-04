@@ -46,17 +46,16 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
     void load(false);
   }, [load, refreshSignal]);
 
-  // Auto-watch: while enabled, re-run on the configured interval (front-of-house; the backend
-  // scheduler runs it headless too).
+  // The backend scheduler is the single runner for Auto-watch (it ticks at the configured
+  // interval even with the tab closed). The panel just POLLS the state read-only every 15s so
+  // "last check" + advice stay fresh — no double execution from the front-end.
   const enabled = state?.enabled ?? false;
-  const intervalSecs = state?.interval_seconds ?? 300;
   const loadRef = useRef(load);
   loadRef.current = load;
   useEffect(() => {
-    if (!enabled) return;
-    const id = setInterval(() => void loadRef.current(true), intervalSecs * 1000);
+    const id = setInterval(() => void loadRef.current(false), 15_000);
     return () => clearInterval(id);
-  }, [enabled, intervalSecs]);
+  }, []);
 
   const autoExecute = state?.auto_execute ?? false;
 
