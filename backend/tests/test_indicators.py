@@ -109,6 +109,51 @@ def test_strong_trend_high_confidence():
     assert p.direction == Direction.LONG and p.confidence >= 0.6
 
 
+def _tech_ext(trend, *, entry, ema20, atr_v=2.0, adx_v=30.0, macd_hist=None):
+    if macd_hist is None:
+        macd_hist = 1.0 if trend == "up" else -1.0
+    ind = {"last_close": entry, "atr14": atr_v, "adx": adx_v, "macd_hist": macd_hist,
+           "ema20": ema20, "vol_ratio": 1.3}
+    return TechnicalRead(symbol="X", overall_trend=trend, confidence=0.6,
+                         timeframes=[TimeframeRead(timeframe="1h", trend=trend, indicators=ind,
+                                                   support_levels=[entry - 10], resistance_levels=[entry + 10])])
+
+
+def test_overextension_lowers_confidence_but_still_trades():
+    # Short stretched > 2.5 ATR below EMA20 still trades (you can't always wait for a pullback in
+    # a trend) but at LOWER confidence than a near-the-mean entry.
+    stretched = _tech_ext("down", entry=100.0, ema20=106.0, atr_v=2.0)  # 100 < 106 - 5
+    near = _tech_ext("down", entry=104.0, ema20=106.0, atr_v=2.0)       # within 2.5 ATR
+    p_stretched = _deterministic_decision("X", AssetClass.FOREX, "1h", stretched, _fund(), now=NOW)
+    p_near = _deterministic_decision("X", AssetClass.FOREX, "1h", near, _fund(), now=NOW)
+    assert p_stretched.direction == Direction.SHORT and p_near.direction == Direction.SHORT
+    assert p_stretched.confidence < p_near.confidence
+    assert "stretched" in p_stretched.rationale.lower()
+
+
+def test_trivial_counter_momentum_does_not_block():
+    # Tiny counter-momentum (|hist| < 10% of ATR) shouldn't sit the trade out.
+    t = _tech_ext("up", entry=100.0, ema20=100.0, atr_v=2.0, macd_hist=-0.1)  # |0.1| < 0.2
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(), now=NOW)
+    assert p.direction == Direction.LONG
+
+
+def test_cross_tf_momentum_conflict_lowers_confidence():
+    def build(macro_macd):
+        ind1 = {"last_close": 100.0, "atr14": 2.0, "adx": 30.0, "macd_hist": -1.0, "ema20": 100.0}
+        return TechnicalRead(symbol="X", overall_trend="down", confidence=0.6, timeframes=[
+            TimeframeRead(timeframe="1h", trend="down", indicators=ind1,
+                          support_levels=[90], resistance_levels=[110]),
+            TimeframeRead(timeframe="1d", trend="down", indicators={"macd_hist": macro_macd}),
+        ])
+
+    agree = _deterministic_decision("X", AssetClass.FOREX, "1h", build(-1.0), _fund(), now=NOW)
+    conflict = _deterministic_decision("X", AssetClass.FOREX, "1h", build(1.0), _fund(), now=NOW)
+    assert agree.direction == Direction.SHORT and conflict.direction == Direction.SHORT
+    assert conflict.confidence < agree.confidence
+    assert "conflict" in conflict.rationale.lower()
+
+
 def _multi_tf(primary_trend, macro_trend, *, resistance=120.0, support=90.0, entry=100.0, adx=30.0):
     ind = {"last_close": entry, "atr14": 2.0, "adx": adx, "macd_hist": 1.0 if primary_trend == "up" else -1.0}
     return TechnicalRead(

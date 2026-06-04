@@ -357,6 +357,14 @@ class Mt5BrokerAdapter(BrokerAdapter):
         symbols = {p.symbol for p in (self._mt5.positions_get() or [])}
         return [self.close_position(s) for s in symbols]
 
+    def contract_size(self, symbol: str) -> float:
+        """The symbol's MT5 contract size (qty is stored in lots, so P&L must scale by this)."""
+        try:
+            info = self._mt5.symbol_info(self._resolve_symbol(symbol))
+            return float(getattr(info, "trade_contract_size", 1) or 1)
+        except Exception:  # noqa: BLE001
+            return 1.0
+
     def get_realized_pnl(self, since) -> float | None:
         """Sum profit + swap + commission of deals closed since ``since`` (terminal truth)."""
         deals = self._mt5.history_deals_get(since, datetime.now(timezone.utc))

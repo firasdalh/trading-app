@@ -30,6 +30,9 @@ Caps how many trades can be open at once.
 When cumulative losses for the day hit this, the app auto-pauses new trades until tomorrow.
 - Why: it stops "revenge trading" — the spiral of trying to win back losses in one session,
   which is how a bad day becomes a catastrophic one. The pause is a feature, not a bug.
+- **Override (2026-06-04):** raised to **10%** at the user's explicit request. The conservative
+  default is 3% for the reason above; at 10% a single bad day takes a much larger bite, and the
+  daily circuit-breaker fires far later. Consider returning to 3% once the strategy is proven.
 
 ### `max_total_exposure` (default: 6% of equity at risk across all open trades)
 The sum of all open trades' risk cannot exceed this.

@@ -41,6 +41,7 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
 }
 import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
+import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { ProposalPanel } from "./ProposalPanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
@@ -374,6 +375,11 @@ export function Dashboard({ settings }: Props) {
         currentAsset={assetClass}
         currentTimeframe={timeframe}
         mode={settings?.app.execution_mode}
+      />
+
+      <OpportunitiesPanel
+        onSelect={openPositionSymbol}
+        onOpened={() => setPosBump((b) => b + 1)}
       />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">

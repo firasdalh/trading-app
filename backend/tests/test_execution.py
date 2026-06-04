@@ -16,6 +16,30 @@ from sqlalchemy import select
 NOW = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def test_close_pnl_scales_by_contract_size(db_session):
+    """MT5 stores qty in lots; booked P&L must scale by the contract size (gold 0.01 lot,
+    $24.66/oz move = -$24.66, not -$0.25)."""
+    from app.execution.monitor import _close_position
+    from app.models.schemas import OrderResult
+
+    class _Broker:
+        is_paper = True
+
+        def contract_size(self, symbol):
+            return 100.0
+
+        def close_position(self, symbol):  # already closed by the broker's own SL
+            return OrderResult(status=OrderStatus.REJECTED, error="no position")
+
+    pos = Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
+                   entry_price=4449.192, status=PositionStatus.OPEN.value, last_price=4473.848)
+    db_session.add(pos)
+    db_session.commit()
+    _close_position(db_session, pos, _Broker(), 4473.848, "stop")
+    db_session.commit()
+    assert pos.realized_pnl == round(-1 * 0.01 * 100 * (4473.848 - 4449.192), 2)  # -24.66
+
+
 def _make_record(session, *, symbol="AAPL", direction=Direction.LONG, entry=100.0,
                  stop=95.0, tp=110.0, qty=10.0) -> TradeProposalRecord:
     rec = TradeProposalRecord(

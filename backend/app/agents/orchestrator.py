@@ -58,6 +58,9 @@ _RSI_OB = 75.0        # overbought / oversold caution thresholds
 _RSI_OS = 25.0
 _STRUCT_IGNORE = 0.5  # ignore overhead structure within 0.5R of entry (breakout zone)
 _MIN_RR_TO_STRUCT = 1.0  # need >=1R of room to the next structure to take the trade
+_MOM_ATR_FRAC = 0.10  # counter-momentum only "matters" when |MACD hist| >= 10% of ATR (noise gate)
+_PULLBACK_ATR = 2.5   # price > this many ATR beyond EMA20 = stretched entry -> down-weight (a
+                      # steady trend rides ~2.4 ATR from the lagging EMA, so only flag real spikes)
 
 _TF_RANK = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7}
 
@@ -82,13 +85,19 @@ def _trend_from_indicators(ind: dict, fallback: str = "sideways") -> str:
     return fallback
 
 
-def _macro_trend(technical: TechnicalRead) -> str:
-    """Trend of the highest-timeframe read (the dominant context), from computed indicators."""
+def _macro_tf(technical: TechnicalRead):
+    """The highest-timeframe read available (the dominant context), or None."""
     best, best_rank = None, -1
     for tf in technical.timeframes:
         r = _TF_RANK.get(tf.timeframe, 0)
         if r > best_rank:
             best, best_rank = tf, r
+    return best
+
+
+def _macro_trend(technical: TechnicalRead) -> str:
+    """Trend of the highest-timeframe read (the dominant context), from computed indicators."""
+    best = _macro_tf(technical)
     if best is None:
         return "sideways"
     return _trend_from_indicators(best.indicators, best.trend)
@@ -125,9 +134,13 @@ def _deterministic_decision(
     rsi = ind.get("rsi14")
     pdi = ind.get("plus_di")
     mdi = ind.get("minus_di")
+    atr_v = ind.get("atr14")
+    # Counter-momentum only blocks entry if it's MEANINGFUL (>= 10% of ATR) — trivial noise is
+    # ignored so we don't sit out forever on a flat histogram.
+    mom_thresh = _MOM_ATR_FRAC * atr_v if atr_v else 0.0
     if trend == "up" and bias != TradingBias.BEARISH:
-        if macd_hist is not None and macd_hist < 0:
-            # Trend up but momentum down = pullback. Wait for the long trigger (watch, not reject).
+        if macd_hist is not None and macd_hist < -mom_thresh:
+            # Trend up but momentum meaningfully down = pullback. Wait for the long trigger.
             base.watch = True
             base.rationale = (
                 f"Uptrend pullback — momentum still down (MACD hist {macd_hist}, RSI {rsi}, "
@@ -139,7 +152,7 @@ def _deterministic_decision(
             return base
         direction = Direction.LONG
     elif trend == "down" and bias != TradingBias.BULLISH:
-        if macd_hist is not None and macd_hist > 0:
+        if macd_hist is not None and macd_hist > mom_thresh:
             base.watch = True
             base.rationale = (
                 f"Downtrend pullback — momentum turning up (MACD hist {macd_hist}, RSI {rsi}, "
@@ -161,7 +174,15 @@ def _deterministic_decision(
         base.rationale = "No usable entry price from technical read; sitting out."
         return base
 
-    atr_v = ind.get("atr14")
+    # --- overextension: entering far from the mean (EMA20) invites a mean-reversion bounce into
+    # the stop. We DON'T hard-block (a healthy trend always rides above/below the lagging EMA, so
+    # blocking would skip every trend) — instead we down-weight a stretched entry below. ---
+    ema20 = ind.get("ema20")
+    overextended = bool(ema20 and atr_v and (
+        (direction == Direction.LONG and entry > ema20 + _PULLBACK_ATR * atr_v) or
+        (direction == Direction.SHORT and entry < ema20 - _PULLBACK_ATR * atr_v)
+    ))
+
     support = tf0.support_levels[0] if tf0 and tf0.support_levels else None
     resistance = tf0.resistance_levels[0] if tf0 and tf0.resistance_levels else None
 
@@ -223,6 +244,18 @@ def _deterministic_decision(
         conf += 0.1
     if macd_hist is not None and ((direction == Direction.LONG) == (macd_hist > 0)):
         conf += 0.05
+    # Cross-timeframe momentum conflict: the higher-TF MACD pushing AGAINST the trade is a
+    # lower-conviction signal (the XAU short was taken with 1h vs 4h MACD disagreeing).
+    macro_tf = _macro_tf(technical)
+    macro_macd = macro_tf.indicators.get("macd_hist") if macro_tf else None
+    macro_conflict = macro_macd is not None and (
+        (direction == Direction.LONG and macro_macd < 0) or
+        (direction == Direction.SHORT and macro_macd > 0)
+    )
+    if macro_conflict:
+        conf -= 0.1
+    if overextended:
+        conf -= 0.1  # stretched entry (mean-reversion bounce risk)
     rsi = ind.get("rsi14")
     if rsi is not None and ((direction == Direction.LONG and rsi >= _RSI_OB)
                             or (direction == Direction.SHORT and rsi <= _RSI_OS)):
@@ -242,7 +275,9 @@ def _deterministic_decision(
     base.confidence = confidence
     base.rationale = (
         f"Confluence {direction.value.upper()}: entry-TF trend={trend}, macro={macro}, "
-        f"ADX {adx_v}, MACD hist={macd_hist}, RSI {rsi}, bias={bias.value}. "
+        f"ADX {adx_v}, MACD hist={macd_hist}, RSI {rsi}, bias={bias.value}"
+        f"{' (cross-TF momentum conflict)' if macro_conflict else ''}"
+        f"{' (stretched entry)' if overextended else ''}. "
         f"Entry {base.entry}, stop {base.stop_loss} ({stop_basis} ~{_ATR_STOP_MULT}xATR), "
         f"target {base.take_profit} ({struct_note}). Deterministic (no LLM)."
     )

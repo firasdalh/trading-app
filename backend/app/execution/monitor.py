@@ -40,6 +40,14 @@ def _exit_reason(direction: str, price: float, stop: float | None, target: float
     return None
 
 
+def _contract_size(broker, symbol: str) -> float:
+    """Broker contract size for P&L scaling; defensive so a lookup failure never blocks a close."""
+    try:
+        return broker.contract_size(symbol) or 1.0
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
 def _close_position(session: Session, pos: Position, broker, exit_price: float, reason: str) -> None:
     # Close the EXISTING position by ticket — never fire a fresh opposite order. On a hedging
     # MT5 account (Exness default) an opposing market order opens a NEW opposite position
@@ -47,7 +55,8 @@ def _close_position(session: Session, pos: Position, broker, exit_price: float, 
     result = broker.close_position(pos.symbol)
     fill = result.avg_fill_price or exit_price
     sign = 1 if pos.direction == Direction.LONG.value else -1
-    realized = round(sign * pos.qty * (fill - pos.entry_price), 2)
+    contract = _contract_size(broker, pos.symbol)
+    realized = round(sign * pos.qty * contract * (fill - pos.entry_price), 2)
 
     pos.status = PositionStatus.CLOSED.value
     pos.closed_at = datetime.now(timezone.utc)
@@ -115,8 +124,9 @@ def monitor_positions(session: Session) -> dict:
             continue
 
         sign = 1 if pos.direction == Direction.LONG.value else -1
+        contract = _contract_size(broker, pos.symbol)
         pos.last_price = price
-        pos.unrealized_pnl = round(sign * pos.qty * (price - pos.entry_price), 2)
+        pos.unrealized_pnl = round(sign * pos.qty * contract * (price - pos.entry_price), 2)
 
         reason = _exit_reason(pos.direction, price, pos.stop_loss, pos.take_profit)
         if reason:

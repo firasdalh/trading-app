@@ -112,6 +112,15 @@ class BrokerAdapter(ABC):
         """
         return {}
 
+    def contract_size(self, symbol: str) -> float:
+        """Units of the underlying per 1.0 of stored qty, for P&L (price_diff × qty × contract).
+
+        Default 1.0 — qty is already in underlying units (sim shares, ccxt coins). MT5 stores
+        qty in LOTS, so it overrides this with the symbol's contract size (e.g. 100 oz for gold,
+        100000 base units for FX) — otherwise booked P&L is off by that factor.
+        """
+        return 1.0
+
     def reconcile(self) -> dict:
         """Reconcile local state against the broker on startup. Default: report positions.
 

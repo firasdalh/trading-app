@@ -34,6 +34,27 @@ def _timeframes_for(primary: str) -> list[str]:
     return list(dict.fromkeys([primary, *_CONTEXT_TIMEFRAMES]))
 
 
+def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
+                   use_llm: bool = False):
+    """Analyse a symbol and run it through the Risk Manager WITHOUT persisting or executing —
+    used to rank opportunities across the watchlist. Returns (proposal, risk_decision)."""
+    now = datetime.now(timezone.utc)
+    settings = get_or_create_settings(session)
+    broker = get_broker_for(asset_class, settings.broker_map)
+    series: list[OHLCVSeries] = []
+    for tf in _timeframes_for(timeframe):
+        try:
+            series.append(broker.get_ohlcv(symbol, tf, limit=200))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("preview ohlcv failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
+    technical = run_technical(symbol, series, use_llm=use_llm)
+    fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)
+    proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental,
+                                now=now, use_llm=use_llm)
+    decision = assess(session, proposal)
+    return proposal, decision
+
+
 def _maybe_auto_execute(session: Session, record: TradeProposalRecord, broker) -> None:
     """Auto-execute under Modes B/C. Mode A leaves the proposal awaiting user approval."""
     from app.execution.executor import ExecutionBlocked, execute_proposal

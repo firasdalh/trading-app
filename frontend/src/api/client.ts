@@ -154,6 +154,8 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   scanNow: () => request<{ scanned: number }>("/api/watchlist/scan-now", { method: "POST" }),
+  opportunities: () =>
+    request<import("../types").OpportunityView[]>("/api/watchlist/opportunities"),
 
   llmStatus: () => request<LlmStatus>("/api/settings/llm"),
   setLlm: (body: { provider: string; model?: string; api_key?: string }) =>

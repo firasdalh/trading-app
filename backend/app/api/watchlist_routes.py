@@ -119,3 +119,66 @@ def set_scan_config(req: ScanConfigRequest, session: Session = Depends(get_sessi
 def scan_now(session: Session = Depends(get_session)) -> dict:
     """Run one scan immediately (regardless of the interval)."""
     return run_scan(session)
+
+
+class OpportunityView(BaseModel):
+    symbol: str
+    asset_class: str
+    timeframe: str
+    direction: str
+    entry: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    rr: float | None = None
+    confidence: float
+    watch: bool
+    rationale: str
+    risk_approved: bool
+    risk_decision: str | None = None
+    risk_reason: str | None = None
+    already_open: bool = False
+
+
+@router.get("/opportunities", response_model=list[OpportunityView])
+def opportunities(session: Session = Depends(get_session)) -> list[OpportunityView]:
+    """Scan every enabled watchlist pair and return the setups ranked best-first — actionable &
+    risk-approved on top, then forming ('watch'), then the rest. Read-only: nothing is opened."""
+    from app.agents.pipeline import preview_symbol
+    from app.risk.service import live_broker_positions
+
+    open_syms = {p.symbol.upper() for p in live_broker_positions(session)}
+    items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
+
+    out: list[OpportunityView] = []
+    for it in items:
+        try:
+            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class), it.timeframe)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
+            continue
+        rr = None
+        if prop.entry and prop.stop_loss and prop.take_profit:
+            risk = abs(prop.entry - prop.stop_loss)
+            rr = round(abs(prop.take_profit - prop.entry) / risk, 2) if risk else None
+        out.append(OpportunityView(
+            symbol=it.symbol, asset_class=it.asset_class, timeframe=it.timeframe,
+            direction=prop.direction.value, entry=prop.entry, stop_loss=prop.stop_loss,
+            take_profit=prop.take_profit, rr=rr, confidence=prop.confidence, watch=prop.watch,
+            rationale=prop.rationale, risk_approved=dec.approved, risk_decision=dec.decision.value,
+            risk_reason=dec.reason, already_open=it.symbol.upper() in open_syms,
+        ))
+
+    def rank(o: OpportunityView):
+        actionable = o.direction in ("long", "short")
+        if actionable and o.risk_approved and not o.already_open:
+            tier = 0  # open it now
+        elif actionable:
+            tier = 1  # a real setup with levels, but blocked (risk/cooldown/paused) or already open
+        elif o.watch:
+            tier = 2  # forming — not ready yet
+        else:
+            tier = 3  # no trade
+        return (tier, -o.confidence, -(o.rr or 0))
+
+    out.sort(key=rank)
+    return out

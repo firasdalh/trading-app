@@ -240,6 +240,24 @@ export interface BacktestResult {
   disclaimer: string;
 }
 
+export interface OpportunityView {
+  symbol: string;
+  asset_class: AssetClass;
+  timeframe: string;
+  direction: Direction;
+  entry: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  rr: number | null;
+  confidence: number;
+  watch: boolean;
+  rationale: string;
+  risk_approved: boolean;
+  risk_decision: string | null;
+  risk_reason: string | null;
+  already_open: boolean;
+}
+
 export interface WatchItem {
   id: number;
   symbol: string;
