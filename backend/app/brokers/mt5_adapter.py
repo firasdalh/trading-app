@@ -397,3 +397,19 @@ class Mt5BrokerAdapter(BrokerAdapter):
         others = sorted(s.name for s in all_syms if matches(s) and not getattr(s, "visible", False))
         ordered = list(dict.fromkeys(selected + others))
         return ordered[:300]
+
+    def describe_symbols(self, asset_class: AssetClass | None = None) -> dict[str, str]:
+        """The MT5 instrument description for each symbol in this asset class (e.g. 'Apple Inc')."""
+        all_syms = self._mt5.symbols_get() or []
+        keywords = self._PATH_KEYWORDS.get(asset_class) if asset_class else None
+        out: dict[str, str] = {}
+        for s in all_syms:
+            name = getattr(s, "name", "")
+            if keywords is not None:
+                path = (getattr(s, "path", "") or "").lower()
+                if not any(k in path or k in name.lower() for k in keywords):
+                    continue
+            desc = (getattr(s, "description", "") or "").strip()
+            if name and desc:
+                out[name] = desc
+        return out

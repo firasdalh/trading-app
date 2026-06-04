@@ -104,6 +104,14 @@ class BrokerAdapter(ABC):
         """
         return []
 
+    def describe_symbols(self, asset_class: AssetClass | None = None) -> dict[str, str]:
+        """Human-readable name per symbol (e.g. {"EURUSDm": "Euro vs US Dollar"}). Default: none.
+
+        Brokers that expose instrument descriptions (MT5) override this so the UI can show the
+        real name next to each ticker.
+        """
+        return {}
+
     def reconcile(self) -> dict:
         """Reconcile local state against the broker on startup. Default: report positions.
 

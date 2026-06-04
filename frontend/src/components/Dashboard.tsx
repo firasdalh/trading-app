@@ -73,6 +73,7 @@ export function Dashboard({ settings }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const [symbols, setSymbols] = useState<string[]>([]);
+  const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [posBump, setPosBump] = useState(0);
   const liveQuote = useQuoteSocket(symbol, assetClass);
   const { data: brokerInfo } = usePolling(() => api.brokerInfo(assetClass), 6000, [assetClass]);
@@ -86,12 +87,16 @@ export function Dashboard({ settings }: Props) {
       .then((r) => {
         if (cancelled) return;
         setSymbols(r.symbols);
+        setDescriptions(r.descriptions ?? {});
         // Only fall back to the first symbol if the (persisted) one truly isn't offered here.
         if (r.symbols.length && !r.symbols.includes(symbol)) {
           setSymbol(r.symbols[0]);
         }
       })
-      .catch(() => setSymbols([]));
+      .catch(() => {
+        setSymbols([]);
+        setDescriptions({});
+      });
     return () => {
       cancelled = true;
     };
@@ -231,6 +236,7 @@ export function Dashboard({ settings }: Props) {
           <SymbolPicker
             value={symbol}
             symbols={symbols}
+            descriptions={descriptions}
             favorites={favForClass}
             onChange={setSymbol}
             onToggleFavorite={toggleFavorite}

@@ -87,7 +87,7 @@ export const api = {
   brokerInfo: (assetClass: AssetClass) =>
     request<{ name: string; is_paper: boolean }>(`/api/broker/info?asset_class=${assetClass}`),
   symbols: (assetClass: AssetClass) =>
-    request<{ broker: string; asset_class: string; symbols: string[] }>(
+    request<{ broker: string; asset_class: string; symbols: string[]; descriptions: Record<string, string> }>(
       `/api/market/symbols?asset_class=${assetClass}`,
     ),
 

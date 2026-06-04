@@ -3,6 +3,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 interface Props {
   value: string;
   symbols: string[];
+  descriptions?: Record<string, string>; // symbol -> human-readable name
   favorites: string[]; // favorited symbols for the current asset class
   onChange: (symbol: string) => void;
   onToggleFavorite: (symbol: string) => void;
@@ -10,7 +11,14 @@ interface Props {
 
 // Searchable symbol combobox with per-symbol favourites (★). Falls back to free entry so a
 // symbol the broker offers but isn't in the list can still be typed.
-export function SymbolPicker({ value, symbols, favorites, onChange, onToggleFavorite }: Props) {
+export function SymbolPicker({
+  value,
+  symbols,
+  descriptions = {},
+  favorites,
+  onChange,
+  onToggleFavorite,
+}: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
@@ -37,9 +45,13 @@ export function SymbolPicker({ value, symbols, favorites, onChange, onToggleFavo
 
   const favSet = useMemo(() => new Set(favorites), [favorites]);
   const q = query.trim().toUpperCase();
+  // Match the ticker OR its description (so "apple" finds AAPLm, "oil" finds USOILm).
   const matches = useMemo(
-    () => symbols.filter((s) => s.toUpperCase().includes(q)),
-    [symbols, q],
+    () =>
+      symbols.filter(
+        (s) => s.toUpperCase().includes(q) || (descriptions[s] ?? "").toUpperCase().includes(q),
+      ),
+    [symbols, q, descriptions],
   );
   const favMatches = matches.filter((s) => favSet.has(s));
   const otherMatches = matches.filter((s) => !favSet.has(s));
@@ -71,7 +83,12 @@ export function SymbolPicker({ value, symbols, favorites, onChange, onToggleFavo
       >
         {favSet.has(s) ? "★" : "☆"}
       </button>
-      <span className="text-sm">{s}</span>
+      <span className="text-sm font-medium">{s}</span>
+      {descriptions[s] && (
+        <span className="truncate text-xs text-neutral-500" title={descriptions[s]}>
+          {descriptions[s]}
+        </span>
+      )}
     </div>
   );
 
@@ -79,9 +96,15 @@ export function SymbolPicker({ value, symbols, favorites, onChange, onToggleFavo
     <div ref={boxRef} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
+        title={descriptions[value] || value}
         className="flex w-48 items-center justify-between rounded bg-neutral-800 px-2 py-1.5 text-left text-sm"
       >
-        <span className="truncate">{value || "Select…"}</span>
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="font-medium">{value || "Select…"}</span>
+          {descriptions[value] && (
+            <span className="truncate text-xs text-neutral-500">{descriptions[value]}</span>
+          )}
+        </span>
         <span className="ml-2 text-neutral-500">▾</span>
       </button>
 

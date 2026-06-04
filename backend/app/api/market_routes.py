@@ -88,7 +88,13 @@ def symbols(
     except Exception as exc:  # noqa: BLE001
         log.warning("list_symbols failed", extra={"broker": broker.name, "error": str(exc)})
         syms = []
-    return {"broker": broker.name, "asset_class": asset_class.value, "symbols": syms}
+    try:
+        descriptions = broker.describe_symbols(asset_class)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("describe_symbols failed", extra={"broker": broker.name, "error": str(exc)})
+        descriptions = {}
+    return {"broker": broker.name, "asset_class": asset_class.value,
+            "symbols": syms, "descriptions": descriptions}
 
 
 @router.get("/broker/info")
