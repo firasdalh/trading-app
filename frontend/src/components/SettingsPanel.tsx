@@ -7,7 +7,7 @@ const LLM_DEFAULT_MODEL: Record<string, string> = {
   gemini: "gemini-2.5-flash",
 };
 
-const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy"];
+const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
 const BROKERS = ["sim", "alpaca", "ccxt", "oanda", "mt5"];
 
 interface Props {

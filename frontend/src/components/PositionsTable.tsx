@@ -1,6 +1,16 @@
 import { useState } from "react";
 import type { PositionView } from "../types";
 
+// Broker prices come back as raw floats that carry IEEE-754 representation noise
+// (e.g. 51664.00000000001, 25142.800000000003). Round to 12 significant figures to strip
+// the noise, then drop trailing zeros — this keeps the right precision for every instrument
+// (JPY 3dp, indices 1dp, 5-digit FX, sub-cent crypto) without hard-coding a decimal count.
+function fmtPrice(v: number | null | undefined): string {
+  if (v == null) return "—";
+  if (!Number.isFinite(v)) return String(v);
+  return Number(v.toPrecision(12)).toString();
+}
+
 interface Props {
   positions: PositionView[] | null;
   onClose?: (p: PositionView) => Promise<void> | void;
@@ -52,8 +62,8 @@ function PositionRow({
   onSetSlTp?: (p: PositionView, sl: number | null, tp: number | null) => Promise<void> | void;
   onSelect?: (p: PositionView) => void;
 }) {
-  const [sl, setSl] = useState(p.stop_loss != null ? String(p.stop_loss) : "");
-  const [tp, setTp] = useState(p.take_profit != null ? String(p.take_profit) : "");
+  const [sl, setSl] = useState(p.stop_loss != null ? fmtPrice(p.stop_loss) : "");
+  const [tp, setTp] = useState(p.take_profit != null ? fmtPrice(p.take_profit) : "");
   const [busy, setBusy] = useState(false);
 
   const run = async (fn: () => Promise<void> | void) => {
@@ -86,8 +96,8 @@ function PositionRow({
         {p.direction}
       </td>
       <td className="text-right tabular-nums">{p.qty}</td>
-      <td className="text-right tabular-nums">{p.entry_price}</td>
-      <td className="text-right tabular-nums">{p.last_price ?? "—"}</td>
+      <td className="text-right tabular-nums">{fmtPrice(p.entry_price)}</td>
+      <td className="text-right tabular-nums">{fmtPrice(p.last_price)}</td>
       <td
         className={`pr-6 text-right tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}
       >

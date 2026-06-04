@@ -1,6 +1,6 @@
 // Types mirroring the backend Pydantic schemas (kept in sync by hand for now).
 
-export type AssetClass = "stock" | "crypto" | "forex" | "metal" | "energy";
+export type AssetClass = "stock" | "crypto" | "forex" | "metal" | "energy" | "index";
 export type Direction = "long" | "short" | "no_trade";
 export type ExecutionMode = "A_PROPOSE_APPROVE" | "B_AUTO_PAPER" | "C_AUTO_LIVE";
 

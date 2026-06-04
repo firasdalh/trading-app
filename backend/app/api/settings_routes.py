@@ -133,7 +133,7 @@ def live_confirm(req: LiveConfirmRequest, session: Session = Depends(get_session
 
 
 _VALID_BROKERS = {"sim", "alpaca", "ccxt", "oanda", "mt5"}
-_VALID_ASSETS = {"stock", "crypto", "forex", "metal", "energy"}
+_VALID_ASSETS = {"stock", "crypto", "forex", "metal", "energy", "index"}
 
 
 @router.post("/settings/broker-map", response_model=SettingsResponse)

@@ -21,6 +21,7 @@ class AssetClass(StrEnum):
     FOREX = "forex"
     METAL = "metal"
     ENERGY = "energy"   # oil, natural gas, etc.
+    INDEX = "index"     # stock indices: US500, US30, USTEC, DE40, UK100, etc.
 
 
 class Direction(StrEnum):
