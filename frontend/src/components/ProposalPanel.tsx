@@ -1,5 +1,6 @@
-import { useState } from "react";
-import type { AnalyzeResponse, TimeframeRead, TradeProposal } from "../types";
+import { useEffect, useState } from "react";
+import { api } from "../api/client";
+import type { AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
 
 const TF_RANK: Record<string, number> = { "1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7 };
 
@@ -20,13 +21,67 @@ interface Props {
   status: string | null;
   busy: boolean;
   equity?: number | null;
-  onApprove: () => void;
+  onApprove: (lots?: number | null) => void;
   onReject: () => void;
 }
 
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
-// risk-manager verdict, and each agent's reasoning (expandable). Approve/Reject in Mode A.
+// risk-manager verdict, the cost/leverage + an adjustable (2%-capped) size, and each agent's
+// reasoning (expandable). Approve/Reject in Mode A.
 export function ProposalPanel({ result, status, busy, equity, onApprove, onReject }: Props) {
+  const proposalId = result?.proposal_id ?? null;
+  const actionable = !!result && result.proposal.direction !== "no_trade";
+  const pending = status === "pending_approval";
+
+  const [lots, setLots] = useState<string>("");
+  const [econ, setEcon] = useState<TradeEconomics | null>(null);
+  const [capped, setCapped] = useState(false);
+  const [maxLots, setMaxLots] = useState<number | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+
+  // Load the AI's default size + cost/leverage whenever the proposal changes.
+  useEffect(() => {
+    if (!proposalId || !actionable) {
+      setEcon(null);
+      setLots("");
+      return;
+    }
+    let cancelled = false;
+    setPreviewBusy(true);
+    api
+      .sizePreview(proposalId, null)
+      .then((r) => {
+        if (cancelled) return;
+        setEcon(r.economics);
+        setCapped(r.capped);
+        setMaxLots(r.max_lots);
+        if (r.economics?.lots != null) setLots(String(r.economics.lots));
+      })
+      .catch(() => {})
+      .finally(() => !cancelled && setPreviewBusy(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [proposalId, actionable]);
+
+  // Re-price at a user-entered lot size (the backend clamps to the 2% per-trade ceiling).
+  const reprice = async (val: string) => {
+    if (!proposalId) return;
+    const n = Number(val);
+    setPreviewBusy(true);
+    try {
+      const r = await api.sizePreview(proposalId, Number.isFinite(n) && n > 0 ? n : null);
+      setEcon(r.economics);
+      setCapped(r.capped);
+      setMaxLots(r.max_lots);
+      if (r.economics?.lots != null) setLots(String(r.economics.lots));
+    } catch {
+      /* ignore */
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
   if (!result) {
     return (
       <div className="card text-sm text-neutral-400">
@@ -37,7 +92,7 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
 
   const { proposal, risk } = result;
   const noTrade = proposal.direction === "no_trade";
-  const pending = status === "pending_approval";
+  const approveLots = lots ? Number(lots) : null;
 
   return (
     <div className="card space-y-3">
@@ -103,6 +158,69 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
         <div className="text-neutral-400">{risk.reason}</div>
       </div>
 
+      {/* Cost, leverage, and an adjustable (2%-capped) size — what you'll spend before approving. */}
+      {!noTrade && (
+        <div className="rounded-md border border-neutral-800 p-3 text-sm">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+              Cost &amp; size {previewBusy && <span className="text-neutral-500">· …</span>}
+            </span>
+            {capped && (
+              <span
+                className="rounded bg-warn/20 px-2 py-0.5 text-xs font-medium text-warn"
+                title="Your size was reduced to fit the 2% per-trade risk cap (RISK.md) or the exposure budget."
+              >
+                capped at 2%
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <Stat label="Spend (margin)" value={econ?.margin_usd != null ? `$${econ.margin_usd.toFixed(2)}` : "—"} />
+            <Stat label="Leverage" value={econ?.leverage != null ? `${econ.leverage.toFixed(0)}×` : "—"} />
+            <Stat
+              label="Exposure"
+              value={
+                econ?.notional_usd != null
+                  ? `$${econ.notional_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                  : "—"
+              }
+            />
+          </div>
+
+          {pending && (
+            <div className="mt-3 flex items-end gap-3">
+              <label className="text-xs text-neutral-400">
+                <div className="mb-1">Size (lots)</div>
+                <input
+                  value={lots}
+                  onChange={(e) => setLots(e.target.value)}
+                  onBlur={(e) => reprice(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && reprice((e.target as HTMLInputElement).value)}
+                  inputMode="decimal"
+                  className="w-24 rounded bg-neutral-800 px-2 py-1.5 text-sm tabular-nums text-neutral-100"
+                />
+              </label>
+              {maxLots != null && (
+                <button
+                  type="button"
+                  onClick={() => reprice(String(maxLots))}
+                  className="mb-0.5 text-xs text-neutral-400 hover:text-neutral-200"
+                  title="Set the maximum size allowed by the 2% per-trade risk cap"
+                >
+                  max {maxLots} lots (2% cap)
+                </button>
+              )}
+            </div>
+          )}
+          {econ?.margin_usd == null && (
+            <div className="mt-2 text-xs text-neutral-500">
+              Cost/leverage are only computed for MT5 (Exness) positions.
+            </div>
+          )}
+        </div>
+      )}
+
       {!noTrade && <SetupSignals proposal={proposal} />}
 
       {/* For no-trade, the rationale is the sit-out reason. For an actionable setup the chips
@@ -120,8 +238,8 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
       {pending ? (
         <div className="flex gap-2">
           <button
-            onClick={onApprove}
-            disabled={busy}
+            onClick={() => onApprove(approveLots)}
+            disabled={busy || previewBusy}
             className="btn flex-1 bg-bull text-white hover:bg-green-700"
           >
             Approve

@@ -369,6 +369,30 @@ class ProposalView(BaseModel):
     reasoning: dict = Field(default_factory=dict)
 
 
+class TradeEconomics(BaseModel):
+    """What a trade costs and how leveraged it is, BEFORE you approve it. Broker-computed (MT5)
+    so margin/leverage include full currency conversion. Fields are None when unavailable."""
+
+    lots: float | None = None
+    qty_units: float | None = None
+    margin_usd: float | None = None       # the "spend" — cash the broker holds to open it
+    notional_usd: float | None = None     # market exposure (account currency)
+    leverage: float | None = None         # notional / margin
+    pct_of_equity: float | None = None    # notional / equity, as a fraction
+
+
+class SizePreviewResponse(BaseModel):
+    """Risk verdict + economics for a proposal at a chosen lot size (Mode A pre-approval)."""
+
+    risk: RiskDecision
+    economics: TradeEconomics | None = None
+    # True when the requested size was reduced — by the 2% per-trade ceiling or the exposure budget.
+    capped: bool = False
+    # Largest lot size allowed by the 2% per-trade ceiling (for the UI to show the cap). None if
+    # it can't be computed (no equity / stop).
+    max_lots: float | None = None
+
+
 class AnalyzeResponse(BaseModel):
     proposal_id: int
     status: str

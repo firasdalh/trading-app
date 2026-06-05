@@ -82,13 +82,20 @@ def evaluate_proposal(
     last_pair_close_at: datetime | None = None,
     qty_step: float | None = None,
     min_qty: float = 0.0,
+    override_risk_fraction: float | None = None,
 ) -> RiskDecision:
-    """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision."""
+    """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
+
+    ``override_risk_fraction`` lets the user size a single trade up or down (Mode A manual size).
+    It is ALWAYS re-clamped to the hard per-trade ceiling here, so a manual size can never exceed
+    RISK.md's 2% cap — the user can size up to the cap, never past it.
+    """
     symbol = proposal.symbol
     checks: dict[str, bool] = {}
 
-    # --- clamp risk-per-trade to the hard ceiling, defensively ---
-    risk_fraction = min(limits.risk_per_trade, limits.risk_per_trade_ceiling)
+    # --- choose the risk fraction, then clamp to the hard ceiling, defensively ---
+    desired = override_risk_fraction if override_risk_fraction is not None else limits.risk_per_trade
+    risk_fraction = min(desired, limits.risk_per_trade_ceiling)
     if risk_fraction <= 0:
         return _veto(symbol, "risk_per_trade is non-positive", checks)
 

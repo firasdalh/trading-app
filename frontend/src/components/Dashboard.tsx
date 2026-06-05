@@ -175,11 +175,11 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     }
   };
 
-  const approve = async () => {
+  const approve = async (lots?: number | null) => {
     if (!result) return;
     setActionBusy(true);
     try {
-      const updated = await api.approve(result.proposal_id);
+      const updated = await api.approve(result.proposal_id, lots ?? null);
       setStatus(updated.status);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

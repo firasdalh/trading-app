@@ -15,11 +15,16 @@ requested, restate the current value and ask for explicit confirmation first.
 
 ### `risk_per_trade` (default: 1% of account equity)
 The maximum you can lose on a single trade if the stop-loss is hit. Position size is
-*derived* from this and the stop distance — you never set lot size directly.
+*derived* from this and the stop distance.
 - Why it's low: at 1%, it takes a long, sustained losing streak to do serious damage,
   which buys you time to notice a broken strategy. At 5%+, a normal run of bad luck can
   halve your account.
 - Ceiling: do not exceed 2%. There is no good reason to.
+- **Manual size (added 2026-06-05):** before approving a Mode-A trade you may adjust the lot
+  size up or down (Proposal panel shows the spend/margin + leverage live). Any chosen size is
+  re-run through the deterministic Risk Manager and **hard-clamped to the 2% ceiling above** —
+  you can size up to the cap, never past it. The 2% ceiling itself is unchanged and remains the
+  one place sizing is bounded.
 
 ### `max_open_positions` (default: 3)
 Caps how many trades can be open at once.

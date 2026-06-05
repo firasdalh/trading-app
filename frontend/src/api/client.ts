@@ -104,8 +104,16 @@ export const api = {
     q.set("limit", String(opts.limit ?? 50));
     return request<ProposalView[]>(`/api/proposals?${q.toString()}`);
   },
-  approve: (id: number) =>
-    request<ProposalView>(`/api/proposals/${id}/approve`, { method: "POST" }),
+  sizePreview: (id: number, lots: number | null) =>
+    request<import("../types").SizePreviewResponse>(`/api/proposals/${id}/size-preview`, {
+      method: "POST",
+      body: JSON.stringify({ lots }),
+    }),
+  approve: (id: number, lots?: number | null) =>
+    request<ProposalView>(`/api/proposals/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ lots: lots ?? null }),
+    }),
   reject: (id: number) =>
     request<ProposalView>(`/api/proposals/${id}/reject`, { method: "POST" }),
 

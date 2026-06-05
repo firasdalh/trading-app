@@ -112,6 +112,14 @@ class BrokerAdapter(ABC):
         """
         return {}
 
+    def quote_economics(self, symbol: str, qty_units: float, price: float, is_long: bool) -> dict | None:
+        """Cost (margin) and leverage of a hypothetical order, in the account currency.
+
+        Default None = the broker can't compute it (the UI then shows '—'). MT5 overrides this
+        with ``order_calc_margin``/``order_calc_profit`` so spend + leverage are exact.
+        """
+        return None
+
     def contract_size(self, symbol: str) -> float:
         """Units of the underlying per 1.0 of stored qty, for P&L (price_diff × qty × contract).
 

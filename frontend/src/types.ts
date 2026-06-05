@@ -82,6 +82,22 @@ export interface AnalyzeResponse {
   risk: RiskDecision;
 }
 
+export interface TradeEconomics {
+  lots: number | null;
+  qty_units: number | null;
+  margin_usd: number | null;
+  notional_usd: number | null;
+  leverage: number | null;
+  pct_of_equity: number | null;
+}
+
+export interface SizePreviewResponse {
+  risk: RiskDecision;
+  economics: TradeEconomics | null;
+  capped: boolean;
+  max_lots: number | null;
+}
+
 export interface ProposalView {
   id: number;
   created_at: string;

@@ -279,6 +279,38 @@ class Mt5BrokerAdapter(BrokerAdapter):
         except Exception:  # noqa: BLE001 - margin is best-effort; never break the positions list
             return None
 
+    def quote_economics(self, symbol: str, qty_units: float, price: float, is_long: bool) -> dict | None:
+        """Cost/leverage of a HYPOTHETICAL order of ``qty_units`` at ``price`` (pre-trade).
+
+        Returns {lots, margin_usd, notional_usd, leverage}. MT5 does all currency conversion
+        (``order_calc_margin``/``order_calc_profit``), so an HKD index is reported in the USD
+        account currency. Never raises.
+        """
+        mt5 = self._mt5
+        try:
+            sym = self._resolve_symbol(symbol)
+            info = self._symbol_info(sym)
+            lots = self._units_to_lots(info, qty_units)
+            order_type = getattr(mt5, "ORDER_TYPE_BUY", 0) if is_long else getattr(mt5, "ORDER_TYPE_SELL", 1)
+            margin = mt5.order_calc_margin(order_type, sym, lots, float(price))
+            margin = float(margin) if margin is not None else None
+            # Notional (account ccy) via the profit of a +1% price move: profit ≈ notional × 1%,
+            # so notional ≈ profit / 0.01. MT5 handles the FX conversion inside order_calc_profit.
+            notional = None
+            if price:
+                profit = mt5.order_calc_profit(order_type, sym, lots, float(price), float(price) * 1.01)
+                if profit is not None:
+                    notional = abs(float(profit)) / 0.01
+            leverage = (notional / margin) if (notional and margin) else None
+            return {
+                "lots": round(lots, 2),
+                "margin_usd": round(margin, 2) if margin is not None else None,
+                "notional_usd": round(notional, 2) if notional is not None else None,
+                "leverage": round(leverage, 1) if leverage else None,
+            }
+        except Exception:  # noqa: BLE001 - economics are best-effort; never break the flow
+            return None
+
     def close_position(self, symbol: str) -> OrderResult:
         mt5 = self._mt5
         sym = self._resolve_symbol(symbol)

@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.core.state import get_or_create_daily_state, get_or_create_risk_config, get_or_create_settings
 from app.core.logging import get_logger
 from app.models.db import Position
-from app.models.enums import AssetClass, PositionStatus
+from app.models.enums import AssetClass, PositionStatus, RiskDecisionType
 from app.models.schemas import AccountState, PositionView, RiskDecision, RiskLimits, TradeProposal
 from app.risk.manager import evaluate_proposal
 
@@ -213,8 +213,16 @@ def last_pair_close_at(session: Session, symbol: str) -> datetime | None:
     return None
 
 
-def assess(session: Session, proposal: TradeProposal) -> RiskDecision:
-    """Run a proposal through the deterministic Risk Manager against live state."""
+def assess(
+    session: Session,
+    proposal: TradeProposal,
+    override_risk_fraction: float | None = None,
+) -> RiskDecision:
+    """Run a proposal through the deterministic Risk Manager against live state.
+
+    ``override_risk_fraction`` (Mode A manual size) is re-clamped to the 2% ceiling inside the
+    manager, so a user-chosen size can never exceed the hard per-trade cap.
+    """
     settings = get_or_create_settings(session)
     broker = get_broker_for(proposal.asset_class, settings.broker_map)
     limits = build_limits(session)
@@ -226,4 +234,112 @@ def assess(session: Session, proposal: TradeProposal) -> RiskDecision:
         now=datetime.now(timezone.utc),
         last_pair_close_at=last_pair_close_at(session, proposal.symbol),
         qty_step=_QTY_STEP.get(proposal.asset_class),
+        override_risk_fraction=override_risk_fraction,
     )
+
+
+def proposal_from_record(record) -> TradeProposal:
+    """Rebuild a minimal TradeProposal from a stored record, enough to re-run the Risk Manager."""
+    from app.models.enums import Direction
+
+    return TradeProposal(
+        symbol=record.symbol,
+        asset_class=AssetClass(record.asset_class),
+        timeframe=record.timeframe,
+        direction=Direction(record.direction),
+        entry=record.entry,
+        stop_loss=record.stop_loss,
+        take_profit=record.take_profit,
+        confidence=record.confidence or 0.0,
+    )
+
+
+def _risk_fraction_for_lots(
+    *, lots: float, contract_size: float, stop_distance: float, equity: float
+) -> float | None:
+    """The per-trade risk fraction that a desired LOT size implies. None if not computable."""
+    if lots <= 0 or stop_distance <= 0 or equity <= 0:
+        return None
+    units = lots * (contract_size or 1.0)
+    return (units * stop_distance) / equity
+
+
+def size_preview(session: Session, record, desired_lots: float | None = None) -> dict:
+    """Risk verdict + cost/leverage economics for a proposal at a chosen lot size.
+
+    ``desired_lots=None`` uses the AI's default (risk_per_trade) sizing. Any desired size is
+    clamped to the 2% per-trade ceiling by the Risk Manager. Economics are computed on the
+    resulting size so the user sees exactly what they'd spend and at what leverage.
+    """
+    from app.risk.manager import size_position
+
+    settings = get_or_create_settings(session)
+    proposal = proposal_from_record(record)
+    broker = get_broker_for(proposal.asset_class, settings.broker_map)
+    limits = build_limits(session)
+    account = build_account_state(session, broker)
+    equity = account.equity
+    entry = record.entry or 0.0
+    stop = record.stop_loss or 0.0
+    stop_distance = abs(entry - stop)
+    contract = 1.0
+    try:
+        contract = broker.contract_size(record.symbol)
+    except Exception:  # noqa: BLE001
+        pass
+
+    override_rf = None
+    if desired_lots is not None:
+        override_rf = _risk_fraction_for_lots(
+            lots=desired_lots, contract_size=contract, stop_distance=stop_distance, equity=equity
+        )
+
+    decision = assess(session, proposal, override_risk_fraction=override_rf)
+
+    qty_step = _QTY_STEP.get(proposal.asset_class)
+    ceiling = limits.risk_per_trade_ceiling
+
+    # Size used for the economics: the approved qty when the trade is allowed; otherwise the
+    # would-be sized qty (so the cost is still shown even when a gate like the daily-loss pause
+    # would block the trade). Both honour the clamped risk fraction + exposure budget.
+    if decision.approved and decision.approved_qty > 0:
+        qty_units = decision.approved_qty
+    else:
+        rf = min(override_rf if override_rf is not None else limits.risk_per_trade, ceiling)
+        qty_units, risk_amt = size_position(
+            equity=equity, risk_fraction=rf, entry=entry, stop_loss=stop, qty_step=qty_step
+        )
+        exposure_remaining = equity * limits.max_total_exposure - account.total_risk_amount
+        if stop_distance > 0 and risk_amt > exposure_remaining and exposure_remaining > 0:
+            from app.risk.manager import _floor_to_step
+
+            qty_units = _floor_to_step(exposure_remaining / stop_distance, qty_step)
+
+    # The 2% ceiling expressed back in lots, so the UI can show/limit the cap.
+    max_lots = None
+    if stop_distance > 0 and equity > 0:
+        ceiling_units, _ = size_position(
+            equity=equity, risk_fraction=ceiling, entry=entry, stop_loss=stop, qty_step=qty_step
+        )
+        max_lots = round(ceiling_units / (contract or 1.0), 2)
+
+    # Was the user's requested size reduced?
+    capped = decision.decision == RiskDecisionType.RESIZED or (
+        override_rf is not None and override_rf > ceiling + 1e-9
+    )
+
+    is_long = record.direction == "long"
+    econ = broker.quote_economics(record.symbol, qty_units, entry, is_long) or {}
+    economics = {
+        "lots": econ.get("lots"),
+        "qty_units": round(qty_units, 4) if qty_units else 0.0,
+        "margin_usd": econ.get("margin_usd"),
+        "notional_usd": econ.get("notional_usd"),
+        "leverage": econ.get("leverage"),
+        "pct_of_equity": (
+            round(econ["notional_usd"] / equity, 4)
+            if econ.get("notional_usd") and equity > 0
+            else None
+        ),
+    }
+    return {"risk": decision, "economics": economics, "capped": capped, "max_lots": max_lots}
