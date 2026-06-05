@@ -26,26 +26,31 @@ export function PositionsTable({ positions, onClose, onSetSlTp, onSelect }: Prop
       {!positions || positions.length === 0 ? (
         <div className="text-sm text-neutral-500">No open positions.</div>
       ) : (
-        <table className="w-full border-separate border-spacing-0 text-sm">
-          <thead className="text-left text-xs uppercase tracking-wide text-neutral-500">
-            <tr>
-              <th className="px-3 py-2">Symbol</th>
-              <th className="px-3 py-2">Side</th>
-              <th className="px-3 py-2 text-right">Qty</th>
-              <th className="px-3 py-2 text-right">Entry</th>
-              <th className="px-3 py-2 text-right">Last</th>
-              <th className="px-3 py-2 pr-6 text-right">P&amp;L</th>
-              <th className="px-3 py-2">Stop</th>
-              <th className="px-3 py-2">Target</th>
-              <th className="px-3 py-2 text-right">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {positions.map((p) => (
-              <PositionRow key={p.id} p={p} onClose={onClose} onSetSlTp={onSetSlTp} onSelect={onSelect} />
-            ))}
-          </tbody>
-        </table>
+        <div className="-mx-2 overflow-x-auto">
+          <table className="w-full border-separate border-spacing-0 whitespace-nowrap text-sm">
+            <thead className="text-left text-xs uppercase tracking-wide text-neutral-500">
+              <tr>
+                <th className="px-2 py-2">Symbol</th>
+                <th className="px-2 py-2">Side</th>
+                <th className="px-2 py-2 text-right">Qty</th>
+                <th className="px-2 py-2 text-right" title="Margin required to hold the position (cost to open), in USD">
+                  Cost
+                </th>
+                <th className="px-2 py-2 text-right">Entry</th>
+                <th className="px-2 py-2 text-right">Last</th>
+                <th className="px-2 py-2 pr-4 text-right">P&amp;L</th>
+                <th className="px-2 py-2">Stop</th>
+                <th className="px-2 py-2">Target</th>
+                <th className="px-2 py-2 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => (
+                <PositionRow key={p.id} p={p} onClose={onClose} onSetSlTp={onSetSlTp} onSelect={onSelect} />
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -78,7 +83,7 @@ function PositionRow({
   const missingProtection = p.stop_loss == null && p.take_profit == null;
 
   return (
-    <tr className="border-t border-neutral-800 [&>td]:px-3 [&>td]:py-2 [&>td]:align-middle">
+    <tr className="border-t border-neutral-800 [&>td]:px-2 [&>td]:py-2 [&>td]:align-middle">
       <td className="font-medium">
         {onSelect ? (
           <button
@@ -96,10 +101,16 @@ function PositionRow({
         {p.direction}
       </td>
       <td className="text-right tabular-nums">{p.qty}</td>
+      <td
+        className="text-right tabular-nums text-neutral-300"
+        title="Margin required to hold the position (cost to open), in USD"
+      >
+        {p.cost_usd != null ? `$${p.cost_usd.toFixed(2)}` : "—"}
+      </td>
       <td className="text-right tabular-nums">{fmtPrice(p.entry_price)}</td>
       <td className="text-right tabular-nums">{fmtPrice(p.last_price)}</td>
       <td
-        className={`pr-6 text-right tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}
+        className={`pr-4 text-right tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}
       >
         {p.unrealized_pnl >= 0 ? "+" : ""}
         {p.unrealized_pnl.toFixed(2)}
@@ -110,7 +121,7 @@ function PositionRow({
           onChange={(e) => setSl(e.target.value)}
           placeholder="SL"
           inputMode="decimal"
-          className={`w-24 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums ${
+          className={`w-20 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums ${
             missingProtection ? "ring-1 ring-warn/50" : ""
           }`}
         />
@@ -121,7 +132,7 @@ function PositionRow({
           onChange={(e) => setTp(e.target.value)}
           placeholder="TP"
           inputMode="decimal"
-          className="w-24 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums"
+          className="w-20 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums"
         />
       </td>
       <td className="text-right">

@@ -263,6 +263,9 @@ class PositionView(BaseModel):
     last_price: float | None = None
     unrealized_pnl: float = 0.0
     realized_pnl: float | None = None
+    # Margin required to hold the position, in the account currency (USD) — the "cost to open".
+    # Broker-computed (MT5) with full currency conversion; None when the broker can't supply it.
+    cost_usd: float | None = None
 
 
 # --------------------------------------------------------------------------- #

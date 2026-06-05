@@ -117,6 +117,7 @@ export interface PositionView {
   last_price: number | null;
   unrealized_pnl: number;
   realized_pnl: number | null;
+  cost_usd: number | null;
 }
 
 export interface PositionAdvice {

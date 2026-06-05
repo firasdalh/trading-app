@@ -257,8 +257,27 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 stop_loss=float(p.sl) or None, take_profit=float(p.tp) or None,
                 status="open", last_price=float(p.price_current),
                 unrealized_pnl=float(p.profit),
+                cost_usd=self._position_margin(p),
             ))
         return views
+
+    def _position_margin(self, p) -> float | None:
+        """Margin to hold this position in the account currency (USD) — the 'cost to open'.
+
+        Uses ``order_calc_margin`` so MT5 does all the currency conversion (e.g. an HKD-quoted
+        index back to the USD account). ``p.volume`` is in LOTS (what MT5 expects). Never raises.
+        """
+        mt5 = self._mt5
+        try:
+            order_type = (
+                getattr(mt5, "ORDER_TYPE_BUY", 0)
+                if p.type == getattr(mt5, "POSITION_TYPE_BUY", 0)
+                else getattr(mt5, "ORDER_TYPE_SELL", 1)
+            )
+            margin = mt5.order_calc_margin(order_type, p.symbol, float(p.volume), float(p.price_open))
+            return round(float(margin), 2) if margin is not None else None
+        except Exception:  # noqa: BLE001 - margin is best-effort; never break the positions list
+            return None
 
     def close_position(self, symbol: str) -> OrderResult:
         mt5 = self._mt5
