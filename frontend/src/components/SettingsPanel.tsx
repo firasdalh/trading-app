@@ -114,6 +114,8 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
         <section className="space-y-2">
           <div className="text-sm font-medium text-neutral-300">Live confirmation phrase</div>
           <input
+            name="live-confirm-phrase"
+            autoComplete="off"
             type="text"
             value={phrase}
             onChange={(e) => setPhrase(e.target.value)}
@@ -147,6 +149,7 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               <label key={ac} className="text-sm">
                 <div className="mb-1 text-xs text-neutral-400">{assetLabel(ac)}</div>
                 <select
+                  name={`broker-${ac}`}
                   disabled={busy}
                   value={settings?.app.broker_map?.[ac] ?? "sim"}
                   onChange={(e) =>
@@ -258,6 +261,7 @@ function LlmSection() {
         <label className="text-sm">
           <div className="mb-1 text-xs text-neutral-400">Provider</div>
           <select
+            name="llm-provider"
             value={provider}
             onChange={(e) => {
               setProvider(e.target.value);
@@ -272,6 +276,8 @@ function LlmSection() {
         <label className="text-sm">
           <div className="mb-1 text-xs text-neutral-400">Model</div>
           <input
+            name="llm-model"
+            autoComplete="off"
             value={model}
             onChange={(e) => setModel(e.target.value)}
             placeholder={LLM_DEFAULT_MODEL[provider]}
@@ -279,6 +285,8 @@ function LlmSection() {
           />
         </label>
         <input
+          name="llm-api-key"
+          autoComplete="off"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
           type="password"
@@ -369,12 +377,16 @@ function Mt5Section({ onChanged }: { onChanged: () => void }) {
 
       <div className="grid grid-cols-3 gap-2">
         <input
+          name="mt5-server"
+          autoComplete="off"
           value={server}
           onChange={(e) => setServer(e.target.value)}
           placeholder="Server (e.g. Exness-MT5Trial)"
           className="col-span-3 rounded bg-neutral-800 px-2 py-1.5 text-sm"
         />
         <input
+          name="mt5-login"
+          autoComplete="off"
           value={login}
           onChange={(e) => setLogin(e.target.value)}
           placeholder="Login (optional)"
@@ -382,6 +394,8 @@ function Mt5Section({ onChanged }: { onChanged: () => void }) {
           className="rounded bg-neutral-800 px-2 py-1.5 text-sm"
         />
         <input
+          name="mt5-password"
+          autoComplete="new-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="Password (optional)"
