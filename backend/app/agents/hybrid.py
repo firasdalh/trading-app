@@ -44,6 +44,9 @@ def get_or_create_hybrid_config(session: Session) -> HybridConfig:
 
 def run_hybrid(session: Session) -> dict:
     """Scan + auto-open the single best qualifying setup (if any). Returns a short summary."""
+    from app.agents.scanner import expire_stale_proposals
+
+    expire_stale_proposals(session)  # clear stale pendings that would otherwise block symbols
     cfg = get_or_create_hybrid_config(session)
     threshold = cfg.min_confidence
 
@@ -84,9 +87,11 @@ def run_hybrid(session: Session) -> dict:
         if _norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms:
             continue
         try:
-            # Full LLM analysis (same as the "Run analysis" button) for a proper read.
+            # Rank deterministically (cheap, no LLM quota) — the engine's confidence is now
+            # well-calibrated. The chosen best is then re-run with the LLM reviewer below before
+            # it actually opens, so the LLM judgment still gates every auto-trade.
             prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=True)
+                                       it.timeframe, use_llm=False)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue

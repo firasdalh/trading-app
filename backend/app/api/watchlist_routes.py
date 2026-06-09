@@ -144,18 +144,21 @@ def opportunities(session: Session = Depends(get_session)) -> list[OpportunityVi
     """Scan every enabled watchlist pair and return the setups ranked best-first — actionable &
     risk-approved on top, then forming ('watch'), then the rest. Read-only: nothing is opened."""
     from app.agents.pipeline import preview_symbol
+    from app.agents.scanner import expire_stale_proposals
     from app.risk.service import live_broker_positions
 
+    expire_stale_proposals(session)  # so the scan reflects a clean pending list
     open_syms = {p.symbol.upper() for p in live_broker_positions(session)}
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
 
     out: list[OpportunityView] = []
     for it in items:
         try:
-            # Full LLM analysis (same engine as the "Run analysis" button) so the scan is a
-            # proper read — fundamentals + the AI reviewer contribute, not deterministic-only.
+            # Rank deterministically (no LLM quota burned scanning the whole list). The engine's
+            # confidence is well-calibrated now; the LLM reviewer runs when you actually open a
+            # trade (the Open button / Hybrid's final pick / Run analysis).
             prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=True)
+                                       it.timeframe, use_llm=False)
         except Exception as exc:  # noqa: BLE001
             log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue

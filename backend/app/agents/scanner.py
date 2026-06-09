@@ -47,6 +47,37 @@ def _scan_open_positions(session: Session) -> list[dict]:
     return actionable
 
 
+# Pending proposals older than this many BARS of their own timeframe are stale (price has moved,
+# the entry/stop are no longer valid) -> expire them so they stop blocking the scanner/Hybrid.
+_STALE_BARS = 2
+_TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+
+
+def expire_stale_proposals(session: Session) -> int:
+    """Mark PENDING_APPROVAL proposals older than ~2 bars of their timeframe as EXPIRED.
+
+    The scanner and Hybrid skip any symbol that has a pending proposal (to avoid duplicates), so
+    stale pendings that never get approved/rejected would otherwise block those symbols forever.
+    """
+    now = datetime.now(timezone.utc)
+    rows = session.scalars(
+        select(TradeProposalRecord).where(
+            TradeProposalRecord.status == ProposalStatus.PENDING_APPROVAL.value
+        )
+    ).all()
+    expired = 0
+    for r in rows:
+        created = r.created_at if r.created_at.tzinfo else r.created_at.replace(tzinfo=timezone.utc)
+        max_age = _STALE_BARS * _TF_MINUTES.get(r.timeframe, 60) * 60
+        if (now - created).total_seconds() > max_age:
+            r.status = ProposalStatus.EXPIRED.value
+            expired += 1
+    if expired:
+        session.commit()
+        log.info("expired stale pending proposals", extra={"count": expired})
+    return expired
+
+
 def get_or_create_scan_config(session: Session) -> ScanConfig:
     cfg = session.get(ScanConfig, 1)
     if cfg is None:
@@ -58,6 +89,7 @@ def get_or_create_scan_config(session: Session) -> ScanConfig:
 
 def run_scan(session: Session) -> dict:
     """Analyze every enabled watch item once. Returns a small summary."""
+    expire_stale_proposals(session)
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
 
     open_syms = {
