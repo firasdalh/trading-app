@@ -106,12 +106,77 @@ def close_one(session: Session, position_id: int) -> dict:
     return {"closed": True, "symbol": pos.symbol, "realized_pnl": pos.realized_pnl}
 
 
+def _reconcile_closed_at_broker(session: Session, settings, open_positions: list[Position]) -> int:
+    """Mark app positions CLOSED when the broker no longer holds them — i.e. they were closed in
+    the MT5 terminal, by a broker-side SL/TP, or by any path that didn't update the DB. Without
+    this, such 'phantom' rows linger as OPEN forever and wrongly count against the anti-stacking
+    rule and the position cap, and show as open in the UI when they aren't.
+
+    Outage-safe: a position is reconciled only when ITS OWN broker successfully reports an open
+    book that lacks it. (`live_broker_positions` swallows per-broker errors and can return an empty
+    list on an outage, so we fetch per broker here and skip any broker whose fetch failed — never
+    closing a position just because the broker was unreachable.)
+
+    Does NOT book realized P&L into the daily state: realized P&L and the journal already come from
+    the broker's own deal history (broker truth), so re-booking here would double-count. This only
+    removes the phantom from the OPEN set.
+    """
+    from app.risk.service import _norm_symbol
+
+    bm = settings.broker_map or {}
+    broker_books: dict[str, tuple[bool, set[tuple[str, str]]]] = {}  # broker name -> (fetch_ok, keys)
+
+    def book_for(asset_class: str) -> tuple[bool, set[tuple[str, str]]]:
+        name = bm.get(asset_class, "sim")
+        if name not in broker_books:
+            broker = get_broker_for(AssetClass(asset_class), bm)
+            # Only a durable-account broker (MT5/Exness) is authoritative for "still open". The
+            # sim broker forgets positions on restart, so its empty book must never close DB rows.
+            if not getattr(broker, "reconciles_positions", False):
+                broker_books[name] = (False, set())
+            else:
+                try:
+                    positions = broker.get_open_positions()
+                    broker_books[name] = (True, {(_norm_symbol(p.symbol), p.direction) for p in positions})
+                except Exception as exc:  # noqa: BLE001 - unreachable broker => skip (never close on outage)
+                    log.warning("reconcile: broker open-book fetch failed",
+                                extra={"broker": name, "error": str(exc)})
+                    broker_books[name] = (False, set())
+        return broker_books[name]
+
+    reconciled = 0
+    for pos in open_positions:
+        ok, keys = book_for(pos.asset_class)
+        if not ok:
+            continue
+        if (_norm_symbol(pos.symbol), pos.direction) not in keys:
+            pos.status = PositionStatus.CLOSED.value
+            pos.closed_at = datetime.now(timezone.utc)
+            session.add(pos)
+            session.add(AgentRun(
+                agent="monitor", symbol=pos.symbol, event="position_reconciled",
+                detail={"reason": "closed at broker (reconciled)", "direction": pos.direction},
+            ))
+            log.warning("position reconciled (closed at broker)",
+                        extra={"symbol": pos.symbol, "direction": pos.direction, "id": pos.id})
+            reconciled += 1
+    return reconciled
+
+
 def monitor_positions(session: Session) -> dict:
     """One monitoring pass over all open positions. Returns a small summary dict."""
     settings = get_or_create_settings(session)
     open_positions = session.scalars(
         select(Position).where(Position.status == PositionStatus.OPEN.value)
     ).all()
+
+    # Reconcile first: drop positions the broker no longer holds (closed in the terminal /
+    # broker-side) so we neither price nor manage phantoms, and they stop blocking new trades.
+    if _reconcile_closed_at_broker(session, settings, open_positions):
+        session.commit()
+        open_positions = session.scalars(
+            select(Position).where(Position.status == PositionStatus.OPEN.value)
+        ).all()
 
     checked, closed = 0, 0
     for pos in open_positions:

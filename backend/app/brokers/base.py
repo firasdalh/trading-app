@@ -39,6 +39,13 @@ class BrokerAdapter(ABC):
     #: Asset classes this adapter can serve.
     supported_asset_classes: tuple[AssetClass, ...] = ()
 
+    #: Whether this broker tracks open positions DURABLY (a real account that survives app
+    #: restarts, e.g. MT5/Exness). The monitor only treats such a broker's open book as
+    #: authoritative when reconciling away app positions the broker no longer holds. The sim
+    #: broker keeps positions in memory and forgets them on restart, so it must stay False —
+    #: otherwise a restart would wrongly reconcile (close) every open paper position.
+    reconciles_positions: bool = False
+
     @property
     @abstractmethod
     def is_paper(self) -> bool:

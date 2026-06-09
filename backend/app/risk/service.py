@@ -254,7 +254,12 @@ def _norm_symbol(s: str) -> str:
 
 
 def db_has_open_same_direction(session: Session, symbol: str, direction: str) -> bool:
-    """True if an APP-tracked OPEN position exists in this symbol + direction (anti-stacking)."""
+    """True if an APP-tracked OPEN position exists in this symbol + direction (anti-stacking).
+
+    Retained as a helper, but the live preview/scan path (`assess`) now derives anti-stacking
+    from broker truth instead, so a stale DB row can't phantom-block a symbol. The monitor
+    reconciles such stale rows; see `app.execution.monitor._reconcile_closed_at_broker`.
+    """
     norm = _norm_symbol(symbol)
     rows = session.scalars(
         select(Position).where(Position.status == PositionStatus.OPEN.value)
@@ -292,13 +297,17 @@ def assess(
     broker = get_broker_for(proposal.asset_class, settings.broker_map)
     limits = build_limits(session)
     account = build_account_state(session, broker)
-    same_dir = db_has_open_same_direction(session, proposal.symbol, proposal.direction.value)
-    # Correlated-concentration check across the real open book (broker truth, so manual trades
-    # count too): refuse a 3rd position that piles onto one risk factor (e.g. "long USD" x3).
+    # Open book from broker truth (so manual/terminal trades count too). Used for BOTH the
+    # anti-stacking and correlated-concentration checks, which keeps the preview consistent with
+    # the executor's final broker-truth gate — a stale app-DB row can no longer "phantom-block" a
+    # symbol that isn't actually open at the broker. (Refuses e.g. a 2nd same-direction trade in
+    # an open symbol, or a 3rd position piling onto one risk factor like "long USD" x3.)
     try:
         open_book = [(p.symbol, p.direction) for p in live_broker_positions(session)]
     except Exception:  # noqa: BLE001 - never let a broker hiccup block sizing
         open_book = []
+    norm = _norm_symbol(proposal.symbol)
+    same_dir = any(_norm_symbol(sym) == norm and d == proposal.direction.value for sym, d in open_book)
     correlated = correlated_concentration(open_book, proposal.symbol, proposal.direction.value)
     return evaluate_proposal(
         proposal,

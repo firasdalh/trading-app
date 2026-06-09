@@ -52,6 +52,9 @@ class Mt5BrokerAdapter(BrokerAdapter):
     name = "mt5"
     supported_asset_classes = (AssetClass.FOREX, AssetClass.METAL, AssetClass.CRYPTO,
                                AssetClass.STOCK, AssetClass.ENERGY, AssetClass.INDEX)
+    # Real Exness account: positions persist across app restarts, so its open book is the
+    # authoritative source the monitor uses to reconcile away stale app-tracked positions.
+    reconciles_positions = True
 
     def __init__(self) -> None:
         from app.brokers.mt5_credentials import resolve_mt5_credentials

@@ -332,12 +332,16 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
         </div>
       )}
 
-      {on && state?.last_result && (
+      {on && (state?.last_result ? (
         <div className="mt-1 text-xs text-neutral-400">
           Last check{state.last_run_at ? ` (${new Date(state.last_run_at).toLocaleTimeString()})` : ""}:{" "}
           {state.last_result}
         </div>
-      )}
+      ) : (
+        <div className="mt-1 text-xs text-neutral-500">
+          No check yet with these settings — press <span className="text-neutral-300">Run now</span> to scan immediately.
+        </div>
+      ))}
     </div>
   );
 }

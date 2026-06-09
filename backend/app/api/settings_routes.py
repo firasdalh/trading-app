@@ -590,10 +590,18 @@ def hybrid_set_config(req: HybridConfigRequest, session: Session = Depends(get_s
     cfg = get_or_create_hybrid_config(session)
     if req.enabled is not None:
         cfg.enabled = req.enabled
-    if req.interval_seconds is not None:
+    # The stored 'last check' summary quotes the threshold/interval that were in force when the
+    # last scan ran. If either changes, that message is now stale (e.g. it still says "above 70%"
+    # after you lower the bar to 60%), so clear it — the panel will repopulate on the next scan.
+    changed_filter = False
+    if req.interval_seconds is not None and req.interval_seconds != cfg.interval_seconds:
         cfg.interval_seconds = req.interval_seconds
-    if req.min_confidence is not None:
+        changed_filter = True
+    if req.min_confidence is not None and req.min_confidence != cfg.min_confidence:
         cfg.min_confidence = req.min_confidence
+        changed_filter = True
+    if changed_filter:
+        cfg.last_result = None
     session.commit()
     log.warning("hybrid config updated", extra={"enabled": cfg.enabled,
                 "interval": cfg.interval_seconds, "min_confidence": cfg.min_confidence})

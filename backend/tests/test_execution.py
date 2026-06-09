@@ -147,6 +147,92 @@ def test_monitor_closes_on_stop_and_pauses_on_daily_loss(db_session):
     assert daily.trading_paused is True  # loss exceeded 3% of 1000
 
 
+# ---- reconciliation: app positions the broker no longer holds ----
+
+def _pv(symbol, direction, asset_class="metal"):
+    from app.models.schemas import PositionView
+    return PositionView(id=1, symbol=symbol, asset_class=asset_class, direction=direction,
+                        qty=0.01, entry_price=100.0, stop_loss=None, take_profit=None,
+                        status="open", last_price=100.0, unrealized_pnl=0.0)
+
+
+class _FakeBroker:
+    """Minimal broker for reconciliation tests: controllable open book + durability flag."""
+    def __init__(self, *, reconciles, book=None, raises=False):
+        self.reconciles_positions = reconciles
+        self._book = book or []
+        self._raises = raises
+
+    def get_open_positions(self):
+        if self._raises:
+            raise RuntimeError("broker down")
+        return self._book
+
+
+def test_reconcile_closes_phantom_on_durable_broker(db_session, monkeypatch):
+    """A durable broker (MT5) that no longer reports a position -> the stale app row is closed,
+    so it stops blocking new trades (anti-stacking) and inflating exposure."""
+    from app.execution import monitor as monitor_mod
+
+    real = Position(symbol="BTCUSDm", asset_class="metal", direction="short", qty=0.01,
+                    entry_price=100.0, status=PositionStatus.OPEN.value, last_price=100.0)
+    phantom = Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
+                       entry_price=2000.0, status=PositionStatus.OPEN.value, last_price=2000.0)
+    db_session.add_all([real, phantom])
+    db_session.commit()
+
+    broker = _FakeBroker(reconciles=True, book=[_pv("BTCUSDm", "short")])  # XAU is gone at broker
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
+
+    settings = get_or_create_settings(db_session)
+    n = monitor_mod._reconcile_closed_at_broker(db_session, settings, [real, phantom])
+    db_session.commit()
+    assert n == 1
+    db_session.refresh(real)
+    db_session.refresh(phantom)
+    assert real.status == PositionStatus.OPEN.value
+    assert phantom.status == PositionStatus.CLOSED.value
+    assert phantom.closed_at is not None
+
+
+def test_reconcile_skips_non_durable_broker(db_session, monkeypatch):
+    """The sim broker forgets positions on restart, so its empty book must NOT close DB rows."""
+    from app.execution import monitor as monitor_mod
+
+    pos = Position(symbol="AAPL", asset_class="stock", direction="long", qty=1.0,
+                   entry_price=100.0, status=PositionStatus.OPEN.value, last_price=100.0)
+    db_session.add(pos)
+    db_session.commit()
+
+    broker = _FakeBroker(reconciles=False, book=[])  # sim: empty, but not authoritative
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
+
+    settings = get_or_create_settings(db_session)
+    n = monitor_mod._reconcile_closed_at_broker(db_session, settings, [pos])
+    assert n == 0
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.OPEN.value
+
+
+def test_reconcile_skips_on_broker_outage(db_session, monkeypatch):
+    """If the (durable) broker can't be reached, never close positions on the outage."""
+    from app.execution import monitor as monitor_mod
+
+    pos = Position(symbol="EURUSDm", asset_class="forex", direction="long", qty=1.0,
+                   entry_price=1.1, status=PositionStatus.OPEN.value, last_price=1.1)
+    db_session.add(pos)
+    db_session.commit()
+
+    broker = _FakeBroker(reconciles=True, raises=True)
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
+
+    settings = get_or_create_settings(db_session)
+    n = monitor_mod._reconcile_closed_at_broker(db_session, settings, [pos])
+    assert n == 0
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.OPEN.value
+
+
 # ---- flatten ----
 
 def test_close_one_books_pnl(db_session):
