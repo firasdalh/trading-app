@@ -319,3 +319,15 @@ def test_volatile_regime_lowers_confidence():
     volatile = _deterministic_decision("X", AssetClass.FOREX, "1h", _tech_regime(1.8), _fund(), now=NOW)
     assert calm.direction == Direction.SHORT and volatile.direction == Direction.SHORT
     assert volatile.confidence < calm.confidence
+
+
+# ---- pullback-to-value entry location ----
+
+def test_pullback_entry_at_value_scores_higher_than_chasing():
+    at_value = _tech_ext("up", entry=100.0, ema20=100.0, atr_v=2.0)  # at the 20-EMA (pullback)
+    mid = _tech_ext("up", entry=104.0, ema20=100.0, atr_v=2.0)       # 2xATR above value (chasing-ish)
+    p_val = _deterministic_decision("X", AssetClass.FOREX, "1h", at_value, _fund(), now=NOW)
+    p_mid = _deterministic_decision("X", AssetClass.FOREX, "1h", mid, _fund(), now=NOW)
+    assert p_val.direction == Direction.LONG and p_mid.direction == Direction.LONG
+    assert p_val.confidence > p_mid.confidence
+    assert "value" in p_val.rationale.lower()

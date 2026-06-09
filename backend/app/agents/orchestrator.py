@@ -89,6 +89,8 @@ _MIN_RR_TO_STRUCT = 1.0  # need >=1R of room to the next structure to take the t
 _MOM_ATR_FRAC = 0.10  # counter-momentum only "matters" when |MACD hist| >= 10% of ATR (noise gate)
 _PULLBACK_ATR = 2.5   # price > this many ATR beyond EMA20 = stretched entry -> down-weight (a
                       # steady trend rides ~2.4 ATR from the lagging EMA, so only flag real spikes)
+_VALUE_ENTRY_ATR = 1.0  # entry within ~1 ATR of the 20-EMA = a pullback to VALUE -> a pro's
+                        # preferred trend entry (tight risk to the swing, lots of room to target)
 
 _TF_RANK = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7}
 
@@ -372,6 +374,12 @@ def _deterministic_decision(
         conf -= 0.1
     if overextended:
         conf -= 0.1  # stretched entry (mean-reversion bounce risk)
+    # Entry LOCATION: a pullback to value (within ~1 ATR of the 20-EMA) is the pro's preferred
+    # trend entry — small risk to the swing, large room to target. Reward it so pullback setups
+    # rank above chased ones in the scanner/Hybrid selection.
+    at_value = bool(ema20 and atr_v and abs(entry - ema20) <= _VALUE_ENTRY_ATR * atr_v)
+    if at_value:
+        conf += 0.1
     rsi = ind.get("rsi14")
     if rsi is not None and ((direction == Direction.LONG and rsi >= _RSI_OB)
                             or (direction == Direction.SHORT and rsi <= _RSI_OS)):
@@ -407,6 +415,7 @@ def _deterministic_decision(
         f"macro={macro}, structure={struct}/{macro_struct}, ADX {adx_v}, MACD hist={macd_hist}, "
         f"RSI {rsi}, bias={bias.value}"
         f"{' (cross-TF momentum conflict)' if macro_conflict else ''}"
+        f"{' (pullback entry at value)' if at_value else ''}"
         f"{' (stretched entry)' if overextended else ''}"
         f"{' (CHoCH)' if ind.get('choch') else ''}. "
         f"Entry {base.entry}, stop {base.stop_loss} "
