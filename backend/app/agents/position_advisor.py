@@ -37,9 +37,12 @@ _SEV_RANK = {"info": 0, "warn": 1, "danger": 2}
 _MOM_ATR_FRAC = 0.10        # momentum counts as "against" only if |MACD hist| >= 10% of ATR
 
 # --- auto-manage thresholds (R = profit / planned risk) ---
-_BREAKEVEN_R = 1.0          # at +1R, lock the stop to breakeven
-_TRAIL_R = 1.5             # beyond +1.5R, trail the stop by ATR
-_TRAIL_ATR_MULT = 1.0       # trailing distance = 1 ATR behind price
+_BREAKEVEN_R = 1.0          # at +1R, lock the stop to breakeven (trending/moderate regime)
+_TRAIL_R = 1.5             # beyond +1.5R, trail the stop (trending/moderate regime)
+_BREAKEVEN_R_FAST = 0.5     # volatile/ranging regime: bank sooner -> breakeven at +0.5R
+_TRAIL_R_FAST = 1.0         # volatile/ranging regime: start trailing at +1R
+_TRAIL_ATR_MULT = 1.0       # ATR trailing distance = 1 ATR behind price
+_STRUCT_TRAIL_BUFFER_ATR = 0.2  # structural trail sits this far beyond the swing (wick allowance)
 _PROTECT_ATR_MULT = 1.5     # protective stop for a naked position = 1.5 ATR from price
 
 # --- hysteresis + cooldown so auto-execute doesn't thrash ---
@@ -116,7 +119,12 @@ def _position_context(session: Session, p) -> dict | None:
     """Fresh deterministic read for one open position (trend, momentum, ATR, last price). Best
     effort — returns ``None`` if data/broker is unavailable. No LLM, so it's free per tick."""
     try:
-        from app.agents.orchestrator import _macro_trend, _trend_from_indicators
+        from app.agents.orchestrator import (
+            _macro_trend,
+            _regime,
+            _structure_label,
+            _trend_from_indicators,
+        )
         from app.agents.technical import run_technical
         from app.brokers.registry import get_broker_for
         from app.models.enums import AssetClass
@@ -138,10 +146,16 @@ def _position_context(session: Session, p) -> dict | None:
         prim = next((x for x in tech.timeframes if x.timeframe == tf), tech.timeframes[0])
         macro_tf = _macro_tf_label(tech, tf)
         ind = prim.indicators
+        # Carry the same chart-reading signals the entry engine uses, so EXIT management is as
+        # senior-trader as entry: market structure, change-of-character, the latest swing levels
+        # (for structural trailing), and the regime (for how aggressively to manage).
         return {"tf": tf, "trend": _trend_from_indicators(ind, prim.trend),
                 "macro": _macro_trend(tech), "macro_tf": macro_tf,
                 "macd_hist": ind.get("macd_hist"), "atr": ind.get("atr14"),
-                "last": ind.get("last_close")}
+                "last": ind.get("last_close"),
+                "regime": _regime(ind), "structure": _structure_label(ind),
+                "choch": bool(ind.get("choch")),
+                "swing_high": ind.get("swing_high"), "swing_low": ind.get("swing_low")}
     except Exception:  # noqa: BLE001 - the advisor must never crash the scan/endpoint
         return None
 
@@ -170,6 +184,15 @@ def _thesis_from_context(p, ctx: dict) -> dict:
                          f"but the higher {macro_tf} timeframe is still "
                          f"{(macro or 'mixed').upper()} — likely a pullback, not a breakdown. "
                          "Tighten the stop; don't bail blindly.")}
+
+    # Change-of-character: the structure we're riding just cracked (price broke back through the
+    # last swing). It's the EARLIEST reversal warning — before the EMA trend even flips — so a pro
+    # tightens / takes profit here rather than waiting. Treat as weakening.
+    if ctx.get("choch") and ctx.get("structure") == want:
+        broke = "higher-low" if p.direction == "long" else "lower-high"
+        return {"label": "weakening",
+                "note": (f"Plan check: change-of-character on {tf} — price broke the last {broke} "
+                         "swing. The structure is cracking; tighten the stop or take profit.")}
 
     against = macd_hist is not None and (
         (p.direction == "long" and macd_hist < 0) or (p.direction == "short" and macd_hist > 0)
@@ -360,10 +383,25 @@ def _tightens(direction: str, current: float | None, new: float) -> bool:
     return new > current if direction == "long" else new < current
 
 
+def _trail_stop(direction: str, last: float, atr: float, ctx: dict, regime: str) -> tuple[float, str]:
+    """Where to trail the stop. In a TRENDING regime, trail behind the last swing (structure) to
+    give the move room — like a trend trader riding it; otherwise (volatile/ranging/moderate) use a
+    tighter ATR trail to bank gains. Returns (level, basis)."""
+    swing = ctx.get("swing_low") if direction == "long" else ctx.get("swing_high")
+    if regime == "trending" and swing is not None:
+        buf = _STRUCT_TRAIL_BUFFER_ATR * atr
+        return ((swing - buf) if direction == "long" else (swing + buf)), "behind structure"
+    atr_trail = (last - _TRAIL_ATR_MULT * atr) if direction == "long" else (last + _TRAIL_ATR_MULT * atr)
+    return atr_trail, "ATR"
+
+
 def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None) -> dict | None:
     """The bounded, deterministic set of actions the advisor may take autonomously — only
     highest-confidence, RISK-REDUCING moves: close an invalidated trade, attach a protective
-    stop, lock to breakeven, or trail. It never opens, sizes up, flips, or loosens a stop."""
+    stop, lock to breakeven, or trail. It never opens, sizes up, flips, or loosens a stop.
+
+    Regime-aware: a clean trend gets room (trail behind structure, normal R thresholds); a
+    volatile/ranging tape banks sooner (tighter ATR trail, lower breakeven/trail R)."""
     if a.thesis == "invalidated":
         return {"action": "close", "kind": "close",
                 "reason": "thesis invalidated — the trend has flipped against the position"}
@@ -371,6 +409,7 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None) -> 
     atr = (ctx or {}).get("atr")
     last = (ctx or {}).get("last") or p.last_price
     d = p.direction
+    regime = (ctx or {}).get("regime") or "moderate"
 
     # 1) Naked position -> attach an ATR protective stop (always risk-reducing).
     if (p.stop_loss is None or p.stop_loss == 0) and atr and last:
@@ -378,16 +417,20 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None) -> 
         return {"action": "set_stop", "kind": "protect", "stop": round(stop, 5),
                 "reason": "no stop set — attaching an ATR protective stop"}
 
-    # 2) R-based management once we have a risk reference and a price.
+    # 2) R-based management once we have a risk reference and a price. In a choppy/volatile tape we
+    # take profit protection earlier (lower R), and the trail style follows the regime.
+    bank_fast = regime in ("volatile", "ranging")
+    trail_r = _TRAIL_R_FAST if bank_fast else _TRAIL_R
+    be_r = _BREAKEVEN_R_FAST if bank_fast else _BREAKEVEN_R
     if plan_risk and last and atr:
         profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
         r = profit / plan_risk
-        if r >= _TRAIL_R:
-            trail = (last - _TRAIL_ATR_MULT * atr) if d == "long" else (last + _TRAIL_ATR_MULT * atr)
+        if r >= trail_r:
+            trail, basis = _trail_stop(d, last, atr, ctx or {}, regime)
             if _tightens(d, p.stop_loss, trail):
                 return {"action": "set_stop", "kind": "trail", "stop": round(trail, 5),
-                        "reason": f"+{r:.1f}R — trailing the stop to lock gains"}
-        if r >= _BREAKEVEN_R and _stop_worse_than_entry(p):
+                        "reason": f"+{r:.1f}R ({regime}) — trailing the stop ({basis}) to lock gains"}
+        if r >= be_r and _stop_worse_than_entry(p):
             return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
                     "reason": f"reached +{r:.1f}R — moving the stop to breakeven"}
 

@@ -234,6 +234,43 @@ def test_thesis_flip_confirmed_on_higher_tf_is_invalidated():
     assert advisor._thesis_from_context(p, ctx)["label"] == "invalidated"
 
 
+# --- structure / regime-aware exit management (senior-trader exits) ---
+
+def test_choch_against_position_warns_weakening():
+    # Long with an intact up-trend, but a change-of-character (broke the last higher-low).
+    p = _pos(direction="long")
+    ctx = {"tf": "1h", "trend": "up", "macro": "up", "macro_tf": "1d", "macd_hist": 1.0,
+           "atr": 2.0, "structure": "up", "choch": True}
+    res = advisor._thesis_from_context(p, ctx)
+    assert res["label"] == "weakening" and "change-of-character" in res["note"].lower()
+
+
+def test_trail_behind_structure_in_trending_regime():
+    p = _pos(direction="long", stop=4455.0)  # entry 4449, stop already past breakeven
+    ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending", "swing_low": 4460.0}
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)  # +2.1R
+    assert d is not None and d["kind"] == "trail" and "structure" in d["reason"]
+    assert abs(d["stop"] - 4459.6) < 0.01  # swing 4460 - 0.2*ATR(2)
+
+
+def test_trail_atr_in_volatile_regime():
+    p = _pos(direction="long", stop=4455.0)
+    ctx = {"atr": 2.0, "last": 4470.0, "regime": "volatile", "swing_low": 4460.0}
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    assert d is not None and d["kind"] == "trail" and "ATR" in d["reason"]
+    assert abs(d["stop"] - 4468.0) < 0.01  # 4470 - 1*ATR(2) (tighter than structure in a chop)
+
+
+def test_volatile_regime_banks_breakeven_earlier():
+    # +0.6R: trending waits (needs +1R) but volatile banks at +0.5R.
+    p = _pos(direction="long", stop=4445.0)  # stop below entry (worse side)
+    base = {"atr": 2.0, "last": 4455.0}  # profit 6 / plan_risk 10 = 0.6R
+    trend = advisor._auto_decision(_adv(thesis="intact"), p, {**base, "regime": "trending"}, 10.0)
+    volat = advisor._auto_decision(_adv(thesis="intact"), p, {**base, "regime": "volatile"}, 10.0)
+    assert trend is None
+    assert volat is not None and volat["kind"] == "breakeven"
+
+
 def _patch_exec(monkeypatch, broker, *, kill=False, live_ok=True):
     import app.brokers.registry as reg
     import app.core.state as state
