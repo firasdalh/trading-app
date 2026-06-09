@@ -266,6 +266,9 @@ class PositionView(BaseModel):
     # Margin required to hold the position, in the account currency (USD) — the "cost to open".
     # Broker-computed (MT5) with full currency conversion; None when the broker can't supply it.
     cost_usd: float | None = None
+    # When the trade closed (closed trades only). For the broker-truth journal this is the
+    # exit deal's time, so it matches the Exness journal.
+    closed_at: datetime | None = None
 
 
 # --------------------------------------------------------------------------- #

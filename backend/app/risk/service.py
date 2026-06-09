@@ -50,6 +50,41 @@ def total_unrealized(session: Session) -> float:
     return round(sum(p.unrealized_pnl for p in live_broker_positions(session)), 2)
 
 
+def broker_closed_trades(session: Session, lookback_days: int = 120) -> list[PositionView] | None:
+    """Closed trades from the brokers' own deal history (broker truth, matches Exness).
+
+    Aggregates across the distinct configured brokers. Returns None if no configured broker can
+    report history — the caller then falls back to app-tracked closed positions.
+    """
+    from datetime import timedelta
+
+    settings = get_or_create_settings(session)
+    bm = settings.broker_map or {}
+    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    seen: set[str] = set()
+    out: list[PositionView] = []
+    supported = False
+    for ac in AssetClass:
+        name = bm.get(ac.value, "sim")
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            res = get_broker_for(ac, bm).get_closed_trades(since)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("broker closed trades failed", extra={"broker": name, "error": str(exc)})
+            continue
+        if res is not None:
+            supported = True
+            out.extend(res)
+    if not supported:
+        return None
+    out.sort(
+        key=lambda v: v.closed_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True
+    )
+    return out
+
+
 def broker_realized_today(session: Session) -> float | None:
     """Realized P&L today from the broker's own deal history (the account truth, including
     trades closed directly in the terminal). Returns None if no configured broker supports
@@ -213,6 +248,34 @@ def last_pair_close_at(session: Session, symbol: str) -> datetime | None:
     return None
 
 
+def _norm_symbol(s: str) -> str:
+    """Loose symbol key for matching across formats (BTC/USD, BTCUSDm, BTCUSD)."""
+    return "".join(ch for ch in (s or "").upper() if ch.isalnum())
+
+
+def db_has_open_same_direction(session: Session, symbol: str, direction: str) -> bool:
+    """True if an APP-tracked OPEN position exists in this symbol + direction (anti-stacking)."""
+    norm = _norm_symbol(symbol)
+    rows = session.scalars(
+        select(Position).where(Position.status == PositionStatus.OPEN.value)
+    ).all()
+    return any(_norm_symbol(p.symbol) == norm and p.direction == direction for p in rows)
+
+
+def broker_has_open_same_direction(session: Session, symbol: str, direction: str) -> bool:
+    """True if the BROKER already has an open position in this symbol + direction (anti-stacking).
+
+    Broker truth, so it also catches trades opened directly in the terminal. Used as the final
+    gate in the executor right before a new order is submitted.
+    """
+    norm = _norm_symbol(symbol)
+    try:
+        positions = live_broker_positions(session)
+    except Exception:  # noqa: BLE001
+        return False
+    return any(_norm_symbol(p.symbol) == norm and p.direction == direction for p in positions)
+
+
 def assess(
     session: Session,
     proposal: TradeProposal,
@@ -227,6 +290,7 @@ def assess(
     broker = get_broker_for(proposal.asset_class, settings.broker_map)
     limits = build_limits(session)
     account = build_account_state(session, broker)
+    same_dir = db_has_open_same_direction(session, proposal.symbol, proposal.direction.value)
     return evaluate_proposal(
         proposal,
         account,
@@ -235,6 +299,7 @@ def assess(
         last_pair_close_at=last_pair_close_at(session, proposal.symbol),
         qty_step=_QTY_STEP.get(proposal.asset_class),
         override_risk_fraction=override_risk_fraction,
+        has_open_same_direction=same_dir,
     )
 
 

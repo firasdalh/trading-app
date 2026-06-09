@@ -52,7 +52,10 @@ def _last_close(technical: TechnicalRead) -> float | None:
 # Indicator gates for the deterministic decision.
 _ADX_MIN = 20.0       # below this the market is ranging -> stand aside
 _ADX_STRONG = 25.0
-_ATR_STOP_MULT = 1.5  # protective stop = entry +/- 1.5 * ATR
+_ATR_STOP_MULT = 1.5  # protective stop = entry +/- 1.5 * ATR (forex/metal/index/stock/energy)
+_ATR_STOP_MULT_CRYPTO = 2.5  # crypto is far more volatile — a tight stop just gets wicked out
+_MIN_STOP_ATR_FRAC = 1.0  # never place the stop closer than 1xATR (anti-wick floor): structure-
+                          # tightening must not pull the stop inside this, or normal noise stops us
 _RR = 2.0             # reward:risk target
 _RSI_OB = 75.0        # overbought / oversold caution thresholds
 _RSI_OS = 25.0
@@ -187,16 +190,23 @@ def _deterministic_decision(
     resistance = tf0.resistance_levels[0] if tf0 and tf0.resistance_levels else None
 
     # --- ATR stop (tightened to structure when sensible) ---
+    # Crypto gets a wider ATR multiple, and we never tighten the stop inside an anti-wick floor
+    # (>= 1xATR from entry) — both target the crypto losses where tight stops were instantly hit.
+    atr_mult = _ATR_STOP_MULT_CRYPTO if asset_class == AssetClass.CRYPTO else _ATR_STOP_MULT
+    min_stop_dist = _MIN_STOP_ATR_FRAC * atr_v if atr_v else 0.0
     if direction == Direction.LONG:
-        atr_stop = entry - _ATR_STOP_MULT * atr_v if atr_v else None
+        atr_stop = entry - atr_mult * atr_v if atr_v else None
         stop = atr_stop if atr_stop is not None else (support if (support and support < entry) else entry * 0.98)
-        if support is not None and atr_stop is not None and atr_stop < support < entry:
+        # Tighten to support only if it stays beyond the anti-wick floor.
+        if (support is not None and atr_stop is not None and atr_stop < support < entry
+                and (entry - support) >= min_stop_dist):
             stop = support
         risk = entry - stop
     else:
-        atr_stop = entry + _ATR_STOP_MULT * atr_v if atr_v else None
+        atr_stop = entry + atr_mult * atr_v if atr_v else None
         stop = atr_stop if atr_stop is not None else (resistance if (resistance and resistance > entry) else entry * 1.02)
-        if resistance is not None and atr_stop is not None and entry < resistance < atr_stop:
+        if (resistance is not None and atr_stop is not None and entry < resistance < atr_stop
+                and (resistance - entry) >= min_stop_dist):
             stop = resistance
         risk = stop - entry
 
@@ -278,7 +288,7 @@ def _deterministic_decision(
         f"ADX {adx_v}, MACD hist={macd_hist}, RSI {rsi}, bias={bias.value}"
         f"{' (cross-TF momentum conflict)' if macro_conflict else ''}"
         f"{' (stretched entry)' if overextended else ''}. "
-        f"Entry {base.entry}, stop {base.stop_loss} ({stop_basis} ~{_ATR_STOP_MULT}xATR), "
+        f"Entry {base.entry}, stop {base.stop_loss} ({stop_basis} ~{atr_mult}xATR), "
         f"target {base.take_profit} ({struct_note}). Deterministic (no LLM)."
     )
     return base

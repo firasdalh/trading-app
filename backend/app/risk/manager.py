@@ -83,6 +83,7 @@ def evaluate_proposal(
     qty_step: float | None = None,
     min_qty: float = 0.0,
     override_risk_fraction: float | None = None,
+    has_open_same_direction: bool = False,
 ) -> RiskDecision:
     """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
 
@@ -155,6 +156,16 @@ def evaluate_proposal(
         return _veto(
             symbol,
             f"max open positions reached ({account.open_positions}/{limits.max_open_positions})",
+            checks,
+        )
+
+    # --- 4b. no stacking: refuse a second same-direction trade in a symbol already open ---
+    # (Three BTC shorts opened in 11 min turned one wrong call into a tripled loss.)
+    checks["no_stacking"] = not has_open_same_direction
+    if has_open_same_direction:
+        return _veto(
+            symbol,
+            f"already have an open {proposal.direction.value} position in {symbol} — not stacking",
             checks,
         )
 

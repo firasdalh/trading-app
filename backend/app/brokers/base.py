@@ -112,6 +112,16 @@ class BrokerAdapter(ABC):
         """
         return {}
 
+    def get_closed_trades(self, since) -> list[PositionView] | None:
+        """Closed trades from the broker's own history since ``since`` (a tz-aware datetime).
+
+        Default None = the broker can't report it (the caller then falls back to app-tracked
+        closed positions). MT5 overrides this by reconstructing closed positions from its deal
+        history, so the journal matches the broker (Exness) exactly — real fills, profit, and
+        close times, including trades closed directly in the terminal.
+        """
+        return None
+
     def quote_economics(self, symbol: str, qty_units: float, price: float, is_long: bool) -> dict | None:
         """Cost (margin) and leverage of a hypothetical order, in the account currency.
 

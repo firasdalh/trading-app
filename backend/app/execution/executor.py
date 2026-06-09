@@ -57,6 +57,16 @@ def execute_proposal(session: Session, record: TradeProposalRecord) -> OrderResu
     if not broker.is_paper and not live_execution_allowed(settings):
         raise ExecutionBlocked("live execution not confirmed for this session")
 
+    # --- anti-stacking: never pile a second same-direction trade into one symbol ---
+    # (Final gate at the moment of opening — catches Mode-A approvals of multiple pending
+    # proposals and Mode-B auto-execs that the analyze-time check couldn't see yet.)
+    from app.risk.service import broker_has_open_same_direction
+
+    if broker_has_open_same_direction(session, record.symbol, record.direction):
+        raise ExecutionBlocked(
+            f"already have an open {record.direction} position in {record.symbol} — not stacking"
+        )
+
     side = OrderSide.BUY if record.direction == Direction.LONG.value else OrderSide.SELL
     req = OrderRequest(
         symbol=record.symbol,

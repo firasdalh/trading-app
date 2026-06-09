@@ -24,6 +24,14 @@ def closed_trades(
     limit: int = Query(100, ge=1, le=500),
     session: Session = Depends(get_session),
 ) -> list[PositionView]:
+    """Closed-trade log. Prefers the broker's own deal history (MT5) so entry/exit/P&L/date
+    match the Exness journal exactly; falls back to app-tracked closed positions otherwise."""
+    from app.risk.service import broker_closed_trades
+
+    broker_trades = broker_closed_trades(session)
+    if broker_trades is not None:
+        return broker_trades[:limit]
+
     rows = session.scalars(
         select(Position)
         .where(Position.status == PositionStatus.CLOSED.value)

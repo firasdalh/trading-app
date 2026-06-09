@@ -134,6 +134,7 @@ export interface PositionView {
   unrealized_pnl: number;
   realized_pnl: number | null;
   cost_usd: number | null;
+  closed_at: string | null;
 }
 
 export interface PositionAdvice {

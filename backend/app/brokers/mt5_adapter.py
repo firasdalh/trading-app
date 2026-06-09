@@ -311,6 +311,64 @@ class Mt5BrokerAdapter(BrokerAdapter):
         except Exception:  # noqa: BLE001 - economics are best-effort; never break the flow
             return None
 
+    def get_closed_trades(self, since) -> list[PositionView] | None:
+        """Reconstruct CLOSED trades from MT5 deal history so the journal matches Exness exactly.
+
+        A closed position = its IN deal (entry price/time/direction) + OUT deal(s) (exit
+        price/time). Realized P&L is profit + swap + commission across the position's deals —
+        the true money booked, matching the terminal. Includes trades closed directly in MT5.
+        """
+        mt5 = self._mt5
+        try:
+            deals = mt5.history_deals_get(since, datetime.now(timezone.utc))
+        except Exception:  # noqa: BLE001
+            return None
+        if deals is None:
+            return []
+
+        entry_in = getattr(mt5, "DEAL_ENTRY_IN", 0)
+        entry_out = getattr(mt5, "DEAL_ENTRY_OUT", 1)
+        deal_buy = getattr(mt5, "DEAL_TYPE_BUY", 0)
+
+        groups: dict[int, list] = {}
+        for d in deals:
+            pid = getattr(d, "position_id", 0)
+            if pid:
+                groups.setdefault(pid, []).append(d)
+
+        out: list[PositionView] = []
+        for pid, ds in groups.items():
+            ds.sort(key=lambda x: getattr(x, "time", 0))
+            ins = [d for d in ds if getattr(d, "entry", None) == entry_in]
+            outs = [d for d in ds if getattr(d, "entry", None) == entry_out]
+            if not ins or not outs:
+                continue  # position still open or only partially filled — skip
+            first_in, last_out = ins[0], outs[-1]
+            is_long = getattr(first_in, "type", 0) == deal_buy
+            vol = round(sum(float(getattr(d, "volume", 0) or 0) for d in outs), 2)
+            net = sum(
+                float(getattr(d, "profit", 0) or 0)
+                + float(getattr(d, "swap", 0) or 0)
+                + float(getattr(d, "commission", 0) or 0)
+                for d in ds
+            )
+            close_ts = int(getattr(last_out, "time", 0) or 0)
+            out.append(PositionView(
+                id=pid,
+                symbol=getattr(first_in, "symbol", ""),
+                asset_class=AssetClass.FOREX.value,  # not surfaced for closed trades
+                direction="long" if is_long else "short",
+                qty=vol,
+                entry_price=float(getattr(first_in, "price", 0) or 0),
+                status="closed",
+                last_price=float(getattr(last_out, "price", 0) or 0),  # shown as Exit
+                unrealized_pnl=0.0,
+                realized_pnl=round(net, 2),
+                closed_at=datetime.fromtimestamp(close_ts, tz=timezone.utc) if close_ts else None,
+            ))
+        out.sort(key=lambda v: v.closed_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return out
+
     def close_position(self, symbol: str) -> OrderResult:
         mt5 = self._mt5
         sym = self._resolve_symbol(symbol)

@@ -30,6 +30,19 @@ The maximum you can lose on a single trade if the stop-loss is hit. Position siz
 Caps how many trades can be open at once.
 - Why: correlated positions (e.g. several USD pairs) can all move against you together,
   so "3 trades" can really be one big bet. Keeping this small limits hidden concentration.
+- **No-stacking rule (added 2026-06-09):** the Risk Manager now also vetoes a second trade in
+  the *same symbol and same direction* while one is already open, and the executor blocks it as
+  a final gate. (Three BTC shorts opened within 11 minutes turned one wrong call into a tripled
+  loss; this prevents that pile-up.)
+
+### Stop placement (engine)
+- Protective stop = entry ± an ATR multiple: **1.5×ATR** for forex/metals/indices/stocks/energy,
+  **2.5×ATR for crypto** (crypto is far more volatile — a tight stop just gets wicked out).
+- An **anti-wick floor (added 2026-06-09)** keeps the stop at least ~1×ATR from entry: the
+  structure-tightening that snaps the stop to a nearby level can no longer pull it inside that
+  floor (a 0.2% stop on BTC was being hit by normal noise within minutes).
+- Note: a wider stop does **not** add dollar risk — position size is derived from
+  `risk_per_trade ÷ stop distance`, so a wider stop just means a smaller position at the same %.
 
 ### `max_daily_loss` (default: 3% of equity)
 When cumulative losses for the day hit this, the app auto-pauses new trades until tomorrow.
@@ -54,6 +67,10 @@ block test trades.
 The sum of all open trades' risk cannot exceed this.
 - Why: it backstops the per-trade and position-count limits so they can't combine into
   an oversized aggregate bet.
+- **Override (2026-06-05):** raised to **9%** (from 6%, a +50% increase) at the user's explicit
+  request. At 9% the combined risk across open trades can take a larger bite at once; the 6%
+  default is the documented recommendation. Per-trade (2% ceiling) and daily-loss caps unchanged.
+  Consider returning to 6% once the strategy is proven.
 
 ### `per_pair_cooldown` (default: 30 min after a closed trade on that pair)
 Prevents immediately re-entering the same pair after a stop-out.

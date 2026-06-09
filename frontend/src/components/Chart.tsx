@@ -11,6 +11,7 @@ import {
   LineStyle,
   LogicalRange,
   UTCTimestamp,
+  WhitespaceData,
 } from "lightweight-charts";
 import { api } from "../api/client";
 import type { AssetClass, Candle, PositionView, TradeProposal } from "../types";
@@ -105,8 +106,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       autoSize: true,
       layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: "#a3a3a3" },
       grid: { vertLines: { color: "#1f1f1f" }, horzLines: { color: "#1f1f1f" } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#404040" },
-      rightPriceScale: { borderColor: "#404040" },
+      timeScale: {
+        timeVisible: true, secondsVisible: false, borderColor: "#404040",
+        barSpacing: 9, minBarSpacing: 4, rightOffset: 6,  // fatter candles + a little right gap
+      },
+      // Tighter top/bottom padding so the candles fill the pane vertically (less dead space).
+      // minimumWidth pins the price-axis width so the RSI pane below lines up bar-for-bar.
+      rightPriceScale: {
+        borderColor: "#404040", scaleMargins: { top: 0.08, bottom: 0.16 }, minimumWidth: 72,
+      },
       crosshair: { mode: 1 },
     });
     const series = chart.addCandlestickSeries({
@@ -156,7 +164,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: "#a3a3a3" },
       grid: { vertLines: { color: "#1f1f1f" }, horzLines: { color: "#1f1f1f" } },
       timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#404040" },
-      rightPriceScale: { borderColor: "#404040" },
+      // Same minimumWidth as the main chart so both price axes match and the bars line up.
+      rightPriceScale: { borderColor: "#404040", minimumWidth: 72 },
       crosshair: { mode: 1 },
     });
     const line = rsiChart.addLineSeries({ color: "#c084fc", lineWidth: 2, priceLineVisible: false });
@@ -218,7 +227,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
-        chartRef.current?.timeScale().fitContent();
+        // Show the most recent ~110 bars (not all 400) so candles are big and the price scale
+        // hugs current price — much less dead space than fitContent(). Pan/zoom still works.
+        const ts = chartRef.current?.timeScale();
+        const n = candleData.length;
+        if (ts && n) {
+          const VISIBLE = 110;
+          ts.setVisibleLogicalRange({ from: Math.max(0, n - VISIBLE), to: n + 6 });
+        }
       })
       .catch(() => {});
     return () => {
@@ -259,9 +275,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     const closes = candles.map((c) => c.close);
     const times = candles.map(toTime);
     const vals = rsiCalc(closes, 14);
-    const data: LineData[] = [];
+    // Emit a point for EVERY candle (whitespace during the 14-bar warmup) so the RSI series has
+    // the SAME length/logical indices as the candles — otherwise the logical-range sync between
+    // the two charts is offset by the warmup and the panes don't line up.
+    const data: (LineData | WhitespaceData)[] = [];
     for (let i = 0; i < vals.length; i++) {
-      if (vals[i] !== null) data.push({ time: times[i], value: vals[i] as number });
+      data.push(vals[i] !== null ? { time: times[i], value: vals[i] as number } : { time: times[i] });
     }
     line.setData(data);
   }
