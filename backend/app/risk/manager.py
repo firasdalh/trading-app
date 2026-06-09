@@ -84,6 +84,7 @@ def evaluate_proposal(
     min_qty: float = 0.0,
     override_risk_fraction: float | None = None,
     has_open_same_direction: bool = False,
+    correlated_exposure: str | None = None,
 ) -> RiskDecision:
     """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
 
@@ -168,6 +169,12 @@ def evaluate_proposal(
             f"already have an open {proposal.direction.value} position in {symbol} — not stacking",
             checks,
         )
+
+    # --- 4c. correlation: don't pile a 3rd correlated bet onto one risk factor ---
+    # (e.g. short EURUSD + short GBPUSD + short AUDUSD = "long USD" x3 — one big bet.)
+    checks["not_correlated"] = correlated_exposure is None
+    if correlated_exposure:
+        return _veto(symbol, correlated_exposure, checks)
 
     # --- 5. per-pair cooldown ---
     if last_pair_close_at is not None:

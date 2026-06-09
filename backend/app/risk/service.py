@@ -286,11 +286,20 @@ def assess(
     ``override_risk_fraction`` (Mode A manual size) is re-clamped to the 2% ceiling inside the
     manager, so a user-chosen size can never exceed the hard per-trade cap.
     """
+    from app.risk.correlation import correlated_concentration
+
     settings = get_or_create_settings(session)
     broker = get_broker_for(proposal.asset_class, settings.broker_map)
     limits = build_limits(session)
     account = build_account_state(session, broker)
     same_dir = db_has_open_same_direction(session, proposal.symbol, proposal.direction.value)
+    # Correlated-concentration check across the real open book (broker truth, so manual trades
+    # count too): refuse a 3rd position that piles onto one risk factor (e.g. "long USD" x3).
+    try:
+        open_book = [(p.symbol, p.direction) for p in live_broker_positions(session)]
+    except Exception:  # noqa: BLE001 - never let a broker hiccup block sizing
+        open_book = []
+    correlated = correlated_concentration(open_book, proposal.symbol, proposal.direction.value)
     return evaluate_proposal(
         proposal,
         account,
@@ -300,6 +309,7 @@ def assess(
         qty_step=_QTY_STEP.get(proposal.asset_class),
         override_risk_fraction=override_risk_fraction,
         has_open_same_direction=same_dir,
+        correlated_exposure=correlated,
     )
 
 

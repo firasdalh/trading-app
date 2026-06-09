@@ -34,6 +34,12 @@ Caps how many trades can be open at once.
   the *same symbol and same direction* while one is already open, and the executor blocks it as
   a final gate. (Three BTC shorts opened within 11 minutes turned one wrong call into a tripled
   loss; this prevents that pile-up.)
+- **Correlation rule (added 2026-06-10):** the Risk Manager also vetoes a trade that would be a
+  3rd *correlated* bet on one risk factor — each trade is mapped to its signed factors (each
+  currency, plus crypto / equity-index / metal / energy blocs), and a new trade is refused when
+  the open book already nets 2 positions the same way on a shared factor (e.g. short EURUSD +
+  short GBPUSD are both "long USD"; a 3rd long-USD trade is blocked). Offsetting trades net down,
+  so they're allowed. See `app/risk/correlation.py`.
 
 ### Stop placement (engine)
 - Protective stop = entry ± an ATR multiple: **1.5×ATR** for forex/metals/indices/stocks/energy,
