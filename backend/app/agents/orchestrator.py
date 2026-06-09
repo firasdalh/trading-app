@@ -73,6 +73,8 @@ def _last_close(technical: TechnicalRead) -> float | None:
 # Indicator gates for the deterministic decision.
 _ADX_MIN = 20.0       # below this the market is ranging -> stand aside
 _ADX_STRONG = 25.0
+_REGIME_VOL_EXPANSION = 1.6  # recent ATR >= 1.6x its baseline = volatility expansion (regime shift)
+_REGIME_VOL_EXTREME = 2.2    # a sharp vol blow-off WITHOUT a strong trend -> stand aside (whipsaw)
 _ATR_STOP_MULT = 1.5  # protective stop = entry +/- 1.5 * ATR (forex/metal/index/stock/energy)
 _ATR_STOP_MULT_CRYPTO = 2.5  # crypto is far more volatile — a tight stop just gets wicked out
 _MIN_STOP_ATR_FRAC = 1.0  # never place the stop closer than 1xATR (anti-wick floor): structure-
@@ -129,6 +131,24 @@ def _macro_trend(technical: TechnicalRead) -> str:
     return _trend_from_indicators(best.indicators, best.trend)
 
 
+def _regime(ind: dict) -> str:
+    """The market regime a senior trader reads FIRST: trending / ranging / volatile / moderate.
+
+    ADX measures trend strength; ``vol_atr_ratio`` (recent ATR vs a longer baseline) flags a
+    volatility expansion. A strong trend is "trending" even while volatility expands (a breakout);
+    volatility expanding WITHOUT a strong trend is "volatile" — the whipsaw zone a pro avoids.
+    """
+    adx = ind.get("adx")
+    vr = ind.get("vol_atr_ratio")
+    if adx is not None and adx >= _ADX_STRONG:
+        return "trending"
+    if vr is not None and vr >= _REGIME_VOL_EXPANSION:
+        return "volatile"
+    if adx is not None and adx < _ADX_MIN:
+        return "ranging"
+    return "moderate"
+
+
 def _structure_label(ind: dict) -> str:
     """Market structure (swing highs/lows) encoded in the indicators: 1=up / -1=down / 0=range."""
     s = ind.get("structure")
@@ -163,10 +183,10 @@ def _deterministic_decision(
     macro = _macro_trend(technical)                                       # higher-timeframe context
     bias = fundamental.bias
 
-    # --- ADX chop gate: don't trade a market with no trend ---
+    # --- regime gate #1: ranging (no trend) — don't trend-trade a market with no trend ---
     adx_v = ind.get("adx")
     if adx_v is not None and adx_v < _ADX_MIN:
-        base.rationale = f"Standing aside: ranging market (ADX {adx_v} < {_ADX_MIN:.0f})."
+        base.rationale = f"Standing aside: ranging regime (ADX {adx_v} < {_ADX_MIN:.0f}, no trend)."
         return base
 
     # --- direction from trend + fundamental + MACD momentum + higher-timeframe alignment ---
@@ -225,6 +245,20 @@ def _deterministic_decision(
             f"Structure conflict: EMA trend reads {trend}, but market structure is {struct} "
             f"(entry TF) / {macro_struct} (higher TF) — against a {direction.value}. Likely an "
             "early reversal or chop; waiting for swing structure to confirm before entering."
+        )
+        return base
+
+    # --- regime gate #2: a sharp volatility blow-off WITHOUT a strong trend = whipsaw zone ---
+    # A pro doesn't chase a chaotic expansion (often a news spike / capitulation); they wait for
+    # it to settle. (A strong-trend breakout is classed "trending", not "volatile", so it passes.)
+    regime = _regime(ind)
+    vol_ratio = ind.get("vol_atr_ratio")
+    if regime == "volatile" and vol_ratio is not None and vol_ratio >= _REGIME_VOL_EXTREME:
+        base.watch = True
+        base.rationale = (
+            f"Volatile regime: volatility is expanding sharply (ATR {vol_ratio:.1f}x its baseline) "
+            f"without a strong trend (ADX {adx_v}). High whipsaw risk — standing aside until it "
+            "settles."
         )
         return base
 
@@ -357,6 +391,10 @@ def _deterministic_decision(
         conf += 0.1 if aligned else -0.1
     if ind.get("choch"):
         conf -= 0.1
+    # Regime: a clean trend is the engine's edge; a volatile (expanding, trendless) tape is lower
+    # conviction even when a setup forms.
+    if regime == "volatile":
+        conf -= 0.1
     confidence = round(max(0.05, min(0.95, conf)), 2)
 
     base.direction = direction
@@ -365,9 +403,9 @@ def _deterministic_decision(
     base.take_profit = round(target, 6)
     base.confidence = confidence
     base.rationale = (
-        f"Confluence {direction.value.upper()}: entry-TF trend={trend}, macro={macro}, "
-        f"structure={struct}/{macro_struct}, ADX {adx_v}, MACD hist={macd_hist}, RSI {rsi}, "
-        f"bias={bias.value}"
+        f"Confluence {direction.value.upper()}: {regime} regime, entry-TF trend={trend}, "
+        f"macro={macro}, structure={struct}/{macro_struct}, ADX {adx_v}, MACD hist={macd_hist}, "
+        f"RSI {rsi}, bias={bias.value}"
         f"{' (cross-TF momentum conflict)' if macro_conflict else ''}"
         f"{' (stretched entry)' if overextended else ''}"
         f"{' (CHoCH)' if ind.get('choch') else ''}. "

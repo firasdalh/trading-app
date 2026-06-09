@@ -73,6 +73,11 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
     a = atr(candles)
     if a is not None:
         indicators["atr14"] = a
+        # Volatility expansion: recent ATR vs a longer baseline. >1 = expanding, <1 = contracting.
+        # Self-referential (a ratio), so it flags regime change consistently across instruments.
+        a_base = atr(candles, 50)
+        if a_base and a_base > 0:
+            indicators["vol_atr_ratio"] = round(a / a_base, 3)
     bb = bollinger(closes)
     if bb is not None:
         indicators["bb_upper"] = bb["upper"]

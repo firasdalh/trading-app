@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.agents.indicators import adx, atr, bollinger, ema, macd, market_structure, volume_ratio
-from app.agents.orchestrator import _deterministic_decision
+from app.agents.orchestrator import _deterministic_decision, _regime
 from app.models.enums import AssetClass, Direction, TradingBias
 from app.models.schemas import Candle, FundamentalRead, TechnicalRead, TimeframeRead
 
@@ -288,3 +288,34 @@ def test_too_close_swing_respects_anti_wick_floor():
     p = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(), now=NOW)
     assert p.direction == Direction.LONG
     assert p.stop_loss is not None and abs(p.stop_loss - 98.0) < 0.01  # entry - 1xATR floor
+
+
+# ---- regime classification ----
+
+def test_regime_classification():
+    assert _regime({"adx": 30.0}) == "trending"
+    assert _regime({"adx": 15.0}) == "ranging"
+    assert _regime({"adx": 22.0, "vol_atr_ratio": 1.8}) == "volatile"
+    assert _regime({"adx": 22.0, "vol_atr_ratio": 1.1}) == "moderate"
+    assert _regime({"adx": 30.0, "vol_atr_ratio": 2.5}) == "trending"  # strong trend beats vol
+
+
+def _tech_regime(vr):
+    ind = {"last_close": 100.0, "atr14": 2.0, "adx": 22.0, "macd_hist": -1.0, "ema20": 100.0}
+    if vr is not None:
+        ind["vol_atr_ratio"] = vr
+    return TechnicalRead(symbol="X", overall_trend="down", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend="down", indicators=ind,
+                      support_levels=[90.0], resistance_levels=[110.0])])
+
+
+def test_extreme_volatility_stands_aside():
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", _tech_regime(2.5), _fund(), now=NOW)
+    assert p.direction == Direction.NO_TRADE and p.watch is True and "whipsaw" in p.rationale.lower()
+
+
+def test_volatile_regime_lowers_confidence():
+    calm = _deterministic_decision("X", AssetClass.FOREX, "1h", _tech_regime(1.1), _fund(), now=NOW)
+    volatile = _deterministic_decision("X", AssetClass.FOREX, "1h", _tech_regime(1.8), _fund(), now=NOW)
+    assert calm.direction == Direction.SHORT and volatile.direction == Direction.SHORT
+    assert volatile.confidence < calm.confidence
