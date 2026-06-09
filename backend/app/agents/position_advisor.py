@@ -45,6 +45,11 @@ _TRAIL_ATR_MULT = 1.0       # ATR trailing distance = 1 ATR behind price
 _STRUCT_TRAIL_BUFFER_ATR = 0.2  # structural trail sits this far beyond the swing (wick allowance)
 _PROTECT_ATR_MULT = 1.5     # protective stop for a naked position = 1.5 ATR from price
 
+# --- partial profit-taking (scale out) ---
+_PARTIAL_R = 1.5            # at +1.5R, book partial profit and de-risk the rest to breakeven
+_PARTIAL_FRACTION = 0.5     # take half off
+_PARTIAL_DONE: set[str] = set()  # symbols already scaled this position (reset when it goes flat)
+
 # --- hysteresis + cooldown so auto-execute doesn't thrash ---
 _CLOSE_CONFIRM = 2          # require N consecutive "invalidated" reads before auto-closing
 _ACTION_COOLDOWN_S = 600    # min seconds between auto-CLOSE actions on the same symbol
@@ -56,6 +61,7 @@ def _reset_auto_state() -> None:
     """Clear hysteresis/cooldown trackers (used by tests; also safe to call on restart)."""
     _INVALID_STREAK.clear()
     _LAST_CLOSE_AT.clear()
+    _PARTIAL_DONE.clear()
 
 
 def _aware(dt: datetime) -> datetime:
@@ -293,6 +299,13 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
         thesis = _position_thesis(session, p, ctx)
         r_mult = _r_multiple(session, p, ctx)
         thesis_label = thesis["label"] if thesis else "unknown"
+        # Scale-out suggestion (Mode A): once a winner reaches the milestone, a pro books partial
+        # profit and trails the rest. (The auto-advisor does this itself when enabled.)
+        if r_mult is not None and r_mult >= _PARTIAL_R and p.symbol not in _PARTIAL_DONE:
+            detail = (f"{detail} At +{r_mult:.1f}R, consider scaling out "
+                      f"~{int(_PARTIAL_FRACTION * 100)}% and trailing the rest.")
+            if severity == "info":
+                severity = "warn"
         if thesis is not None:
             detail = f"{detail} {thesis['note']}"
             if r_mult is not None:
@@ -395,10 +408,12 @@ def _trail_stop(direction: str, last: float, atr: float, ctx: dict, regime: str)
     return atr_trail, "ATR"
 
 
-def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None) -> dict | None:
+def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
+                   already_scaled: bool = False) -> dict | None:
     """The bounded, deterministic set of actions the advisor may take autonomously — only
     highest-confidence, RISK-REDUCING moves: close an invalidated trade, attach a protective
-    stop, lock to breakeven, or trail. It never opens, sizes up, flips, or loosens a stop.
+    stop, scale out partial profit, lock to breakeven, or trail. It never opens, sizes up, flips,
+    or loosens a stop.
 
     Regime-aware: a clean trend gets room (trail behind structure, normal R thresholds); a
     volatile/ranging tape banks sooner (tighter ATR trail, lower breakeven/trail R)."""
@@ -410,6 +425,16 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None) -> 
     last = (ctx or {}).get("last") or p.last_price
     d = p.direction
     regime = (ctx or {}).get("regime") or "moderate"
+
+    # 0) Scale out: at the profit milestone, book partial profit ONCE and de-risk the rest. Done
+    # before the trail/breakeven below, so we take money off the table first. The executor then
+    # also moves the remainder's stop to breakeven.
+    if plan_risk and last and atr and not already_scaled:
+        profit0 = (last - p.entry_price) if d == "long" else (p.entry_price - last)
+        if profit0 / plan_risk >= _PARTIAL_R:
+            return {"action": "take_partial", "kind": "partial", "fraction": _PARTIAL_FRACTION,
+                    "reason": (f"+{profit0 / plan_risk:.1f}R — scaling out "
+                               f"{int(_PARTIAL_FRACTION * 100)}% and moving the rest to breakeven")}
 
     # 1) Naked position -> attach an ATR protective stop (always risk-reducing).
     if (p.stop_loss is None or p.stop_loss == 0) and atr and last:
@@ -494,6 +519,10 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
     settings = get_or_create_settings(session)
     positions = {p.symbol: p for p in live_broker_positions(session)}
     contexts = contexts or {}
+    # A symbol that has gone flat can scale out again next time it's entered.
+    for sym in list(_PARTIAL_DONE):
+        if sym not in positions:
+            _PARTIAL_DONE.discard(sym)
 
     for a in advice:
         p = positions.get(a.symbol)
@@ -508,7 +537,7 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
 
         ctx = contexts.get(a.symbol) or _position_context(session, p)
         plan_risk = _plan_risk(session, a.symbol, (ctx or {}).get("atr"), a.direction)
-        decision = _auto_decision(a, p, ctx or {}, plan_risk)
+        decision = _auto_decision(a, p, ctx or {}, plan_risk, already_scaled=a.symbol in _PARTIAL_DONE)
         if decision is None:
             continue
         action, kind, reason = decision["action"], decision["kind"], decision["reason"]
@@ -540,6 +569,16 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                     _reconcile_closed_symbol(session, p.symbol)
                     _LAST_CLOSE_AT[a.symbol] = now
                     _INVALID_STREAK[a.symbol] = 0
+            elif action == "take_partial":
+                result = broker.close_partial(p.symbol, decision.get("fraction", _PARTIAL_FRACTION))
+                ok = result.status.value not in ("error", "rejected")
+                if ok:
+                    _PARTIAL_DONE.add(a.symbol)
+                    # De-risk the runner: move the remainder's stop to breakeven.
+                    try:
+                        broker.set_sl_tp(p.symbol, round(p.entry_price, 5), p.take_profit)
+                    except Exception:  # noqa: BLE001
+                        pass
             else:  # set_stop (protect | breakeven | trail)
                 result = broker.set_sl_tp(p.symbol, decision["stop"], p.take_profit)
                 ok = result.status.value not in ("error", "rejected")

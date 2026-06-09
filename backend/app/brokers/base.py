@@ -85,6 +85,13 @@ class BrokerAdapter(ABC):
         """
         return OrderResult(status=OrderStatus.REJECTED, error="set_sl_tp not supported by this broker")
 
+    def close_partial(self, symbol: str, fraction: float) -> OrderResult:
+        """Close ``fraction`` (0..1) of the open position — a partial profit-take; the rest stays
+        open. Default: not supported. MT5/sim override it. Brokers that can't partial-close return
+        REJECTED, and the caller simply leaves the position whole.
+        """
+        return OrderResult(status=OrderStatus.REJECTED, error="close_partial not supported by this broker")
+
     # ---- lifecycle ----
 
     def get_realized_pnl(self, since) -> float | None:

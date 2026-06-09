@@ -176,6 +176,19 @@ class SimPaperBroker(BrokerAdapter):
             )
         )
 
+    def close_partial(self, symbol: str, fraction: float) -> OrderResult:
+        pos = self._positions.get(symbol)
+        if not pos or pos.net_qty == 0:
+            return OrderResult(status=OrderStatus.REJECTED, error=f"no open position for {symbol}")
+        qty = abs(pos.net_qty) * max(0.0, min(1.0, fraction))
+        if qty <= 0:
+            return OrderResult(status=OrderStatus.REJECTED, error="partial qty is zero")
+        side = OrderSide.SELL if pos.net_qty > 0 else OrderSide.BUY
+        return self.submit_order(
+            OrderRequest(symbol=symbol, asset_class=AssetClass(pos.asset_class), side=side,
+                         order_type=OrderType.MARKET, qty=qty)
+        )
+
     def set_sl_tp(self, symbol: str, stop_loss: float | None = None,
                   take_profit: float | None = None) -> OrderResult:
         pos = self._positions.get(symbol)

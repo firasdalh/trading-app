@@ -394,6 +394,47 @@ class Mt5BrokerAdapter(BrokerAdapter):
                                error=None if done else "close failed")
         return last or OrderResult(status=OrderStatus.ERROR, error="no close result")
 
+    def close_partial(self, symbol: str, fraction: float) -> OrderResult:
+        """Close ``fraction`` of the open position (partial profit-take). The remainder keeps the
+        same ticket and stops. Volume is floored to the lot step; a position already at the broker
+        minimum can't be split, so we reject (the caller then leaves it whole)."""
+        mt5 = self._mt5
+        try:
+            sym = self._resolve_symbol(symbol)
+            positions = [p for p in (mt5.positions_get(symbol=sym) or [])]
+            if not positions:
+                return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
+            info = mt5.symbol_info(sym)
+            step = float(getattr(info, "volume_step", 0.01) or 0.01)
+            vmin = float(getattr(info, "volume_min", step) or step)
+            last: OrderResult | None = None
+            for p in positions:
+                part = (int((p.volume * fraction) / step) * step) if step else p.volume * fraction
+                part = round(max(vmin, min(part, p.volume)), 2)
+                if part >= p.volume:  # can't take a partial without dropping below the min lot
+                    return OrderResult(status=OrderStatus.REJECTED,
+                                       error="position too small to partial-close (min lot)")
+                is_long = p.type == getattr(mt5, "POSITION_TYPE_BUY", 0)
+                tick = mt5.symbol_info_tick(sym)
+                req = {
+                    "action": mt5.TRADE_ACTION_DEAL, "symbol": sym, "volume": float(part),
+                    "type": mt5.ORDER_TYPE_SELL if is_long else mt5.ORDER_TYPE_BUY,
+                    "position": p.ticket,
+                    "price": float(tick.bid if is_long else tick.ask),
+                    "deviation": 20, "type_filling": self._filling(info),
+                    "comment": "ai-trading-app partial",
+                }
+                result = mt5.order_send(req)
+                done = result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
+                last = OrderResult(status=OrderStatus.SUBMITTED if done else OrderStatus.ERROR,
+                                   filled_qty=float(part) if done else 0.0,
+                                   raw={"retcode": getattr(result, "retcode", None)},
+                                   error=None if done else "partial close failed")
+            return last or OrderResult(status=OrderStatus.ERROR, error="no partial-close result")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("MT5 close_partial error")
+            return OrderResult(status=OrderStatus.ERROR, error=str(exc))
+
     def set_sl_tp(self, symbol: str, stop_loss: float | None = None,
                   take_profit: float | None = None) -> OrderResult:
         mt5 = self._mt5

@@ -168,9 +168,14 @@ class _Broker:
         self.is_paper = is_paper
         self.closed = []
         self.sltp = []
+        self.partials = []
 
     def close_position(self, symbol):
         self.closed.append(symbol)
+        return _Result("filled")
+
+    def close_partial(self, symbol, fraction):
+        self.partials.append((symbol, fraction))
         return _Result("filled")
 
     def set_sl_tp(self, symbol, sl, tp):
@@ -199,9 +204,10 @@ def test_auto_decision_protects_naked_position():
 
 def test_auto_decision_trails_beyond_target_r():
     # short, big profit (last well below entry) -> trail; plan_risk 10, profit ~50 = 5R.
+    # already_scaled=True so we test the trail that manages the remainder after a partial.
     p = _pos(direction="short", stop=4460.0)
     decision = advisor._auto_decision(_adv(thesis="intact"), p,
-                                      {"atr": 5.0, "last": 4399.0}, 10.0)
+                                      {"atr": 5.0, "last": 4399.0}, 10.0, already_scaled=True)
     assert decision is not None and decision["kind"] == "trail"
     assert decision["stop"] < 4460.0  # tighter than the current stop
 
@@ -248,7 +254,7 @@ def test_choch_against_position_warns_weakening():
 def test_trail_behind_structure_in_trending_regime():
     p = _pos(direction="long", stop=4455.0)  # entry 4449, stop already past breakeven
     ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending", "swing_low": 4460.0}
-    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)  # +2.1R
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)  # +2.1R
     assert d is not None and d["kind"] == "trail" and "structure" in d["reason"]
     assert abs(d["stop"] - 4459.6) < 0.01  # swing 4460 - 0.2*ATR(2)
 
@@ -256,7 +262,7 @@ def test_trail_behind_structure_in_trending_regime():
 def test_trail_atr_in_volatile_regime():
     p = _pos(direction="long", stop=4455.0)
     ctx = {"atr": 2.0, "last": 4470.0, "regime": "volatile", "swing_low": 4460.0}
-    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
     assert d is not None and d["kind"] == "trail" and "ATR" in d["reason"]
     assert abs(d["stop"] - 4468.0) < 0.01  # 4470 - 1*ATR(2) (tighter than structure in a chop)
 
@@ -269,6 +275,49 @@ def test_volatile_regime_banks_breakeven_earlier():
     volat = advisor._auto_decision(_adv(thesis="intact"), p, {**base, "regime": "volatile"}, 10.0)
     assert trend is None
     assert volat is not None and volat["kind"] == "breakeven"
+
+
+# --- partial profit-taking (scale out) ---
+
+def test_auto_decision_scales_out_at_milestone():
+    p = _pos(direction="long", stop=4445.0)  # entry 4449
+    ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending"}  # +2.1R
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    assert d is not None and d["action"] == "take_partial" and d["fraction"] == 0.5
+
+
+def test_auto_decision_no_double_scale():
+    p = _pos(direction="long", stop=4445.0)
+    ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending"}
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
+    assert d is None or d["action"] != "take_partial"  # already scaled -> manage the rest instead
+
+
+def test_sim_close_partial_reduces_position():
+    from app.brokers.sim import SimPaperBroker
+    from app.models.enums import AssetClass, OrderSide, OrderType
+    from app.models.schemas import OrderRequest
+
+    b = SimPaperBroker()
+    b.submit_order(OrderRequest(symbol="EURUSD", asset_class=AssetClass.FOREX, side=OrderSide.BUY,
+                                order_type=OrderType.MARKET, qty=1.0))
+    res = b.close_partial("EURUSD", 0.5)
+    assert res.status.value not in ("error", "rejected")
+    pos = b.get_open_positions()
+    assert len(pos) == 1 and abs(pos[0].qty - 0.5) < 1e-6
+
+
+def test_auto_execute_takes_partial_and_moves_to_breakeven(db_session, monkeypatch):
+    broker = _Broker(is_paper=True)
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [_pos(direction="long", stop=4445.0)])
+    monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
+    _patch_exec(monkeypatch, broker)
+    ctx = {"XAUUSDm": {"atr": 2.0, "last": 4470.0, "regime": "trending"}}  # +2.1R
+    actions = advisor._auto_execute(db_session, [_adv(symbol="XAUUSDm", thesis="intact")], ctx)
+    assert broker.partials == [("XAUUSDm", 0.5)]
+    assert any(x["kind"] == "partial" and x["ok"] for x in actions)
+    # de-risk: the runner's stop is moved to breakeven (entry 4449).
+    assert any(s[0] == "XAUUSDm" and abs(s[1] - 4449.0) < 0.01 for s in broker.sltp)
 
 
 def _patch_exec(monkeypatch, broker, *, kill=False, live_ok=True):
