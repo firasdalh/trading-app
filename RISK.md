@@ -92,6 +92,13 @@ A separate one-button toggle (Opportunities panel). When ON, a tick every ~35 mi
 30–90) opens **at most one** trade per cycle: only if open positions < `max_open_positions`, only
 the single best watchlist setup, and only when its confidence exceeds the threshold (default
 **70%**). It re-runs the full analysis (LLM review can still veto) before opening.
+- **Adjustable in the UI (added 2026-06-10):** a ⚙ Settings editor on the Hybrid panel lets you
+  change the **check interval (clamped 30–90 min)** and the **confidence threshold (clamped
+  50–95%; default still 70%)**. The threshold only governs *which* setups qualify for auto-open —
+  it is **not** a money cap. Every dollar limit (≤2% per trade, daily-loss, exposure, position
+  count, no-stacking, correlation) is enforced in the executor regardless of the threshold, so
+  lowering it cannot enlarge any single or aggregate bet; it only lets Hybrid act on
+  lower-conviction setups. The UI shows a warning when it is set below the 70% default.
 - It does **not** bypass anything: kill-switch, live-confirmation, daily-loss pause, exposure
   budget, per-pair cooldown, and no-stacking are all enforced in the executor exactly as for a
   manual approval. On a LIVE account it is blocked unless live trading is confirmed (same gate as

@@ -171,12 +171,24 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
   );
 }
 
-// Hybrid auto-pilot toggle: one button. When on, every ~35 min it opens the single best
-// watchlist setup above the confidence threshold if there's room — all risk gates still apply.
+// Documented Hybrid ranges (RISK.md): check interval 30–90 min, confidence threshold 50–95%.
+// We clamp the editor to these so the controls can't be pushed somewhere reckless. The money
+// limits (per-trade, daily-loss, exposure, position count, no-stacking) apply regardless.
+const HYB_MIN_MINUTES = 30;
+const HYB_MAX_MINUTES = 90;
+const HYB_MIN_CONF = 50;
+const HYB_MAX_CONF = 95;
+const clampInt = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
+
+// Hybrid auto-pilot: one toggle, plus adjustable check interval and confidence threshold. When
+// on, every N min it opens the single best watchlist setup above the threshold if there's room —
+// all risk gates still apply.
 function HybridControl({ onOpened }: { onOpened?: () => void }) {
   const [bump, setBump] = useState(0);
   const { data: state } = usePolling(() => api.hybridState(), 15000, [bump]);
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({ interval: "", conf: "" });
   const refresh = () => setBump((b) => b + 1);
 
   const on = state?.enabled ?? false;
@@ -204,6 +216,28 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
     }
   };
 
+  // Open the editor seeded with the live values (a snapshot — polling can't overwrite it).
+  const openEditor = () => {
+    setForm({ interval: String(intervalMin), conf: String(confPct) });
+    setEditing(true);
+  };
+
+  const save = async () => {
+    const mins = clampInt(Number(form.interval) || intervalMin, HYB_MIN_MINUTES, HYB_MAX_MINUTES);
+    const conf = clampInt(Number(form.conf) || confPct, HYB_MIN_CONF, HYB_MAX_CONF);
+    setBusy(true);
+    try {
+      await api.setHybridConfig({ interval_seconds: mins * 60, min_confidence: conf / 100 });
+      refresh();
+      setEditing(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // What the (clamped) confidence in the editor will actually be saved as — drives the warning.
+  const draftConf = clampInt(Number(form.conf) || confPct, HYB_MIN_CONF, HYB_MAX_CONF);
+
   return (
     <div
       className={`mb-2 rounded-md border px-3 py-2 ${
@@ -220,9 +254,17 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
           {on ? "ON" : "OFF"}
         </span>
         <button
+          onClick={openEditor}
+          disabled={busy}
+          className="btn ml-auto bg-neutral-700 text-neutral-100 hover:bg-neutral-600"
+          title="Adjust the check interval and confidence threshold"
+        >
+          ⚙ Settings
+        </button>
+        <button
           onClick={toggle}
           disabled={busy}
-          className={`btn ml-auto text-white ${on ? "bg-bear/80 hover:bg-bear" : "bg-bull/80 hover:bg-bull"}`}
+          className={`btn text-white ${on ? "bg-bear/80 hover:bg-bear" : "bg-bull/80 hover:bg-bull"}`}
         >
           {on ? "Turn off" : "Activate"}
         </button>
@@ -232,11 +274,64 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
           </button>
         )}
       </div>
+
       <p className="mt-1 text-xs text-neutral-500">
         Every ~{intervalMin} min, if fewer than 3 trades are open, it scans the watchlist and
         auto-opens the single best setup above <span className="text-neutral-300">{confPct}%</span>{" "}
         confidence. Kill-switch, daily-loss, exposure & no-stacking limits still apply.
       </p>
+
+      {editing && (
+        <div className="mt-2 rounded-md border border-neutral-700 bg-neutral-900/60 p-3">
+          <div className="flex flex-wrap items-end gap-4">
+            <label className="text-xs text-neutral-400">
+              <div className="mb-1">Check every (min)</div>
+              <input
+                name="hybrid-interval"
+                autoComplete="off"
+                inputMode="numeric"
+                value={form.interval}
+                onChange={(e) => setForm((f) => ({ ...f, interval: e.target.value }))}
+                onKeyDown={(e) => e.key === "Enter" && save()}
+                className="w-24 rounded bg-neutral-800 px-2 py-1.5 text-sm tabular-nums text-neutral-100"
+              />
+              <div className="mt-1 text-[10px] text-neutral-600">{HYB_MIN_MINUTES}–{HYB_MAX_MINUTES} min</div>
+            </label>
+            <label className="text-xs text-neutral-400">
+              <div className="mb-1">Min confidence (%)</div>
+              <input
+                name="hybrid-conf"
+                autoComplete="off"
+                inputMode="numeric"
+                value={form.conf}
+                onChange={(e) => setForm((f) => ({ ...f, conf: e.target.value }))}
+                onKeyDown={(e) => e.key === "Enter" && save()}
+                className="w-24 rounded bg-neutral-800 px-2 py-1.5 text-sm tabular-nums text-neutral-100"
+              />
+              <div className="mt-1 text-[10px] text-neutral-600">{HYB_MIN_CONF}–{HYB_MAX_CONF}%</div>
+            </label>
+            <div className="flex gap-2">
+              <button onClick={save} disabled={busy} className="btn bg-bull/80 text-white hover:bg-bull">
+                {busy ? "…" : "Save"}
+              </button>
+              <button
+                onClick={() => setEditing(false)}
+                disabled={busy}
+                className="btn bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+          {draftConf < 70 && (
+            <p className="mt-2 text-[11px] leading-relaxed text-warn">
+              Below the 70% default — Hybrid will auto-open lower-conviction setups. Every money
+              limit (≤2% per trade, daily-loss, exposure, position count) still applies.
+            </p>
+          )}
+        </div>
+      )}
+
       {on && state?.last_result && (
         <div className="mt-1 text-xs text-neutral-400">
           Last check{state.last_run_at ? ` (${new Date(state.last_run_at).toLocaleTimeString()})` : ""}:{" "}
