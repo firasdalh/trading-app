@@ -163,6 +163,16 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   };
   const { data: risk } = usePolling(() => api.riskState(), 5000, []);
 
+  // Is the panel's executed setup actually still open at the broker? `positions` is the broker's
+  // live (open-only) list, so an executed proposal whose symbol is absent has since closed (hit
+  // stop/target, or closed manually/by the advisor). null = positions not loaded yet — keep the
+  // stored status until we know, so it doesn't flicker to "closed" on first paint.
+  const positionOpen = useMemo<boolean | null>(() => {
+    if (!result || !positions) return null;
+    const sym = result.proposal.symbol.toUpperCase();
+    return positions.some((p) => p.symbol.toUpperCase() === sym);
+  }, [positions, result]);
+
   const runAnalysis = async () => {
     setAnalyzing(true);
     setError(null);
@@ -368,6 +378,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         <ProposalPanel
           result={result}
           status={status}
+          positionOpen={positionOpen}
           busy={actionBusy}
           equity={account?.equity ?? null}
           onApprove={approve}

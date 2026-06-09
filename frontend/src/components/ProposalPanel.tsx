@@ -20,6 +20,10 @@ function reviewNote(rationale: string): string {
 interface Props {
   result: AnalyzeResponse | null;
   status: string | null;
+  // Whether the executed setup is still open at the broker (live truth). null = unknown/loading.
+  // The proposal's stored status stays "executed" forever, so this is what tells the panel the
+  // position has since closed.
+  positionOpen?: boolean | null;
   busy: boolean;
   equity?: number | null;
   onApprove: (lots?: number | null) => void;
@@ -29,7 +33,7 @@ interface Props {
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (2%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, busy, equity, onApprove, onReject }: Props) {
+export function ProposalPanel({ result, status, positionOpen, busy, equity, onApprove, onReject }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -111,7 +115,7 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
         </div>
         <div className="flex items-center gap-2">
           <ReviewBadge decision={proposal.review_decision} />
-          <StatusBadge status={status} />
+          <StatusBadge status={status} positionOpen={positionOpen} />
         </div>
       </div>
 
@@ -262,7 +266,9 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
               ? "Watching — setup forming; waiting for the trigger. Nothing to approve yet."
               : "Orchestrator declined — nothing to approve."
             : status === "executed"
-              ? "Position open — manage it in the Positions table below."
+              ? positionOpen === false
+                ? "Position closed — no longer open at the broker. Run analysis for a fresh setup."
+                : "Position open — manage it in the Positions table below."
               : status === "approved"
                 ? "Approved — awaiting execution."
                 : status === "rejected"
@@ -474,10 +480,12 @@ function ReviewBadge({ decision }: { decision: string | null }) {
   );
 }
 
-function StatusBadge({ status }: { status: string | null }) {
+function StatusBadge({ status, positionOpen }: { status: string | null; positionOpen?: boolean | null }) {
   if (!status) return null;
+  // An executed proposal whose position has since closed should read "closed", not "executed".
+  const label = status === "executed" && positionOpen === false ? "closed" : status;
   return (
-    <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300">{status}</span>
+    <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300">{label}</span>
   );
 }
 
