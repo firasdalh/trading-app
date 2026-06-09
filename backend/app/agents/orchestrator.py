@@ -151,6 +151,34 @@ def _regime(ind: dict) -> str:
     return "moderate"
 
 
+def _session_quality(asset_class: AssetClass, symbol: str, now: datetime) -> tuple[str, str]:
+    """Liquidity quality of the current trading session: 'active' / 'normal' / 'thin'.
+
+    A pro leans into the liquid windows (real participation behind a move) and is wary of thin
+    hours where spreads widen and moves are noise. Times are UTC. Crypto is 24/7 (always normal).
+    """
+    h = now.hour
+    s = symbol.upper()
+    if asset_class == AssetClass.CRYPTO:
+        return "normal", "24/7"
+    if asset_class == AssetClass.INDEX:
+        if any(k in s for k in ("US500", "US30", "USTEC", "US2000", "NAS", "SPX", "NDX")):
+            return ("active", "US cash session") if 13 <= h < 20 else ("thin", "outside US cash")
+        if any(k in s for k in ("DE", "UK100", "FR40", "STOXX", "EU")):
+            return ("active", "EU session") if 7 <= h < 16 else ("thin", "outside EU session")
+        if any(k in s for k in ("JP225", "HK50", "AUS200", "IN50")):
+            return ("active", "Asian session") if 0 <= h < 8 else ("thin", "outside Asian session")
+        return "normal", ""
+    # FX / metals / energy: London 07-16, NY 12-21 UTC; the 12-16 overlap is peak liquidity.
+    if 12 <= h < 16:
+        return "active", "London-NY overlap (peak liquidity)"
+    if 7 <= h < 21:
+        return "normal", "London/NY hours"
+    if asset_class == AssetClass.FOREX and any(c in s for c in ("JPY", "AUD", "NZD")):
+        return "normal", "Asian session (JPY/AUD/NZD)"
+    return "thin", "thin hours (post-NY / pre-London)"
+
+
 def _structure_label(ind: dict) -> str:
     """Market structure (swing highs/lows) encoded in the indicators: 1=up / -1=down / 0=range."""
     s = ind.get("structure")
@@ -403,6 +431,12 @@ def _deterministic_decision(
     # conviction even when a setup forms.
     if regime == "volatile":
         conf -= 0.1
+    # Session/liquidity: lean into the liquid windows, discount thin hours (noise, wide spreads).
+    session_q, _session_note = _session_quality(asset_class, symbol, now)
+    if session_q == "active":
+        conf += 0.05
+    elif session_q == "thin":
+        conf -= 0.05
     confidence = round(max(0.05, min(0.95, conf)), 2)
 
     base.direction = direction
@@ -417,7 +451,8 @@ def _deterministic_decision(
         f"{' (cross-TF momentum conflict)' if macro_conflict else ''}"
         f"{' (pullback entry at value)' if at_value else ''}"
         f"{' (stretched entry)' if overextended else ''}"
-        f"{' (CHoCH)' if ind.get('choch') else ''}. "
+        f"{' (CHoCH)' if ind.get('choch') else ''}"
+        f"{f' ({session_q} session)' if session_q != 'normal' else ''}. "
         f"Entry {base.entry}, stop {base.stop_loss} "
         f"({stop_basis}{f', {risk / atr_v:.1f}xATR' if atr_v else ''}), "
         f"target {base.take_profit} ({struct_note}). Deterministic (no LLM)."

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.agents.indicators import adx, atr, bollinger, ema, macd, market_structure, volume_ratio
-from app.agents.orchestrator import _deterministic_decision, _regime
+from app.agents.orchestrator import _deterministic_decision, _regime, _session_quality
 from app.models.enums import AssetClass, Direction, TradingBias
 from app.models.schemas import Candle, FundamentalRead, TechnicalRead, TimeframeRead
 
@@ -331,3 +331,26 @@ def test_pullback_entry_at_value_scores_higher_than_chasing():
     assert p_val.direction == Direction.LONG and p_mid.direction == Direction.LONG
     assert p_val.confidence > p_mid.confidence
     assert "value" in p_val.rationale.lower()
+
+
+# ---- session / liquidity weighting ----
+
+def test_session_quality():
+    fx = AssetClass.FOREX
+    assert _session_quality(fx, "EURUSDm", datetime(2026, 1, 5, 13, tzinfo=timezone.utc))[0] == "active"
+    assert _session_quality(fx, "EURUSDm", datetime(2026, 1, 5, 23, tzinfo=timezone.utc))[0] == "thin"
+    # JPY pairs trade the Asian session, so thin hours are still 'normal' for them.
+    assert _session_quality(fx, "USDJPYm", datetime(2026, 1, 5, 23, tzinfo=timezone.utc))[0] == "normal"
+    assert _session_quality(AssetClass.CRYPTO, "BTCUSDm", datetime(2026, 1, 5, 3, tzinfo=timezone.utc))[0] == "normal"
+    assert _session_quality(AssetClass.INDEX, "US500m", datetime(2026, 1, 5, 15, tzinfo=timezone.utc))[0] == "active"
+    assert _session_quality(AssetClass.INDEX, "US500m", datetime(2026, 1, 5, 2, tzinfo=timezone.utc))[0] == "thin"
+
+
+def test_session_weighting_lifts_confidence_in_liquid_window():
+    t = _tech_ext("up", entry=104.0, ema20=100.0, atr_v=2.0)
+    active = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(),
+                                     now=datetime(2026, 1, 5, 13, tzinfo=timezone.utc))  # overlap
+    thin = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(),
+                                   now=datetime(2026, 1, 5, 23, tzinfo=timezone.utc))    # dead zone
+    assert active.direction == Direction.LONG and thin.direction == Direction.LONG
+    assert active.confidence > thin.confidence
