@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
+import { assetLabel } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { useQuoteSocket } from "../hooks/useQuoteSocket";
@@ -247,13 +248,14 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         <label className="text-sm">
           <div className="mb-1 text-xs text-neutral-400">Asset class</div>
           <select
+            name="dash-asset-class"
             value={assetClass}
             onChange={(e) => setAssetClass(e.target.value as AssetClass)}
             className="rounded bg-neutral-800 px-2 py-1.5"
           >
             {ASSET_CLASSES.map((a) => (
               <option key={a} value={a}>
-                {a}
+                {assetLabel(a)}
               </option>
             ))}
           </select>
@@ -261,6 +263,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         <label className="text-sm">
           <div className="mb-1 text-xs text-neutral-400">Timeframe</div>
           <select
+            name="dash-timeframe"
             value={timeframe}
             onChange={(e) => setTimeframe(e.target.value)}
             className="rounded bg-neutral-800 px-2 py-1.5"

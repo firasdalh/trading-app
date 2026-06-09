@@ -136,6 +136,8 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
           <label className="flex items-center gap-1 text-xs text-neutral-400">
             every
             <input
+              name="advisor-interval"
+              autoComplete="off"
               value={intervalInput}
               onChange={(e) => setIntervalInput(e.target.value)}
               onBlur={saveInterval}

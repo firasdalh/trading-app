@@ -306,6 +306,28 @@ class AdvisorConfig(Base):
     )
 
 
+class HybridConfig(Base):
+    """Singleton (id=1) for Hybrid auto-pilot mode.
+
+    When enabled, a scheduled tick every ``interval_seconds`` (30-45 min) scans the watchlist
+    and, if there's room (open positions < max_open_positions), auto-opens the SINGLE best
+    risk-approved setup whose confidence exceeds ``min_confidence``. All risk gates still apply.
+    Off by default (safety).
+    """
+
+    __tablename__ = "hybrid_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=2100)  # 35 min (30-45 range)
+    min_confidence: Mapped[float] = mapped_column(Float, default=0.70)    # only > 70% conviction
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_result: Mapped[str | None] = mapped_column(Text)  # short note from the last tick
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class AgentRun(Base):
     """A record of one agent-cycle / event for transparency and the reflection agent."""
 

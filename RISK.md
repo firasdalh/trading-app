@@ -81,6 +81,16 @@ A = AI proposes, you approve. B = auto-execute paper only. C = auto-execute live
 - Stay on A or B for months. Do not touch C until backtests AND a long paper run look sane.
 - Mode C is real money with no human in the loop. The warning banner is there on purpose.
 
+### Hybrid auto-pilot (added 2026-06-09)
+A separate one-button toggle (Opportunities panel). When ON, a tick every ~35 min (configurable
+30–90) opens **at most one** trade per cycle: only if open positions < `max_open_positions`, only
+the single best watchlist setup, and only when its confidence exceeds the threshold (default
+**70%**). It re-runs the full analysis (LLM review can still veto) before opening.
+- It does **not** bypass anything: kill-switch, live-confirmation, daily-loss pause, exposure
+  budget, per-pair cooldown, and no-stacking are all enforced in the executor exactly as for a
+  manual approval. On a LIVE account it is blocked unless live trading is confirmed (same gate as
+  Mode C). Off by default.
+
 ### `kill_switch`
 Always-available halt for all new orders. Test that it works before you ever go live.
 Knowing exactly how to stop the system is part of being allowed to run it.

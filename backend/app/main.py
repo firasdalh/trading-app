@@ -96,6 +96,18 @@ def _advisor_tick() -> None:
         log.warning("advisor tick failed", extra={"error": str(exc)})
 
 
+def _hybrid_tick() -> None:
+    """Scheduled Hybrid auto-pilot pass. Honors its own enabled flag + 30-45 min interval."""
+    from app.agents.hybrid import hybrid_tick
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            hybrid_tick(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hybrid tick failed", extra={"error": str(exc)})
+
+
 def _register_monitor_job() -> None:
     from app.core.scheduler import get_scheduler
 
@@ -108,7 +120,10 @@ def _register_monitor_job() -> None:
     # Polls every 30s; the advisor enforces the user-configured auto-watch interval.
     sched.add_job(_advisor_tick, "interval", seconds=30, id="position_advisor",
                   replace_existing=True, max_instances=1)
-    log.info("position monitor (10s) + watchlist scanner (20s) + advisor (30s poll) scheduled")
+    # Polls every 60s; Hybrid auto-pilot enforces its own 30-45 min interval.
+    sched.add_job(_hybrid_tick, "interval", seconds=60, id="hybrid_autopilot",
+                  replace_existing=True, max_instances=1)
+    log.info("position monitor (10s) + watchlist scanner (20s) + advisor (30s) + hybrid (60s poll) scheduled")
 
 
 @asynccontextmanager

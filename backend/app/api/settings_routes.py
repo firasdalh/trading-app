@@ -545,3 +545,65 @@ def flatten(session: Session = Depends(get_session)) -> dict:
 def run_monitor(session: Session = Depends(get_session)) -> dict:
     """Run one position-monitor pass (also runs automatically on the scheduler)."""
     return monitor_positions(session)
+
+
+# --------------------------------------------------------------------------- #
+#  Hybrid auto-pilot
+# --------------------------------------------------------------------------- #
+
+
+class HybridConfigRequest(BaseModel):
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(None, ge=300, le=5400)  # 5-90 min
+    min_confidence: float | None = Field(None, gt=0.0, le=1.0)
+
+
+class HybridView(BaseModel):
+    enabled: bool
+    interval_seconds: int
+    min_confidence: float
+    last_run_at: str | None = None
+    last_result: str | None = None
+
+
+def _hybrid_view(session: Session) -> HybridView:
+    from app.agents.hybrid import get_or_create_hybrid_config
+
+    cfg = get_or_create_hybrid_config(session)
+    return HybridView(
+        enabled=cfg.enabled, interval_seconds=cfg.interval_seconds,
+        min_confidence=cfg.min_confidence, last_run_at=_iso_utc(cfg.last_run_at),
+        last_result=cfg.last_result,
+    )
+
+
+@router.get("/hybrid", response_model=HybridView, tags=["hybrid"])
+def hybrid_state(session: Session = Depends(get_session)) -> HybridView:
+    """Hybrid auto-pilot config + the last tick's outcome."""
+    return _hybrid_view(session)
+
+
+@router.post("/hybrid/config", response_model=HybridView, tags=["hybrid"])
+def hybrid_set_config(req: HybridConfigRequest, session: Session = Depends(get_session)) -> HybridView:
+    from app.agents.hybrid import get_or_create_hybrid_config
+
+    cfg = get_or_create_hybrid_config(session)
+    if req.enabled is not None:
+        cfg.enabled = req.enabled
+    if req.interval_seconds is not None:
+        cfg.interval_seconds = req.interval_seconds
+    if req.min_confidence is not None:
+        cfg.min_confidence = req.min_confidence
+    session.commit()
+    log.warning("hybrid config updated", extra={"enabled": cfg.enabled,
+                "interval": cfg.interval_seconds, "min_confidence": cfg.min_confidence})
+    return _hybrid_view(session)
+
+
+@router.post("/hybrid/run", response_model=HybridView, tags=["hybrid"])
+def hybrid_run_now(session: Session = Depends(get_session)) -> HybridView:
+    """Run one Hybrid pass immediately (the 'Run now' button)."""
+    from app.agents.hybrid import run_hybrid
+
+    run_hybrid(session)
+    return _hybrid_view(session)

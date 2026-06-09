@@ -1,15 +1,6 @@
 import { useState } from "react";
+import { fmtPrice, fmtUsd } from "../format";
 import type { PositionView } from "../types";
-
-// Broker prices come back as raw floats that carry IEEE-754 representation noise
-// (e.g. 51664.00000000001, 25142.800000000003). Round to 12 significant figures to strip
-// the noise, then drop trailing zeros — this keeps the right precision for every instrument
-// (JPY 3dp, indices 1dp, 5-digit FX, sub-cent crypto) without hard-coding a decimal count.
-function fmtPrice(v: number | null | undefined): string {
-  if (v == null) return "—";
-  if (!Number.isFinite(v)) return String(v);
-  return Number(v.toPrecision(12)).toString();
-}
 
 interface Props {
   positions: PositionView[] | null;
@@ -105,18 +96,19 @@ function PositionRow({
         className="text-right tabular-nums text-neutral-300"
         title="Margin required to hold the position (cost to open), in USD"
       >
-        {p.cost_usd != null ? `$${p.cost_usd.toFixed(2)}` : "—"}
+        {fmtUsd(p.cost_usd)}
       </td>
       <td className="text-right tabular-nums">{fmtPrice(p.entry_price)}</td>
       <td className="text-right tabular-nums">{fmtPrice(p.last_price)}</td>
       <td
         className={`pr-4 text-right tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}
       >
-        {p.unrealized_pnl >= 0 ? "+" : ""}
-        {p.unrealized_pnl.toFixed(2)}
+        {fmtUsd(p.unrealized_pnl, { sign: true })}
       </td>
       <td>
         <input
+          name={`sl-${p.id}`}
+          autoComplete="off"
           value={sl}
           onChange={(e) => setSl(e.target.value)}
           placeholder="SL"
@@ -130,6 +122,8 @@ function PositionRow({
         <input
           value={tp}
           onChange={(e) => setTp(e.target.value)}
+          name={`tp-${p.id}`}
+          autoComplete="off"
           placeholder="TP"
           inputMode="decimal"
           className="w-20 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums"

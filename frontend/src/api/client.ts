@@ -165,6 +165,14 @@ export const api = {
   opportunities: () =>
     request<import("../types").OpportunityView[]>("/api/watchlist/opportunities"),
 
+  hybridState: () => request<import("../types").HybridState>("/api/hybrid"),
+  setHybridConfig: (cfg: { enabled?: boolean; interval_seconds?: number; min_confidence?: number }) =>
+    request<import("../types").HybridState>("/api/hybrid/config", {
+      method: "POST",
+      body: JSON.stringify(cfg),
+    }),
+  hybridRun: () => request<import("../types").HybridState>("/api/hybrid/run", { method: "POST" }),
+
   llmStatus: () => request<LlmStatus>("/api/settings/llm"),
   setLlm: (body: { provider: string; model?: string; api_key?: string }) =>
     request<LlmStatus>("/api/settings/llm", { method: "POST", body: JSON.stringify(body) }),

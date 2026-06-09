@@ -14,6 +14,7 @@ import {
   WhitespaceData,
 } from "lightweight-charts";
 import { api } from "../api/client";
+import { fmtPrice } from "../format";
 import type { AssetClass, Candle, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
@@ -379,12 +380,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
       {legend && (
         <div className="pointer-events-none absolute left-2 top-9 z-10 flex gap-2 text-xs tabular-nums">
-          <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmt(legend.open)}</span></span>
-          <span className="text-neutral-400">H<span className="ml-0.5 text-neutral-200">{fmt(legend.high)}</span></span>
-          <span className="text-neutral-400">L<span className="ml-0.5 text-neutral-200">{fmt(legend.low)}</span></span>
-          <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmt(legend.close)}</span></span>
+          <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.open)}</span></span>
+          <span className="text-neutral-400">H<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.high)}</span></span>
+          <span className="text-neutral-400">L<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.low)}</span></span>
+          <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.close)}</span></span>
           <span className={change >= 0 ? "text-bull" : "text-bear"}>
-            {change >= 0 ? "+" : ""}{fmt(change)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
+            {change >= 0 ? "+" : ""}{fmtPrice(change)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
           </span>
         </div>
       )}
@@ -396,12 +397,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
               myPos.direction === "long" ? "bg-bull/20 text-bull" : "bg-bear/20 text-bear"
             }`}
           >
-            {myPos.direction === "long" ? "▲ LONG" : "▼ SHORT"} @ {fmt(myPos.entry_price)}
+            {myPos.direction === "long" ? "▲ LONG" : "▼ SHORT"} @ {fmtPrice(myPos.entry_price)}
           </span>
           {myPos.stop_loss != null && (
-            <span className="text-bear">SL {fmt(myPos.stop_loss)}{posBE ? " (BE)" : ""}</span>
+            <span className="text-bear">SL {fmtPrice(myPos.stop_loss)}{posBE ? " (BE)" : ""}</span>
           )}
-          {myPos.take_profit != null && <span className="text-bull">TP {fmt(myPos.take_profit)}</span>}
+          {myPos.take_profit != null && <span className="text-bull">TP {fmtPrice(myPos.take_profit)}</span>}
           <span className={myPos.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}>
             {myPos.unrealized_pnl >= 0 ? "+" : ""}
             {myPos.unrealized_pnl.toFixed(2)}
@@ -418,8 +419,4 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       )}
     </div>
   );
-}
-
-function fmt(v: number): string {
-  return v.toLocaleString(undefined, { maximumFractionDigits: 5 });
 }

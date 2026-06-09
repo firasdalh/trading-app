@@ -260,6 +260,14 @@ export interface BacktestResult {
   disclaimer: string;
 }
 
+export interface HybridState {
+  enabled: boolean;
+  interval_seconds: number;
+  min_confidence: number;
+  last_run_at: string | null;
+  last_result: string | null;
+}
+
 export interface OpportunityView {
   symbol: string;
   asset_class: AssetClass;

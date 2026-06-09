@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import { assetLabel } from "../format";
 import type { AssetClass, BacktestResult } from "../types";
 import { EquityChart } from "./EquityChart";
 
@@ -45,26 +46,28 @@ export function BacktestView() {
       <div className="card flex flex-wrap items-end gap-3">
         <Field label="Symbol">
           <input
+            name="bt-symbol"
+            autoComplete="off"
             value={symbol}
             onChange={(e) => setSymbol(e.target.value)}
             className="w-28 rounded bg-neutral-800 px-2 py-1.5 uppercase"
           />
         </Field>
         <Field label="Asset class">
-          <select value={assetClass} onChange={(e) => setAssetClass(e.target.value as AssetClass)} className="rounded bg-neutral-800 px-2 py-1.5">
-            {ASSET_CLASSES.map((a) => <option key={a}>{a}</option>)}
+          <select name="bt-asset-class" value={assetClass} onChange={(e) => setAssetClass(e.target.value as AssetClass)} className="rounded bg-neutral-800 px-2 py-1.5">
+            {ASSET_CLASSES.map((a) => <option key={a} value={a}>{assetLabel(a)}</option>)}
           </select>
         </Field>
         <Field label="Timeframe">
-          <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="rounded bg-neutral-800 px-2 py-1.5">
+          <select name="bt-timeframe" value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="rounded bg-neutral-800 px-2 py-1.5">
             {TIMEFRAMES.map((t) => <option key={t}>{t}</option>)}
           </select>
         </Field>
         <Field label="Bars">
-          <input type="number" value={bars} min={50} max={2000} onChange={(e) => setBars(Number(e.target.value))} className="w-24 rounded bg-neutral-800 px-2 py-1.5" />
+          <input name="bt-bars" type="number" value={bars} min={50} max={2000} onChange={(e) => setBars(Number(e.target.value))} className="w-24 rounded bg-neutral-800 px-2 py-1.5" />
         </Field>
         <Field label="Starting equity">
-          <input type="number" value={equity} min={1} onChange={(e) => setEquity(Number(e.target.value))} className="w-32 rounded bg-neutral-800 px-2 py-1.5" />
+          <input name="bt-equity" type="number" value={equity} min={1} onChange={(e) => setEquity(Number(e.target.value))} className="w-32 rounded bg-neutral-800 px-2 py-1.5" />
         </Field>
         <button onClick={run} disabled={busy} className="btn bg-blue-600 text-white hover:bg-blue-500">
           {busy ? "Running…" : "Run backtest"}

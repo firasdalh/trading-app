@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { assetLabel } from "../format";
 import type { AssetClass, ExecutionMode, LlmStatus, Mt5Status, SettingsResponse } from "../types";
 
 const LLM_DEFAULT_MODEL: Record<string, string> = {
@@ -144,7 +145,7 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
           <div className="grid grid-cols-2 gap-2">
             {ASSET_CLASSES.map((ac) => (
               <label key={ac} className="text-sm">
-                <div className="mb-1 text-xs capitalize text-neutral-400">{ac}</div>
+                <div className="mb-1 text-xs text-neutral-400">{assetLabel(ac)}</div>
                 <select
                   disabled={busy}
                   value={settings?.app.broker_map?.[ac] ?? "sim"}

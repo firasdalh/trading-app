@@ -79,6 +79,7 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
         <label className="flex items-center gap-1">
           <span className="text-xs text-neutral-400">every</span>
           <input
+            name="scan-interval"
             type="number"
             min={20}
             max={3600}

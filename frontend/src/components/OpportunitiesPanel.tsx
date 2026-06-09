@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import { fmtPrice } from "../format";
+import { usePolling } from "../hooks/usePolling";
 import type { OpportunityView } from "../types";
 
 interface Props {
@@ -72,6 +74,8 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
         </button>
       </div>
 
+      <HybridControl onOpened={onOpened} />
+
       {error && <div className="mb-2 rounded border border-bear/40 bg-bear/10 px-2 py-1 text-xs text-bear">{error}</div>}
 
       {!items ? (
@@ -131,16 +135,11 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                       {openingKey === `${o.symbol}-${o.timeframe}` ? "Opening…" : "Open"}
                     </button>
                   )}
-                  {!canOpen && !actionable && (
-                    <span className="ml-auto text-xs text-neutral-600">
-                      {o.risk_decision === "vetoed" ? "" : ""}
-                    </span>
-                  )}
                 </div>
                 {actionable && o.entry != null && (
                   <div className="mt-1 text-xs tabular-nums text-neutral-400">
-                    entry {o.entry} · SL <span className="text-bear">{o.stop_loss}</span> · TP{" "}
-                    <span className="text-bull">{o.take_profit}</span>
+                    entry {fmtPrice(o.entry)} · SL <span className="text-bear">{fmtPrice(o.stop_loss)}</span> · TP{" "}
+                    <span className="text-bull">{fmtPrice(o.take_profit)}</span>
                   </div>
                 )}
                 <p className="mt-1 text-xs leading-relaxed text-neutral-500">
@@ -150,6 +149,82 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Hybrid auto-pilot toggle: one button. When on, every ~35 min it opens the single best
+// watchlist setup above the confidence threshold if there's room — all risk gates still apply.
+function HybridControl({ onOpened }: { onOpened?: () => void }) {
+  const [bump, setBump] = useState(0);
+  const { data: state } = usePolling(() => api.hybridState(), 15000, [bump]);
+  const [busy, setBusy] = useState(false);
+  const refresh = () => setBump((b) => b + 1);
+
+  const on = state?.enabled ?? false;
+  const intervalMin = state ? Math.round(state.interval_seconds / 60) : 35;
+  const confPct = state ? Math.round(state.min_confidence * 100) : 70;
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      await api.setHybridConfig({ enabled: !on });
+      refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runNow = async () => {
+    setBusy(true);
+    try {
+      await api.hybridRun();
+      refresh();
+      onOpened?.();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className={`mb-2 rounded-md border px-3 py-2 ${
+        on ? "border-bull/50 bg-bull/5" : "border-neutral-800 bg-neutral-900/40"
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold">🤖 Hybrid auto-pilot</span>
+        <span
+          className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+            on ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"
+          }`}
+        >
+          {on ? "ON" : "OFF"}
+        </span>
+        <button
+          onClick={toggle}
+          disabled={busy}
+          className={`btn ml-auto text-white ${on ? "bg-bear/80 hover:bg-bear" : "bg-bull/80 hover:bg-bull"}`}
+        >
+          {on ? "Turn off" : "Activate"}
+        </button>
+        {on && (
+          <button onClick={runNow} disabled={busy} className="btn bg-neutral-700 text-white hover:bg-neutral-600">
+            {busy ? "…" : "Run now"}
+          </button>
+        )}
+      </div>
+      <p className="mt-1 text-xs text-neutral-500">
+        Every ~{intervalMin} min, if fewer than 3 trades are open, it scans the watchlist and
+        auto-opens the single best setup above <span className="text-neutral-300">{confPct}%</span>{" "}
+        confidence. Kill-switch, daily-loss, exposure & no-stacking limits still apply.
+      </p>
+      {on && state?.last_result && (
+        <div className="mt-1 text-xs text-neutral-400">
+          Last check{state.last_run_at ? ` (${new Date(state.last_run_at).toLocaleTimeString()})` : ""}:{" "}
+          {state.last_result}
         </div>
       )}
     </div>

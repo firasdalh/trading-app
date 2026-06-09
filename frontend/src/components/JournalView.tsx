@@ -1,14 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import type { ReflectionReport } from "../types";
-
-// Strip broker float noise (e.g. 160.03199999999998) without hard-coding decimals.
-function fmtPrice(v: number | null | undefined): string {
-  if (v == null) return "—";
-  if (!Number.isFinite(v)) return String(v);
-  return Number(v.toPrecision(12)).toString();
-}
 
 // Close date/time in the user's local zone (matches the Exness journal column).
 function fmtDate(iso: string | null | undefined): string {
@@ -101,30 +95,32 @@ export function JournalView() {
         {!trades || trades.length === 0 ? (
           <div className="text-sm text-neutral-500">No closed trades yet.</div>
         ) : (
-          <table className="w-full text-sm">
-            <thead className="text-left text-xs text-neutral-400">
-              <tr>
-                <th className="py-1">Closed</th><th>Symbol</th><th>Side</th>
-                <th className="text-right">Qty</th><th className="text-right">Entry</th>
-                <th className="text-right">Exit</th><th className="text-right">Realized P&amp;L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.map((t) => (
-                <tr key={t.id} className="border-t border-neutral-800">
-                  <td className="py-1 whitespace-nowrap text-neutral-400">{fmtDate(t.closed_at)}</td>
-                  <td>{t.symbol}</td>
-                  <td className={t.direction === "long" ? "text-bull" : "text-bear"}>{t.direction}</td>
-                  <td className="text-right tabular-nums">{t.qty}</td>
-                  <td className="text-right tabular-nums">{fmtPrice(t.entry_price)}</td>
-                  <td className="text-right tabular-nums">{fmtPrice(t.last_price)}</td>
-                  <td className={`text-right tabular-nums ${(t.realized_pnl ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
-                    {t.realized_pnl == null ? "—" : `${t.realized_pnl >= 0 ? "+" : ""}${t.realized_pnl.toFixed(2)}`}
-                  </td>
+          <div className="max-h-[28rem] overflow-auto">
+            <table className="w-full whitespace-nowrap text-sm">
+              <thead className="sticky top-0 bg-neutral-900 text-left text-xs text-neutral-400">
+                <tr>
+                  <th className="py-1 pr-3">Closed</th><th className="pr-3">Symbol</th><th className="pr-3">Side</th>
+                  <th className="pr-3 text-right">Qty</th><th className="pr-3 text-right">Entry</th>
+                  <th className="pr-3 text-right">Exit</th><th className="text-right">Realized P&amp;L</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {trades.map((t) => (
+                  <tr key={t.id} className="border-t border-neutral-800">
+                    <td className="py-1 pr-3 text-neutral-400">{fmtDate(t.closed_at)}</td>
+                    <td className="pr-3">{t.symbol}</td>
+                    <td className={`pr-3 ${t.direction === "long" ? "text-bull" : "text-bear"}`}>{t.direction}</td>
+                    <td className="pr-3 text-right tabular-nums">{t.qty}</td>
+                    <td className="pr-3 text-right tabular-nums">{fmtPrice(t.entry_price)}</td>
+                    <td className="pr-3 text-right tabular-nums">{fmtPrice(t.last_price)}</td>
+                    <td className={`text-right tabular-nums ${(t.realized_pnl ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
+                      {t.realized_pnl == null ? "—" : fmtUsd(t.realized_pnl, { sign: true })}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

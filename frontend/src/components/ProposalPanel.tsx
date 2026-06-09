@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { fmtPrice, fmtUsd } from "../format";
 import type { AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
 
 const TF_RANK: Record<string, number> = { "1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7 };
@@ -116,9 +117,9 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
 
       {!noTrade && (
         <div className="grid grid-cols-3 gap-2 text-sm">
-          <Stat label="Entry" value={fmt(proposal.entry)} />
-          <Stat label="Stop" value={fmt(proposal.stop_loss)} valueClass="text-bear" />
-          <Stat label="Target" value={fmt(proposal.take_profit)} valueClass="text-bull" />
+          <Stat label="Entry" value={fmtPrice(proposal.entry)} />
+          <Stat label="Stop" value={fmtPrice(proposal.stop_loss)} valueClass="text-bear" />
+          <Stat label="Target" value={fmtPrice(proposal.take_profit)} valueClass="text-bull" />
         </div>
       )}
 
@@ -176,7 +177,7 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
           </div>
 
           <div className="grid grid-cols-3 gap-2">
-            <Stat label="Spend (margin)" value={econ?.margin_usd != null ? `$${econ.margin_usd.toFixed(2)}` : "—"} />
+            <Stat label="Spend (margin)" value={fmtUsd(econ?.margin_usd)} />
             <Stat label="Leverage" value={econ?.leverage != null ? `${econ.leverage.toFixed(0)}×` : "—"} />
             <Stat
               label="Exposure"
@@ -193,6 +194,8 @@ export function ProposalPanel({ result, status, busy, equity, onApprove, onRejec
               <label className="text-xs text-neutral-400">
                 <div className="mb-1">Size (lots)</div>
                 <input
+                  name="proposal-lots"
+                  autoComplete="off"
                   value={lots}
                   onChange={(e) => setLots(e.target.value)}
                   onBlur={(e) => reprice(e.target.value)}
@@ -487,6 +490,3 @@ function Stat({ label, value, valueClass }: { label: string; value: string; valu
   );
 }
 
-function fmt(v: number | null): string {
-  return v == null ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: 4 });
-}

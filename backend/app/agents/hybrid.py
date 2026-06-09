@@ -1,0 +1,153 @@
+"""Hybrid auto-pilot mode.
+
+One toggle. When enabled, a scheduled tick (every 30-45 min) does what a disciplined trader
+would on a check-in:
+  1. Is there room? (open positions < max_open_positions) — if not, do nothing.
+  2. Scan the watchlist and rank setups (deterministic preview).
+  3. Take ONLY the single best one whose confidence exceeds the threshold (default 70%),
+     re-run the FULL analysis (LLM review can still veto / lower confidence), and auto-open it.
+
+It opens at most one trade per tick. Every hard safety gate still applies downstream
+(kill-switch, live-confirmation, daily-loss pause, exposure budget, anti-stacking, min lot),
+so Hybrid can never bypass the Risk Manager — it only removes the manual approve click for a
+high-conviction setup.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.agents.pipeline import analyze_symbol, preview_symbol
+from app.core.logging import get_logger
+from app.core.state import (
+    get_or_create_risk_config,
+    get_or_create_settings,
+    kill_switch_active,
+)
+from app.models.db import AgentRun, HybridConfig, TradeProposalRecord, WatchItem
+from app.models.enums import AssetClass, ProposalStatus
+from app.risk.service import _norm_symbol, live_broker_positions
+
+log = get_logger("agents.hybrid")
+
+
+def get_or_create_hybrid_config(session: Session) -> HybridConfig:
+    cfg = session.get(HybridConfig, 1)
+    if cfg is None:
+        cfg = HybridConfig(id=1, enabled=False, interval_seconds=2100, min_confidence=0.70)
+        session.add(cfg)
+        session.commit()
+    return cfg
+
+
+def run_hybrid(session: Session) -> dict:
+    """Scan + auto-open the single best qualifying setup (if any). Returns a short summary."""
+    cfg = get_or_create_hybrid_config(session)
+    threshold = cfg.min_confidence
+
+    def done(reason: str, opened: dict | None = None) -> dict:
+        cfg.last_result = reason
+        session.add(cfg)
+        session.add(AgentRun(agent="hybrid", event="tick",
+                             detail={"opened": opened, "reason": reason}))
+        session.commit()
+        return {"ran": True, "opened": opened, "reason": reason}
+
+    # --- safety: kill-switch halts everything ---
+    if kill_switch_active(session):
+        return done("kill-switch active — no auto-open")
+
+    # --- 1. room check (open positions < max_open_positions) ---
+    max_pos = get_or_create_risk_config(session).max_open_positions
+    try:
+        open_positions = live_broker_positions(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hybrid: broker positions failed", extra={"error": str(exc)})
+        return done("could not read open positions")
+    if len(open_positions) >= max_pos:
+        return done(f"no room ({len(open_positions)}/{max_pos} open)")
+    open_syms = {_norm_symbol(p.symbol) for p in open_positions}
+
+    # --- 2. scan watchlist, rank deterministically; keep only qualifying candidates ---
+    items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
+    pending_syms = {
+        _norm_symbol(r.symbol) for r in session.scalars(
+            select(TradeProposalRecord).where(
+                TradeProposalRecord.status == ProposalStatus.PENDING_APPROVAL.value
+            )
+        )
+    }
+    candidates: list[tuple[float, WatchItem]] = []
+    for it in items:
+        if _norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms:
+            continue
+        try:
+            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class), it.timeframe)
+        except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
+            log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
+            continue
+        if (prop.direction.value in ("long", "short") and dec.approved
+                and prop.confidence > threshold):
+            candidates.append((prop.confidence, it))
+
+    if not candidates:
+        return done(f"no risk-approved setup above {threshold:.0%} confidence")
+
+    candidates.sort(key=lambda x: -x[0])
+    _, best = candidates[0]
+
+    # --- 3. full analysis (LLM review can veto / lower confidence) then auto-open ---
+    res = analyze_symbol(session, best.symbol, AssetClass(best.asset_class), best.timeframe,
+                         use_llm=True)
+    record = session.get(TradeProposalRecord, res.proposal_id)
+    if record is None:
+        return done(f"{best.symbol}: proposal vanished")
+
+    # Modes B/C may have already auto-executed it inside analyze_symbol.
+    if record.status == ProposalStatus.EXECUTED.value:
+        opened = {"symbol": best.symbol, "direction": record.direction,
+                  "confidence": record.confidence}
+        return done(f"opened {best.symbol} {record.direction} @ {record.confidence:.0%}", opened)
+
+    if (not res.risk.approved or res.proposal.confidence <= threshold
+            or res.proposal.direction.value not in ("long", "short")):
+        return done(f"best ({best.symbol}) no longer qualifies after full review "
+                    f"({res.proposal.confidence:.0%}, {res.risk.decision.value})")
+
+    # Approve + execute (every gate enforced inside the executor).
+    from app.execution.executor import ExecutionBlocked, execute_proposal
+
+    record.status = ProposalStatus.APPROVED.value
+    session.commit()
+    try:
+        execute_proposal(session, record)
+    except ExecutionBlocked as exc:
+        return done(f"{best.symbol}: execution blocked — {exc}")
+    session.refresh(record)
+
+    if record.status != ProposalStatus.EXECUTED.value:
+        return done(f"{best.symbol}: order not filled ({record.status})")
+
+    opened = {"symbol": best.symbol, "direction": record.direction, "confidence": record.confidence}
+    log.warning("hybrid auto-opened a trade", extra=opened)
+    return done(f"opened {best.symbol} {record.direction} @ {record.confidence:.0%}", opened)
+
+
+def hybrid_tick(session: Session) -> dict:
+    """Scheduler entrypoint: respect the enabled flag + interval, then run one hybrid pass."""
+    cfg = get_or_create_hybrid_config(session)
+    if not cfg.enabled:
+        return {"ran": False, "reason": "disabled"}
+
+    now = datetime.now(timezone.utc)
+    if cfg.last_run_at is not None:
+        last = cfg.last_run_at if cfg.last_run_at.tzinfo else cfg.last_run_at.replace(tzinfo=timezone.utc)
+        if (now - last).total_seconds() < cfg.interval_seconds:
+            return {"ran": False, "reason": "interval not elapsed"}
+
+    cfg.last_run_at = now
+    session.add(cfg)
+    session.commit()
+    return run_hybrid(session)

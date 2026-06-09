@@ -113,6 +113,8 @@ export function SymbolPicker({
           <div className="border-b border-neutral-800 p-2">
             <input
               ref={inputRef}
+              name="symbol-search"
+              autoComplete="off"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
