@@ -116,6 +116,17 @@ _CCY_TO_COUNTRY = {
 }
 _METAL_PREFIXES = ("XAU", "XAG", "XPT", "XPD")
 
+# Stock-index symbols carry no currency code, so map them to the country whose macro events
+# move them (FOMC moves US500, ECB moves DE40, etc.). Checked as substrings of the symbol.
+_INDEX_COUNTRY = {
+    "US500": "US", "US30": "US", "USTEC": "US", "US2000": "US", "SPX": "US", "NAS": "US",
+    "NDX": "US", "DOW": "US", "DJ": "US",
+    "DE40": "EU", "DE30": "EU", "GER": "EU", "DAX": "EU", "STOXX": "EU", "EU50": "EU", "FR40": "EU", "CAC": "EU",
+    "UK100": "GB", "FTSE": "GB",
+    "JP225": "JP", "JPN225": "JP", "NIK": "JP",
+    "AUS200": "AU", "ASX": "AU",
+}
+
 
 def _f(v) -> float | None:
     try:
@@ -147,6 +158,10 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
                 countries.append(country)
         if any(s.startswith(p) or p in s for p in _METAL_PREFIXES) and "US" not in countries:
             countries.append("US")
+        # Stock indices: add the country whose macro calendar drives them.
+        for token, country in _INDEX_COUNTRY.items():
+            if token in s and country not in countries:
+                countries.append(country)
         return countries
 
     def get_events(self, symbol: str, lookahead_hours: int = 24) -> list[CalendarEvent]:

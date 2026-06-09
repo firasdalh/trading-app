@@ -379,6 +379,11 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         currentAsset={assetClass}
         currentTimeframe={timeframe}
         mode={settings?.app.execution_mode}
+        onSelect={(it) => {
+          if (it.asset_class !== assetClass) setAssetClass(it.asset_class as AssetClass);
+          setSymbol(it.symbol);
+          if (it.timeframe) setTimeframe(it.timeframe);
+        }}
       />
 
       <OpportunitiesPanel

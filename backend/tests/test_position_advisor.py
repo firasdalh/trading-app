@@ -210,6 +210,30 @@ def test_auto_decision_none_when_intact_no_event():
     assert advisor._auto_decision(_adv(thesis="intact"), _pos(), {}, None) is None
 
 
+def test_auto_decision_tightens_on_weakening_in_profit():
+    # short in modest profit (~0.5R, below the +1.5R trail), thesis weakening -> tighten now.
+    p = _pos(direction="short", stop=4470.0)
+    decision = advisor._auto_decision(_adv(thesis="weakening"), p,
+                                      {"atr": 5.0, "last": 4444.0}, 10.0)
+    assert decision is not None and decision["kind"] == "tighten"
+    assert decision["stop"] < 4470.0  # only ever tighter than the current stop
+
+
+# --- multi-timeframe invalidation gating (entry-TF flip needs higher-TF confirmation) ---
+
+def test_thesis_lone_tf_flip_is_weakening_not_invalidated():
+    p = _pos(direction="long")
+    # entry-TF flipped DOWN against the long, but the higher TF is still UP -> pullback, weakening.
+    ctx = {"tf": "1h", "trend": "down", "macro": "up", "macro_tf": "1d", "macd_hist": 0.0, "atr": 5.0}
+    assert advisor._thesis_from_context(p, ctx)["label"] == "weakening"
+
+
+def test_thesis_flip_confirmed_on_higher_tf_is_invalidated():
+    p = _pos(direction="long")
+    ctx = {"tf": "1h", "trend": "down", "macro": "down", "macro_tf": "1d", "macd_hist": 0.0, "atr": 5.0}
+    assert advisor._thesis_from_context(p, ctx)["label"] == "invalidated"
+
+
 def _patch_exec(monkeypatch, broker, *, kill=False, live_ok=True):
     import app.brokers.registry as reg
     import app.core.state as state
@@ -259,9 +283,9 @@ def test_auto_execute_blocks_unconfirmed_live(db_session, monkeypatch):
 
 
 def test_run_advisor_skips_execution_when_toggle_off(db_session, monkeypatch):
-    monkeypatch.setattr(advisor, "advise_positions", lambda session: [_adv(thesis="invalidated")])
+    monkeypatch.setattr(advisor, "_advise_with_context", lambda session: ([_adv(thesis="invalidated")], {}))
     called = {"n": 0}
-    monkeypatch.setattr(advisor, "_auto_execute", lambda s, a: called.__setitem__("n", called["n"] + 1) or [])
+    monkeypatch.setattr(advisor, "_auto_execute", lambda s, a, c=None: called.__setitem__("n", called["n"] + 1) or [])
     cfg = advisor.get_or_create_advisor_config(db_session)
     cfg.auto_execute = False
     db_session.commit()
@@ -324,9 +348,9 @@ def test_reenter_skips_when_no_fresh_setup(db_session, monkeypatch):
 
 
 def test_run_advisor_reenters_after_close_when_enabled(db_session, monkeypatch):
-    monkeypatch.setattr(advisor, "advise_positions", lambda s: [])
+    monkeypatch.setattr(advisor, "_advise_with_context", lambda s: ([], {}))
     monkeypatch.setattr(advisor, "_auto_execute",
-                        lambda s, a: [{"symbol": "EURUSDm", "action": "close", "ok": True, "asset_class": "forex"}])
+                        lambda s, a, c=None: [{"symbol": "EURUSDm", "action": "close", "ok": True, "asset_class": "forex"}])
     monkeypatch.setattr(advisor, "_maybe_reenter",
                         lambda s, sym, ac: {"symbol": sym, "action": "reenter", "kind": "open", "ok": True, "reason": "opened long"})
     cfg = advisor.get_or_create_advisor_config(db_session)
@@ -338,9 +362,9 @@ def test_run_advisor_reenters_after_close_when_enabled(db_session, monkeypatch):
 
 
 def test_run_advisor_no_reenter_when_toggle_off(db_session, monkeypatch):
-    monkeypatch.setattr(advisor, "advise_positions", lambda s: [])
+    monkeypatch.setattr(advisor, "_advise_with_context", lambda s: ([], {}))
     monkeypatch.setattr(advisor, "_auto_execute",
-                        lambda s, a: [{"symbol": "EURUSDm", "action": "close", "ok": True, "asset_class": "forex"}])
+                        lambda s, a, c=None: [{"symbol": "EURUSDm", "action": "close", "ok": True, "asset_class": "forex"}])
     monkeypatch.setattr(advisor, "_maybe_reenter",
                         lambda s, sym, ac: (_ for _ in ()).throw(AssertionError("should not re-enter")))
     cfg = advisor.get_or_create_advisor_config(db_session)
@@ -352,9 +376,9 @@ def test_run_advisor_no_reenter_when_toggle_off(db_session, monkeypatch):
 
 
 def test_run_advisor_executes_when_toggle_on(db_session, monkeypatch):
-    monkeypatch.setattr(advisor, "advise_positions", lambda session: [_adv(thesis="invalidated")])
+    monkeypatch.setattr(advisor, "_advise_with_context", lambda session: ([_adv(thesis="invalidated")], {}))
     monkeypatch.setattr(advisor, "_auto_execute",
-                        lambda s, a: [{"symbol": "XAUUSDm", "action": "close", "ok": True}])
+                        lambda s, a, c=None: [{"symbol": "XAUUSDm", "action": "close", "ok": True}])
     cfg = advisor.get_or_create_advisor_config(db_session)
     cfg.auto_execute = True
     db_session.commit()

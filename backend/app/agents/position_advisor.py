@@ -59,23 +59,42 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _planned_timeframe(session: Session, symbol: str) -> str:
-    """The timeframe the trade was last analysed on (so the re-check matches the plan)."""
-    row = session.scalars(
-        select(TradeProposalRecord).where(TradeProposalRecord.symbol == symbol)
-        .order_by(TradeProposalRecord.id.desc())
-    ).first()
+def _plan_proposal(session: Session, symbol: str, direction: str | None = None):
+    """The proposal that actually OPENED the current position.
+
+    Prefers the most recent EXECUTED proposal matching symbol + direction (the no-stacking rule
+    guarantees one open trade per symbol+direction, so that's this trade's real entry plan).
+    Falls back to the latest proposal for the symbol. This avoids using a *later* re-analysis's
+    levels/timeframe — which the scanner/hybrid create constantly — for the R-multiple and the
+    thesis re-check.
+    """
+    from app.models.enums import ProposalStatus
+    from app.risk.service import _norm_symbol
+
+    norm = _norm_symbol(symbol)
+    rows = session.scalars(
+        select(TradeProposalRecord).order_by(TradeProposalRecord.id.desc()).limit(120)
+    ).all()
+    same = [r for r in rows if _norm_symbol(r.symbol) == norm]
+    if direction is not None:
+        for r in same:
+            if r.status == ProposalStatus.EXECUTED.value and r.direction == direction:
+                return r
+    return same[0] if same else None
+
+
+def _planned_timeframe(session: Session, symbol: str, direction: str | None = None) -> str:
+    """The timeframe the trade was opened on (so the re-check matches the actual plan)."""
+    row = _plan_proposal(session, symbol, direction)
     return row.timeframe if (row and row.timeframe) else "1h"
 
 
-def _plan_risk(session: Session, symbol: str, atr: float | None) -> float | None:
+def _plan_risk(session: Session, symbol: str, atr: float | None,
+               direction: str | None = None) -> float | None:
     """The risk-per-unit the trade was planned with (|entry − stop|), used to express progress
     in R. Falls back to the engine's default ATR stop distance when no plan is on record."""
     try:
-        row = session.scalars(
-            select(TradeProposalRecord).where(TradeProposalRecord.symbol == symbol)
-            .order_by(TradeProposalRecord.id.desc())
-        ).first()
+        row = _plan_proposal(session, symbol, direction)
         if row and row.entry and row.stop_loss:
             r = abs(row.entry - row.stop_loss)
             if r > 0:
@@ -85,18 +104,26 @@ def _plan_risk(session: Session, symbol: str, atr: float | None) -> float | None
     return _PROTECT_ATR_MULT * atr if atr else None
 
 
+def _macro_tf_label(tech, fallback: str) -> str:
+    """Label of the highest-timeframe read available (the dominant context)."""
+    from app.agents.orchestrator import _macro_tf
+
+    m = _macro_tf(tech)
+    return m.timeframe if m else fallback
+
+
 def _position_context(session: Session, p) -> dict | None:
     """Fresh deterministic read for one open position (trend, momentum, ATR, last price). Best
     effort — returns ``None`` if data/broker is unavailable. No LLM, so it's free per tick."""
     try:
-        from app.agents.orchestrator import _trend_from_indicators
+        from app.agents.orchestrator import _macro_trend, _trend_from_indicators
         from app.agents.technical import run_technical
         from app.brokers.registry import get_broker_for
         from app.models.enums import AssetClass
 
         ac = AssetClass(p.asset_class)
         broker = get_broker_for(ac, get_or_create_settings(session).broker_map)
-        tf = _planned_timeframe(session, p.symbol)
+        tf = _planned_timeframe(session, p.symbol, p.direction)
         series = []
         for t in dict.fromkeys([tf, "1h", "1d"]):
             try:
@@ -109,8 +136,10 @@ def _position_context(session: Session, p) -> dict | None:
         if not tech.timeframes:
             return None
         prim = next((x for x in tech.timeframes if x.timeframe == tf), tech.timeframes[0])
+        macro_tf = _macro_tf_label(tech, tf)
         ind = prim.indicators
         return {"tf": tf, "trend": _trend_from_indicators(ind, prim.trend),
+                "macro": _macro_trend(tech), "macro_tf": macro_tf,
                 "macd_hist": ind.get("macd_hist"), "atr": ind.get("atr14"),
                 "last": ind.get("last_close")}
     except Exception:  # noqa: BLE001 - the advisor must never crash the scan/endpoint
@@ -123,14 +152,24 @@ def _thesis_from_context(p, ctx: dict) -> dict:
     trivial counter-momentum (noise) is ignored."""
     tf, trend = ctx["tf"], ctx["trend"]
     macd_hist, atr = ctx.get("macd_hist"), ctx.get("atr")
+    macro, macro_tf = ctx.get("macro"), ctx.get("macro_tf", tf)
     want = "up" if p.direction == "long" else "down"
     opp = "down" if p.direction == "long" else "up"
 
     if trend == opp:
-        return {"label": "invalidated",
-                "note": (f"Plan check: the {tf} trend now reads {trend.upper()}, against your "
-                         f"{p.direction}. The setup that justified this trade no longer holds — "
-                         "consider exiting rather than hoping.")}
+        # Only call it INVALIDATED when the higher timeframe confirms the flip. An entry-TF flip
+        # while the higher TF still supports the trade is usually a pullback, not a breakdown —
+        # treat it as weakening so we don't auto-exit good trades on noise (the crypto lesson).
+        if macro == opp:
+            return {"label": "invalidated",
+                    "note": (f"Plan check: the trend now reads {trend.upper()} against your "
+                             f"{p.direction} on BOTH {tf} and the higher {macro_tf} timeframe. "
+                             "The setup no longer holds — consider exiting rather than hoping.")}
+        return {"label": "weakening",
+                "note": (f"Plan check: {tf} flipped {trend.upper()} against your {p.direction}, "
+                         f"but the higher {macro_tf} timeframe is still "
+                         f"{(macro or 'mixed').upper()} — likely a pullback, not a breakdown. "
+                         "Tighten the stop; don't bail blindly.")}
 
     against = macd_hist is not None and (
         (p.direction == "long" and macd_hist < 0) or (p.direction == "short" and macd_hist > 0)
@@ -159,7 +198,7 @@ def _r_multiple(session: Session, p, ctx: dict | None) -> float | None:
     if not ctx:
         return None
     last = ctx.get("last") or p.last_price
-    risk = _plan_risk(session, p.symbol, ctx.get("atr"))
+    risk = _plan_risk(session, p.symbol, ctx.get("atr"), p.direction)
     if not last or not risk:
         return None
     profit = (last - p.entry_price) if p.direction == "long" else (p.entry_price - last)
@@ -192,9 +231,17 @@ def _base_advice(p, ev_label, ev_mins, winning, has_stop) -> tuple[str, str, str
 
 
 def advise_positions(session: Session) -> list[PositionAdvice]:
+    """Advisories for the panel/endpoint (the per-position fresh read is discarded)."""
+    return _advise_with_context(session)[0]
+
+
+def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[str, dict]]:
+    """Compute advisories AND return the per-symbol fresh context, so the auto-execute pass can
+    reuse it instead of re-fetching the broker/indicators for every position a second time."""
     now = datetime.now(timezone.utc)
     cal = get_calendar_provider()
     out: list[PositionAdvice] = []
+    contexts: dict[str, dict] = {}
 
     for p in live_broker_positions(session):
         try:
@@ -218,6 +265,8 @@ def advise_positions(session: Session) -> list[PositionAdvice]:
         severity, headline, detail = _base_advice(p, ev_label, ev_mins, winning, has_stop)
 
         ctx = _position_context(session, p)
+        if ctx:
+            contexts[p.symbol] = ctx
         thesis = _position_thesis(session, p, ctx)
         r_mult = _r_multiple(session, p, ctx)
         thesis_label = thesis["label"] if thesis else "unknown"
@@ -241,7 +290,7 @@ def advise_positions(session: Session) -> list[PositionAdvice]:
             has_stop=has_stop, severity=severity, headline=headline, detail=detail,
             thesis=thesis_label, r_multiple=r_mult, event_label=ev_label, minutes_to_event=ev_mins,
         ))
-    return out
+    return out, contexts
 
 
 # --------------------------------------------------------------------------- #
@@ -342,6 +391,16 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None) -> 
             return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
                     "reason": f"reached +{r:.1f}R — moving the stop to breakeven"}
 
+    # 2b) Thesis weakening while in profit -> tighten the stop NOW (don't wait for +1.5R). Locks
+    # gains exactly when the read is deteriorating; only ever risk-reducing.
+    if a.thesis == "weakening" and atr and last:
+        profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
+        if profit > 0:
+            tight = (last - _TRAIL_ATR_MULT * atr) if d == "long" else (last + _TRAIL_ATR_MULT * atr)
+            if _tightens(d, p.stop_loss, tight):
+                return {"action": "set_stop", "kind": "tighten", "stop": round(tight, 5),
+                        "reason": "thesis weakening while in profit — tightening the stop to lock gains"}
+
     # 3) Winning into imminent news -> lock breakeven even before +1R.
     if a.event_label is not None and p.unrealized_pnl > 0 and _stop_worse_than_entry(p):
         return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
@@ -369,7 +428,8 @@ def _reconcile_closed_symbol(session: Session, symbol: str) -> None:
         daily.realized_pnl = round(daily.realized_pnl + (r.unrealized_pnl or 0.0), 2)
 
 
-def _auto_execute(session: Session, advice: list[PositionAdvice]) -> list[dict]:
+def _auto_execute(session: Session, advice: list[PositionAdvice],
+                  contexts: dict[str, dict] | None = None) -> list[dict]:
     """Act on the bounded auto-decisions. Hard safety gates: kill switch halts everything; live
     brokers require this session's live-confirmation; paper acts freely. Closing requires the
     invalidation to persist (hysteresis) and is rate-limited per symbol (cooldown); protective
@@ -390,6 +450,7 @@ def _auto_execute(session: Session, advice: list[PositionAdvice]) -> list[dict]:
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
     positions = {p.symbol: p for p in live_broker_positions(session)}
+    contexts = contexts or {}
 
     for a in advice:
         p = positions.get(a.symbol)
@@ -402,8 +463,8 @@ def _auto_execute(session: Session, advice: list[PositionAdvice]) -> list[dict]:
         else:
             _INVALID_STREAK[a.symbol] = 0
 
-        ctx = _position_context(session, p)
-        plan_risk = _plan_risk(session, a.symbol, (ctx or {}).get("atr"))
+        ctx = contexts.get(a.symbol) or _position_context(session, p)
+        plan_risk = _plan_risk(session, a.symbol, (ctx or {}).get("atr"), a.direction)
         decision = _auto_decision(a, p, ctx or {}, plan_risk)
         if decision is None:
             continue
@@ -454,11 +515,11 @@ def _auto_execute(session: Session, advice: list[PositionAdvice]) -> list[dict]:
 
 def run_advisor(session: Session) -> dict:
     """Compute advisories now, optionally auto-execute, record to the audit log, stamp last_run."""
-    advice = advise_positions(session)
+    advice, contexts = _advise_with_context(session)
     cfg = get_or_create_advisor_config(session)
     cfg.last_run_at = datetime.now(timezone.utc)
 
-    actions = _auto_execute(session, advice) if cfg.auto_execute else []
+    actions = _auto_execute(session, advice, contexts) if cfg.auto_execute else []
 
     # After closing an invalidated trade, optionally re-analyse and open a fresh, properly-sized
     # setup in whatever direction the engine now supports (opt-in, separate toggle).

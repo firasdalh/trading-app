@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
+import { displaySymbol } from "../format";
 import type { AssetClass, ExecutionMode, WatchlistResponse } from "../types";
 
 interface Props {
@@ -7,13 +8,17 @@ interface Props {
   currentAsset: AssetClass;
   currentTimeframe: string;
   mode: ExecutionMode | undefined;
+  onSelect?: (it: { symbol: string; asset_class: string; timeframe: string }) => void;
 }
 
 // Autonomous scanner control: the watched pairs, an on/off toggle, the scan interval, and
 // last-scan time. The AI analyzes these pairs on a schedule and acts per execution mode.
-export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, mode }: Props) {
+export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, mode, onSelect }: Props) {
   const [data, setData] = useState<WatchlistResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  // symbol (uppercase) -> instrument name, for hover tooltips. Fetched once per asset class.
+  const [descs, setDescs] = useState<Record<string, string>>({});
+  const fetchedAc = useRef<Set<string>>(new Set());
 
   const load = () => api.watchlist().then(setData).catch(() => {});
 
@@ -22,6 +27,29 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, []);
+
+  // Pull instrument names for the asset classes present in the watchlist (once each).
+  useEffect(() => {
+    if (!data) return;
+    const need = [...new Set(data.items.map((i) => i.asset_class))].filter(
+      (ac) => !fetchedAc.current.has(ac),
+    );
+    for (const ac of need) {
+      fetchedAc.current.add(ac);
+      api
+        .symbols(ac as AssetClass)
+        .then((r) =>
+          setDescs((prev) => {
+            const next = { ...prev };
+            for (const [sym, name] of Object.entries(r.descriptions ?? {})) {
+              next[sym.toUpperCase()] = name;
+            }
+            return next;
+          }),
+        )
+        .catch(() => {});
+    }
+  }, [data]);
 
   const wrap = async (fn: () => Promise<WatchlistResponse>) => {
     setBusy(true);
@@ -127,23 +155,50 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          {data.items.map((it) => (
-            <span
-              key={it.id}
-              className="flex items-center gap-2 rounded bg-neutral-800 px-2 py-1 text-sm"
-            >
-              {it.symbol}
-              <span className="text-xs text-neutral-500">{it.timeframe}</span>
-              <button
-                disabled={busy}
-                onClick={() => wrap(() => api.removeWatch(it.id))}
-                className="text-neutral-500 hover:text-bear"
-                title="Remove"
+          {[...data.items]
+            .sort(
+              (a, b) =>
+                a.asset_class.localeCompare(b.asset_class) ||
+                a.symbol.localeCompare(b.symbol) ||
+                a.timeframe.localeCompare(b.timeframe),
+            )
+            .map((it) => {
+            const active =
+              it.symbol.toUpperCase() === currentSymbol.toUpperCase() &&
+              it.timeframe === currentTimeframe;
+            const name = descs[it.symbol.toUpperCase()];
+            return (
+              <span
+                key={it.id}
+                className={`flex items-center gap-2 rounded px-2 py-1 text-sm ${
+                  active ? "bg-blue-600 text-white" : "bg-neutral-800"
+                }`}
               >
-                ✕
-              </button>
-            </span>
-          ))}
+                <button
+                  onClick={() => onSelect?.(it)}
+                  className="font-medium hover:underline"
+                  title={
+                    name
+                      ? `${name} — ${it.asset_class} · ${it.timeframe} (open on the chart)`
+                      : `Open ${displaySymbol(it.symbol)} (${it.asset_class} · ${it.timeframe}) on the chart`
+                  }
+                >
+                  {displaySymbol(it.symbol)}
+                </button>
+                <span className={`text-xs ${active ? "text-blue-100" : "text-neutral-500"}`}>
+                  {it.timeframe}
+                </span>
+                <button
+                  disabled={busy}
+                  onClick={() => wrap(() => api.removeWatch(it.id))}
+                  className={`hover:text-bear ${active ? "text-blue-200" : "text-neutral-500"}`}
+                  title="Remove from watchlist"
+                >
+                  ✕
+                </button>
+              </span>
+            );
+          })}
         </div>
       )}
     </div>

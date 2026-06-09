@@ -17,6 +17,14 @@ export function fmtUsd(v: number | null | undefined, opts: { sign?: boolean } = 
   return opts.sign ? `+${s}` : s;
 }
 
+// Display a broker symbol consistently. Exness suffixes its instruments with a lowercase "m"
+// (EURUSDm, US500m); the watchlist stores them with mixed casing depending on how they were
+// added (EURUSDM vs USOILm). Normalize to base-uppercase + lowercase "m" so they all match.
+export function displaySymbol(s: string): string {
+  const u = (s || "").toUpperCase();
+  return u.endsWith("M") ? `${u.slice(0, -1)}m` : u;
+}
+
 // Human label for an asset-class value. Capitalized; "index" -> "Indices".
 const ASSET_LABELS: Record<string, string> = { index: "Indices" };
 export function assetLabel(a: string): string {

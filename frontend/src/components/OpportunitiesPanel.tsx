@@ -21,12 +21,14 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
   const [busy, setBusy] = useState(false);
   const [openingKey, setOpeningKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [listOpen, setListOpen] = useState(true); // collapse the (long) results list
 
   const scan = async () => {
     setBusy(true);
     setError(null);
     try {
       setItems(await api.opportunities());
+      setListOpen(true); // show results after a scan
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -58,7 +60,15 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
   return (
     <div className="card">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="text-sm font-semibold">Opportunities</span>
+        <button
+          onClick={() => setListOpen((o) => !o)}
+          className="flex items-center gap-1 text-sm font-semibold hover:text-neutral-300"
+          title={listOpen ? "Collapse the results" : "Expand the results"}
+          aria-expanded={listOpen}
+        >
+          <span className="text-xs text-neutral-500">{listOpen ? "▾" : "▸"}</span>
+          Opportunities
+        </button>
         <span className="text-xs text-neutral-500">scan all watchlist pairs &amp; rank the best</span>
         {items && (
           <span className="text-xs text-neutral-400">
@@ -78,7 +88,13 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
 
       {error && <div className="mb-2 rounded border border-bear/40 bg-bear/10 px-2 py-1 text-xs text-bear">{error}</div>}
 
-      {!items ? (
+      {!listOpen ? (
+        items && (
+          <div className="text-xs text-neutral-500">
+            {items.length} setups hidden — click “Opportunities” to expand.
+          </div>
+        )
+      ) : !items ? (
         <div className="text-sm text-neutral-500">
           Press <span className="font-semibold text-neutral-300">Scan watchlist</span> to analyze every
           pair and see the best setups ranked, with one-click open.
@@ -86,7 +102,7 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
       ) : items.length === 0 ? (
         <div className="text-sm text-neutral-500">No enabled watchlist pairs to scan.</div>
       ) : (
-        <div className="space-y-2">
+        <div className="max-h-[32rem] space-y-2 overflow-y-auto pr-1">
           {items.map((o, i) => {
             const dir = DIR[o.direction] ?? DIR.no_trade;
             const actionable = o.direction === "long" || o.direction === "short";
