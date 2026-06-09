@@ -12,6 +12,7 @@ from app.agents.indicators import (
     bollinger,
     ema,
     macd,
+    market_structure,
     rsi,
     swing_levels,
     trend_from_emas,
@@ -88,6 +89,16 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
     vr = volume_ratio(candles)
     if vr is not None:
         indicators["vol_ratio"] = vr
+    # Market structure (swing highs/lows) — how a chart trader reads trend. Encoded numerically
+    # (1=up / -1=down / 0=range) plus the latest swing levels and a change-of-character flag, so
+    # the orchestrator can weight structure without a schema change.
+    ms = market_structure(candles)
+    indicators["structure"] = {"up": 1.0, "down": -1.0, "range": 0.0}[ms["structure"]]
+    if ms["swing_high"] is not None:
+        indicators["swing_high"] = ms["swing_high"]
+    if ms["swing_low"] is not None:
+        indicators["swing_low"] = ms["swing_low"]
+    indicators["choch"] = 1.0 if ms["choch"] else 0.0
 
     trend = trend_from_emas(closes)
     adx_val = indicators.get("adx")
@@ -99,7 +110,8 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         resistance_levels=[resistance] if resistance is not None else [],
         indicators=indicators,
         patterns=[],
-        comment=f"deterministic read: trend={trend}, strength={strength} (ADX={adx_val})",
+        comment=f"deterministic read: trend={trend}, structure={ms['structure']}, "
+                f"strength={strength} (ADX={adx_val})",
     )
 
 

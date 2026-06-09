@@ -20,17 +20,38 @@ from app.models.schemas import FundamentalRead, TechnicalRead, TradeProposal, Tr
 
 log = get_logger("agents.orchestrator")
 
-_REVIEW_SYSTEM = """You are a senior, risk-aware trader REVIEWING a trade setup produced by a
-deterministic strategy. Your authority is strictly limited:
-- You may ONLY confirm or veto. You CANNOT create a trade, change its direction, move the
-  stop/target, or increase size. Position sizing and hard risk limits are handled by a
-  separate deterministic Risk Manager downstream.
-- CONFIRM when the setup is reasonable. Optionally LOWER the confidence (never raise it).
-- VETO only with a concrete, risk-based reason: higher-timeframe trend conflict, an imminent
-  high-impact event (stand_aside_windows), clear exhaustion / over-extension, poor reward:risk
-  versus nearby structure, or thin/illiquid conditions.
-Be conservative but not trigger-happy — a vague feeling is not a veto. Return strict JSON:
-decision ("confirm"|"veto"), confidence (0-1), rationale, concerns[]."""
+_REVIEW_SYSTEM = """You are a trader with 30 years on institutional desks (FX, indices, commodities,
+crypto). You have survived many cycles BECAUSE you are selective: you pass on most setups and only
+back the high-quality ones. You are now REVIEWING a setup the deterministic strategy produced.
+
+Your authority is strictly limited (non-negotiable):
+- You may ONLY confirm or veto. You CANNOT create a trade, flip its direction, move the
+  entry/stop/target, or increase size. Sizing and the hard risk limits are handled by a separate
+  deterministic Risk Manager downstream. You may only CONFIRM, VETO, or LOWER the confidence.
+
+Judge the setup against a professional checklist, then grade it A / B / C:
+1. TREND & STRUCTURE — Is the trade WITH the dominant higher-timeframe trend and market structure
+   (higher highs/lows for longs, lower highs/lows for shorts)? Counter-trend trades start at C.
+2. LOCATION — Is entry at VALUE (a pullback to a moving average / prior structure / support-
+   resistance) or is it CHASING an extended move far from the mean? Buying highs / selling lows
+   into a stretched RSI is a classic amateur error — penalise it hard.
+3. MOMENTUM — Does momentum (MACD/ADX/DI) CONFIRM the entry, or is it diverging/rolling over?
+   A trade needs the move to already be working, not hoped for.
+4. REWARD:RISK vs REAL STRUCTURE — Is there a clean path of at least ~2R to target BEFORE price
+   runs into opposing structure (support for shorts, resistance for longs)? If the obvious level
+   sits between entry and target, R:R is not real.
+5. EVENT & LIQUIDITY RISK — Imminent high-impact event (stand_aside_windows), thin/illiquid
+   conditions, or a market with no trend (low ADX / ranging) — stand aside.
+6. CONVICTION — Confirm only A and B setups (trend + good location + momentum + clean R:R).
+   VETO C setups: counter-trend, chasing/extended entries, momentum divergence, R:R blocked by
+   structure, or "no real edge here." When genuinely torn, protect capital and veto — the best
+   trades a pro makes are the ones they DON'T take.
+
+Be decisive but not trigger-happy: a vague feeling is not a veto; a concrete flaw is.
+In `rationale`, state the GRADE (A/B/C) and the one or two factors that drove the decision, like a
+desk head explaining a call. In `concerns`, list the specific risks. Set `confidence` to your honest
+conviction (0-1) — modest for B, high for A, and you will be vetoing C.
+Return strict JSON: decision ("confirm"|"veto"), confidence (0-1), rationale, concerns[]."""
 
 
 def _now_in_stand_aside(fundamental: FundamentalRead, now: datetime) -> bool:
@@ -56,6 +77,8 @@ _ATR_STOP_MULT = 1.5  # protective stop = entry +/- 1.5 * ATR (forex/metal/index
 _ATR_STOP_MULT_CRYPTO = 2.5  # crypto is far more volatile — a tight stop just gets wicked out
 _MIN_STOP_ATR_FRAC = 1.0  # never place the stop closer than 1xATR (anti-wick floor): structure-
                           # tightening must not pull the stop inside this, or normal noise stops us
+_STRUCT_STOP_BUFFER_ATR = 0.2  # place the structural stop this far BEYOND the swing (wick allowance)
+_STRUCT_STOP_MAX_ATR = 3.0     # if the invalidating swing is further than this, it's not a practical stop
 _RR = 2.0             # reward:risk target
 _RSI_OB = 75.0        # overbought / oversold caution thresholds
 _RSI_OS = 25.0
@@ -104,6 +127,20 @@ def _macro_trend(technical: TechnicalRead) -> str:
     if best is None:
         return "sideways"
     return _trend_from_indicators(best.indicators, best.trend)
+
+
+def _structure_label(ind: dict) -> str:
+    """Market structure (swing highs/lows) encoded in the indicators: 1=up / -1=down / 0=range."""
+    s = ind.get("structure")
+    if s is None:
+        return "range"
+    return "up" if s > 0.5 else "down" if s < -0.5 else "range"
+
+
+def _macro_structure(technical: TechnicalRead) -> str:
+    """Market structure of the highest-timeframe read (the dominant chart context)."""
+    best = _macro_tf(technical)
+    return _structure_label(best.indicators) if best else "range"
 
 
 def _deterministic_decision(
@@ -172,6 +209,25 @@ def _deterministic_decision(
         )
         return base
 
+    # --- market-structure confluence: a pro won't fight clear opposing swing structure ---
+    # If the EMA stack points one way but the SWINGS (entry TF AND higher TF) point the other,
+    # that's an early-reversal / chop tell. Stand aside and wait rather than buying into
+    # lower-highs/lower-lows (or selling into higher-highs/higher-lows).
+    struct = _structure_label(ind)
+    macro_struct = _macro_structure(technical)
+    against_struct = (
+        (direction == Direction.LONG and struct == "down" and macro_struct == "down")
+        or (direction == Direction.SHORT and struct == "up" and macro_struct == "up")
+    )
+    if against_struct:
+        base.watch = True
+        base.rationale = (
+            f"Structure conflict: EMA trend reads {trend}, but market structure is {struct} "
+            f"(entry TF) / {macro_struct} (higher TF) — against a {direction.value}. Likely an "
+            "early reversal or chop; waiting for swing structure to confirm before entering."
+        )
+        return base
+
     entry = ind.get("last_close") or _last_close(technical)
     if entry is None or entry <= 0:
         base.rationale = "No usable entry price from technical read; sitting out."
@@ -189,25 +245,41 @@ def _deterministic_decision(
     support = tf0.support_levels[0] if tf0 and tf0.support_levels else None
     resistance = tf0.resistance_levels[0] if tf0 and tf0.resistance_levels else None
 
-    # --- ATR stop (tightened to structure when sensible) ---
-    # Crypto gets a wider ATR multiple, and we never tighten the stop inside an anti-wick floor
-    # (>= 1xATR from entry) — both target the crypto losses where tight stops were instantly hit.
+    # --- protective stop ---
+    # A pro stops where the trade is INVALIDATED, not at an arbitrary distance: just beyond the
+    # last swing (structure). We prefer that swing-structure stop, falling back to an ATR stop,
+    # with two guards — never tighter than the anti-wick floor (>= 1xATR, so noise can't pick it
+    # off), and never wider than _STRUCT_STOP_MAX_ATR (a too-far swing isn't a practical stop).
+    # Crypto keeps a wider ATR multiple. (These guards fixed the instant-wick crypto losses.)
     atr_mult = _ATR_STOP_MULT_CRYPTO if asset_class == AssetClass.CRYPTO else _ATR_STOP_MULT
     min_stop_dist = _MIN_STOP_ATR_FRAC * atr_v if atr_v else 0.0
+    swing_low = ind.get("swing_low")
+    swing_high = ind.get("swing_high")
+    stop_basis = "ATR"
     if direction == Direction.LONG:
         atr_stop = entry - atr_mult * atr_v if atr_v else None
         stop = atr_stop if atr_stop is not None else (support if (support and support < entry) else entry * 0.98)
-        # Tighten to support only if it stays beyond the anti-wick floor.
+        # Tighten to nearby support only if it stays beyond the anti-wick floor.
         if (support is not None and atr_stop is not None and atr_stop < support < entry
                 and (entry - support) >= min_stop_dist):
-            stop = support
+            stop, stop_basis = support, "support"
+        # Structural stop: just below the last swing low (the long's invalidation), if practical.
+        if atr_v and swing_low is not None and swing_low < entry:
+            struct_dist = (entry - swing_low) + _STRUCT_STOP_BUFFER_ATR * atr_v
+            if struct_dist <= _STRUCT_STOP_MAX_ATR * atr_v:
+                stop, stop_basis = entry - max(struct_dist, min_stop_dist), "swing-low structure"
         risk = entry - stop
     else:
         atr_stop = entry + atr_mult * atr_v if atr_v else None
         stop = atr_stop if atr_stop is not None else (resistance if (resistance and resistance > entry) else entry * 1.02)
         if (resistance is not None and atr_stop is not None and entry < resistance < atr_stop
                 and (resistance - entry) >= min_stop_dist):
-            stop = resistance
+            stop, stop_basis = resistance, "resistance"
+        # Structural stop: just above the last swing high (the short's invalidation), if practical.
+        if atr_v and swing_high is not None and swing_high > entry:
+            struct_dist = (swing_high - entry) + _STRUCT_STOP_BUFFER_ATR * atr_v
+            if struct_dist <= _STRUCT_STOP_MAX_ATR * atr_v:
+                stop, stop_basis = entry + max(struct_dist, min_stop_dist), "swing-high structure"
         risk = stop - entry
 
     if risk <= 0:
@@ -275,9 +347,18 @@ def _deterministic_decision(
         regime_ok = (direction == Direction.LONG and entry >= e200) or \
                     (direction == Direction.SHORT and entry <= e200)
         conf += 0.05 if regime_ok else -0.05
+    # Market structure: aligned swings (HH/HL for a long, LH/LL for a short) add real conviction;
+    # trading against structure or right after a change-of-character (CHoCH) subtracts it. This is
+    # the chart-reader's "is price action actually confirming this?" check.
+    if struct != "range":
+        aligned = (direction == Direction.LONG and struct == "up") or (
+            direction == Direction.SHORT and struct == "down"
+        )
+        conf += 0.1 if aligned else -0.1
+    if ind.get("choch"):
+        conf -= 0.1
     confidence = round(max(0.05, min(0.95, conf)), 2)
 
-    stop_basis = "ATR" if atr_v else "structure"
     base.direction = direction
     base.entry = round(entry, 6)
     base.stop_loss = round(stop, 6)
@@ -285,10 +366,13 @@ def _deterministic_decision(
     base.confidence = confidence
     base.rationale = (
         f"Confluence {direction.value.upper()}: entry-TF trend={trend}, macro={macro}, "
-        f"ADX {adx_v}, MACD hist={macd_hist}, RSI {rsi}, bias={bias.value}"
+        f"structure={struct}/{macro_struct}, ADX {adx_v}, MACD hist={macd_hist}, RSI {rsi}, "
+        f"bias={bias.value}"
         f"{' (cross-TF momentum conflict)' if macro_conflict else ''}"
-        f"{' (stretched entry)' if overextended else ''}. "
-        f"Entry {base.entry}, stop {base.stop_loss} ({stop_basis} ~{atr_mult}xATR), "
+        f"{' (stretched entry)' if overextended else ''}"
+        f"{' (CHoCH)' if ind.get('choch') else ''}. "
+        f"Entry {base.entry}, stop {base.stop_loss} "
+        f"({stop_basis}{f', {risk / atr_v:.1f}xATR' if atr_v else ''}), "
         f"target {base.take_profit} ({struct_note}). Deterministic (no LLM)."
     )
     return base
@@ -323,11 +407,13 @@ def run_orchestrator(
         f"  symbol={symbol} timeframe={timeframe} direction={proposal.direction.value}\n"
         f"  entry={proposal.entry} stop={proposal.stop_loss} target={proposal.take_profit} "
         f"confidence={proposal.confidence}\n  rationale={proposal.rationale}\n\n"
-        f"TECHNICAL READ:\n{technical.model_dump_json(indent=2)}\n\n"
+        f"TECHNICAL READ (all timeframes, indicators, support/resistance):\n"
+        f"{technical.model_dump_json(indent=2)}\n\n"
         f"FUNDAMENTAL READ:\n{fundamental.model_dump_json(indent=2)}\n\n"
-        "Confirm if this is a reasonable setup; veto only with a concrete risk reason "
-        "(higher-timeframe conflict, imminent high-impact news, exhaustion/over-extension, "
-        "poor reward:risk vs structure, illiquid conditions)."
+        "Run your professional checklist (trend & structure, location/value vs chasing, momentum "
+        "confirmation, reward:risk vs the nearest opposing level, event & liquidity risk). Grade it "
+        "A/B/C. Confirm only A/B; veto C and any counter-trend, chased/over-extended, momentum-"
+        "diverging, or structure-blocked setup. When torn, protect capital and veto."
     )
     review = analyze(system=_REVIEW_SYSTEM, user=user, schema=TradeReviewLLM, max_tokens=2000)
     if review is None:

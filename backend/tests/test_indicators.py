@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from app.agents.indicators import adx, atr, bollinger, ema, macd, volume_ratio
+from app.agents.indicators import adx, atr, bollinger, ema, macd, market_structure, volume_ratio
 from app.agents.orchestrator import _deterministic_decision
 from app.models.enums import AssetClass, Direction, TradingBias
 from app.models.schemas import Candle, FundamentalRead, TechnicalRead, TimeframeRead
@@ -198,3 +198,93 @@ def test_strong_trend_ignores_immediate_structure():
                                 _multi_tf("down", "down", support=97.6, adx=35.0), _fund(), now=NOW)
     assert p.direction == Direction.SHORT
     assert p.take_profit is not None and p.take_profit < p.entry
+
+
+# ---- market structure (swing highs/lows) ----
+
+def _zigzag(n: int, step_up: float, step_dn: float, up_len: int, dn_len: int) -> list[Candle]:
+    """A saw-tooth: up_len bars rising by step_up, then dn_len bars falling by step_dn."""
+    prices: list[float] = []
+    p = 100.0
+    while len(prices) < n:
+        for _ in range(up_len):
+            prices.append(p)
+            p += step_up
+        for _ in range(dn_len):
+            prices.append(p)
+            p -= step_dn
+    return [Candle(ts=NOW + timedelta(hours=i), open=v, high=v + 0.5, low=v - 0.5, close=v, volume=1.0)
+            for i, v in enumerate(prices[:n])]
+
+
+def test_market_structure_reads_uptrend():
+    ms = market_structure(_zigzag(40, step_up=2, step_dn=1, up_len=5, dn_len=3))  # net up
+    assert ms["structure"] == "up"
+    assert ms["swing_high"] is not None and ms["swing_low"] is not None
+
+
+def test_market_structure_reads_downtrend():
+    ms = market_structure(_zigzag(40, step_up=1, step_dn=2, up_len=3, dn_len=5))  # net down
+    assert ms["structure"] == "down"
+
+
+def test_market_structure_range_on_insufficient_data():
+    few = [Candle(ts=NOW + timedelta(hours=i), open=100, high=101, low=99, close=100, volume=1.0)
+           for i in range(3)]
+    assert market_structure(few)["structure"] == "range"
+
+
+def test_market_structure_flags_choch():
+    candles = _zigzag(36, step_up=2, step_dn=1, up_len=5, dn_len=3)
+    sl = market_structure(candles)["swing_low"]
+    assert sl is not None
+    candles.append(Candle(ts=NOW + timedelta(hours=99), open=sl, high=sl, low=sl - 5,
+                          close=sl - 5, volume=1.0))  # close well below the last swing low
+    assert market_structure(candles)["choch"] is True
+
+
+# ---- structural stops (place the stop where the trade is invalidated) ----
+
+def _tech_struct(trend, entry, atr_v=2.0, *, swing_low=None, swing_high=None, adx_v=30.0):
+    ind = {"last_close": entry, "atr14": atr_v, "adx": adx_v, "ema20": entry, "vol_ratio": 1.3,
+           "macd_hist": 1.0 if trend == "up" else -1.0,
+           "structure": 1.0 if trend == "up" else -1.0}
+    if swing_low is not None:
+        ind["swing_low"] = swing_low
+    if swing_high is not None:
+        ind["swing_high"] = swing_high
+    return TechnicalRead(symbol="X", overall_trend=trend, confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend=trend, indicators=ind,
+                      support_levels=[entry - 10], resistance_levels=[entry + 10])])
+
+
+def test_structural_stop_uses_swing_low_for_long():
+    # Swing low 96, ATR 2 -> structural stop = 96 - 0.2*2 = 95.6 (4.4 below entry, within 3xATR).
+    t = _tech_struct("up", entry=100.0, atr_v=2.0, swing_low=96.0)
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(), now=NOW)
+    assert p.direction == Direction.LONG
+    assert p.stop_loss is not None and abs(p.stop_loss - 95.6) < 0.01
+    assert "swing" in p.rationale.lower()
+
+
+def test_structural_stop_uses_swing_high_for_short():
+    t = _tech_struct("down", entry=100.0, atr_v=2.0, swing_high=104.0)
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(), now=NOW)
+    assert p.direction == Direction.SHORT
+    assert p.stop_loss is not None and abs(p.stop_loss - 104.4) < 0.01  # 104 + 0.2*ATR
+
+
+def test_too_far_swing_falls_back_to_atr_stop():
+    # Swing low 80 is 10xATR away -> not a practical stop -> fall back to the 1.5xATR stop (97).
+    t = _tech_struct("up", entry=100.0, atr_v=2.0, swing_low=80.0)
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(), now=NOW)
+    assert p.direction == Direction.LONG
+    assert p.stop_loss is not None and abs(p.stop_loss - 97.0) < 0.01  # 1.5 * ATR
+
+
+def test_too_close_swing_respects_anti_wick_floor():
+    # Swing low 99.5 is only 0.25xATR away -> floor to 1xATR (stop = 98), never get wicked off.
+    t = _tech_struct("up", entry=100.0, atr_v=2.0, swing_low=99.5)
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(), now=NOW)
+    assert p.direction == Direction.LONG
+    assert p.stop_loss is not None and abs(p.stop_loss - 98.0) < 0.01  # entry - 1xATR floor

@@ -42,6 +42,59 @@ def swing_levels(candles: list[Candle], lookback: int = 20) -> tuple[float | Non
     return round(support, 4), round(resistance, 4)
 
 
+def market_structure(candles: list[Candle], left: int = 3, right: int = 3) -> dict:
+    """Read market structure the way a chart trader does — from the sequence of swing pivots.
+
+    A *swing high* is a bar whose high is strictly above the ``left`` bars before and ``right``
+    bars after it (a local peak); a *swing low* is the mirror. We then classify the trend from
+    the last two of each:
+      - higher-high AND higher-low  -> "up"   (a real uptrend's footprint)
+      - lower-high  AND lower-low   -> "down"
+      - anything mixed              -> "range"
+    ``choch`` (change-of-character) is True when the latest close breaks back through the most
+    recent opposing swing — the earliest warning that the trend may be turning.
+
+    Returns: {structure, swing_high, swing_low, choch}. The newest pivot is necessarily ``right``
+    bars old (a peak isn't confirmed until price turns), so nothing here repaints.
+    """
+    n = len(candles)
+    out = {"structure": "range", "swing_high": None, "swing_low": None, "choch": False}
+    if n < left + right + 3:
+        return out
+
+    sh: list[float] = []  # swing-high prices, oldest-first
+    sl: list[float] = []  # swing-low prices, oldest-first
+    for i in range(left, n - right):
+        h = candles[i].high
+        if all(h > candles[j].high for j in range(i - left, i)) and all(
+            h > candles[j].high for j in range(i + 1, i + right + 1)
+        ):
+            sh.append(h)
+        lo = candles[i].low
+        if all(lo < candles[j].low for j in range(i - left, i)) and all(
+            lo < candles[j].low for j in range(i + 1, i + right + 1)
+        ):
+            sl.append(lo)
+
+    if len(sh) >= 2 and len(sl) >= 2:
+        if sh[-1] > sh[-2] and sl[-1] > sl[-2]:
+            out["structure"] = "up"
+        elif sh[-1] < sh[-2] and sl[-1] < sl[-2]:
+            out["structure"] = "down"
+
+    last_sh = sh[-1] if sh else None
+    last_sl = sl[-1] if sl else None
+    out["swing_high"] = round(last_sh, 6) if last_sh is not None else None
+    out["swing_low"] = round(last_sl, 6) if last_sl is not None else None
+
+    last_close = candles[-1].close
+    if out["structure"] == "up" and last_sl is not None and last_close < last_sl:
+        out["choch"] = True
+    elif out["structure"] == "down" and last_sh is not None and last_close > last_sh:
+        out["choch"] = True
+    return out
+
+
 def trend_from_smas(closes: list[float]) -> str:
     """Classify trend from fast/slow SMA relationship + last-close position."""
     fast = sma(closes, 10) or sma(closes, min(len(closes), 5))

@@ -84,7 +84,9 @@ def run_hybrid(session: Session) -> dict:
         if _norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms:
             continue
         try:
-            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class), it.timeframe)
+            # Full LLM analysis (same as the "Run analysis" button) for a proper read.
+            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
+                                       it.timeframe, use_llm=True)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue
