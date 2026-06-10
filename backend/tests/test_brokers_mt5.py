@@ -66,10 +66,11 @@ class FakeMt5:
         return (0, "ok")
 
     def history_deals_get(self, frm, to):
-        # One entry deal (profit 0) + one closing deal with profit/swap/commission.
+        # One entry deal (profit 0) + one closing deal with profit/swap/commission. Trade deals
+        # carry a symbol (balance/credit ops don't — see test_get_realized_pnl_excludes_*).
         return [
-            SimpleNamespace(profit=0.0, swap=0.0, commission=0.0),
-            SimpleNamespace(profit=150.0, swap=-2.0, commission=-1.0),
+            SimpleNamespace(symbol="EURUSD", profit=0.0, swap=0.0, commission=0.0),
+            SimpleNamespace(symbol="EURUSD", profit=150.0, swap=-2.0, commission=-1.0),
         ]
 
 
@@ -225,3 +226,21 @@ def test_serialized_mt5_passes_constants_and_serializes_calls():
     release.set()
     worker.join(timeout=2)
     assert locked_out is True
+
+
+def test_get_realized_pnl_excludes_balance_operations():
+    """A withdrawal / credit deal (no symbol) must NOT count as trading P&L — otherwise it
+    distorts realized and can falsely trip the daily-loss breaker (the real-account bug:
+    trading was +159.17 but a -818.79 withdrawal made it look like a -659.62 'loss')."""
+    from datetime import datetime, timezone
+
+    class _Deals:
+        def history_deals_get(self, a, b):
+            return [
+                SimpleNamespace(symbol="XAUUSDm", profit=159.17, swap=0.0, commission=0.0),
+                SimpleNamespace(symbol="", profit=-818.79, swap=0.0, commission=0.0),  # withdrawal/credit
+            ]
+
+    a = Mt5BrokerAdapter.__new__(Mt5BrokerAdapter)
+    a._mt5 = _Deals()
+    assert a.get_realized_pnl(datetime(2026, 6, 10, tzinfo=timezone.utc)) == 159.17

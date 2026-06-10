@@ -561,12 +561,21 @@ class Mt5BrokerAdapter(BrokerAdapter):
             return 1.0
 
     def get_realized_pnl(self, since) -> float | None:
-        """Sum profit + swap + commission of deals closed since ``since`` (terminal truth)."""
+        """Sum profit + swap + commission of TRADE deals closed since ``since`` (terminal truth).
+
+        Excludes non-trade BALANCE operations — deposits, withdrawals, credit/bonus changes,
+        corrections — which carry a P&L figure but no symbol (and no position_id). Counting them
+        would distort realized trading P&L AND can falsely trip the daily-loss circuit breaker:
+        a withdrawal would look like a trading loss and pause trading. (Trade deals always carry a
+        symbol; balance ops never do.)
+        """
         deals = self._mt5.history_deals_get(since, datetime.now(timezone.utc))
         if deals is None:
             return 0.0
         total = 0.0
         for d in deals:
+            if not getattr(d, "symbol", ""):  # balance / credit / correction / charge — not trading
+                continue
             total += float(getattr(d, "profit", 0) or 0)
             total += float(getattr(d, "swap", 0) or 0)
             total += float(getattr(d, "commission", 0) or 0)
