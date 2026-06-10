@@ -18,6 +18,7 @@ an injected fake module.
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 from app.brokers.base import BrokerAdapter, BrokerError
@@ -48,6 +49,41 @@ def normalize_symbol(symbol: str) -> str:
     return symbol.upper().replace("/", "").replace("_", "").replace("-", "")
 
 
+# The MetaTrader5 package talks to the terminal over a SINGLE connection that is NOT safe for
+# concurrent use. This app calls it from the scheduler's threads (monitor ~10s, scanner ~20s,
+# advisor ~30s, Hybrid ~60s) AND from API request handlers, so without serialization two calls can
+# interleave on the one IPC pipe — corrupting replies or wedging the link (lost ticks, a close
+# firing against a half-read state). Every terminal call is funnelled through this process-wide
+# lock. It is module-level (shared by all Mt5BrokerAdapter instances) because they share the one
+# terminal; reentrant so a future method-level wrap can't self-deadlock.
+_MT5_LOCK = threading.RLock()
+
+
+class _SerializedMt5:
+    """Proxy over the MetaTrader5 module that runs every terminal CALL under ``_MT5_LOCK``.
+
+    Only callables are wrapped (and the lock is held just for that one call); constant attributes
+    (``TIMEFRAME_*``, ``TRADE_ACTION_*``, retcodes, etc.) pass straight through. The wrapped C
+    functions never call back into Python, so calls don't nest — the lock is released between
+    successive calls, serializing the IPC without otherwise blocking the agents.
+    """
+
+    def __init__(self, mt5) -> None:
+        # Store in __dict__ directly so __getattr__ (below) never recurses resolving it.
+        self.__dict__["_mt5"] = mt5
+
+    def __getattr__(self, name: str):
+        attr = getattr(self.__dict__["_mt5"], name)
+        if not callable(attr):
+            return attr
+
+        def _locked(*args, **kwargs):
+            with _MT5_LOCK:
+                return attr(*args, **kwargs)
+
+        return _locked
+
+
 class Mt5BrokerAdapter(BrokerAdapter):
     name = "mt5"
     supported_asset_classes = (AssetClass.FOREX, AssetClass.METAL, AssetClass.CRYPTO,
@@ -63,7 +99,9 @@ class Mt5BrokerAdapter(BrokerAdapter):
             import MetaTrader5 as mt5  # lazy; Windows-only
         except ImportError as exc:  # pragma: no cover
             raise BrokerError("MetaTrader5 package not installed (pip install MetaTrader5)") from exc
-        self._mt5 = mt5
+        # Wrap so every terminal call made through self._mt5 is serialized (single-connection
+        # safety). __init__ below uses the raw local `mt5` — it runs once at startup, single-threaded.
+        self._mt5 = _SerializedMt5(mt5)
 
         creds = resolve_mt5_credentials()
         kwargs: dict = {}

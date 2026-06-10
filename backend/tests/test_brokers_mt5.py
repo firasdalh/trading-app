@@ -192,3 +192,36 @@ def test_open_positions_lots_to_units():
     assert len(views) == 1
     assert views[0].direction == "long"
     assert views[0].qty == 100000.0  # 1.0 lot * contract_size 100000
+
+
+def test_serialized_mt5_passes_constants_and_serializes_calls():
+    """The proxy wrapping the MetaTrader5 module must pass constants through unlocked and hold the
+    shared lock for the duration of every call, so concurrent threads can't interleave on the
+    single terminal connection."""
+    import threading
+
+    from app.brokers.mt5_adapter import _MT5_LOCK, _SerializedMt5
+
+    started, release = threading.Event(), threading.Event()
+
+    class _Fake:
+        TIMEFRAME_H1 = 16385  # a constant
+
+        def hold(self):
+            started.set()
+            release.wait(timeout=2)  # keep the call (and thus the lock) in flight
+            return "ok"
+
+    proxy = _SerializedMt5(_Fake())
+    assert proxy.TIMEFRAME_H1 == 16385  # constant passes straight through (not wrapped)
+
+    worker = threading.Thread(target=proxy.hold)
+    worker.start()
+    assert started.wait(timeout=2)  # worker is now inside the call, holding _MT5_LOCK
+    # A different thread (this one) must NOT be able to grab the lock while the call is in flight.
+    locked_out = not _MT5_LOCK.acquire(blocking=False)
+    if not locked_out:
+        _MT5_LOCK.release()
+    release.set()
+    worker.join(timeout=2)
+    assert locked_out is True
