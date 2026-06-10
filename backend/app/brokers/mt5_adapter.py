@@ -79,7 +79,11 @@ class _SerializedMt5:
 
         def _locked(*args, **kwargs):
             with _MT5_LOCK:
-                return attr(*args, **kwargs)
+                # Forward positionally when there are no keyword args: MT5's dict-taking calls
+                # (order_send / order_check) REJECT an empty kwargs dict with "Unnamed arguments
+                # not allowed", which would silently block every order. Passing **{} is not a
+                # no-op to these C functions, so only spread kwargs when non-empty.
+                return attr(*args, **kwargs) if kwargs else attr(*args)
 
         return _locked
 
