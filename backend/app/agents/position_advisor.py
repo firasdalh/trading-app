@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.core.state import get_or_create_settings
+from app.data.ohlcv_cache import get_ohlcv_cached
 from app.data.providers import get_calendar_provider
 from app.models.db import AdvisorConfig, AgentRun, TradeProposalRecord
 from app.models.schemas import PositionAdvice
@@ -141,7 +142,7 @@ def _position_context(session: Session, p) -> dict | None:
         series = []
         for t in dict.fromkeys([tf, "1h", "1d"]):
             try:
-                series.append(broker.get_ohlcv(p.symbol, t, limit=200))
+                series.append(get_ohlcv_cached(broker, p.symbol, t, limit=200))
             except Exception:  # noqa: BLE001
                 pass
         if not series:

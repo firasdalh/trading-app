@@ -18,6 +18,7 @@ from app.agents.orchestrator import run_orchestrator
 from app.agents.technical import run_technical
 from app.brokers.registry import get_broker_for
 from app.core.logging import get_logger
+from app.data.ohlcv_cache import get_ohlcv_cached
 from app.core.state import get_or_create_settings
 from app.models.db import AgentRun, TradeProposalRecord
 from app.models.enums import AssetClass, Direction, ProposalStatus, RiskDecisionType
@@ -47,7 +48,7 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
     series: list[OHLCVSeries] = []
     for tf in _timeframes_for(timeframe):
         try:
-            series.append(broker.get_ohlcv(symbol, tf, limit=200))
+            series.append(get_ohlcv_cached(broker, symbol, tf, limit=200))
         except Exception as exc:  # noqa: BLE001
             log.warning("preview ohlcv failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
     technical = run_technical(symbol, series, use_llm=use_llm)
@@ -97,7 +98,7 @@ def analyze_symbol(
     series: list[OHLCVSeries] = []
     for tf in _timeframes_for(timeframe):
         try:
-            series.append(broker.get_ohlcv(symbol, tf, limit=200))
+            series.append(get_ohlcv_cached(broker, symbol, tf, limit=200))
         except Exception as exc:  # noqa: BLE001
             log.warning("ohlcv fetch failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
 
