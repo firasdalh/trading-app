@@ -612,6 +612,14 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                         except Exception as exc:  # noqa: BLE001
                             log.warning("advisor: breakeven move after partial failed",
                                         extra={"symbol": a.symbol, "error": str(exc)})
+                elif "too small" in (result.error or "").lower() or "min lot" in (result.error or "").lower():
+                    # Position is at the broker minimum lot — it can't be split. Stop retrying the
+                    # partial every tick (which just spams failed actions); mark it so the next pass
+                    # manages the WHOLE position via breakeven/trail instead. Re-checked when flat.
+                    _PARTIAL_DONE.add(a.symbol)
+                    action, kind = "partial_skipped", "partial"
+                    reason = "position at min lot — can't scale; managing the whole position instead"
+                    ok = True  # not a failure: a partial just isn't applicable to a min-lot position
             else:  # set_stop (protect | breakeven | trail)
                 result = broker.set_sl_tp(p.symbol, decision["stop"], p.take_profit)
                 ok = result.status.value not in ("error", "rejected")

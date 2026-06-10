@@ -335,6 +335,26 @@ def test_auto_execute_partial_does_not_loosen_profitable_stop(db_session, monkey
     assert not any(abs(s[1] - 4449.0) < 0.01 for s in broker.sltp)     # but stop NOT loosened to entry
 
 
+def test_auto_execute_partial_skips_when_too_small(db_session, monkeypatch):
+    """A min-lot position can't be split 50%; the advisor must skip gracefully (not spam a failed
+    take_partial every tick) and mark it so it manages the whole position instead."""
+    class _SmallBroker(_Broker):
+        def close_partial(self, symbol, fraction):
+            self.partials.append((symbol, fraction))
+            return _Result("rejected", error="position too small to partial-close (min lot)")
+
+    broker = _SmallBroker(is_paper=True)
+    monkeypatch.setattr(advisor, "live_broker_positions",
+                        lambda session: [_pos(direction="long", stop=4445.0)])
+    monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
+    _patch_exec(monkeypatch, broker)
+    ctx = {"XAUUSDm": {"atr": 2.0, "last": 4470.0, "regime": "trending"}}  # +2.1R -> take_partial
+    actions = advisor._auto_execute(db_session, [_adv(symbol="XAUUSDm", thesis="intact")], ctx)
+    assert broker.partials == [("XAUUSDm", 0.5)]          # attempted once
+    assert "XAUUSDm" in advisor._PARTIAL_DONE             # marked -> won't retry the partial
+    assert any(x["action"] == "partial_skipped" and x["ok"] for x in actions)  # benign, not a ✗
+
+
 def test_already_scaled_derived_from_remaining_size(db_session):
     """A position whose live size is materially below the planned size is treated as already
     scaled — correct across restarts when the in-memory _PARTIAL_DONE set is empty."""
