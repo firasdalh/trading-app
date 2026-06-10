@@ -28,7 +28,7 @@ from app.core.state import (
 )
 from app.models.db import AgentRun, HybridConfig, TradeProposalRecord, WatchItem
 from app.models.enums import AssetClass, ProposalStatus
-from app.risk.service import _norm_symbol, live_broker_positions
+from app.risk.service import ScanCache, _norm_symbol, live_broker_positions
 
 log = get_logger("agents.hybrid")
 
@@ -72,6 +72,9 @@ def run_hybrid(session: Session) -> dict:
     if len(open_positions) >= max_pos:
         return done(f"no room ({len(open_positions)}/{max_pos} open)")
     open_syms = {_norm_symbol(p.symbol) for p in open_positions}
+    # Reuse this single open-book fetch for every per-symbol risk check in the scan below (primed
+    # into a ScanCache), so ranking the watchlist doesn't make one broker round-trip per symbol.
+    cache = ScanCache(open_book=[(p.symbol, p.direction) for p in open_positions])
 
     # --- 2. scan watchlist, rank deterministically; keep only qualifying candidates ---
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
@@ -91,7 +94,7 @@ def run_hybrid(session: Session) -> dict:
             # well-calibrated. The chosen best is then re-run with the LLM reviewer below before
             # it actually opens, so the LLM judgment still gates every auto-trade.
             prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=False)
+                                       it.timeframe, use_llm=False, cache=cache)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue

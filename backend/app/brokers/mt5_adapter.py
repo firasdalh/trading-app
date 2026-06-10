@@ -413,7 +413,11 @@ class Mt5BrokerAdapter(BrokerAdapter):
             last: OrderResult | None = None
             for p in positions:
                 part = (int((p.volume * fraction) / step) * step) if step else p.volume * fraction
-                part = round(max(vmin, min(part, p.volume)), 2)
+                # Round to the lot STEP's precision (0.01 -> 2dp, 0.001 -> 3dp), not a fixed 2dp,
+                # so fine-lot instruments aren't snapped to an invalid/zero volume.
+                s = f"{step:.10f}".rstrip("0")
+                ndp = len(s.split(".")[1]) if "." in s else 0
+                part = round(max(vmin, min(part, p.volume)), ndp)
                 if part >= p.volume:  # can't take a partial without dropping below the min lot
                     return OrderResult(status=OrderStatus.REJECTED,
                                        error="position too small to partial-close (min lot)")

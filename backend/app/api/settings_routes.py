@@ -554,8 +554,11 @@ def run_monitor(session: Session = Depends(get_session)) -> dict:
 
 class HybridConfigRequest(BaseModel):
     enabled: bool | None = None
-    interval_seconds: int | None = Field(None, ge=300, le=5400)  # 5-90 min
-    min_confidence: float | None = Field(None, gt=0.0, le=1.0)
+    # Bounds match the documented Hybrid range in RISK.md (interval 30-90 min, confidence
+    # 50-95%), so the API is the single source of truth — the UI clamp is merely cosmetic and a
+    # direct POST can't make the auto-pilot more trigger-happy than documented.
+    interval_seconds: int | None = Field(None, ge=1800, le=5400)  # 30-90 min
+    min_confidence: float | None = Field(None, ge=0.5, le=0.95)   # 50-95%
 
 
 class HybridView(BaseModel):

@@ -6,6 +6,7 @@ limit — it only assembles inputs.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -213,8 +214,42 @@ def build_limits(session: Session) -> RiskLimits:
     )
 
 
-def build_account_state(session: Session, broker: BrokerAdapter) -> AccountState:
-    acct = broker.get_account()
+@dataclass
+class ScanCache:
+    """Per-scan memo so a watchlist/Hybrid sweep makes ONE broker round-trip for the open book and
+    one ``get_account`` per broker — not N. The open book and account state don't change between
+    symbols within a single read-only ranking pass, so caching them turns O(N) broker I/O (slow
+    over MT5's synchronous terminal IPC) into O(1).
+
+    Create one per scan and discard it. Do NOT reuse across scans or pass it to the real open path
+    (``analyze_symbol``), which must see fresh broker truth before opening a trade.
+    """
+    open_book: list[tuple[str, str]] | None = None
+    accounts: dict[str, AccountState] = field(default_factory=dict)
+
+
+def _scan_open_book(session: Session, cache: ScanCache | None) -> list[tuple[str, str]]:
+    """Broker open book as (symbol, direction) tuples; memoized on ``cache`` for one scan."""
+    if cache is not None and cache.open_book is not None:
+        return cache.open_book
+    try:
+        book = [(p.symbol, p.direction) for p in live_broker_positions(session)]
+    except Exception:  # noqa: BLE001 - never let a broker hiccup block sizing
+        book = []
+    if cache is not None:
+        cache.open_book = book
+    return book
+
+
+def build_account_state(session: Session, broker: BrokerAdapter,
+                        cache: ScanCache | None = None) -> AccountState:
+    # The broker round-trip (get_account) is the expensive part; memoize it per broker for a scan.
+    if cache is not None and broker.name in cache.accounts:
+        acct = cache.accounts[broker.name]
+    else:
+        acct = broker.get_account()
+        if cache is not None:
+            cache.accounts[broker.name] = acct
     # Aggregate risk-at-entry across locally-tracked OPEN positions for exposure accounting.
     open_positions = session.scalars(
         select(Position).where(Position.status == PositionStatus.OPEN.value)
@@ -253,20 +288,6 @@ def _norm_symbol(s: str) -> str:
     return "".join(ch for ch in (s or "").upper() if ch.isalnum())
 
 
-def db_has_open_same_direction(session: Session, symbol: str, direction: str) -> bool:
-    """True if an APP-tracked OPEN position exists in this symbol + direction (anti-stacking).
-
-    Retained as a helper, but the live preview/scan path (`assess`) now derives anti-stacking
-    from broker truth instead, so a stale DB row can't phantom-block a symbol. The monitor
-    reconciles such stale rows; see `app.execution.monitor._reconcile_closed_at_broker`.
-    """
-    norm = _norm_symbol(symbol)
-    rows = session.scalars(
-        select(Position).where(Position.status == PositionStatus.OPEN.value)
-    ).all()
-    return any(_norm_symbol(p.symbol) == norm and p.direction == direction for p in rows)
-
-
 def broker_has_open_same_direction(session: Session, symbol: str, direction: str) -> bool:
     """True if the BROKER already has an open position in this symbol + direction (anti-stacking).
 
@@ -285,27 +306,27 @@ def assess(
     session: Session,
     proposal: TradeProposal,
     override_risk_fraction: float | None = None,
+    cache: ScanCache | None = None,
 ) -> RiskDecision:
     """Run a proposal through the deterministic Risk Manager against live state.
 
     ``override_risk_fraction`` (Mode A manual size) is re-clamped to the 2% ceiling inside the
-    manager, so a user-chosen size can never exceed the hard per-trade cap.
+    manager, so a user-chosen size can never exceed the hard per-trade cap. ``cache`` (a
+    ``ScanCache``) memoizes the broker open book + account for a multi-symbol scan; omit it for
+    single-symbol assessments and the real open path so they always read fresh broker truth.
     """
     from app.risk.correlation import correlated_concentration
 
     settings = get_or_create_settings(session)
     broker = get_broker_for(proposal.asset_class, settings.broker_map)
     limits = build_limits(session)
-    account = build_account_state(session, broker)
+    account = build_account_state(session, broker, cache=cache)
     # Open book from broker truth (so manual/terminal trades count too). Used for BOTH the
     # anti-stacking and correlated-concentration checks, which keeps the preview consistent with
     # the executor's final broker-truth gate — a stale app-DB row can no longer "phantom-block" a
     # symbol that isn't actually open at the broker. (Refuses e.g. a 2nd same-direction trade in
     # an open symbol, or a 3rd position piling onto one risk factor like "long USD" x3.)
-    try:
-        open_book = [(p.symbol, p.direction) for p in live_broker_positions(session)]
-    except Exception:  # noqa: BLE001 - never let a broker hiccup block sizing
-        open_book = []
+    open_book = _scan_open_book(session, cache)
     norm = _norm_symbol(proposal.symbol)
     same_dir = any(_norm_symbol(sym) == norm and d == proposal.direction.value for sym, d in open_book)
     correlated = correlated_concentration(open_book, proposal.symbol, proposal.direction.value)

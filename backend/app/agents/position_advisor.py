@@ -301,7 +301,8 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
         thesis_label = thesis["label"] if thesis else "unknown"
         # Scale-out suggestion (Mode A): once a winner reaches the milestone, a pro books partial
         # profit and trails the rest. (The auto-advisor does this itself when enabled.)
-        if r_mult is not None and r_mult >= _PARTIAL_R and p.symbol not in _PARTIAL_DONE:
+        if (r_mult is not None and r_mult >= _PARTIAL_R
+                and not _already_scaled(session, p.symbol, p.qty, p.direction)):
             detail = (f"{detail} At +{r_mult:.1f}R, consider scaling out "
                       f"~{int(_PARTIAL_FRACTION * 100)}% and trailing the rest.")
             if severity == "info":
@@ -394,6 +395,28 @@ def _tightens(direction: str, current: float | None, new: float) -> bool:
     if current is None:
         return True
     return new > current if direction == "long" else new < current
+
+
+def _already_scaled(session: Session, symbol: str, qty: float | None, direction: str | None) -> bool:
+    """Has this position already been partially closed (scaled out)?
+
+    Prefer DERIVING it from the live remaining size vs the planned size, so it stays correct
+    across app restarts and symbol re-entries — unlike the in-memory ``_PARTIAL_DONE`` set, which
+    is wiped on restart and keyed only by symbol. The set is kept as a same-process fast path and
+    as the fallback for a position with no plan on record (e.g. opened directly in the terminal),
+    where the planned size is unknown.
+    """
+    if symbol in _PARTIAL_DONE:
+        return True
+    try:
+        row = _plan_proposal(session, symbol, direction)
+        if row and row.approved_qty and qty is not None:
+            # A 50% scale leaves ~half the original size; treat as scaled once the remaining
+            # volume is materially below plan (tolerant of lot-step rounding on the remainder).
+            return qty < row.approved_qty * (1 - _PARTIAL_FRACTION / 2)
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
 
 def _trail_stop(direction: str, last: float, atr: float, ctx: dict, regime: str) -> tuple[float, str]:
@@ -537,7 +560,8 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
 
         ctx = contexts.get(a.symbol) or _position_context(session, p)
         plan_risk = _plan_risk(session, a.symbol, (ctx or {}).get("atr"), a.direction)
-        decision = _auto_decision(a, p, ctx or {}, plan_risk, already_scaled=a.symbol in _PARTIAL_DONE)
+        decision = _auto_decision(a, p, ctx or {}, plan_risk,
+                                  already_scaled=_already_scaled(session, p.symbol, p.qty, p.direction))
         if decision is None:
             continue
         action, kind, reason = decision["action"], decision["kind"], decision["reason"]
@@ -574,11 +598,19 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                 ok = result.status.value not in ("error", "rejected")
                 if ok:
                     _PARTIAL_DONE.add(a.symbol)
-                    # De-risk the runner: move the remainder's stop to breakeven.
-                    try:
-                        broker.set_sl_tp(p.symbol, round(p.entry_price, 5), p.take_profit)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    # De-risk the runner: move the remainder's stop to breakeven — but only if that
+                    # TIGHTENS it. If the stop was already trailed past entry (locked in profit),
+                    # moving it back to breakeven would LOOSEN it, so leave the better stop alone.
+                    be = round(p.entry_price, 5)
+                    if _tightens(p.direction, p.stop_loss, be):
+                        try:
+                            be_res = broker.set_sl_tp(p.symbol, be, p.take_profit)
+                            if be_res.status.value in ("error", "rejected"):
+                                log.warning("advisor: breakeven move after partial rejected",
+                                            extra={"symbol": a.symbol, "error": be_res.error})
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("advisor: breakeven move after partial failed",
+                                        extra={"symbol": a.symbol, "error": str(exc)})
             else:  # set_stop (protect | breakeven | trail)
                 result = broker.set_sl_tp(p.symbol, decision["stop"], p.take_profit)
                 ok = result.status.value not in ("error", "rejected")

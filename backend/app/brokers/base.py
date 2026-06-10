@@ -43,7 +43,10 @@ class BrokerAdapter(ABC):
     #: restarts, e.g. MT5/Exness). The monitor only treats such a broker's open book as
     #: authoritative when reconciling away app positions the broker no longer holds. The sim
     #: broker keeps positions in memory and forgets them on restart, so it must stay False —
-    #: otherwise a restart would wrongly reconcile (close) every open paper position.
+    #: otherwise a restart would wrongly reconcile (close) every open paper position. Other real
+    #: brokers (Alpaca/OANDA/ccxt-derivatives) may opt in by setting this True, but only after
+    #: verifying their ``get_open_positions`` returns the COMPLETE open book (and doesn't return an
+    #: empty list on a transient disconnect, which would wrongly close live positions).
     reconciles_positions: bool = False
 
     @property

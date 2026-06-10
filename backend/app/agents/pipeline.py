@@ -35,9 +35,12 @@ def _timeframes_for(primary: str) -> list[str]:
 
 
 def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
-                   use_llm: bool = False):
+                   use_llm: bool = False, cache=None):
     """Analyse a symbol and run it through the Risk Manager WITHOUT persisting or executing —
-    used to rank opportunities across the watchlist. Returns (proposal, risk_decision)."""
+    used to rank opportunities across the watchlist. Returns (proposal, risk_decision).
+
+    ``cache`` (a ``risk.service.ScanCache``) lets a multi-symbol scan share one broker open-book +
+    account fetch instead of one per symbol; leave it None for a single-symbol preview."""
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
     broker = get_broker_for(asset_class, settings.broker_map)
@@ -51,7 +54,7 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental,
                                 now=now, use_llm=use_llm)
-    decision = assess(session, proposal)
+    decision = assess(session, proposal, cache=cache)
     return proposal, decision
 
 

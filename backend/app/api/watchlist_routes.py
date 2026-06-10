@@ -145,10 +145,14 @@ def opportunities(session: Session = Depends(get_session)) -> list[OpportunityVi
     risk-approved on top, then forming ('watch'), then the rest. Read-only: nothing is opened."""
     from app.agents.pipeline import preview_symbol
     from app.agents.scanner import expire_stale_proposals
-    from app.risk.service import live_broker_positions
+    from app.risk.service import ScanCache, live_broker_positions
 
     expire_stale_proposals(session)  # so the scan reflects a clean pending list
-    open_syms = {p.symbol.upper() for p in live_broker_positions(session)}
+    # One open-book fetch for the whole scan: serves both the already-open check and (primed into
+    # the ScanCache) every per-symbol risk assessment below, instead of one broker call per symbol.
+    live = live_broker_positions(session)
+    open_syms = {p.symbol.upper() for p in live}
+    cache = ScanCache(open_book=[(p.symbol, p.direction) for p in live])
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
 
     out: list[OpportunityView] = []
@@ -158,7 +162,7 @@ def opportunities(session: Session = Depends(get_session)) -> list[OpportunityVi
             # confidence is well-calibrated now; the LLM reviewer runs when you actually open a
             # trade (the Open button / Hybrid's final pick / Run analysis).
             prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=False)
+                                       it.timeframe, use_llm=False, cache=cache)
         except Exception as exc:  # noqa: BLE001
             log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue

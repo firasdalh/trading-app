@@ -320,6 +320,45 @@ def test_auto_execute_takes_partial_and_moves_to_breakeven(db_session, monkeypat
     assert any(s[0] == "XAUUSDm" and abs(s[1] - 4449.0) < 0.01 for s in broker.sltp)
 
 
+def test_auto_execute_partial_does_not_loosen_profitable_stop(db_session, monkeypatch):
+    """If the runner's stop is already locked in profit, the post-partial breakeven move must NOT
+    loosen it back to entry."""
+    broker = _Broker(is_paper=True)
+    # long, stop 4460 ABOVE entry 4449 -> already in profit; breakeven would loosen it.
+    monkeypatch.setattr(advisor, "live_broker_positions",
+                        lambda session: [_pos(direction="long", stop=4460.0)])
+    monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
+    _patch_exec(monkeypatch, broker)
+    ctx = {"XAUUSDm": {"atr": 2.0, "last": 4470.0, "regime": "trending"}}  # +2.1R -> take_partial
+    advisor._auto_execute(db_session, [_adv(symbol="XAUUSDm", thesis="intact")], ctx)
+    assert broker.partials == [("XAUUSDm", 0.5)]                       # partial still taken
+    assert not any(abs(s[1] - 4449.0) < 0.01 for s in broker.sltp)     # but stop NOT loosened to entry
+
+
+def test_already_scaled_derived_from_remaining_size(db_session):
+    """A position whose live size is materially below the planned size is treated as already
+    scaled — correct across restarts when the in-memory _PARTIAL_DONE set is empty."""
+    from app.models.db import TradeProposalRecord
+    from app.models.enums import ProposalStatus
+
+    db_session.add(TradeProposalRecord(
+        symbol="XAUUSDm", asset_class="metal", timeframe="1h", direction="short",
+        entry=4449.0, stop_loss=4470.0, take_profit=4400.0, confidence=0.7, rationale="t",
+        reasoning={}, status=ProposalStatus.EXECUTED.value, risk_decision="approved",
+        approved_qty=1.0, risk_amount=21.0,
+    ))
+    db_session.commit()
+    assert advisor._already_scaled(db_session, "XAUUSDm", 1.0, "short") is False  # full size
+    assert advisor._already_scaled(db_session, "XAUUSDm", 0.5, "short") is True   # half -> scaled
+
+
+def test_already_scaled_falls_back_to_partial_done_set(db_session):
+    """With no plan on record, fall back to the in-memory set (same-process fast path)."""
+    assert advisor._already_scaled(db_session, "EURUSDm", 1.0, "long") is False
+    advisor._PARTIAL_DONE.add("EURUSDm")
+    assert advisor._already_scaled(db_session, "EURUSDm", 1.0, "long") is True
+
+
 def _patch_exec(monkeypatch, broker, *, kill=False, live_ok=True):
     import app.brokers.registry as reg
     import app.core.state as state

@@ -26,7 +26,8 @@ def test_opportunities_ranks_actionable_approved_first(db_session, monkeypatch):
     ])
     db_session.commit()
     table = _props()
-    monkeypatch.setattr(pipeline, "preview_symbol", lambda s, sym, ac, tf, use_llm=False: table[sym])
+    monkeypatch.setattr(pipeline, "preview_symbol",
+                        lambda s, sym, ac, tf, use_llm=False, cache=None: table[sym])
     monkeypatch.setattr(risk_service, "live_broker_positions", lambda s: [])
 
     res = opportunities(session=db_session)
@@ -39,8 +40,9 @@ def test_opportunities_marks_already_open(db_session, monkeypatch):
     db_session.add(WatchItem(symbol="BBB", asset_class="forex", timeframe="1h", enabled=True))
     db_session.commit()
     table = _props()
-    monkeypatch.setattr(pipeline, "preview_symbol", lambda s, sym, ac, tf, use_llm=False: table["BBB"])
+    monkeypatch.setattr(pipeline, "preview_symbol",
+                        lambda s, sym, ac, tf, use_llm=False, cache=None: table["BBB"])
     monkeypatch.setattr(risk_service, "live_broker_positions",
-                        lambda s: [type("P", (), {"symbol": "BBB"})()])
+                        lambda s: [type("P", (), {"symbol": "BBB", "direction": "long"})()])
     res = opportunities(session=db_session)
     assert res[0].already_open is True

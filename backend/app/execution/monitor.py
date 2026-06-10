@@ -129,19 +129,22 @@ def _reconcile_closed_at_broker(session: Session, settings, open_positions: list
     def book_for(asset_class: str) -> tuple[bool, set[tuple[str, str]]]:
         name = bm.get(asset_class, "sim")
         if name not in broker_books:
-            broker = get_broker_for(AssetClass(asset_class), bm)
-            # Only a durable-account broker (MT5/Exness) is authoritative for "still open". The
-            # sim broker forgets positions on restart, so its empty book must never close DB rows.
-            if not getattr(broker, "reconciles_positions", False):
-                broker_books[name] = (False, set())
-            else:
-                try:
+            # Everything here is wrapped: a bad asset_class string (legacy/migrated row) or a
+            # broker that can't be built/reached must never close DB rows — and must never abort
+            # the whole monitoring pass (which would silently stop SL/TP management).
+            try:
+                broker = get_broker_for(AssetClass(asset_class), bm)
+                # Only a durable-account broker (MT5/Exness) is authoritative for "still open". The
+                # sim broker forgets positions on restart, so its empty book must never close DB rows.
+                if not getattr(broker, "reconciles_positions", False):
+                    broker_books[name] = (False, set())
+                else:
                     positions = broker.get_open_positions()
                     broker_books[name] = (True, {(_norm_symbol(p.symbol), p.direction) for p in positions})
-                except Exception as exc:  # noqa: BLE001 - unreachable broker => skip (never close on outage)
-                    log.warning("reconcile: broker open-book fetch failed",
-                                extra={"broker": name, "error": str(exc)})
-                    broker_books[name] = (False, set())
+            except Exception as exc:  # noqa: BLE001 - bad asset_class / unbuildable / unreachable => skip
+                log.warning("reconcile: broker open-book unavailable",
+                            extra={"broker": name, "asset_class": asset_class, "error": str(exc)})
+                broker_books[name] = (False, set())
         return broker_books[name]
 
     reconciled = 0
