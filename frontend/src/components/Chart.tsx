@@ -80,6 +80,41 @@ function rsiCalc(closes: number[], period = 14): (number | null)[] {
   return res;
 }
 
+// MACD: macd = EMA(fast) − EMA(slow); signal = EMA(signalP) of macd; hist = macd − signal.
+// Returns full-length arrays aligned to the closes (null during warmup) so the sub-pane lines up
+// bar-for-bar with the main chart. Reuses the SMA-seeded ema() above for both stages.
+function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
+  const emaFast = ema(closes, fast);
+  const emaSlow = ema(closes, slow);
+  const macd: (number | null)[] = closes.map((_, i) =>
+    emaFast[i] !== undefined && emaSlow[i] !== undefined ? (emaFast[i] as number) - (emaSlow[i] as number) : null,
+  );
+  const signal: (number | null)[] = new Array(closes.length).fill(null);
+  const firstDefined = macd.findIndex((v) => v !== null);
+  if (firstDefined >= 0) {
+    const sig = ema(macd.slice(firstDefined) as number[], signalP);
+    for (let j = 0; j < sig.length; j++) {
+      if (sig[j] !== undefined) signal[firstDefined + j] = sig[j] as number;
+    }
+  }
+  const hist: (number | null)[] = closes.map((_, i) =>
+    macd[i] !== null && signal[i] !== null ? (macd[i] as number) - (signal[i] as number) : null,
+  );
+  return { macd, signal, hist };
+}
+
+// The dollar P&L an open position would show AT a given price level (e.g. its SL or TP). Derived
+// from the live floating P&L per price unit — which already encodes lot size, contract size and
+// FX conversion — so it's exact in the account currency. Empty until price moves off entry (the
+// ratio is undefined at entry). SL => a loss (negative), TP => a gain (positive).
+function usdAtLevel(pos: PositionView, level: number | null | undefined): string {
+  if (level == null || pos.last_price == null || pos.last_price === pos.entry_price) return "";
+  const perPrice = pos.unrealized_pnl / (pos.last_price - pos.entry_price);
+  if (!isFinite(perPrice)) return "";
+  const usd = (level - pos.entry_price) * perPrice;
+  return `${usd >= 0 ? "+" : "−"}$${Math.abs(usd).toFixed(2)}`;
+}
+
 export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rsiContainerRef = useRef<HTMLDivElement>(null);
@@ -89,6 +124,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const emaRefs = useRef<Record<number, ISeriesApi<"Line">>>({});
   const rsiChartRef = useRef<IChartApi | null>(null);
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdContainerRef = useRef<HTMLDivElement>(null);
+  const macdChartRef = useRef<IChartApi | null>(null);
+  const macdLineRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdSignalRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdHistRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const candlesRef = useRef<Candle[]>([]);
   const lastBarRef = useRef<CandlestickData | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
@@ -97,6 +137,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = useState<Record<number, boolean>>({ 50: true, 100: false, 200: true });
   const [showRsi, setShowRsi] = useState(true);
+  const [showMacd, setShowMacd] = useState(true);
 
   const toTime = (c: Candle) => Math.floor(Date.parse(c.ts) / 1000) as UTCTimestamp;
 
@@ -205,6 +246,59 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showRsi]);
 
+  // Create/destroy the MACD sub-pane (histogram + macd/signal lines) when toggled; sync its time
+  // axis to the main chart the same way the RSI pane does.
+  useEffect(() => {
+    if (!showMacd || !macdContainerRef.current) return;
+    const macdChart = createChart(macdContainerRef.current, {
+      autoSize: true,
+      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: "#a3a3a3" },
+      grid: { vertLines: { color: "#1f1f1f" }, horzLines: { color: "#1f1f1f" } },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#404040" },
+      rightPriceScale: { borderColor: "#404040", minimumWidth: 72 },
+      crosshair: { mode: 1 },
+    });
+    // Histogram first so the lines render on top; all share the right price scale (centred on 0).
+    const hist = macdChart.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false });
+    const macdLine = macdChart.addLineSeries({ color: "#3b82f6", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+    const signalLine = macdChart.addLineSeries({ color: "#f59e0b", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+    macdLine.createPriceLine({ price: 0, color: "#404040", lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false });
+    macdChartRef.current = macdChart;
+    macdLineRef.current = macdLine;
+    macdSignalRef.current = signalLine;
+    macdHistRef.current = hist;
+    applyMacd();
+
+    const main = chartRef.current;
+    let syncing = false;
+    const mainToMacd = (range: LogicalRange | null) => {
+      if (syncing || !range) return;
+      syncing = true;
+      macdChart.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    };
+    const macdToMain = (range: LogicalRange | null) => {
+      if (syncing || !range || !main) return;
+      syncing = true;
+      main.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    };
+    main?.timeScale().subscribeVisibleLogicalRangeChange(mainToMacd);
+    macdChart.timeScale().subscribeVisibleLogicalRangeChange(macdToMain);
+    const mainRange = main?.timeScale().getVisibleLogicalRange();
+    if (mainRange) macdChart.timeScale().setVisibleLogicalRange(mainRange);
+
+    return () => {
+      main?.timeScale().unsubscribeVisibleLogicalRangeChange(mainToMacd);
+      macdChart.remove();
+      macdChartRef.current = null;
+      macdLineRef.current = null;
+      macdSignalRef.current = null;
+      macdHistRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showMacd]);
+
   // Load candles + volume + EMAs + RSI when symbol/asset/timeframe changes.
   useEffect(() => {
     let cancelled = false;
@@ -225,6 +319,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         );
         applyEmas(series.candles);
         applyRsi();
+        applyMacd();
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
@@ -286,6 +381,33 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     line.setData(data);
   }
 
+  function applyMacd() {
+    const macdLine = macdLineRef.current;
+    const signalLine = macdSignalRef.current;
+    const histSeries = macdHistRef.current;
+    const candles = candlesRef.current;
+    if (!macdLine || !signalLine || !histSeries || !candles.length) return;
+    const times = candles.map(toTime);
+    const { macd, signal, hist } = macdCalc(candles.map((c) => c.close));
+    // A point for EVERY candle (whitespace during warmup) so logical indices match the main pane.
+    const macdData: (LineData | WhitespaceData)[] = [];
+    const signalData: (LineData | WhitespaceData)[] = [];
+    const histData: (HistogramData | WhitespaceData)[] = [];
+    for (let i = 0; i < candles.length; i++) {
+      macdData.push(macd[i] !== null ? { time: times[i], value: macd[i] as number } : { time: times[i] });
+      signalData.push(signal[i] !== null ? { time: times[i], value: signal[i] as number } : { time: times[i] });
+      histData.push(
+        hist[i] !== null
+          ? { time: times[i], value: hist[i] as number,
+              color: (hist[i] as number) >= 0 ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)" }
+          : { time: times[i] },
+      );
+    }
+    histSeries.setData(histData);
+    macdLine.setData(macdData);
+    signalLine.setData(signalData);
+  }
+
   // Live quote -> update the last candle.
   useEffect(() => {
     if (!liveQuote || !seriesRef.current || !lastBarRef.current) return;
@@ -343,9 +465,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       // the same axis pixel — merge them into one instead of overlapping.
       const be =
         p.stop_loss != null && Math.abs(p.stop_loss - p.entry_price) <= Math.abs(p.entry_price) * 1e-4;
-      add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL` : `${arrow} entry`);
-      if (!be) add(p.stop_loss, "#ef5350", "SL");
-      add(p.take_profit, "#26a69a", "TP");
+      // Show the $ you'd lose at SL / gain at TP right on the line label (like MT5's on-chart box).
+      const slUsd = usdAtLevel(p, p.stop_loss);
+      const tpUsd = usdAtLevel(p, p.take_profit);
+      add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL ${slUsd}`.trim() : `${arrow} entry`);
+      if (!be) add(p.stop_loss, "#ef5350", `SL ${slUsd}`.trim());
+      add(p.take_profit, "#26a69a", `TP ${tpUsd}`.trim());
     }
   }, [positions, symbol]);
 
@@ -376,6 +501,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         >
           RSI
         </button>
+        <button
+          onClick={() => setShowMacd((v) => !v)}
+          className={`rounded px-2 py-0.5 text-xs ${showMacd ? "bg-neutral-700 text-blue-300" : "bg-neutral-900 text-neutral-500"}`}
+        >
+          MACD
+        </button>
       </div>
 
       {legend && (
@@ -400,9 +531,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             {myPos.direction === "long" ? "▲ LONG" : "▼ SHORT"} @ {fmtPrice(myPos.entry_price)}
           </span>
           {myPos.stop_loss != null && (
-            <span className="text-bear">SL {fmtPrice(myPos.stop_loss)}{posBE ? " (BE)" : ""}</span>
+            <span className="text-bear">
+              SL {fmtPrice(myPos.stop_loss)}{posBE ? " (BE)" : ""}
+              {usdAtLevel(myPos, myPos.stop_loss) && <span className="ml-1">{usdAtLevel(myPos, myPos.stop_loss)}</span>}
+            </span>
           )}
-          {myPos.take_profit != null && <span className="text-bull">TP {fmtPrice(myPos.take_profit)}</span>}
+          {myPos.take_profit != null && (
+            <span className="text-bull">
+              TP {fmtPrice(myPos.take_profit)}
+              {usdAtLevel(myPos, myPos.take_profit) && <span className="ml-1">{usdAtLevel(myPos, myPos.take_profit)}</span>}
+            </span>
+          )}
           <span className={myPos.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}>
             {myPos.unrealized_pnl >= 0 ? "+" : ""}
             {myPos.unrealized_pnl.toFixed(2)}
@@ -415,6 +554,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         <div className="relative mt-1">
           <span className="pointer-events-none absolute left-2 top-1 z-10 text-xs text-purple-300">RSI 14</span>
           <div ref={rsiContainerRef} className="h-[120px] w-full" />
+        </div>
+      )}
+      {showMacd && (
+        <div className="relative mt-1">
+          <span className="pointer-events-none absolute left-2 top-1 z-10 flex gap-2 text-xs">
+            <span className="text-neutral-400">MACD 12 26 9</span>
+            <span className="text-blue-300">MACD</span>
+            <span className="text-amber-400">signal</span>
+          </span>
+          <div ref={macdContainerRef} className="h-[120px] w-full" />
         </div>
       )}
     </div>
