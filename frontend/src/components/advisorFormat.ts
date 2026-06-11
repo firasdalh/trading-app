@@ -11,13 +11,15 @@ export function ago(iso: string | null): string {
 }
 
 // Human label for an advisor action/kind.
-export function actionText(a: { action: string; kind?: string | null; stop?: number | null }): string {
+export function actionText(a: { action: string; kind?: string | null; stop?: number | null; reason?: string | null }): string {
   if (a.action === "close" || a.kind === "close") return "closed position";
   if (a.action === "close_pending") return "close pending confirmation";
+  if (a.action === "stop_deferred") return a.reason || "stop change deferred (market closed)";
   if (a.action === "reenter") return "re-entered (new analyzed trade)";
   if (a.action === "reenter_skip") return "re-checked — no fresh setup, stayed flat";
   if (a.action === "reenter_blocked") return "re-entry blocked";
   const at = a.stop != null ? ` @ ${a.stop}` : "";
+  if (a.action === "run_target" || a.kind === "run") return `letting winner run — removed target, trailing${at}`;
   if (a.kind === "protect") return `attached protective stop${at}`;
   if (a.kind === "breakeven") return `moved stop → breakeven${at}`;
   if (a.kind === "trail") return `trailed stop${at}`;

@@ -88,6 +88,25 @@ class _SerializedMt5:
         return _locked
 
 
+# MT5 trade-server retcodes surfaced as readable, classifiable errors so callers (e.g. the
+# advisor) can distinguish a BENIGN, temporary rejection — market closed, or the stop already at
+# the requested level — from a real failure. Values are MT5's fixed TRADE_RETCODE_* numbers.
+_RETCODE_MSG = {
+    10004: "requote", 10006: "request rejected", 10013: "invalid request",
+    10014: "invalid volume", 10015: "invalid price", 10016: "invalid stops",
+    10017: "trading disabled", 10018: "market closed", 10019: "not enough money",
+    10021: "off quotes (no prices)", 10025: "no changes (already set)",
+    10027: "autotrading disabled in terminal",
+}
+
+
+def _retcode_error(result, fallback: str) -> str:
+    """Readable error for a non-DONE order_send result: prefer the mapped retcode meaning, then
+    the broker comment, else the fallback with the raw code."""
+    rc = getattr(result, "retcode", None)
+    return _RETCODE_MSG.get(rc) or getattr(result, "comment", None) or f"{fallback} (retcode {rc})"
+
+
 class Mt5BrokerAdapter(BrokerAdapter):
     name = "mt5"
     supported_asset_classes = (AssetClass.FOREX, AssetClass.METAL, AssetClass.CRYPTO,
@@ -545,7 +564,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 last = OrderResult(
                     status=OrderStatus.SUBMITTED if done else OrderStatus.ERROR,
                     raw={"retcode": getattr(result, "retcode", None)},
-                    error=None if done else (getattr(result, "comment", None) or "set SL/TP failed"),
+                    error=None if done else _retcode_error(result, "set SL/TP failed"),
                 )
             return last or OrderResult(status=OrderStatus.ERROR, error="no result")
         except Exception as exc:

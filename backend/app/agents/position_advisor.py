@@ -49,6 +49,8 @@ _PROTECT_ATR_MULT = 1.5     # protective stop for a naked position = 1.5 ATR fro
 # --- partial profit-taking (scale out) ---
 _PARTIAL_R = 1.5            # at +1.5R, book partial profit and de-risk the rest to breakeven
 _PARTIAL_FRACTION = 0.5     # take half off
+_RUN_R = 1.8               # near the ~2R target in a strong intact trend, let the winner RUN:
+#                            drop the fixed take-profit and ride a trailing stop instead of capping
 _PARTIAL_DONE: set[str] = set()  # symbols already scaled this position (reset when it goes flat)
 
 # --- hysteresis + cooldown so auto-execute doesn't thrash ---
@@ -398,6 +400,17 @@ def _tightens(direction: str, current: float | None, new: float) -> bool:
     return new > current if direction == "long" else new < current
 
 
+# Stop-modify rejections that are BENIGN + temporary: the existing broker-side stop still protects
+# the trade and the advisor will retry, so they're recorded as "deferred", not failures.
+_DEFERRABLE = ("market closed", "no changes", "off quotes", "no prices",
+               "trading disabled", "autotrading disabled")
+
+
+def _is_deferrable(err: str | None) -> bool:
+    e = (err or "").lower()
+    return any(k in e for k in _DEFERRABLE)
+
+
 def _already_scaled(session: Session, symbol: str, qty: float | None, direction: str | None) -> bool:
     """Has this position already been partially closed (scaled out)?
 
@@ -474,6 +487,15 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
     if plan_risk and last and atr:
         profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
         r = profit / plan_risk
+        # LET WINNERS RUN: near the planned target in a strong, intact trend, drop the fixed
+        # take-profit and ride a trailing stop — so a real trend isn't capped at ~2R. Risk-neutral:
+        # the stop is moved to breakeven-or-better and never loosened. Fires once (TP then gone).
+        if r >= _RUN_R and regime == "trending" and a.thesis == "intact" and p.take_profit is not None:
+            trail, basis = _trail_stop(d, last, atr, ctx or {}, regime)
+            stop = trail if _tightens(d, p.stop_loss, trail) else (p.stop_loss if p.stop_loss is not None else trail)
+            return {"action": "run_target", "kind": "run", "stop": round(stop, 5),
+                    "reason": (f"+{r:.1f}R in a strong trend — letting it run: removing the target "
+                               f"and trailing the stop ({basis})")}
         if r >= trail_r:
             trail, basis = _trail_stop(d, last, atr, ctx or {}, regime)
             if _tightens(d, p.stop_loss, trail):
@@ -518,6 +540,22 @@ def _reconcile_closed_symbol(session: Session, symbol: str) -> None:
         r.closed_at = datetime.now(timezone.utc)
         r.realized_pnl = r.unrealized_pnl or 0.0
         daily.realized_pnl = round(daily.realized_pnl + (r.unrealized_pnl or 0.0), 2)
+
+
+def _clear_db_take_profit(session: Session, symbol: str) -> None:
+    """Remove the take-profit on the app-tracked open position(s) for this symbol, so the Monitor
+    no longer auto-closes at the old target once the advisor has switched the trade to a trailing
+    exit ('let winners run'). The broker-side TP is cleared separately in the executor."""
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    rows = session.scalars(
+        select(Position).where(Position.symbol == symbol,
+                               Position.status == PositionStatus.OPEN.value)
+    ).all()
+    for r in rows:
+        r.take_profit = None
+        session.add(r)
 
 
 def _auto_execute(session: Session, advice: list[PositionAdvice],
@@ -620,9 +658,27 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                     action, kind = "partial_skipped", "partial"
                     reason = "position at min lot — can't scale; managing the whole position instead"
                     ok = True  # not a failure: a partial just isn't applicable to a min-lot position
+            elif action == "run_target":
+                # Let the winner run: trail the stop AND clear the take-profit (0.0 clears it on
+                # MT5) so neither the broker nor the Monitor caps the trade at the planned target.
+                # The trailing stop — broker-side, enforced between ticks — becomes the exit.
+                result = broker.set_sl_tp(p.symbol, decision["stop"], 0.0)
+                ok = result.status.value not in ("error", "rejected")
+                if ok:
+                    _clear_db_take_profit(session, p.symbol)  # so the Monitor won't close at the old TP
+                elif _is_deferrable(result.error):
+                    action, kind = "stop_deferred", "deferred"
+                    reason = f"deferred — {result.error} (target/stop unchanged; will retry)"
             else:  # set_stop (protect | breakeven | trail)
                 result = broker.set_sl_tp(p.symbol, decision["stop"], p.take_profit)
                 ok = result.status.value not in ("error", "rejected")
+                if not ok and _is_deferrable(result.error):
+                    # Benign + temporary: the market is closed, or the stop is already where we
+                    # want it. The ORIGINAL broker-side stop still protects the trade, and the
+                    # advisor will retry and apply the move once the market reopens. Surface it as
+                    # a calm "deferred", not a red ✗, so a real ✗ always means a real problem.
+                    action, kind = "stop_deferred", "deferred"
+                    reason = f"deferred — {result.error} (original stop still protects; will retry)"
             actions.append({"symbol": a.symbol, "action": action, "kind": kind, "ok": ok,
                             "reason": reason, "stop": decision.get("stop"),
                             "asset_class": p.asset_class,

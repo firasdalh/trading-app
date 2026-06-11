@@ -38,8 +38,18 @@ export function AdvisorActivity({ refreshSignal }: Props) {
       <ul className="space-y-1">
         {items.slice(0, 10).map((it) => (
           <li key={`${it.run_id}-${it.seq}`} className="flex items-center gap-2 text-xs">
-            <span className={it.ok ? "text-bull" : it.action === "close_pending" ? "text-warn" : "text-bear"}>
-              {it.ok ? "✓" : it.action === "close_pending" ? "⏳" : "✗"}
+            <span
+              className={
+                it.ok
+                  ? "text-bull"
+                  : it.action === "stop_deferred"
+                    ? "text-neutral-400"
+                    : it.action === "close_pending"
+                      ? "text-warn"
+                      : "text-bear"
+              }
+            >
+              {it.ok ? "✓" : it.action === "stop_deferred" ? "⏸" : it.action === "close_pending" ? "⏳" : "✗"}
             </span>
             <span className="font-medium">{it.symbol}</span>
             <span className="text-neutral-300">{actionText(it)}</span>

@@ -19,10 +19,10 @@ def _reset_advisor_state():
     advisor._reset_auto_state()
 
 
-def _pos(symbol="XAUUSDm", direction="short", pnl=10.0, stop=4473.0) -> PositionView:
+def _pos(symbol="XAUUSDm", direction="short", pnl=10.0, stop=4473.0, tp=4397.0) -> PositionView:
     return PositionView(
         id=1, symbol=symbol, asset_class="metal", direction=direction, qty=1.0,
-        entry_price=4449.0, stop_loss=stop, take_profit=4397.0, status="open",
+        entry_price=4449.0, stop_loss=stop, take_profit=tp, status="open",
         last_price=4439.0, unrealized_pnl=pnl,
     )
 
@@ -252,7 +252,9 @@ def test_choch_against_position_warns_weakening():
 
 
 def test_trail_behind_structure_in_trending_regime():
-    p = _pos(direction="long", stop=4455.0)  # entry 4449, stop already past breakeven
+    # tp=None: the target was already removed (the 'let it run' state), so this isolates the
+    # plain structural trail that manages the runner from then on.
+    p = _pos(direction="long", stop=4455.0, tp=None)  # entry 4449, stop already past breakeven
     ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending", "swing_low": 4460.0}
     d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)  # +2.1R
     assert d is not None and d["kind"] == "trail" and "structure" in d["reason"]
@@ -353,6 +355,73 @@ def test_auto_execute_partial_skips_when_too_small(db_session, monkeypatch):
     assert broker.partials == [("XAUUSDm", 0.5)]          # attempted once
     assert "XAUUSDm" in advisor._PARTIAL_DONE             # marked -> won't retry the partial
     assert any(x["action"] == "partial_skipped" and x["ok"] for x in actions)  # benign, not a ✗
+
+
+def test_auto_execute_defers_stop_when_market_closed(db_session, monkeypatch):
+    """A stop-modify rejected for a benign/temporary reason (market closed) is recorded as a
+    'deferred' action, not a red ✗ — the original broker-side stop still protects the trade."""
+    class _ClosedBroker(_Broker):
+        def set_sl_tp(self, symbol, sl, tp):
+            self.sltp.append((symbol, sl, tp))
+            return _Result("rejected", error="market closed")
+
+    broker = _ClosedBroker(is_paper=True)
+    # short, +1R, stop above entry (worse side) -> the advisor decides "move to breakeven".
+    monkeypatch.setattr(advisor, "live_broker_positions",
+                        lambda session: [_pos(direction="short", pnl=10.0, stop=4460.0)])
+    monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
+    _patch_exec(monkeypatch, broker)
+    ctx = {"XAUUSDm": {"atr": 5.0, "last": 4439.0, "regime": "moderate"}}
+    actions = advisor._auto_execute(db_session, [_adv(thesis="intact")], ctx)
+    deferred = [a for a in actions if a["action"] == "stop_deferred"]
+    assert deferred, f"expected a deferred action, got {[a['action'] for a in actions]}"
+    assert "market closed" in deferred[0]["reason"]
+
+
+def test_auto_decision_lets_winner_run_in_strong_trend():
+    """At ~2R in a strong, intact trend the advisor lets the winner RUN (drop the target, trail)
+    instead of capping at the planned target."""
+    p = _pos(direction="short", stop=4460.0)  # entry 4449, take_profit 4397 still set
+    ctx = {"atr": 5.0, "last": 4429.0, "regime": "trending"}  # profit 20 / plan 10 = +2.0R
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
+    assert d is not None and d["action"] == "run_target"
+    assert d["stop"] < 4460.0  # trail is tighter than the current stop (never loosens)
+
+
+def test_auto_decision_no_run_when_trend_not_strong():
+    """Same +2R but a ranging/volatile regime -> do NOT remove the target; just trail/bank."""
+    p = _pos(direction="short", stop=4460.0)
+    ctx = {"atr": 5.0, "last": 4429.0, "regime": "ranging"}
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
+    assert d is None or d["action"] != "run_target"
+
+
+def test_auto_execute_run_target_clears_take_profit(db_session, monkeypatch):
+    """Executing 'run_target' clears the broker TP (0.0) AND the app-tracked DB TP, so neither
+    caps the trade — the trailing stop becomes the exit."""
+    from sqlalchemy import select
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    db_session.add(Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
+                            entry_price=4449.0, stop_loss=4460.0, take_profit=4397.0,
+                            status=PositionStatus.OPEN.value, last_price=4429.0))
+    db_session.commit()
+
+    broker = _Broker(is_paper=True)
+    monkeypatch.setattr(advisor, "live_broker_positions",
+                        lambda session: [_pos(direction="short", stop=4460.0)])
+    monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
+    monkeypatch.setattr(advisor, "_already_scaled", lambda *a, **k: True)  # past the partial step
+    _patch_exec(monkeypatch, broker)
+    ctx = {"XAUUSDm": {"atr": 5.0, "last": 4429.0, "regime": "trending"}}
+    actions = advisor._auto_execute(db_session, [_adv(thesis="intact")], ctx)
+
+    runs = [a for a in actions if a["action"] == "run_target"]
+    assert runs and runs[0]["ok"]
+    assert any(s[0] == "XAUUSDm" and s[2] == 0.0 for s in broker.sltp)  # broker TP cleared
+    row = db_session.scalars(select(Position).where(Position.symbol == "XAUUSDm")).first()
+    assert row.take_profit is None  # DB TP cleared (Monitor won't close at the old target)
 
 
 def test_already_scaled_derived_from_remaining_size(db_session):
