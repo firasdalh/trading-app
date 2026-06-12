@@ -187,6 +187,20 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     }
   };
 
+  // A 409 means the proposal's status changed under us (rejected / expired / executed). The
+  // message carries the real status, so sync the panel to it — the Approve/Reject buttons then
+  // disappear (they only show for pending_approval) — and show a calm note, not a raw error.
+  const handleActionError = (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    const m = msg.match(/status '(\w+)'/);
+    if (m) {
+      setStatus(m[1]);
+      setError(`This proposal is no longer pending (it's ${m[1]}). Run a fresh analysis to trade it.`);
+    } else {
+      setError(msg);
+    }
+  };
+
   const approve = async (lots?: number | null) => {
     if (!result) return;
     setActionBusy(true);
@@ -194,7 +208,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
       const updated = await api.approve(result.proposal_id, lots ?? null);
       setStatus(updated.status);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      handleActionError(e);
     } finally {
       setActionBusy(false);
     }
@@ -207,7 +221,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
       const updated = await api.reject(result.proposal_id);
       setStatus(updated.status);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      handleActionError(e);
     } finally {
       setActionBusy(false);
     }

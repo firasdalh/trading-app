@@ -43,7 +43,16 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
       refresh();
       onChanged?.();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      // 409 = the proposal's status changed under us (rejected / expired / already acted on).
+      // Refresh so the stale row drops off the list, and show a calm note, not the raw conflict.
+      if (/409|cannot (approve|reject)/i.test(msg)) {
+        setError("That setup is no longer pending (rejected, expired, or already acted on).");
+      } else {
+        setError(msg);
+      }
+      refresh();
+      onChanged?.();
     } finally {
       setBusyId(null);
     }
