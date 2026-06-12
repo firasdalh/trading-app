@@ -131,11 +131,21 @@ def approve_proposal(
     row.status = ProposalStatus.APPROVED.value
     session.commit()
     try:
-        execute_proposal(session, row)  # sets EXECUTED + opens a position on fill
+        result = execute_proposal(session, row)  # sets EXECUTED + opens a position on fill
     except ExecutionBlocked as exc:
         log.warning("approve blocked by safety gate", extra={"proposal_id": proposal_id, "reason": str(exc)})
         raise HTTPException(status_code=423, detail=str(exc)) from exc
     session.refresh(row)
+    if row.status != ProposalStatus.EXECUTED.value:
+        # The order was SUBMITTED but the broker didn't fill it — e.g. "AutoTrading disabled by
+        # client" (the terminal's Algo Trading button is off), market closed, or a requote. Revert
+        # to pending so the user can fix the cause and approve again, and surface WHY — instead of
+        # a silent, permanent "approved — awaiting execution" with no explanation.
+        row.status = ProposalStatus.PENDING_APPROVAL.value
+        session.commit()
+        log.warning("approve: order not filled", extra={"proposal_id": proposal_id, "error": result.error})
+        raise HTTPException(status_code=422,
+                            detail=f"order not filled — {result.error or 'broker rejected the order'}")
     log.warning("proposal approved + executed", extra={"proposal_id": proposal_id, "status": row.status})
     return ProposalView.model_validate(row)
 

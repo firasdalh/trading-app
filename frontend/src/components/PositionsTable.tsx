@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { fmtPrice, fmtUsd } from "../format";
 import type { PositionView } from "../types";
 
@@ -61,6 +61,15 @@ function PositionRow({
   const [sl, setSl] = useState(p.stop_loss != null ? fmtPrice(p.stop_loss) : "");
   const [tp, setTp] = useState(p.take_profit != null ? fmtPrice(p.take_profit) : "");
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+
+  // Auto-cancel the close confirmation if it isn't acted on quickly, so a stray click can't sit
+  // armed and get confirmed by accident later (this closes a real position).
+  useEffect(() => {
+    if (!confirming) return;
+    const t = setTimeout(() => setConfirming(false), 5000);
+    return () => clearTimeout(t);
+  }, [confirming]);
 
   const run = async (fn: () => Promise<void> | void) => {
     setBusy(true);
@@ -141,15 +150,38 @@ function PositionRow({
               Set
             </button>
           )}
-          {onClose && (
-            <button
-              disabled={busy}
-              onClick={() => run(() => onClose(p))}
-              className="btn border border-bear/50 bg-bear/10 text-bear hover:bg-bear/20"
-            >
-              Close
-            </button>
-          )}
+          {onClose &&
+            (confirming ? (
+              <>
+                <button
+                  disabled={busy}
+                  onClick={() => run(async () => {
+                    await onClose(p);
+                    setConfirming(false);
+                  })}
+                  className="btn bg-bear text-white hover:bg-red-700"
+                  title={`Confirm closing ${p.symbol} ${p.direction.toUpperCase()}`}
+                >
+                  {busy ? "Closing…" : "Confirm"}
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                  className="btn bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                disabled={busy}
+                onClick={() => setConfirming(true)}
+                className="btn border border-bear/50 bg-bear/10 text-bear hover:bg-bear/20"
+                title={`Close ${p.symbol} ${p.direction.toUpperCase()} — asks to confirm`}
+              >
+                Close
+              </button>
+            ))}
         </div>
       </td>
     </tr>
