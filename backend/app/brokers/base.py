@@ -102,6 +102,17 @@ class BrokerAdapter(ABC):
         """
         return OrderResult(status=OrderStatus.REJECTED, error="close_partial not supported by this broker")
 
+    def can_open(self, symbol: str, direction: str) -> tuple[bool, str | None]:
+        """Whether a NEW position can be OPENED in this symbol + ``direction`` at the broker right
+        now. Returns ``(ok, reason_if_not)``.
+
+        Default: yes — brokers that can't report per-instrument trade permissions assume tradeable.
+        MT5 overrides this to honor the symbol's trade_mode (disabled / close-only / long-only /
+        short-only), so the risk layer refuses a setup the broker would bounce at order time
+        (e.g. Exness has some index CFDs disabled), instead of approving a trade that can't open.
+        """
+        return True, None
+
     # ---- lifecycle ----
 
     def get_realized_pnl(self, since) -> float | None:

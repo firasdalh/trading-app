@@ -85,6 +85,7 @@ def evaluate_proposal(
     override_risk_fraction: float | None = None,
     has_open_same_direction: bool = False,
     correlated_exposure: str | None = None,
+    not_tradeable_reason: str | None = None,
 ) -> RiskDecision:
     """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
 
@@ -133,6 +134,13 @@ def evaluate_proposal(
         checks["take_profit_valid"] = tp_ok
         if not tp_ok:
             return _veto(symbol, "take-profit is on the wrong side of entry", checks)
+
+    # --- 1c. broker tradeability: refuse a setup the broker won't let us OPEN (instrument
+    # disabled / close-only, or the wrong direction for a long-only/short-only symbol). Otherwise
+    # we'd "approve" a trade that bounces at order time (e.g. Exness has India 50 disabled). ---
+    checks["tradeable"] = not bool(not_tradeable_reason)
+    if not_tradeable_reason:
+        return _veto(symbol, f"not tradeable — {not_tradeable_reason}", checks)
 
     # --- 2. account sanity ---
     if account.equity <= 0:

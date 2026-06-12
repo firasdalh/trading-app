@@ -575,6 +575,28 @@ class Mt5BrokerAdapter(BrokerAdapter):
         symbols = {p.symbol for p in (self._mt5.positions_get() or [])}
         return [self.close_position(s) for s in symbols]
 
+    def can_open(self, symbol: str, direction: str) -> tuple[bool, str | None]:
+        """Whether a NEW position can be OPENED in this symbol + direction, per the instrument's
+        MT5 trade_mode. Refuses a disabled / close-only symbol, and the wrong side of a long-only /
+        short-only one — so the risk layer doesn't approve a trade the terminal would bounce with
+        'Trade disabled' (e.g. Exness has India 50 disabled). (trade_mode: 0 DISABLED, 1 LONGONLY,
+        2 SHORTONLY, 3 CLOSEONLY, 4 FULL.)"""
+        try:
+            mode = getattr(self._symbol_info(self._resolve_symbol(symbol)), "trade_mode", None)
+        except Exception:  # noqa: BLE001 - on a lookup failure, don't block; the executor is the final gate
+            return True, None
+        if mode is None or mode == 4:               # FULL (or unknown) -> allow
+            return True, None
+        if mode == 0:                               # DISABLED
+            return False, "broker has this instrument disabled"
+        if mode == 3:                               # CLOSEONLY
+            return False, "broker allows close-only on this instrument"
+        if mode == 1 and direction == "short":      # LONGONLY
+            return False, "broker allows long-only on this instrument"
+        if mode == 2 and direction == "long":       # SHORTONLY
+            return False, "broker allows short-only on this instrument"
+        return True, None
+
     def contract_size(self, symbol: str) -> float:
         """The symbol's MT5 contract size (qty is stored in lots, so P&L must scale by this)."""
         try:

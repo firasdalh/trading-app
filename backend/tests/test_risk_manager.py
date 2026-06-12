@@ -186,3 +186,12 @@ def test_min_qty_vetoed():
     d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
                           now=NOW, qty_step=1, min_qty=1000.0)
     assert not d.approved and "below minimum" in d.reason
+
+
+def test_vetoes_when_broker_not_tradeable():
+    """A setup the broker won't let us OPEN (instrument disabled / close-only / wrong side) is
+    vetoed up front, not 'approved' then bounced at order time (e.g. Exness disables India 50)."""
+    dec = evaluate_proposal(make_proposal(), make_account(), make_limits(), now=NOW,
+                            not_tradeable_reason="broker has this instrument disabled")
+    assert not dec.approved and dec.decision == RiskDecisionType.VETOED
+    assert "not tradeable" in dec.reason.lower()

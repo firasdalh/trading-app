@@ -244,3 +244,26 @@ def test_get_realized_pnl_excludes_balance_operations():
     a = Mt5BrokerAdapter.__new__(Mt5BrokerAdapter)
     a._mt5 = _Deals()
     assert a.get_realized_pnl(datetime(2026, 6, 10, tzinfo=timezone.utc)) == 159.17
+
+
+def test_can_open_honors_trade_mode():
+    """can_open() must mirror the broker's per-instrument trade_mode so the risk layer never
+    approves a trade the terminal would reject (0 DISABLED, 1 LONGONLY, 2 SHORTONLY, 3 CLOSEONLY,
+    4 FULL)."""
+    a = Mt5BrokerAdapter.__new__(Mt5BrokerAdapter)
+    a._resolve_symbol = lambda s: s
+
+    def with_mode(mode):
+        a._symbol_info = lambda s: SimpleNamespace(trade_mode=mode)
+        return a
+
+    with_mode(4)  # FULL
+    assert a.can_open("X", "long") == (True, None) and a.can_open("X", "short") == (True, None)
+    with_mode(0)  # DISABLED -> neither side
+    assert a.can_open("IN50m", "long")[0] is False and a.can_open("IN50m", "short")[0] is False
+    with_mode(3)  # CLOSEONLY -> neither side
+    assert a.can_open("X", "long")[0] is False and a.can_open("X", "short")[0] is False
+    with_mode(1)  # LONGONLY -> short refused, long ok
+    assert a.can_open("X", "short")[0] is False and a.can_open("X", "long") == (True, None)
+    with_mode(2)  # SHORTONLY -> long refused, short ok
+    assert a.can_open("X", "long")[0] is False and a.can_open("X", "short") == (True, None)

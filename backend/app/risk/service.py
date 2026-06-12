@@ -330,6 +330,17 @@ def assess(
     norm = _norm_symbol(proposal.symbol)
     same_dir = any(_norm_symbol(sym) == norm and d == proposal.direction.value for sym, d in open_book)
     correlated = correlated_concentration(open_book, proposal.symbol, proposal.direction.value)
+    # Broker tradeability: don't approve a setup the broker won't let us OPEN (instrument disabled
+    # / close-only, or the wrong side of a long-only/short-only symbol). Caught here so it shows as
+    # "not tradeable", not a tempting "approved · Open" that bounces at order time.
+    not_tradeable = None
+    if proposal.direction.value in ("long", "short"):
+        try:
+            ok_open, why = broker.can_open(proposal.symbol, proposal.direction.value)
+            if not ok_open:
+                not_tradeable = why
+        except Exception:  # noqa: BLE001 - never let a tradeability lookup block sizing
+            pass
     return evaluate_proposal(
         proposal,
         account,
@@ -340,6 +351,7 @@ def assess(
         override_risk_fraction=override_risk_fraction,
         has_open_same_direction=same_dir,
         correlated_exposure=correlated,
+        not_tradeable_reason=not_tradeable,
     )
 
 
