@@ -331,8 +331,25 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           const VISIBLE = 110;
           ts.setVisibleLogicalRange({ from: Math.max(0, n - VISIBLE), to: n + 6 });
         }
+        // Re-fit the price (y) axis to the NEW pair. autoScale gets turned OFF the moment the user
+        // drags the price axis, and stays off — which otherwise leaves the next pair's candles
+        // off-screen behind a pinned scale (e.g. BNB at 588 hidden under a 10000+ range).
+        seriesRef.current.priceScale().applyOptions({ autoScale: true });
       })
-      .catch(() => {});
+      .catch(() => {
+        // Don't leave the PREVIOUS pair's chart up when this one fails to load — clear it so it's
+        // obviously empty (not silently showing the wrong pair's data/scale).
+        if (cancelled || !seriesRef.current || !volumeRef.current) return;
+        candlesRef.current = [];
+        seriesRef.current.setData([]);
+        volumeRef.current.setData([]);
+        for (const { period } of EMA_CONFIG) emaRefs.current[period]?.setData([]);
+        rsiSeriesRef.current?.setData([]);
+        macdLineRef.current?.setData([]);
+        macdSignalRef.current?.setData([]);
+        macdHistRef.current?.setData([]);
+        setLegend(null);
+      });
     return () => {
       cancelled = true;
     };
