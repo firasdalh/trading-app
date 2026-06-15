@@ -13,8 +13,10 @@ Prerequisites:
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -70,7 +72,20 @@ def _open_in_browser_when_up() -> None:
     webbrowser.open(URL)
 
 
+def _ensure_data_dir() -> None:
+    """In a frozen build the program folder is read-only, so put the DB + .env in a persistent,
+    writable per-user location (%APPDATA%\\AITradingDesk) by making it the working directory before
+    the app (which uses ./trading.sqlite3 and ./.env) is imported. No-op when running from source."""
+    if not getattr(sys, "frozen", False):
+        return
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    data_dir = os.path.join(base, "AITradingDesk")
+    os.makedirs(data_dir, exist_ok=True)
+    os.chdir(data_dir)
+
+
 def main() -> None:
+    _ensure_data_dir()  # must run BEFORE the server imports app.main (reads ./.env, ./db)
     try:
         import webview  # pywebview — native window
     except Exception:  # noqa: BLE001 - backend/GUI lib not available on this Python

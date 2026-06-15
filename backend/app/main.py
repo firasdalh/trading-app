@@ -9,6 +9,7 @@ Run locally:
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -186,8 +187,13 @@ app.include_router(ws_router)
 # The frontend already uses relative /api, /ws, /health, so serving its build here means the whole
 # app runs on ONE port — what the desktop launcher points its window at. No-op in dev (dist not
 # built): the Vite dev server on :5173 proxies /api back here instead.
-_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                     "frontend", "dist")
+# In a PyInstaller bundle the built UI is shipped under sys._MEIPASS; in dev it's at repo
+# root/frontend/dist (computed from this file's location).
+if getattr(sys, "frozen", False):
+    _DIST = os.path.join(sys._MEIPASS, "frontend", "dist")  # type: ignore[attr-defined]
+else:
+    _DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                         "frontend", "dist")
 _INDEX = os.path.join(_DIST, "index.html")
 _HAS_UI = os.path.isfile(_INDEX)
 _RESERVED = {"api", "ws", "health", "docs", "redoc", "openapi.json"}

@@ -27,6 +27,10 @@ frontend/dist/
 frontend/.vite/
 *.local
 
+# ---- PyInstaller desktop build ----
+backend/build/
+backend/dist/
+
 # ---- Editors / OS ----
 .vscode/
 .idea/
