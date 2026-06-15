@@ -8,10 +8,13 @@ Run locally:
 """
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.backtest_routes import router as backtest_router
 from app.api.journal_routes import router as journal_router
@@ -179,11 +182,42 @@ app.include_router(watchlist_router)
 app.include_router(ws_router)
 
 
-@app.get("/", tags=["system"])
-def root() -> dict:
-    return {
-        "name": "AI Multi-Agent Trading App",
-        "version": "0.1.0",
-        "docs": "/docs",
-        "safety": "paper mode default; deterministic risk manager; kill-switch enabled",
-    }
+# --- serve the built React UI from this same server (desktop app / single-origin) ---
+# The frontend already uses relative /api, /ws, /health, so serving its build here means the whole
+# app runs on ONE port — what the desktop launcher points its window at. No-op in dev (dist not
+# built): the Vite dev server on :5173 proxies /api back here instead.
+_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                     "frontend", "dist")
+_INDEX = os.path.join(_DIST, "index.html")
+_HAS_UI = os.path.isfile(_INDEX)
+_RESERVED = {"api", "ws", "health", "docs", "redoc", "openapi.json"}
+
+_API_INFO = {
+    "name": "AI Multi-Agent Trading App",
+    "version": "0.1.0",
+    "docs": "/docs",
+    "safety": "paper mode default; deterministic risk manager; kill-switch enabled",
+}
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    # Built UI when present (desktop / single-origin); the API info JSON otherwise (dev / API-only).
+    return FileResponse(_INDEX) if _HAS_UI else _API_INFO
+
+
+if _HAS_UI:
+    _assets = os.path.join(_DIST, "assets")
+    if os.path.isdir(_assets):
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+    # SPA catch-all — registered LAST so /api, /ws, /health, /docs keep their handlers. Serves a
+    # real static file (favicon, etc.) if it exists, otherwise index.html for client-side routing.
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        if full_path.split("/", 1)[0] in _RESERVED:
+            raise HTTPException(status_code=404, detail="not found")
+        candidate = os.path.normpath(os.path.join(_DIST, full_path))
+        if full_path and candidate.startswith(_DIST) and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(_INDEX)
