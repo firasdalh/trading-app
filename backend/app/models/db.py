@@ -199,6 +199,9 @@ class Position(Base):
 
     # Risk at entry (used for exposure accounting).
     risk_amount: Mapped[float | None] = mapped_column(Float)
+    # The proposal's confidence at entry — kept so closed trades can be bucketed by confidence to
+    # CALIBRATE the score against real outcomes (does "70%" actually win ~70%?).
+    confidence: Mapped[float | None] = mapped_column(Float)
 
     broker: Mapped[str] = mapped_column(String(24), default="paper")
     broker_env: Mapped[str] = mapped_column(String(8), default="paper")

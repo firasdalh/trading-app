@@ -310,3 +310,22 @@ def test_mode_b_auto_executes_paper(db_session):
     if res.risk.approved:
         assert res.status == ProposalStatus.EXECUTED.value
         assert db_session.scalars(select(Position)).all()
+
+
+def test_confidence_calibration_buckets(db_session):
+    """Closed trades bucket by entry confidence with win rate + avg R — the calibration data that
+    tells us whether the engine's confidence actually predicts outcomes."""
+    from app.api.journal_routes import calibration
+
+    def closed(conf, pnl, risk=10.0):
+        return Position(symbol="X", asset_class="forex", direction="long", qty=1.0, entry_price=100.0,
+                        status=PositionStatus.CLOSED.value, realized_pnl=pnl, risk_amount=risk,
+                        confidence=conf)
+
+    db_session.add_all([closed(0.75, 20.0), closed(0.72, -10.0), closed(0.95, 30.0)])
+    db_session.commit()
+    by = {b.bucket: b for b in calibration(session=db_session)}
+    assert by["70-80%"].trades == 2 and by["70-80%"].wins == 1 and by["70-80%"].win_rate == 0.5
+    assert abs(by["70-80%"].avg_r - 0.5) < 1e-6           # (+2R, -1R) -> mean 0.5R
+    assert by["90-100%"].trades == 1 and by["90-100%"].win_rate == 1.0
+    assert by["50-60%"].trades == 0 and by["50-60%"].win_rate is None

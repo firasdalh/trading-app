@@ -123,6 +123,7 @@ def execute_proposal(session: Session, record: TradeProposalRecord) -> OrderResu
             status=PositionStatus.OPEN.value,
             last_price=entry_price,
             risk_amount=record.risk_amount,
+            confidence=record.confidence,  # kept for confidence-vs-outcome calibration
             broker=broker.name,
             broker_env=settings.broker_env,
         )

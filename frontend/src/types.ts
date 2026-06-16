@@ -332,6 +332,14 @@ export interface ReflectionReport {
   lessons: string[];
 }
 
+export interface CalibrationBucket {
+  bucket: string;             // confidence range, e.g. "70-80%"
+  trades: number;
+  wins: number;
+  win_rate: number | null;    // null when the bucket has no trades yet
+  avg_r: number | null;       // mean realized R
+}
+
 export interface AccountState {
   equity: number;
   cash: number;

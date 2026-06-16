@@ -10,9 +10,11 @@ from app.agents.indicators import (
     adx,
     atr,
     bollinger,
+    divergence,
     ema,
     macd,
     market_structure,
+    reference_levels,
     rsi,
     swing_levels,
     trend_from_emas,
@@ -104,6 +106,18 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
     if ms["swing_low"] is not None:
         indicators["swing_low"] = ms["swing_low"]
     indicators["choch"] = 1.0 if ms["choch"] else 0.0
+
+    # RSI divergence (momentum vs price at the last two swings) — encoded as 0/1 flags so the
+    # orchestrator can weight it without a schema change.
+    dv = divergence(candles)
+    for k, v in dv.items():
+        indicators[f"div_{k}"] = 1.0 if v else 0.0
+
+    # Institutional reference levels (prior day/week high-low) — only meaningful on the daily TF;
+    # the orchestrator reads them off the macro timeframe for entry/stop/target confluence.
+    if series.timeframe in ("1d", "1w"):
+        for k, v in reference_levels(candles).items():
+            indicators[k] = v
 
     trend = trend_from_emas(closes)
     adx_val = indicators.get("adx")

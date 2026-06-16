@@ -2,7 +2,15 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
-import type { ReflectionReport } from "../types";
+import type { CalibrationBucket, ReflectionReport } from "../types";
+
+// Midpoint of a "70-80%" bucket label, used to judge whether the realized win rate matches the
+// confidence the engine assigned (the whole point of calibration).
+function bucketMid(label: string): number {
+  const m = label.match(/(\d+)-(\d+)/);
+  if (!m) return 0;
+  return (Number(m[1]) + Number(m[2])) / 200; // -> 0..1
+}
 
 // Close date/time in the user's local zone (matches the Exness journal column).
 function fmtDate(iso: string | null | undefined): string {
@@ -17,6 +25,7 @@ function fmtDate(iso: string | null | undefined): string {
 // Journal: closed-trade log + the read-only Reflection agent's patterns and lessons.
 export function JournalView() {
   const { data: trades } = usePolling(() => api.journalTrades(100), 8000, []);
+  const { data: calib } = usePolling(() => api.journalCalibration(), 10000, []);
   const [reflection, setReflection] = useState<ReflectionReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +99,8 @@ export function JournalView() {
         )}
       </div>
 
+      <CalibrationCard calib={calib} />
+
       <div className="card">
         <div className="mb-2 text-sm font-semibold">Closed trades ({trades?.length ?? 0})</div>
         {!trades || trades.length === 0 ? (
@@ -123,6 +134,58 @@ export function JournalView() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// Confidence calibration: per-bucket realized win rate vs the confidence the engine assigned.
+// Green = the bucket wins at least as often as its midpoint implies (calibrated/underconfident);
+// red = it wins much less often (overconfident — the score is inflating those setups).
+function CalibrationCard({ calib }: { calib: CalibrationBucket[] | null }) {
+  const withTrades = (calib ?? []).filter((b) => b.trades > 0);
+  const total = withTrades.reduce((n, b) => n + b.trades, 0);
+  return (
+    <div className="card">
+      <div className="mb-1 text-sm font-semibold">Confidence calibration</div>
+      <p className="mb-2 text-xs text-neutral-500">
+        Does a “70%” setup actually win ~70%? Realized win rate per confidence bucket. Needs a
+        decent sample (≈20+ trades per bucket) before it’s trustworthy.
+      </p>
+      {total === 0 ? (
+        <div className="text-sm text-neutral-500">
+          No closed trades carry a recorded confidence yet — this fills in as new trades close.
+        </div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="text-left text-xs text-neutral-400">
+            <tr>
+              <th className="py-1 pr-3">Confidence</th>
+              <th className="pr-3 text-right">Trades</th>
+              <th className="pr-3 text-right">Win rate</th>
+              <th className="text-right">Avg R</th>
+            </tr>
+          </thead>
+          <tbody>
+            {withTrades.map((b) => {
+              const wr = b.win_rate ?? 0;
+              const mid = bucketMid(b.bucket);
+              const wrClass = wr >= mid ? "text-bull" : wr >= mid - 0.1 ? "text-warn" : "text-bear";
+              return (
+                <tr key={b.bucket} className="border-t border-neutral-800">
+                  <td className="py-1 pr-3">{b.bucket}</td>
+                  <td className="pr-3 text-right tabular-nums">{b.trades}</td>
+                  <td className={`pr-3 text-right tabular-nums ${wrClass}`}>
+                    {b.win_rate == null ? "—" : `${(b.win_rate * 100).toFixed(0)}%`}
+                  </td>
+                  <td className={`text-right tabular-nums ${(b.avg_r ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
+                    {b.avg_r == null ? "—" : `${b.avg_r >= 0 ? "+" : ""}${b.avg_r.toFixed(2)}R`}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

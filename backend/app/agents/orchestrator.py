@@ -11,6 +11,7 @@ pipeline works offline. The deterministic path is conservative by design.
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 
 from app.agents.llm import analyze, llm_available
@@ -81,7 +82,8 @@ _MIN_STOP_ATR_FRAC = 1.0  # never place the stop closer than 1xATR (anti-wick fl
                           # tightening must not pull the stop inside this, or normal noise stops us
 _STRUCT_STOP_BUFFER_ATR = 0.2  # place the structural stop this far BEYOND the swing (wick allowance)
 _STRUCT_STOP_MAX_ATR = 3.0     # if the invalidating swing is further than this, it's not a practical stop
-_RR = 2.0             # reward:risk target
+_RR = 2.0             # reward:risk target (baseline / fallback)
+_RR_MAX = 4.0         # cap the planned target at 4R so a far key level isn't an unrealistic target
 _RSI_OB = 75.0        # overbought / oversold caution thresholds
 _RSI_OS = 25.0
 _STRUCT_IGNORE = 0.5  # ignore overhead structure within 0.5R of entry (breakout zone)
@@ -191,6 +193,37 @@ def _macro_structure(technical: TechnicalRead) -> str:
     """Market structure of the highest-timeframe read (the dominant chart context)."""
     best = _macro_tf(technical)
     return _structure_label(best.indicators) if best else "range"
+
+
+def _round_levels(price: float) -> list[float]:
+    """Psychological round-number magnets straddling the price (magnitude-scaled to the instrument:
+    ~1-10% step, e.g. 580/590 for ~588, 1.10/1.20 for ~1.1, 24000/25000 for ~24k)."""
+    if price <= 0:
+        return []
+    step = 10 ** (math.floor(math.log10(price)) - 1)
+    base = math.floor(price / step) * step
+    return [round(base, 6), round(base + step, 6)]
+
+
+def _key_levels(technical: TechnicalRead, tf0, entry: float) -> list[float]:
+    """Every confluence level a desk actually watches, deduped + sorted: pivot S/R (entry TF),
+    prior day/week high-low (institutional, from the daily TF), and round numbers."""
+    raw: list[float] = []
+    if tf0:
+        raw += list(tf0.support_levels[:1]) + list(tf0.resistance_levels[:1])
+    macro = _macro_tf(technical)
+    if macro:
+        for k in ("prior_day_high", "prior_day_low", "prior_week_high", "prior_week_low"):
+            v = macro.indicators.get(k)
+            if v:
+                raw.append(v)
+    raw += _round_levels(entry)
+    tol = abs(entry) * 5e-4  # merge levels within ~0.05% of each other
+    out: list[float] = []
+    for lv in sorted(x for x in raw if x and x > 0):
+        if not out or (lv - out[-1]) > tol:
+            out.append(round(lv, 6))
+    return out
 
 
 def _deterministic_decision(
@@ -306,6 +339,24 @@ def _deterministic_decision(
         (direction == Direction.SHORT and entry < ema20 - _PULLBACK_ATR * atr_v)
     ))
 
+    # --- divergence exhaustion (#2): regular RSI divergence AGAINST the trade while price is
+    # stretched is a classic reversal tell — wait for it to resolve rather than entering into it. ---
+    div_against = bool(
+        (direction == Direction.LONG and ind.get("div_bear"))
+        or (direction == Direction.SHORT and ind.get("div_bull"))
+    )
+    div_with = bool(
+        (direction == Direction.LONG and ind.get("div_bull_hidden"))
+        or (direction == Direction.SHORT and ind.get("div_bear_hidden"))
+    )
+    if div_against and overextended:
+        base.watch = True
+        base.rationale = (
+            f"Momentum divergence against the {direction.value} with price extended (RSI {rsi}) — "
+            "exhaustion risk. Waiting for momentum to realign before entering."
+        )
+        return base
+
     support = tf0.support_levels[0] if tf0 and tf0.support_levels else None
     resistance = tf0.resistance_levels[0] if tf0 and tf0.resistance_levels else None
 
@@ -350,34 +401,52 @@ def _deterministic_decision(
         base.rationale = "Computed risk is non-positive; sitting out."
         return base
 
-    # --- structure-aware target: don't aim through overhead structure ---
-    # In a STRONG trend the nearest swing is the breakout level, not a barrier — let the move
-    # run to a 2R ATR target. Only respect immediate structure in moderate/ranging trends.
-    raw_target = entry + _RR * risk if direction == Direction.LONG else entry - _RR * risk
-    target = raw_target
-    struct_note = f"~{_RR:.0f}R"
-    respect_structure = not (adx_v is not None and adx_v >= _ADX_STRONG)
-    if respect_structure and direction == Direction.LONG and resistance is not None:
-        # Only treat resistance as a ceiling if it's beyond the breakout zone but below 2R.
-        if entry + _STRUCT_IGNORE * risk < resistance < raw_target:
-            if (resistance - entry) < _MIN_RR_TO_STRUCT * risk:
-                base.rationale = (
-                    f"Too little room: resistance {round(resistance,5)} is < "
-                    f"{_MIN_RR_TO_STRUCT:.0f}R above entry. Sitting out."
-                )
-                return base
-            target = resistance
-            struct_note = f"capped at resistance {round(resistance, 5)}"
-    elif respect_structure and direction == Direction.SHORT and support is not None:
-        if raw_target < support < entry - _STRUCT_IGNORE * risk:
-            if (entry - support) < _MIN_RR_TO_STRUCT * risk:
-                base.rationale = (
-                    f"Too little room: support {round(support,5)} is < "
-                    f"{_MIN_RR_TO_STRUCT:.0f}R below entry. Sitting out."
-                )
-                return base
-            target = support
-            struct_note = f"capped at support {round(support, 5)}"
+    # --- target from REAL key levels (#3/#4): pivot S/R, prior day/week high-low, round numbers.
+    # Aim for a clean >=2R level when one exists (snap the 2R target to a real level); a STRONG
+    # trend may run to the NEXT level (up to the RR cap); a moderate trend caps at a sub-2R level;
+    # sit out if a wall sits within <1R against the trade. Honest R:R reported per setup. ---
+    levels = _key_levels(technical, tf0, entry)
+    strong = adx_v is not None and adx_v >= _ADX_STRONG
+    ignore = _STRUCT_IGNORE * risk  # levels inside the breakout zone aren't barriers
+    if direction == Direction.LONG:
+        cap, two_r = entry + _RR_MAX * risk, entry + _RR * risk
+        ahead = sorted(lv for lv in levels if lv > entry + ignore)          # nearest first
+        past_2r = [lv for lv in ahead if lv >= two_r]
+    else:
+        cap, two_r = entry - _RR_MAX * risk, entry - _RR * risk
+        ahead = sorted((lv for lv in levels if lv < entry - ignore), reverse=True)
+        past_2r = [lv for lv in ahead if lv <= two_r]
+
+    def _clamp(t: float) -> float:
+        return min(t, cap) if direction == Direction.LONG else max(t, cap)
+
+    nearest = ahead[0] if ahead else None
+    nearest_rr = (abs(nearest - entry) / risk) if nearest is not None else None
+
+    if nearest is not None and nearest_rr < _RR:
+        # A real key level sits BEFORE 2R — the path to a clean 2R isn't free.
+        if nearest_rr < _MIN_RR_TO_STRUCT and not strong:
+            side = "above" if direction == Direction.LONG else "below"
+            base.rationale = (f"Too little room: key level {round(nearest, 5)} is < {_MIN_RR_TO_STRUCT:.0f}R "
+                              f"{side} entry — R:R not real. Sitting out.")
+            return base
+        if strong:
+            # Strong trend can break the minor level — aim for the next clean >=2R level, else 2R.
+            target = _clamp(past_2r[0]) if past_2r else two_r
+            struct_note = f"~{abs(target - entry) / risk:.1f}R (strong trend through {round(nearest, 5)})"
+        else:
+            target = nearest  # moderate trend respects the level — cap there
+            struct_note = f"capped at key level {round(nearest, 5)} (~{nearest_rr:.1f}R)"
+    elif past_2r:
+        # Nearest meaningful level is already >=2R — clean target; a strong trend may run further.
+        target = past_2r[0]
+        if strong and len(past_2r) >= 2 and (past_2r[1] <= cap if direction == Direction.LONG else past_2r[1] >= cap):
+            target = past_2r[1]
+        target = _clamp(target)
+        struct_note = f"key level {round(target, 5)} (~{abs(target - entry) / risk:.1f}R)"
+    else:
+        target = two_r  # no key level in range -> fixed RR
+        struct_note = f"~{_RR:.0f}R"
 
     # --- confidence from multi-factor confluence ---
     conf = 0.3 + 0.2 * technical.confidence + 0.15 * fundamental.confidence
@@ -427,6 +496,12 @@ def _deterministic_decision(
         conf += 0.1 if aligned else -0.1
     if ind.get("choch"):
         conf -= 0.1
+    # RSI divergence: regular divergence AGAINST the trade is exhaustion (down-weight); hidden
+    # divergence WITH the trade is continuation confirmation (up-weight).
+    if div_against:
+        conf -= 0.12
+    if div_with:
+        conf += 0.07
     # Regime: a clean trend is the engine's edge; a volatile (expanding, trendless) tape is lower
     # conviction even when a setup forms.
     if regime == "volatile":
@@ -451,6 +526,8 @@ def _deterministic_decision(
         f"{' (cross-TF momentum conflict)' if macro_conflict else ''}"
         f"{' (pullback entry at value)' if at_value else ''}"
         f"{' (stretched entry)' if overextended else ''}"
+        f"{' (divergence against)' if div_against else ''}"
+        f"{' (hidden div confirms)' if div_with else ''}"
         f"{' (CHoCH)' if ind.get('choch') else ''}"
         f"{f' ({session_q} session)' if session_q != 'normal' else ''}. "
         f"Entry {base.entry}, stop {base.stop_loss} "

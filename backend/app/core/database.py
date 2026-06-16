@@ -44,6 +44,9 @@ _SQLITE_ADDED_COLUMNS = {
     "risk_config": [
         ("daily_loss_breaker_enabled", "BOOLEAN DEFAULT 1"),
     ],
+    "positions": [
+        ("confidence", "FLOAT"),
+    ],
 }
 
 

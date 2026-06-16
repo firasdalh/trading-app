@@ -354,3 +354,57 @@ def test_session_weighting_lifts_confidence_in_liquid_window():
                                    now=datetime(2026, 1, 5, 23, tzinfo=timezone.utc))    # dead zone
     assert active.direction == Direction.LONG and thin.direction == Direction.LONG
     assert active.confidence > thin.confidence
+
+
+# ---- analytics enhancements: divergence, institutional levels, key-level targets ----
+
+def test_reference_levels_prior_day_and_week():
+    from app.agents.indicators import reference_levels
+    mon = datetime(2026, 6, 8, tzinfo=timezone.utc)  # ISO week 24, Monday
+    days = [
+        Candle(ts=mon, open=10, high=12, low=9, close=11, volume=1),                      # wk24 Mon
+        Candle(ts=mon + timedelta(days=1), open=11, high=13, low=10, close=12, volume=1),  # wk24 Tue
+        Candle(ts=mon + timedelta(days=7), open=12, high=15, low=11, close=14, volume=1),  # wk25 Mon (prior day)
+        Candle(ts=mon + timedelta(days=8), open=14, high=16, low=13, close=15, volume=1),  # wk25 Tue (forming)
+    ]
+    r = reference_levels(days)
+    assert r["prior_day_high"] == 15.0 and r["prior_day_low"] == 11.0   # the wk25 Monday bar
+    assert r["prior_week_high"] == 13.0 and r["prior_week_low"] == 9.0   # the completed week 24
+
+
+def test_divergence_detects_bearish():
+    from app.agents.indicators import divergence
+    closes = ([100.0] * 16
+              + [104, 108, 112, 116, 120, 116, 112, 108]   # hump 1: sharp -> peak 120 @ idx20 (RSI~100)
+              + [110, 113, 116, 119, 121, 118, 115, 112])  # hump 2: gentle -> higher peak 121 @ idx28 (RSI lower)
+    candles = [Candle(ts=NOW + timedelta(hours=i), open=c, high=c + 0.2, low=c - 0.2, close=c, volume=1000)
+               for i, c in enumerate(closes)]
+    d = divergence(candles)
+    assert d["bear"] is True  # higher price high, lower RSI high = bearish divergence
+
+
+def test_divergence_against_extended_setup_watches():
+    # Short with a stretched entry (100 well below EMA20 106) AND regular bullish divergence against
+    # it -> exhaustion; the engine should WATCH, not enter.
+    ind = {"last_close": 100.0, "atr14": 2.0, "adx": 30.0, "macd_hist": -1.0, "ema20": 106.0,
+           "div_bull": 1.0}
+    tech = TechnicalRead(symbol="X", overall_trend="down", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend="down", indicators=ind,
+                      support_levels=[80], resistance_levels=[110]),
+        TimeframeRead(timeframe="1d", trend="down", indicators={}, support_levels=[], resistance_levels=[]),
+    ])
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", tech, _fund(), now=NOW)
+    assert p.direction == Direction.NO_TRADE and p.watch and "divergence" in p.rationale.lower()
+
+
+def test_target_snaps_to_prior_day_high():
+    # Moderate long; the only nearby level is the institutional prior-day-high (104) on the daily TF.
+    ind = {"last_close": 100.0, "atr14": 2.0, "adx": 22.0, "macd_hist": 1.0}
+    tech = TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend="up", indicators=ind,
+                      support_levels=[80], resistance_levels=[130]),       # pivots far away
+        TimeframeRead(timeframe="1d", trend="up", indicators={"prior_day_high": 104.0},
+                      support_levels=[], resistance_levels=[]),
+    ])
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", tech, _fund(), now=NOW)
+    assert p.direction == Direction.LONG and p.take_profit == 104.0  # capped at the institutional level

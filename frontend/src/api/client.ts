@@ -14,6 +14,7 @@ import type {
   ProposalView,
   WatchlistResponse,
   ReflectionReport,
+  CalibrationBucket,
   RiskState,
   SettingsResponse,
 } from "../types";
@@ -197,4 +198,5 @@ export const api = {
   journalTrades: (limit = 100) => request<PositionView[]>(`/api/journal/trades?limit=${limit}`),
   reflect: () => request<ReflectionReport>("/api/journal/reflect", { method: "POST" }),
   reflectionLatest: () => request<ReflectionReport | null>("/api/journal/reflection/latest"),
+  journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
 };

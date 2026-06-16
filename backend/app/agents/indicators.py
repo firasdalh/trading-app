@@ -95,6 +95,91 @@ def market_structure(candles: list[Candle], left: int = 3, right: int = 3) -> di
     return out
 
 
+def _swing_pivots(candles: list[Candle], left: int, right: int, start: int) -> tuple[list[int], list[int]]:
+    """Indices of confirmed swing-high and swing-low pivots from ``start`` onward."""
+    highs: list[int] = []
+    lows: list[int] = []
+    for i in range(max(left, start), len(candles) - right):
+        h = candles[i].high
+        if all(h > candles[j].high for j in range(i - left, i)) and all(
+            h > candles[j].high for j in range(i + 1, i + right + 1)
+        ):
+            highs.append(i)
+        lo = candles[i].low
+        if all(lo < candles[j].low for j in range(i - left, i)) and all(
+            lo < candles[j].low for j in range(i + 1, i + right + 1)
+        ):
+            lows.append(i)
+    return highs, lows
+
+
+def divergence(candles: list[Candle], left: int = 3, right: int = 3, lookback: int = 60) -> dict:
+    """RSI divergence between the last two swing pivots — the classic momentum-vs-price tell.
+
+    Regular (reversal):  bear = higher price high + lower RSI high (uptrend exhausting);
+                         bull = lower price low + higher RSI low (downtrend exhausting).
+    Hidden (continuation): bear_hidden = lower high + higher RSI high (downtrend resuming);
+                           bull_hidden = higher low + lower RSI low (uptrend resuming).
+    RSI is taken on closes UP TO each pivot, so nothing repaints. Returns four bool flags.
+    """
+    out = {"bull": False, "bear": False, "bull_hidden": False, "bear_hidden": False}
+    n = len(candles)
+    if n < left + right + 5:
+        return out
+    closes = [c.close for c in candles]
+    start = max(left, n - lookback)
+    highs, lows = _swing_pivots(candles, left, right, start)
+
+    def _rsi_at(i: int) -> float | None:
+        return rsi(closes[: i + 1])
+
+    if len(highs) >= 2:
+        a, b = highs[-2], highs[-1]
+        ra, rb = _rsi_at(a), _rsi_at(b)
+        if ra is not None and rb is not None:
+            if candles[b].high > candles[a].high and rb < ra:
+                out["bear"] = True
+            elif candles[b].high < candles[a].high and rb > ra:
+                out["bear_hidden"] = True
+    if len(lows) >= 2:
+        a, b = lows[-2], lows[-1]
+        ra, rb = _rsi_at(a), _rsi_at(b)
+        if ra is not None and rb is not None:
+            if candles[b].low < candles[a].low and rb > ra:
+                out["bull"] = True
+            elif candles[b].low > candles[a].low and rb < ra:
+                out["bull_hidden"] = True
+    return out
+
+
+def reference_levels(daily_candles: list[Candle]) -> dict:
+    """Institutional reference levels from DAILY candles: the prior completed day's and week's
+    high/low — the levels desks actually watch. The last daily bar is the (forming) current day,
+    so 'prior day' is the second-to-last bar; 'prior week' is the most recent COMPLETED ISO week.
+    """
+    out: dict[str, float] = {}
+    n = len(daily_candles)
+    if n >= 2:
+        prev_day = daily_candles[-2]
+        out["prior_day_high"] = round(prev_day.high, 6)
+        out["prior_day_low"] = round(prev_day.low, 6)
+    weeks: dict[tuple[int, int], dict[str, float]] = {}
+    order: list[tuple[int, int]] = []
+    for c in daily_candles:
+        wk = c.ts.isocalendar()[:2]  # (iso-year, iso-week)
+        if wk not in weeks:
+            weeks[wk] = {"high": c.high, "low": c.low}
+            order.append(wk)
+        else:
+            weeks[wk]["high"] = max(weeks[wk]["high"], c.high)
+            weeks[wk]["low"] = min(weeks[wk]["low"], c.low)
+    if len(order) >= 2:
+        prev_week = weeks[order[-2]]  # the week before the current (forming) one
+        out["prior_week_high"] = round(prev_week["high"], 6)
+        out["prior_week_low"] = round(prev_week["low"], 6)
+    return out
+
+
 def trend_from_smas(closes: list[float]) -> str:
     """Classify trend from fast/slow SMA relationship + last-close position."""
     fast = sma(closes, 10) or sma(closes, min(len(closes), 5))
