@@ -6,6 +6,7 @@ import type { AssetClass, ExecutionMode, LlmStatus, Mt5Status, SettingsResponse 
 const LLM_DEFAULT_MODEL: Record<string, string> = {
   anthropic: "claude-opus-4-8",
   gemini: "gemini-2.5-flash",
+  openai: "gpt-5-mini",
 };
 
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
@@ -271,6 +272,7 @@ function LlmSection() {
           >
             <option value="anthropic">Claude (Anthropic)</option>
             <option value="gemini">Gemini (Google)</option>
+            <option value="openai">GPT (OpenAI)</option>
           </select>
         </label>
         <label className="text-sm">
@@ -300,8 +302,9 @@ function LlmSection() {
         </button>
       </div>
       <p className="mt-1 text-xs text-neutral-500">
-        Gemini: <code>gemini-2.5-flash</code> (fast/cheap) or <code>gemini-2.5-pro</code> (max
-        reasoning). Without a key, agents use the offline deterministic logic.
+        Gemini: <code>gemini-2.5-flash</code> (fast/cheap). OpenAI: <code>gpt-5-mini</code>{" "}
+        (fast/cheap) or <code>gpt-5</code> (max reasoning). Without a key, agents use the offline
+        deterministic logic.
       </p>
     </section>
   );

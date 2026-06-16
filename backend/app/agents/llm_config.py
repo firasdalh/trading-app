@@ -9,12 +9,13 @@ from app.models.db import LlmConfig
 
 log = get_logger("agents.llm_config")
 
-_DEFAULT_MODEL = {"anthropic": "claude-opus-4-8", "gemini": "gemini-2.5-flash"}
+_DEFAULT_MODEL = {"anthropic": "claude-opus-4-8", "gemini": "gemini-2.5-flash",
+                  "openai": "gpt-5-mini"}
 
 
 @dataclass
 class LlmCfg:
-    provider: str        # "anthropic" | "gemini"
+    provider: str        # "anthropic" | "gemini" | "openai"
     model: str
     api_key: str
 
@@ -43,4 +44,6 @@ def resolve_llm_config() -> LlmCfg:
     provider = (cfg.llm_provider or "anthropic").lower()
     if provider == "gemini":
         return LlmCfg("gemini", cfg.gemini_model or _DEFAULT_MODEL["gemini"], cfg.gemini_api_key)
+    if provider == "openai":
+        return LlmCfg("openai", cfg.openai_model or _DEFAULT_MODEL["openai"], cfg.openai_api_key)
     return LlmCfg("anthropic", cfg.anthropic_model or _DEFAULT_MODEL["anthropic"], cfg.anthropic_api_key)

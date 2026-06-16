@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     broker_env: BrokerEnv = "paper"
 
     # ---- LLM provider selection ----
-    # "anthropic" (Claude) or "gemini" (Google). UI can override per the DB LlmConfig.
+    # "anthropic" (Claude), "gemini" (Google), or "openai" (GPT). UI can override per DB LlmConfig.
     llm_provider: str = "anthropic"
 
     # ---- Anthropic ----
@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # ---- Google Gemini ----
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+
+    # ---- OpenAI ----
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5-mini"
 
     # ---- Alpaca (paper) ----
     alpaca_api_key: str = ""
@@ -101,6 +105,7 @@ class Settings(BaseSettings):
             "ccxt_api_secret",
             "mt5_password",
             "gemini_api_key",
+            "openai_api_key",
             "live_confirm_phrase",
             "database_url",
         }

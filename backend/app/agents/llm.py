@@ -51,6 +51,14 @@ def _gemini_client(api_key: str):
     return _clients[key]
 
 
+def _openai_client(api_key: str):
+    key = f"openai:{api_key}"
+    if key not in _clients:
+        from openai import OpenAI
+        _clients[key] = OpenAI(api_key=api_key)
+    return _clients[key]
+
+
 def _anthropic_analyze(model: str, api_key: str, system: str, user: str,
                        schema: type[T], max_tokens: int) -> T | None:
     client = _anthropic_client(api_key)
@@ -96,6 +104,25 @@ def _gemini_analyze(model: str, api_key: str, system: str, user: str,
     return None
 
 
+def _openai_analyze(model: str, api_key: str, system: str, user: str,
+                    schema: type[T], max_tokens: int) -> T | None:
+    """OpenAI structured output via the chat-completions parse helper. GPT-5 models are reasoning
+    models, so the token budget covers thinking too — give generous headroom and keep reasoning
+    low for fast, cheap structured extraction (mirrors disabling Gemini's 'thinking')."""
+    client = _openai_client(api_key)
+    kwargs = dict(
+        model=model,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        response_format=schema,
+        max_completion_tokens=max(max_tokens, 8000),
+    )
+    try:  # GPT-5 accepts reasoning_effort; older models reject it — degrade gracefully.
+        resp = client.beta.chat.completions.parse(reasoning_effort="low", **kwargs)
+    except TypeError:
+        resp = client.beta.chat.completions.parse(**kwargs)
+    return resp.choices[0].message.parsed
+
+
 class _Ping(BaseModel):
     ok: bool
 
@@ -110,6 +137,8 @@ def probe() -> None:
     user = "Return ok=true."
     if cfg.provider == "gemini":
         result = _gemini_analyze(cfg.model, cfg.api_key, system, user, _Ping, 2000)
+    elif cfg.provider == "openai":
+        result = _openai_analyze(cfg.model, cfg.api_key, system, user, _Ping, 2000)
     else:
         result = _anthropic_analyze(cfg.model, cfg.api_key, system, user, _Ping, 2000)
     if result is None:
@@ -124,6 +153,8 @@ def analyze(*, system: str, user: str, schema: type[T], max_tokens: int = 4000) 
     try:
         if cfg.provider == "gemini":
             parsed = _gemini_analyze(cfg.model, cfg.api_key, system, user, schema, max_tokens)
+        elif cfg.provider == "openai":
+            parsed = _openai_analyze(cfg.model, cfg.api_key, system, user, schema, max_tokens)
         else:
             parsed = _anthropic_analyze(cfg.model, cfg.api_key, system, user, schema, max_tokens)
         if parsed is None:

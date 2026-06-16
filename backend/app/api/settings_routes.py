@@ -289,8 +289,8 @@ def set_llm(req: LlmConfigRequest, session: Session = Depends(get_session)) -> d
     from app.agents.llm_config import resolve_llm_config
     from app.models.db import LlmConfig
 
-    if req.provider not in ("anthropic", "gemini"):
-        raise HTTPException(status_code=400, detail="provider must be 'anthropic' or 'gemini'")
+    if req.provider not in ("anthropic", "gemini", "openai"):
+        raise HTTPException(status_code=400, detail="provider must be 'anthropic', 'gemini', or 'openai'")
     row = session.get(LlmConfig, 1) or LlmConfig(id=1)
     row.provider = req.provider
     row.model = (req.model or "").strip() or None

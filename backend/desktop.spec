@@ -15,7 +15,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 _COLLECT = [
     "webview", "clr_loader", "MetaTrader5",
     "uvicorn", "fastapi", "starlette", "pydantic", "pydantic_settings", "pydantic_core",
-    "sqlalchemy", "apscheduler", "anthropic", "websockets", "httpx", "httpcore",
+    "sqlalchemy", "apscheduler", "anthropic", "openai", "websockets", "httpx", "httpcore",
     "google.genai", "google.generativeai",  # Gemini (whichever is installed; missing ones skipped)
 ]
 
