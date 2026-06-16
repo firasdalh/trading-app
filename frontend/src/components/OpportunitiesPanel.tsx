@@ -69,7 +69,9 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
           <span className="text-xs text-neutral-500">{listOpen ? "▾" : "▸"}</span>
           Opportunities
         </button>
-        <span className="text-xs text-neutral-500">scan all watchlist pairs &amp; rank the best</span>
+        <span className="text-xs text-neutral-500">
+          ranks all pairs, then AI-reviews the actionable ones (matches Run analysis)
+        </span>
         {items && (
           <span className="text-xs text-neutral-400">
             · {actionableCount} actionable / {items.length} scanned

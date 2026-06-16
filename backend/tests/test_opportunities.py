@@ -36,6 +36,33 @@ def test_opportunities_ranks_actionable_approved_first(db_session, monkeypatch):
     assert res[1].direction == "no_trade" and res[1].risk_approved is False
 
 
+def test_opportunities_deep_pass_applies_llm_veto(db_session, monkeypatch):
+    """The actionable deterministic candidate is re-judged by the LLM reviewer; a veto turns it
+    into NO_TRADE in the scan too, so the list matches 'Run analysis' (no silent disagreement)."""
+    db_session.add(WatchItem(symbol="BBB", asset_class="forex", timeframe="1h", enabled=True))
+    db_session.commit()
+
+    det_good = (TradeProposal(symbol="BBB", asset_class=AssetClass.FOREX, direction=Direction.LONG,
+                              entry=1.10, stop_loss=1.09, take_profit=1.12, confidence=0.78,
+                              rationale="confluence"),
+                RiskDecision(decision=RiskDecisionType.APPROVED, approved=True, reason="ok", symbol="BBB"))
+    llm_veto = (TradeProposal(symbol="BBB", asset_class=AssetClass.FOREX, direction=Direction.NO_TRADE,
+                              confidence=0.0, rationale="VETOED by AI review: chasing into resistance"),
+                RiskDecision(decision=RiskDecisionType.VETOED, approved=False, reason="no trade", symbol="BBB"))
+
+    def fake_preview(s, sym, ac, tf, use_llm=False, cache=None):
+        return llm_veto if use_llm else det_good
+
+    monkeypatch.setattr(pipeline, "preview_symbol", fake_preview)
+    monkeypatch.setattr(risk_service, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr("app.agents.llm.llm_available", lambda: True)
+
+    res = opportunities(session=db_session)
+    assert res[0].symbol == "BBB"
+    assert res[0].direction == "no_trade" and res[0].risk_approved is False
+    assert res[0].confidence == 0.0 and "VETOED" in res[0].rationale
+
+
 def test_opportunities_marks_already_open(db_session, monkeypatch):
     db_session.add(WatchItem(symbol="BBB", asset_class="forex", timeframe="1h", enabled=True))
     db_session.commit()

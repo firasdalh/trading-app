@@ -6,7 +6,7 @@ the Monitor.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +18,10 @@ from app.models.db import WatchItem
 from app.models.enums import AssetClass
 
 log = get_logger("api.watchlist")
+
+# How many of the strongest ACTIONABLE candidates get the (costlier) LLM review in a deep scan.
+# Bounds the LLM calls per scan; watch/forming rows aren't openable, so they stay deterministic.
+_DEEP_MAX = 6
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
 
@@ -140,9 +144,19 @@ class OpportunityView(BaseModel):
 
 
 @router.get("/opportunities", response_model=list[OpportunityView])
-def opportunities(session: Session = Depends(get_session)) -> list[OpportunityView]:
+def opportunities(
+    deep: bool = Query(True, description="Re-judge the actionable candidates with the LLM reviewer "
+                                         "so the headline setups match 'Run analysis'."),
+    session: Session = Depends(get_session),
+) -> list[OpportunityView]:
     """Scan every enabled watchlist pair and return the setups ranked best-first — actionable &
-    risk-approved on top, then forming ('watch'), then the rest. Read-only: nothing is opened."""
+    risk-approved on top, then forming ('watch'), then the rest. Read-only: nothing is opened.
+
+    Two passes: every pair is ranked by the cheap deterministic engine, then (when ``deep``) the
+    few ACTIONABLE candidates are re-run through the LLM reviewer so the setups you'd actually open
+    show the SAME verdict as 'Run analysis' / the Open button — the LLM can veto a deterministic
+    chase. Forming/'watch' rows stay deterministic; they aren't openable, so no quota is spent."""
+    from app.agents.llm import llm_available
     from app.agents.pipeline import preview_symbol
     from app.agents.scanner import expire_stale_proposals
     from app.risk.service import ScanCache, live_broker_positions
@@ -155,28 +169,49 @@ def opportunities(session: Session = Depends(get_session)) -> list[OpportunityVi
     cache = ScanCache(open_book=[(p.symbol, p.direction) for p in live])
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
 
-    out: list[OpportunityView] = []
-    for it in items:
-        try:
-            # Rank deterministically (no LLM quota burned scanning the whole list). The engine's
-            # confidence is well-calibrated now; the LLM reviewer runs when you actually open a
-            # trade (the Open button / Hybrid's final pick / Run analysis).
-            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=False, cache=cache)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
-            continue
+    def _view(it: WatchItem, prop, dec) -> OpportunityView:
         rr = None
         if prop.entry and prop.stop_loss and prop.take_profit:
             risk = abs(prop.entry - prop.stop_loss)
             rr = round(abs(prop.take_profit - prop.entry) / risk, 2) if risk else None
-        out.append(OpportunityView(
+        return OpportunityView(
             symbol=it.symbol, asset_class=it.asset_class, timeframe=it.timeframe,
             direction=prop.direction.value, entry=prop.entry, stop_loss=prop.stop_loss,
             take_profit=prop.take_profit, rr=rr, confidence=prop.confidence, watch=prop.watch,
             rationale=prop.rationale, risk_approved=dec.approved, risk_decision=dec.decision.value,
             risk_reason=dec.reason, already_open=it.symbol.upper() in open_syms,
-        ))
+        )
+
+    # Pass 1 — rank the whole list with the deterministic engine (cheap, no LLM quota).
+    out: list[OpportunityView] = []
+    meta: list[WatchItem] = []  # WatchItem parallel to `out`, so pass 2 can re-run a row by index
+    for it in items:
+        try:
+            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
+                                       it.timeframe, use_llm=False, cache=cache)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
+            continue
+        out.append(_view(it, prop, dec))
+        meta.append(it)
+
+    # Pass 2 — re-judge the ACTIONABLE candidates (the only ones you can open) with the LLM reviewer,
+    # capped at the strongest _DEEP_MAX so a manual scan stays fast. A veto turns the row into
+    # NO_TRADE with confidence 0, so it drops out of the actionable tier exactly like Run analysis.
+    if deep and llm_available():
+        idxs = [i for i, o in enumerate(out)
+                if o.direction in ("long", "short") and o.risk_approved and not o.already_open]
+        idxs.sort(key=lambda i: -out[i].confidence)
+        for i in idxs[:_DEEP_MAX]:
+            it = meta[i]
+            try:
+                prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
+                                           it.timeframe, use_llm=True, cache=cache)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("opportunity LLM review failed",
+                            extra={"symbol": it.symbol, "error": str(exc)})
+                continue
+            out[i] = _view(it, prop, dec)
 
     def rank(o: OpportunityView):
         actionable = o.direction in ("long", "short")

@@ -593,7 +593,9 @@ def run_orchestrator(
 
     # Confirmed: keep deterministic levels; the LLM may only LOWER confidence.
     proposal.confidence = round(min(proposal.confidence, review.confidence or proposal.confidence), 2)
-    proposal.rationale = f"{proposal.rationale} | AI review CONFIRMED: {review.rationale}"
+    # Drop the stale "(no LLM)" marker — this proposal WAS just LLM-reviewed.
+    base_rationale = proposal.rationale.replace(" Deterministic (no LLM).", "").rstrip()
+    proposal.rationale = f"{base_rationale} | AI review CONFIRMED: {review.rationale}"
     proposal.review_decision = "confirm"
     log.info("LLM confirmed deterministic setup",
              extra={"symbol": symbol, "direction": proposal.direction.value, "confidence": proposal.confidence})
