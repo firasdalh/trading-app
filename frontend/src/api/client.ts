@@ -15,6 +15,7 @@ import type {
   WatchlistResponse,
   ReflectionReport,
   CalibrationBucket,
+  ExplainedReview,
   RiskState,
   SettingsResponse,
 } from "../types";
@@ -96,6 +97,11 @@ export const api = {
     request<AnalyzeResponse>("/api/proposals/analyze", {
       method: "POST",
       body: JSON.stringify({ symbol, asset_class: assetClass, timeframe }),
+    }),
+  explainReview: (text: string, lang: "en" | "ar") =>
+    request<ExplainedReview>("/api/proposals/explain", {
+      method: "POST",
+      body: JSON.stringify({ text, lang }),
     }),
   proposals: (opts: { symbol?: string; timeframe?: string; status?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();

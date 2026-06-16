@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice } from "../format";
 import { usePolling } from "../hooks/usePolling";
+import { ReviewExplanation } from "./ReviewExplanation";
 import type { OpportunityView } from "../types";
 
 interface Props {
@@ -164,6 +165,9 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                   {!o.risk_approved && o.risk_reason ? `Risk: ${o.risk_reason}. ` : ""}
                   {o.rationale}
                 </p>
+                <div className="mt-2">
+                  <ReviewExplanation rationale={o.rationale} />
+                </div>
               </div>
             );
           })}

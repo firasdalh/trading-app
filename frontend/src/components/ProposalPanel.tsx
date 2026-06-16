@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
+import { ReviewExplanation } from "./ReviewExplanation";
 import type { AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
 
 const TF_RANK: Record<string, number> = { "1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7 };
@@ -239,6 +240,8 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
           <p className="text-xs leading-relaxed text-neutral-400">{reviewNote(proposal.rationale)}</p>
         )
       )}
+
+      <ReviewExplanation rationale={proposal.rationale} />
 
       <Reasoning result={result} />
 

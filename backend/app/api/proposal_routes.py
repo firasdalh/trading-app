@@ -30,6 +30,23 @@ class SizeRequest(BaseModel):
     # Desired position size in LOTS. None = use the AI's risk-based default size.
     lots: float | None = Field(None, gt=0)
 
+
+class ExplainRequest(BaseModel):
+    text: str = Field(min_length=1)
+    lang: str = "en"  # "en" | "ar"
+
+
+class ExplainResponse(BaseModel):
+    decision: str
+    is_trade: bool
+    grade: str | None = None
+    main_reason: str
+    pros: list[str] = Field(default_factory=list)
+    cons: list[str] = Field(default_factory=list)
+    conclusion: str
+    lang: str
+
+
 log = get_logger("api.proposals")
 router = APIRouter(prefix="/api/proposals", tags=["proposals"])
 
@@ -37,6 +54,21 @@ router = APIRouter(prefix="/api/proposals", tags=["proposals"])
 @router.post("/analyze", response_model=AnalyzeResponse)
 def analyze(request: AnalyzeRequest, session: Session = Depends(get_session)) -> AnalyzeResponse:
     return analyze_symbol(session, request.symbol, request.asset_class, request.timeframe)
+
+
+@router.post("/explain", response_model=ExplainResponse)
+def explain(req: ExplainRequest) -> ExplainResponse:
+    """Reformat a raw AI-review rationale into a structured (Decision / main reason / pros / cons /
+    conclusion) explanation, in English or Arabic. Stateless — serves both the analysis report and
+    the scan list. Faithful: it only restructures/translates, never adds new analysis."""
+    from app.agents.explain import explain_review
+
+    lang = "ar" if req.lang == "ar" else "en"
+    out = explain_review(req.text, lang)
+    if out is None:
+        raise HTTPException(status_code=503,
+                            detail="explanation unavailable — no AI model configured")
+    return ExplainResponse(**out.model_dump(), lang=lang)
 
 
 @router.get("", response_model=list[ProposalView])

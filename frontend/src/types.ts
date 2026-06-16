@@ -340,6 +340,18 @@ export interface CalibrationBucket {
   avg_r: number | null;       // mean realized R
 }
 
+// Structured (and optionally Arabic) reformatting of a raw AI-review rationale.
+export interface ExplainedReview {
+  decision: string;        // headline, e.g. "NO TRADE" / "ENTER SHORT"
+  is_trade: boolean;       // true = take the trade, false = stand aside
+  grade: string | null;    // A/B/C if present
+  main_reason: string;
+  pros: string[];
+  cons: string[];
+  conclusion: string;
+  lang: "en" | "ar";
+}
+
 export interface AccountState {
   equity: number;
   cash: number;
