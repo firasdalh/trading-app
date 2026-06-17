@@ -102,21 +102,40 @@ def test_trigger_fires_and_opens_on_break(db_session, monkeypatch):
     assert s.status == "triggered" and s.result_proposal_id is not None
 
 
-def test_trigger_rejected_when_recheck_declines(db_session, monkeypatch):
+def test_trigger_rearms_when_recheck_declines(db_session, monkeypatch):
     s = _arm(db_session)
     _stub_market(monkeypatch, price=78.0)
-    # Double-check now says NO_TRADE / vetoed -> the armed setup is rejected, nothing opens.
+    # Double-check says NO_TRADE (timing miss) -> stays ARMED with a cooldown, nothing opens.
     monkeypatch.setattr(pipeline, "analyze_symbol",
                         _fake_analyze("no_trade", approved=False, status=ProposalStatus.RISK_VETOED.value))
     out = cond.check_conditional_setups(db_session)
     assert out["triggered"] == 0
     db_session.refresh(s)
-    assert s.status == "rejected"
+    assert s.status == "armed" and s.retries == 1 and s.cooldown_until is not None
 
 
-def test_no_trigger_when_price_has_not_crossed(db_session, monkeypatch):
+def test_trigger_rejected_after_max_retries(db_session, monkeypatch):
+    s = _arm(db_session, retries=cond._MAX_RETRIES - 1)
+    _stub_market(monkeypatch, price=78.0)
+    monkeypatch.setattr(pipeline, "analyze_symbol",
+                        _fake_analyze("no_trade", approved=False, status=ProposalStatus.RISK_VETOED.value))
+    cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert s.status == "rejected" and s.retries == cond._MAX_RETRIES
+
+
+def test_invalidated_when_price_reaches_stop_before_trigger(db_session, monkeypatch):
+    s = _arm(db_session)                       # sell_stop short, trigger 78.2, stop 78.4
+    _stub_market(monkeypatch, price=78.5)      # above the stop -> the break idea is dead
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 0
+    db_session.refresh(s)
+    assert s.status == "rejected" and "invalidated" in (s.last_note or "")
+
+
+def test_no_trigger_when_price_between_trigger_and_stop(db_session, monkeypatch):
     s = _arm(db_session)
-    _stub_market(monkeypatch, price=78.5)  # still above the sell-stop trigger
+    _stub_market(monkeypatch, price=78.3)  # above trigger 78.2, below stop 78.4 -> wait, still armed
     out = cond.check_conditional_setups(db_session)
     assert out["triggered"] == 0
     db_session.refresh(s)

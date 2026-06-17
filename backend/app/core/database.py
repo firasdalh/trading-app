@@ -51,6 +51,10 @@ _SQLITE_ADDED_COLUMNS = {
         ("conditional_enabled", "BOOLEAN DEFAULT 1"),
         ("max_armed", "INTEGER DEFAULT 3"),
     ],
+    "conditional_setups": [
+        ("cooldown_until", "DATETIME"),
+        ("retries", "INTEGER DEFAULT 0"),
+    ],
 }
 
 

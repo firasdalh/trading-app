@@ -31,6 +31,22 @@ from app.risk.service import _norm_symbol, live_broker_positions
 log = get_logger("agents.conditional")
 
 _DEFAULT_VALID_HOURS = 12
+_MAX_RETRIES = 20          # give up auto-re-arming after this many declined re-checks
+_TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+
+
+def _cooldown_minutes(timeframe: str) -> int:
+    """After a declined re-check, wait ~one bar of the setup's timeframe before re-checking — the
+    momentum/RSI that caused the decline only updates per closed bar, so re-checking sooner is noise."""
+    return _TF_MINUTES.get(timeframe, 60)
+
+
+def _invalidated(direction: str, price: float, stop_loss: float | None) -> bool:
+    """The idea is dead if price has already reached where the trade's stop would sit — i.e. the
+    break failed and reversed past it — so we shouldn't keep re-arming a clearly-broken setup."""
+    if stop_loss is None:
+        return False
+    return price >= stop_loss if direction == "short" else price <= stop_loss
 
 
 def _aware(dt: datetime) -> datetime:
@@ -146,11 +162,22 @@ def _fire(session: Session, s: ConditionalSetup) -> int:
     if (res.proposal.direction.value != s.direction
             or res.proposal.direction not in (Direction.LONG, Direction.SHORT)
             or not res.risk.approved):
-        s.status = ConditionalStatus.REJECTED.value
-        s.last_note = (f"re-check declined: {res.proposal.direction.value} / "
-                       f"{res.risk.decision.value}")
+        # Decline is usually a TIMING miss (e.g. momentum bouncing at the break). Keep the setup
+        # ARMED with a cooldown so it can fire again when momentum realigns — rather than killing a
+        # still-valid level. Give up only after the retry cap (validity window also bounds it).
+        s.retries += 1
+        why = f"{res.proposal.direction.value} / {res.risk.decision.value}"
+        if s.retries >= _MAX_RETRIES:
+            s.status = ConditionalStatus.REJECTED.value
+            s.last_note = f"re-check declined {s.retries}× — giving up ({why})"
+            log.info("conditional rejected (retry cap)", extra={"symbol": s.symbol, "note": s.last_note})
+        else:
+            cd = _cooldown_minutes(s.timeframe)
+            s.cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=cd)
+            s.last_note = f"re-check declined ({why}); re-armed — retry after ~{cd}m (try {s.retries})"
+            log.info("conditional re-armed after decline",
+                     extra={"symbol": s.symbol, "retries": s.retries, "cooldown_min": cd})
         session.add(s)
-        log.info("conditional re-check declined", extra={"symbol": s.symbol, "note": s.last_note})
         return 0
 
     # Modes B/C already auto-executed inside analyze_symbol.
@@ -216,6 +243,11 @@ def check_conditional_setups(session: Session) -> dict:
     ks = kill_switch_active(session)
     triggered = 0
     for s in armed:
+        # Auto-re-arm cooldown: after a declined re-check, wait ~one bar before re-checking (skip
+        # the broker call entirely while cooling down).
+        if s.cooldown_until and _aware(s.cooldown_until) > now:
+            continue
+
         broker = get_broker_for(AssetClass(s.asset_class), settings.broker_map)
         try:
             price = broker.get_quote(s.symbol).price
@@ -231,6 +263,14 @@ def check_conditional_setups(session: Session) -> dict:
                     ref = candles[-1].close
             except Exception:  # noqa: BLE001 - fall back to the live quote
                 pass
+
+        # Invalidation: the break failed and price reached where the stop would sit -> drop it.
+        if _invalidated(s.direction, ref, s.stop_loss):
+            s.status = ConditionalStatus.REJECTED.value
+            s.last_note = "invalidated — price reached the stop level before triggering"
+            session.add(s)
+            log.info("conditional invalidated", extra={"symbol": s.symbol})
+            continue
 
         if not _crossed(s.order_type, ref, s.trigger_price):
             continue

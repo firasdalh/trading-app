@@ -370,6 +370,11 @@ class ConditionalSetup(Base):
     triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_proposal_id: Mapped[int | None] = mapped_column(Integer)  # proposal created at trigger
     last_note: Mapped[str | None] = mapped_column(Text)
+    # Auto-re-arm: when a trigger fires but the re-check declines on TIMING (e.g. momentum bouncing),
+    # the setup stays ARMED with a short cooldown (≈ one bar) instead of dying — so it can fire again
+    # when momentum realigns. Bounded by valid_until, an invalidation check, and the retry cap.
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retries: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class AgentRun(Base):
