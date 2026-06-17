@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { displaySymbol, fmtPrice } from "../format";
 import { usePolling } from "../hooks/usePolling";
+import { TradeSizer } from "./TradeSizer";
 import type { ProposalView } from "../types";
 
 interface Props {
@@ -33,6 +34,7 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(true);
+  const [lotsById, setLotsById] = useState<Record<number, number | null>>({});
   const refresh = () => setBump((b) => b + 1);
 
   const act = async (id: number, fn: () => Promise<unknown>) => {
@@ -112,7 +114,7 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
                   <span className="text-xs text-neutral-600">{ago(p.created_at)}</span>
                   <div className="ml-auto flex gap-2">
                     <button
-                      onClick={() => act(p.id, () => api.approve(p.id))}
+                      onClick={() => act(p.id, () => api.approve(p.id, lotsById[p.id] ?? null))}
                       disabled={busy}
                       className="btn bg-bull/20 text-bull hover:bg-bull/30"
                     >
@@ -130,10 +132,16 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
                 <div className="mt-1 text-xs tabular-nums text-neutral-400">
                   entry {fmtPrice(p.entry)} · SL <span className="text-bear">{fmtPrice(p.stop_loss)}</span> · TP{" "}
                   <span className="text-bull">{fmtPrice(p.take_profit)}</span>
-                  {p.risk_amount != null && (
-                    <span className="text-neutral-500"> · risk ${p.risk_amount.toFixed(2)}</span>
-                  )}
                 </div>
+                {p.entry != null && p.stop_loss != null && (
+                  <TradeSizer
+                    proposalId={p.id}
+                    entry={p.entry}
+                    stopLoss={p.stop_loss}
+                    takeProfit={p.take_profit}
+                    onLots={(l) => setLotsById((m) => ({ ...m, [p.id]: l }))}
+                  />
+                )}
                 {p.rationale && (
                   <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-neutral-500">{p.rationale}</p>
                 )}

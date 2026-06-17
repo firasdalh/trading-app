@@ -42,6 +42,7 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
 
   const [lots, setLots] = useState<string>("");
   const [econ, setEcon] = useState<TradeEconomics | null>(null);
+  const [riskUsd, setRiskUsd] = useState<number | null>(null);
   const [capped, setCapped] = useState(false);
   const [maxLots, setMaxLots] = useState<number | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -60,6 +61,7 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
       .then((r) => {
         if (cancelled) return;
         setEcon(r.economics);
+        setRiskUsd(r.risk?.risk_amount ?? null);
         setCapped(r.capped);
         setMaxLots(r.max_lots);
         if (r.economics?.lots != null) setLots(String(r.economics.lots));
@@ -79,6 +81,7 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
     try {
       const r = await api.sizePreview(proposalId, Number.isFinite(n) && n > 0 ? n : null);
       setEcon(r.economics);
+      setRiskUsd(r.risk?.risk_amount ?? null);
       setCapped(r.capped);
       setMaxLots(r.max_lots);
       if (r.economics?.lots != null) setLots(String(r.economics.lots));
@@ -100,6 +103,13 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
   const { proposal, risk } = result;
   const noTrade = proposal.direction === "no_trade";
   const approveLots = lots ? Number(lots) : null;
+  // Potential reward in $ (reward scales with risk by the same lot×point factor -> reward = risk×R).
+  const rrMult =
+    proposal.entry != null && proposal.stop_loss != null && proposal.take_profit != null
+      && proposal.entry !== proposal.stop_loss
+      ? Math.abs(proposal.take_profit - proposal.entry) / Math.abs(proposal.entry - proposal.stop_loss)
+      : null;
+  const rewardUsd = riskUsd != null && rrMult != null ? riskUsd * rrMult : null;
 
   return (
     <div className="card space-y-3">
@@ -183,6 +193,8 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
           </div>
 
           <div className="grid grid-cols-3 gap-2">
+            <Stat label="Risk" value={fmtUsd(riskUsd)} />
+            <Stat label="Reward" value={fmtUsd(rewardUsd)} />
             <Stat label="Spend (margin)" value={fmtUsd(econ?.margin_usd)} />
             <Stat label="Leverage" value={econ?.leverage != null ? `${econ.leverage.toFixed(0)}×` : "—"} />
             <Stat
