@@ -4,8 +4,8 @@ import type { SizePreviewResponse } from "../types";
 
 // Lot input + live dollar figures (risk / potential reward / cost). Adjust the lot and the dollars
 // update (broker-computed via `preview`; the backend clamps to the 2% per-trade cap). `onLots` fires
-// immediately (parent tracks the chosen lot, e.g. for Approve); `onCommit` fires debounced (e.g. to
-// persist the lot on an armed setup). Works for any trade — proposals or armed conditionals.
+// immediately (parent tracks the chosen lot, e.g. for Approve). When `onCommit` is provided a Save
+// button persists the lot (e.g. on an armed setup). Works for proposals or armed conditionals.
 export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCommit }: {
   preview: (lots: number | null) => Promise<SizePreviewResponse>;
   entry: number | null;
@@ -15,19 +15,21 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
   onCommit?: (lots: number | null) => void;
 }) {
   const [lots, setLots] = useState("");
-  const [riskUsd, setRiskUsd] = useState<number | null>(null);
+  const [notionalUsd, setNotionalUsd] = useState<number | null>(null);
+  const [riskAmt, setRiskAmt] = useState<number | null>(null);   // fallback when notional missing
   const [marginUsd, setMarginUsd] = useState<number | null>(null);
   const [maxLots, setMaxLots] = useState<number | null>(null);
   const [capped, setCapped] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Hold the latest preview closure in a ref so a new closure each render doesn't re-fire the mount
-  // fetch (the effect runs once; reprice always calls the current closure).
+  // Latest preview closure in a ref so a new closure each render doesn't re-fire the mount fetch.
   const previewRef = useRef(preview);
   previewRef.current = preview;
 
   const apply = (r: SizePreviewResponse) => {
-    setRiskUsd(r.risk?.risk_amount ?? null);
+    setNotionalUsd(r.economics?.notional_usd ?? null);
+    setRiskAmt(r.risk?.risk_amount ?? null);
     setMarginUsd(r.economics?.margin_usd ?? null);
     setMaxLots(r.max_lots ?? null);
     setCapped(r.capped);
@@ -50,17 +52,17 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-price at the user's lot (debounced so typing doesn't spam the broker), then commit the lot.
+  // Re-price at the user's lot (debounced so typing doesn't spam the broker).
   const reprice = (val: string) => {
     const n = Number(val);
-    const lots = Number.isFinite(n) && n > 0 ? n : null;
-    onLots?.(lots);
+    const lv = Number.isFinite(n) && n > 0 ? n : null;
+    setSaved(false);
+    onLots?.(lv);
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
       setBusy(true);
       try {
-        apply(await previewRef.current(lots));
-        onCommit?.(lots);
+        apply(await previewRef.current(lv));
       } catch {
         /* ignore — keep last good figures */
       } finally {
@@ -69,11 +71,25 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
     }, 500);
   };
 
-  // Potential reward in $: reward and risk scale by the same lot×point factor, so reward = risk×R.
+  const save = () => {
+    const n = Number(lots);
+    onCommit?.(Number.isFinite(n) && n > 0 ? n : null);
+    setSaved(true);
+  };
+
+  // Risk / reward in $ derived from the notional exposure + the levels — robust even when the
+  // CURRENT decision is gated (e.g. a position is open), which is fine for a future conditional
+  // entry. (risk = notional × stop-distance / entry; reward = notional × target-distance / entry.)
+  const dist = (a: number, b: number) => Math.abs(a - b);
   const rr = entry != null && stopLoss != null && takeProfit != null && entry !== stopLoss
-    ? Math.abs(takeProfit - entry) / Math.abs(entry - stopLoss)
+    ? dist(takeProfit, entry) / dist(entry, stopLoss)
     : null;
-  const rewardUsd = riskUsd != null && rr != null ? riskUsd * rr : null;
+  const riskUsd = notionalUsd != null && entry && stopLoss != null
+    ? notionalUsd * dist(entry, stopLoss) / entry
+    : riskAmt;
+  const rewardUsd = notionalUsd != null && entry && takeProfit != null
+    ? notionalUsd * dist(takeProfit, entry) / entry
+    : riskUsd != null && rr != null ? riskUsd * rr : null;
 
   return (
     <div className="mt-2 rounded border border-neutral-800 bg-neutral-950/40 px-2 py-2">
@@ -94,6 +110,16 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
         <Stat label="Reward" value={fmtUsd(rewardUsd)} cls="text-bull" />
         <Stat label="Cost (margin)" value={fmtUsd(marginUsd)} />
         {busy && <span className="pb-1 text-[10px] text-neutral-500">…</span>}
+        {onCommit && (
+          <button
+            onClick={save}
+            disabled={busy}
+            className="btn ml-auto bg-blue-600/80 text-xs text-white hover:bg-blue-600"
+            title="Use this lot when the setup fires"
+          >
+            {saved ? "Saved ✓" : "Save lot"}
+          </button>
+        )}
       </div>
       {capped && (
         <div className="mt-1 text-[10px] text-warn">Capped to the 2% per-trade limit.</div>
