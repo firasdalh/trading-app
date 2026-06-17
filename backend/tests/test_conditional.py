@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import app.agents.conditional as cond
 import app.agents.pipeline as pipeline
-from app.agents.orchestrator import _conditional_break
+from app.agents.orchestrator import _conditional_break, _conditional_pullback
 from app.models.db import ConditionalSetup, TradeProposalRecord
 from app.models.enums import Direction, ProposalStatus, RiskDecisionType
 from app.models.schemas import AnalyzeResponse, RiskDecision, TradeProposal
@@ -34,6 +34,21 @@ def test_conditional_break_long_enters_on_break_of_resistance():
 def test_conditional_break_none_when_path_is_clear():
     # No key level between entry and target -> nothing to wait for.
     assert _conditional_break(Direction.SHORT, 79.5, 0.3, [80.0, 81.0], 77.4, 0.6) is None
+
+
+def test_conditional_pullback_offers_better_long_entry_at_value():
+    # Overextended LONG (entry 105 far above EMA20 100) -> buy_limit back at value (~100).
+    c = _conditional_pullback(Direction.LONG, entry=105.0, ema20=100.0, atr_v=1.0,
+                              ind={"swing_low": 99.0}, target=112.0, confidence=0.6)
+    assert c is not None and c.order_type == "buy_limit"
+    assert c.trigger_price == 100.0 and c.stop_loss < 99.0  # at value, stop below the swing
+    assert c.take_profit == 112.0 and c.rr >= 1.5
+
+
+def test_conditional_pullback_none_when_not_overextended():
+    # Entry already at/below value -> no better pullback entry to wait for.
+    assert _conditional_pullback(Direction.LONG, entry=100.0, ema20=100.0, atr_v=1.0,
+                                 ind={}, target=112.0, confidence=0.6) is None
 
 
 # ---------------------------------------------------------------- service
