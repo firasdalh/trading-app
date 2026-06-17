@@ -97,6 +97,17 @@ export function ConditionalsPanel({ onSelect }: {
               <span className="text-bull">{fmtPrice(s.take_profit)}</span>
               {s.rr != null ? ` · ~${s.rr.toFixed(1)}R` : ""} · conf {(s.confidence * 100).toFixed(0)}%
             </div>
+            {s.status === "armed" && s.current_price != null && (
+              <div className="mt-0.5 text-xs tabular-nums text-amber-300/90">
+                now {fmtPrice(s.current_price)} ·{" "}
+                {s.pips_to_trigger != null
+                  ? `${s.pips_to_trigger} pips`
+                  : s.pct_to_trigger != null
+                    ? `${s.pct_to_trigger}%`
+                    : "—"}{" "}
+                to trigger
+              </div>
+            )}
             {s.status === "armed" && (
               <TradeSizer
                 preview={(l) => api.conditionalSizePreview(s.id, l)}

@@ -75,11 +75,48 @@ class ConditionalSetupView(BaseModel):
     result_proposal_id: int | None
     last_note: str | None
     desired_lots: float | None
+    # Live distance to the trigger (armed only; populated by the list route from a fresh quote).
+    current_price: float | None = None
+    pips_to_trigger: float | None = None   # FX only (None for non-FX); always-available pct below
+    pct_to_trigger: float | None = None
+
+
+def _pip_size(symbol: str, asset_class: str) -> float | None:
+    """Pip size for FX (0.01 for JPY pairs, else 0.0001); None for non-FX (pips aren't standard —
+    the UI falls back to the % distance there)."""
+    if asset_class == "forex":
+        return 0.01 if "JPY" in symbol.upper() else 0.0001
+    return None
 
 
 @router.get("", response_model=list[ConditionalSetupView])
 def list_all(session: Session = Depends(get_session)) -> list[ConditionalSetupView]:
-    return [ConditionalSetupView.model_validate(s) for s in list_conditionals(session)]
+    """Armed setups carry a live distance-to-trigger (current price + pips/%), fetched from one
+    quote per armed symbol (bounded by max_armed)."""
+    from app.brokers.registry import get_broker_for
+    from app.models.enums import AssetClass, ConditionalStatus as CS
+
+    settings = get_or_create_settings(session)
+    quotes: dict[str, float] = {}
+    out: list[ConditionalSetupView] = []
+    for s in list_conditionals(session):
+        v = ConditionalSetupView.model_validate(s)
+        if s.status == CS.ARMED.value and s.trigger_price:
+            try:
+                price = quotes.get(s.symbol)
+                if price is None:
+                    broker = get_broker_for(AssetClass(s.asset_class), settings.broker_map)
+                    price = quotes[s.symbol] = broker.get_quote(s.symbol).price
+                v.current_price = price
+                if price:
+                    v.pct_to_trigger = round(abs(price - s.trigger_price) / price * 100, 3)
+                pip = _pip_size(s.symbol, s.asset_class)
+                if pip:
+                    v.pips_to_trigger = round(abs(price - s.trigger_price) / pip, 1)
+            except Exception:  # noqa: BLE001 - a quote failure shouldn't break the list
+                pass
+        out.append(v)
+    return out
 
 
 @router.post("", response_model=ConditionalSetupView)

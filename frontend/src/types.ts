@@ -111,6 +111,9 @@ export interface ConditionalSetupView {
   result_proposal_id: number | null;
   last_note: string | null;
   desired_lots: number | null;
+  current_price: number | null;     // armed only: live distance to the trigger
+  pips_to_trigger: number | null;   // FX only
+  pct_to_trigger: number | null;
 }
 
 export interface AnalyzeResponse {
