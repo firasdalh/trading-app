@@ -19,12 +19,16 @@ The maximum you can lose on a single trade if the stop-loss is hit. Position siz
 - Why it's low: at 1%, it takes a long, sustained losing streak to do serious damage,
   which buys you time to notice a broken strategy. At 5%+, a normal run of bad luck can
   halve your account.
-- Ceiling: do not exceed 2%. There is no good reason to.
+- Ceiling: the documented hard cap is 2%. **Override (2026-06-17):** raised to **3%** at the
+  user's explicit request, AND the default per-trade risk raised from 1% to **3%** (so automatic
+  trades now risk 3%, not 1%). That is a +50% bigger single-trade loss than the 2% cap and 3× the
+  1% default; a sustained losing streak now bites much faster. The conservative values (1% default
+  / 2% ceiling) are the documented recommendation — consider returning to them once the strategy
+  is proven.
 - **Manual size (added 2026-06-05):** before approving a Mode-A trade you may adjust the lot
   size up or down (Proposal panel shows the spend/margin + leverage live). Any chosen size is
-  re-run through the deterministic Risk Manager and **hard-clamped to the 2% ceiling above** —
-  you can size up to the cap, never past it. The 2% ceiling itself is unchanged and remains the
-  one place sizing is bounded.
+  re-run through the deterministic Risk Manager and **hard-clamped to the 3% ceiling above** —
+  you can size up to the cap, never past it. The ceiling remains the one place sizing is bounded.
 
 ### `max_open_positions` (default: 3)
 Caps how many trades can be open at once.
@@ -97,7 +101,8 @@ the single best watchlist setup, and only when its confidence exceeds the thresh
   50–95%; default still 70%)**. The threshold only governs *which* setups qualify for auto-open —
   it is **not** a money cap. Every dollar limit (≤2% per trade, daily-loss, exposure, position
   count, no-stacking, correlation) is enforced in the executor regardless of the threshold, so
-  lowering it cannot enlarge any single or aggregate bet; it only lets Hybrid act on
+  lowering it cannot enlarge any single or aggregate bet (per-trade cap now 3% — see override
+  above); it only lets Hybrid act on
   lower-conviction setups. The UI shows a warning when it is set below the 70% default.
 - It does **not** bypass anything: kill-switch, live-confirmation, daily-loss pause, exposure
   budget, per-pair cooldown, and no-stacking are all enforced in the executor exactly as for a

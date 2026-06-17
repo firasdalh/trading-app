@@ -212,18 +212,18 @@ class AccountState(BaseModel):
 class RiskLimits(BaseModel):
     """The active risk limits handed to the deterministic Risk Manager.
 
-    Mirrors the RiskConfig DB row. ``risk_per_trade_ceiling`` is a hard cap (RISK.md: 2%)
+    Mirrors the RiskConfig DB row. ``risk_per_trade_ceiling`` is a hard cap (RISK.md: 3%)
     that the manager re-clamps against defensively, regardless of the stored value.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
-    risk_per_trade: float = 0.01
+    risk_per_trade: float = 0.03
     max_open_positions: int = 3
     max_daily_loss: float = 0.03
     max_total_exposure: float = 0.06
     per_pair_cooldown_minutes: int = 30
-    risk_per_trade_ceiling: float = 0.02
+    risk_per_trade_ceiling: float = 0.03
     # Effective state of the daily-loss circuit breaker handed to the manager (already
     # resolved by the service layer). When False, the daily-loss gate is skipped.
     daily_loss_breaker_enabled: bool = True

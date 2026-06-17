@@ -185,9 +185,9 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
             {capped && (
               <span
                 className="rounded bg-warn/20 px-2 py-0.5 text-xs font-medium text-warn"
-                title="Your size was reduced to fit the 2% per-trade risk cap (RISK.md) or the exposure budget."
+                title="Your size was reduced to fit the 3% per-trade risk cap (RISK.md) or the exposure budget."
               >
-                capped at 2%
+                capped at 3%
               </span>
             )}
           </div>

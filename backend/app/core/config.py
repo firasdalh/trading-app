@@ -82,8 +82,9 @@ class Settings(BaseSettings):
 
     # ---- Risk defaults (mirror RISK.md — hard ceilings, do not raise) ----
     # These seed the DB RiskConfig row on first boot. See RISK.md for rationale.
-    default_risk_per_trade: float = Field(0.01, description="1% of equity per trade")
-    risk_per_trade_ceiling: float = Field(0.02, description="Hard ceiling — never exceed 2%")
+    # Per-trade risk + ceiling raised from 1%/2% to 3% at the user's explicit request (2026-06-17).
+    default_risk_per_trade: float = Field(0.03, description="3% of equity per trade (was 1%)")
+    risk_per_trade_ceiling: float = Field(0.03, description="Hard ceiling — never exceed 3% (was 2%)")
     default_max_open_positions: int = 3
     default_max_daily_loss: float = Field(0.03, description="3% of equity")
     default_max_total_exposure: float = Field(0.06, description="6% of equity at risk")
