@@ -96,11 +96,15 @@ def test_orchestrator_short_on_downtrend():
     assert prop.stop_loss and prop.stop_loss > prop.entry
 
 
-def test_orchestrator_no_trade_on_conflict():
+def test_fundamental_bias_nudges_confidence_not_vetoes():
+    # An opposing fundamental bias is a soft macro lean now — it must NOT veto a clean technical
+    # trend, only lower confidence. (Trend decides direction; bias is a confidence factor.)
     tech = run_technical("TEST", [_uptrend_series()])  # up
     bearish = FundamentalRead(symbol="TEST", bias=TradingBias.BEARISH)
-    prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, bearish, now=NOW)
-    assert prop.direction == Direction.NO_TRADE
+    neutral_prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), now=NOW)
+    bearish_prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, bearish, now=NOW)
+    assert bearish_prop.direction == Direction.LONG          # not vetoed
+    assert bearish_prop.confidence < neutral_prop.confidence  # only down-weighted
 
 
 def test_orchestrator_stands_aside_in_event_window():
@@ -156,12 +160,15 @@ def test_llm_cannot_create_trade_when_rules_decline(monkeypatch):
     from app.models.schemas import TradeReviewLLM
 
     tech = run_technical("TEST", [_uptrend_series()])  # up
-    bearish = FundamentalRead(symbol="TEST", bias=TradingBias.BEARISH)  # -> deterministic no_trade
+    # Force a deterministic stand-aside via an imminent high-impact event window (bias no longer
+    # vetoes, so use a rule that still declines).
+    window = EventWindow(label="CPI", start=NOW - timedelta(minutes=5), end=NOW + timedelta(minutes=30))
+    fund = _neutral_fundamental(windows=[window])
     called = []
     monkeypatch.setattr(orchestrator, "llm_available", lambda: True)
     monkeypatch.setattr(orchestrator, "analyze",
                         lambda **k: called.append(1) or TradeReviewLLM(decision=ReviewDecision.CONFIRM, confidence=0.9))
-    p = orchestrator.run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, bearish, now=NOW, use_llm=True)
+    p = orchestrator.run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, fund, now=NOW, use_llm=True)
     assert p.direction == Direction.NO_TRADE
     assert called == []  # the LLM is never even consulted when the rules decline
 

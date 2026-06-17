@@ -49,12 +49,14 @@ Judge the setup against a professional checklist, then grade it A / B / C:
    sits between entry and target, R:R is not real.
 5. EVENT & LIQUIDITY RISK — Imminent high-impact event (stand_aside_windows), thin/illiquid
    conditions, or a market with no trend (low ADX / ranging) — stand aside.
-6. CONVICTION — Confirm only A and B setups (trend + good location + momentum + clean R:R).
-   VETO C setups: counter-trend, chasing/extended entries, momentum divergence, R:R blocked by
-   structure, or "no real edge here." When genuinely torn, protect capital and veto — the best
-   trades a pro makes are the ones they DON'T take.
+6. CONVICTION — Confirm A and B setups. For a MARGINAL setup, CONFIRM it at LOWER confidence
+   rather than veto — let the confidence score and the risk limits do the filtering, not a hard
+   reject. Reserve VETO for a CLEAR, specific flaw: counter-trend, no real R:R (an obvious level
+   sits between entry and target), an imminent high-impact event, or no trend at all. When merely
+   unsure, confirm at lower confidence.
 
-Be decisive but not trigger-happy: a vague feeling is not a veto; a concrete flaw is.
+Be decisive but not trigger-happy: a vague feeling is not a veto; a concrete flaw is. Vetoing every
+borderline setup is its own failure — it means the desk never trades.
 In `rationale`, state the GRADE (A/B/C) and the one or two factors that drove the decision, like a
 desk head explaining a call. In `concerns`, list the specific risks. Set `confidence` to your honest
 conviction (0-1) — modest for B, high for A, and you will be vetoing C.
@@ -369,7 +371,11 @@ def _deterministic_decision(
     # Counter-momentum only blocks entry if it's MEANINGFUL (>= 10% of ATR) — trivial noise is
     # ignored so we don't sit out forever on a flat histogram.
     mom_thresh = _MOM_ATR_FRAC * atr_v if atr_v else 0.0
-    if trend == "up" and bias != TradingBias.BEARISH:
+    # The TREND (technical) decides direction. The fundamental bias is a soft macro lean — the
+    # fundamental agent self-rates ~0.3 ("not a primary signal"), so it only NUDGES confidence
+    # below; it must not veto a clean technical trend. Direction is still gated by the higher-
+    # timeframe trend (don't fight the macro) and the momentum-pullback wait.
+    if trend == "up":
         if macd_hist is not None and macd_hist < -mom_thresh:
             # Trend up but momentum meaningfully down = pullback. Wait for the long trigger.
             base.watch = True
@@ -382,7 +388,7 @@ def _deterministic_decision(
             base.rationale = "No confluence: higher-timeframe trend is DOWN — not buying into it."
             return base
         direction = Direction.LONG
-    elif trend == "down" and bias != TradingBias.BULLISH:
+    elif trend == "down":
         if macd_hist is not None and macd_hist > mom_thresh:
             base.watch = True
             base.rationale = (
@@ -395,9 +401,7 @@ def _deterministic_decision(
             return base
         direction = Direction.SHORT
     else:
-        base.rationale = (
-            f"No confluence: trend={trend}, fundamental bias={bias.value}. Sitting out."
-        )
+        base.rationale = "No clear trend (EMAs sideways) — sitting out."
         return base
 
     # --- market-structure confluence: a pro won't fight clear opposing swing structure ---
@@ -558,6 +562,12 @@ def _deterministic_decision(
 
     # --- confidence from multi-factor confluence ---
     conf = 0.3 + 0.2 * technical.confidence + 0.15 * fundamental.confidence
+    # Fundamental bias: a soft macro lean (now a confidence nudge, no longer a direction veto).
+    # Agrees with the trade -> small bonus; opposes -> small penalty; neutral -> nothing.
+    if bias == TradingBias.BULLISH:
+        conf += 0.05 if direction == Direction.LONG else -0.05
+    elif bias == TradingBias.BEARISH:
+        conf += 0.05 if direction == Direction.SHORT else -0.05
     if macro == trend:
         conf += 0.15  # higher-timeframe agrees
     if adx_v is not None and adx_v >= _ADX_STRONG:
@@ -687,8 +697,9 @@ def run_orchestrator(
         f"FUNDAMENTAL READ:\n{fundamental.model_dump_json(indent=2)}\n\n"
         "Run your professional checklist (trend & structure, location/value vs chasing, momentum "
         "confirmation, reward:risk vs the nearest opposing level, event & liquidity risk). Grade it "
-        "A/B/C. Confirm only A/B; veto C and any counter-trend, chased/over-extended, momentum-"
-        "diverging, or structure-blocked setup. When torn, protect capital and veto."
+        "A/B/C. Confirm A/B, and confirm a marginal C at LOWER confidence; VETO only a clear failure "
+        "(counter-trend, no real R:R, an imminent high-impact event, or no trend). When unsure, "
+        "confirm at lower confidence rather than veto."
     )
     review = analyze(system=_REVIEW_SYSTEM, user=user, schema=TradeReviewLLM, max_tokens=2000)
     if review is None:
