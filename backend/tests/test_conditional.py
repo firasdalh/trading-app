@@ -241,6 +241,16 @@ def test_desired_lots_resizes_proposal_on_fire(db_session, monkeypatch):
     assert rec.approved_qty == 0.07 and s.status == "triggered"
 
 
+def test_clear_finished_removes_only_terminal(db_session):
+    _arm(db_session, symbol="UKOILm", status="armed")
+    _arm(db_session, symbol="HK50m", status="rejected")
+    _arm(db_session, symbol="US500m", status="cancelled")
+    n = cond.clear_finished(db_session)
+    assert n == 2
+    remaining = cond.list_conditionals(db_session)
+    assert len(remaining) == 1 and remaining[0].status == "armed"
+
+
 def test_arm_conditional_dedups_same_symbol_direction(db_session, monkeypatch):
     monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
     first = cond.arm_conditional(db_session, symbol="UKOILm", asset_class="energy", timeframe="1h",

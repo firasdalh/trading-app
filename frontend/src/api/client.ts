@@ -197,6 +197,8 @@ export const api = {
     }),
   cancelConditional: (id: number) =>
     request<{ cancelled: boolean }>(`/api/conditionals/${id}`, { method: "DELETE" }),
+  clearFinishedConditionals: () =>
+    request<{ cleared: number }>("/api/conditionals/finished", { method: "DELETE" }),
   conditionalSizePreview: (id: number, lots: number | null) =>
     request<import("../types").SizePreviewResponse>(`/api/conditionals/${id}/size-preview`, {
       method: "POST",

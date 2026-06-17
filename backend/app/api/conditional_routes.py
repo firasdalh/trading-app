@@ -15,7 +15,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.agents.conditional import arm_conditional, cancel_conditional, list_conditionals
+from app.agents.conditional import (
+    arm_conditional,
+    cancel_conditional,
+    clear_finished,
+    list_conditionals,
+)
 from app.core.database import get_session
 from app.core.state import get_or_create_settings
 from app.models.db import ConditionalSetup
@@ -138,6 +143,12 @@ def set_lots(setup_id: int, req: LotRequest, session: Session = Depends(get_sess
     session.commit()
     session.refresh(s)
     return ConditionalSetupView.model_validate(s)
+
+
+@router.delete("/finished")
+def clear_finished_route(session: Session = Depends(get_session)) -> dict:
+    """Remove all terminal (cancelled / rejected / expired / triggered) setups — armed ones stay."""
+    return {"cleared": clear_finished(session)}
 
 
 @router.delete("/{setup_id}")

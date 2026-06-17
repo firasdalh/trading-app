@@ -22,8 +22,8 @@ export function ConditionalsPanel({ onSelect }: {
   const { data } = usePolling(() => api.conditionals(), 10000, [bump]);
   const items: ConditionalSetupView[] = data ?? [];
   const armed = items.filter((i) => i.status === "armed");
-  const others = items.filter((i) => i.status !== "armed").slice(0, 5);
-  const visible = [...armed, ...others];
+  const finished = items.filter((i) => i.status !== "armed");
+  const visible = [...armed, ...finished.slice(0, 5)];
 
   const cancel = async (id: number) => {
     try {
@@ -34,12 +34,31 @@ export function ConditionalsPanel({ onSelect }: {
     }
   };
 
+  const clearFinished = async () => {
+    try {
+      await api.clearFinishedConditionals();
+      setBump((b) => b + 1);
+    } catch {
+      /* ignore */
+    }
+  };
+
   if (visible.length === 0) return null; // nothing armed yet — keep the dashboard clean
 
   return (
     <div className="card">
-      <div className="mb-1 text-sm font-semibold">
-        Armed / pending setups <span className="text-xs text-neutral-500">· {armed.length} armed</span>
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-sm font-semibold">Armed / pending setups</span>
+        <span className="text-xs text-neutral-500">· {armed.length} armed</span>
+        {finished.length > 0 && (
+          <button
+            onClick={clearFinished}
+            className="ml-auto text-xs text-neutral-500 hover:text-neutral-300"
+            title="Remove finished (cancelled / rejected / expired / triggered) — armed stay"
+          >
+            Clear finished
+          </button>
+        )}
       </div>
       <p className="mb-2 text-xs text-neutral-500">
         “Wait for the break” entries. On a confirmed trigger the system re-checks the trade and only

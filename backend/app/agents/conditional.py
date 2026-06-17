@@ -74,6 +74,18 @@ def list_conditionals(session: Session, *, limit: int = 100) -> list[Conditional
     return rows
 
 
+def clear_finished(session: Session) -> int:
+    """Delete all non-armed (cancelled / rejected / expired / triggered) setups — they're terminal
+    history, not active, so clearing them only tidies the panel. Returns how many were removed."""
+    from sqlalchemy import delete
+
+    res = session.execute(
+        delete(ConditionalSetup).where(ConditionalSetup.status != ConditionalStatus.ARMED.value)
+    )
+    session.commit()
+    return res.rowcount or 0
+
+
 def cancel_conditional(session: Session, setup_id: int) -> bool:
     s = session.get(ConditionalSetup, setup_id)
     if s is None or s.status != ConditionalStatus.ARMED.value:
