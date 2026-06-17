@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
+import { ArmSetupButton } from "./ArmSetupButton";
 import { ReviewExplanation } from "./ReviewExplanation";
 import type { AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
 
@@ -242,6 +243,21 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
       )}
 
       <ReviewExplanation rationale={proposal.rationale} />
+
+      {proposal.conditional && (
+        <div className="rounded-md border border-amber-700/40 bg-amber-900/10 p-2">
+          <div className="mb-1 text-xs text-amber-300/90">
+            Blocked by structure now — but valid on a break. Arm it and the system will re-check and
+            open it automatically when the level gives way:
+          </div>
+          <ArmSetupButton
+            symbol={proposal.symbol}
+            assetClass={proposal.asset_class}
+            timeframe={proposal.timeframe}
+            conditional={proposal.conditional}
+          />
+        </div>
+      )}
 
       <Reasoning result={result} />
 

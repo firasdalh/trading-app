@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice } from "../format";
 import { usePolling } from "../hooks/usePolling";
+import { ArmSetupButton } from "./ArmSetupButton";
 import { ReviewExplanation } from "./ReviewExplanation";
 import type { OpportunityView } from "../types";
 
@@ -168,6 +169,16 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                 <div className="mt-2">
                   <ReviewExplanation rationale={o.rationale} />
                 </div>
+                {o.conditional && !o.already_open && (
+                  <div className="mt-2">
+                    <ArmSetupButton
+                      symbol={o.symbol}
+                      assetClass={o.asset_class}
+                      timeframe={o.timeframe}
+                      conditional={o.conditional}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}
@@ -194,12 +205,13 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
   const { data: state } = usePolling(() => api.hybridState(), 15000, [bump]);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ interval: "", conf: "" });
+  const [form, setForm] = useState({ interval: "", conf: "", cond: true, armed: "3" });
   const refresh = () => setBump((b) => b + 1);
 
   const on = state?.enabled ?? false;
   const intervalMin = state ? Math.round(state.interval_seconds / 60) : 35;
   const confPct = state ? Math.round(state.min_confidence * 100) : 70;
+  const condOn = state?.conditional_enabled ?? true;
 
   const toggle = async () => {
     setBusy(true);
@@ -224,7 +236,10 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
 
   // Open the editor seeded with the live values (a snapshot — polling can't overwrite it).
   const openEditor = () => {
-    setForm({ interval: String(intervalMin), conf: String(confPct) });
+    setForm({
+      interval: String(intervalMin), conf: String(confPct),
+      cond: state?.conditional_enabled ?? true, armed: String(state?.max_armed ?? 3),
+    });
     setEditing(true);
   };
 
@@ -233,7 +248,10 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
     const conf = clampInt(Number(form.conf) || confPct, HYB_MIN_CONF, HYB_MAX_CONF);
     setBusy(true);
     try {
-      await api.setHybridConfig({ interval_seconds: mins * 60, min_confidence: conf / 100 });
+      await api.setHybridConfig({
+        interval_seconds: mins * 60, min_confidence: conf / 100,
+        conditional_enabled: form.cond, max_armed: clampInt(Number(form.armed) || 3, 0, 10),
+      });
       refresh();
       setEditing(false);
     } finally {
@@ -285,6 +303,10 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
         Every ~{intervalMin} min, if fewer than 3 trades are open, it scans the watchlist and
         auto-opens the single best setup above <span className="text-neutral-300">{confPct}%</span>{" "}
         confidence. Kill-switch, daily-loss, exposure & no-stacking limits still apply.
+        {condOn && (
+          <> It also <span className="text-amber-300">arms “wait for the break”</span> setups that
+          are blocked by structure, re-checking + opening them when the level gives way.</>
+        )}
       </p>
 
       {editing && (
@@ -315,6 +337,29 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
                 className="w-24 rounded bg-neutral-800 px-2 py-1.5 text-sm tabular-nums text-neutral-100"
               />
               <div className="mt-1 text-[10px] text-neutral-600">{HYB_MIN_CONF}–{HYB_MAX_CONF}%</div>
+            </label>
+            <label className="text-xs text-neutral-400">
+              <div className="mb-1">Max armed</div>
+              <input
+                name="hybrid-armed"
+                autoComplete="off"
+                inputMode="numeric"
+                value={form.armed}
+                onChange={(e) => setForm((f) => ({ ...f, armed: e.target.value }))}
+                onKeyDown={(e) => e.key === "Enter" && save()}
+                disabled={!form.cond}
+                className="w-20 rounded bg-neutral-800 px-2 py-1.5 text-sm tabular-nums text-neutral-100 disabled:opacity-40"
+              />
+              <div className="mt-1 text-[10px] text-neutral-600">0–10 pending</div>
+            </label>
+            <label className="flex items-center gap-2 text-xs text-neutral-300">
+              <input
+                type="checkbox"
+                checked={form.cond}
+                onChange={(e) => setForm((f) => ({ ...f, cond: e.target.checked }))}
+                className="h-4 w-4 accent-amber-500"
+              />
+              Arm conditional break-entries
             </label>
             <div className="flex gap-2">
               <button onClick={save} disabled={busy} className="btn bg-bull/80 text-white hover:bg-bull">

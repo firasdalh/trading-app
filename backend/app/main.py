@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.backtest_routes import router as backtest_router
+from app.api.conditional_routes import router as conditional_router
 from app.api.journal_routes import router as journal_router
 from app.api.market_routes import router as market_router
 from app.api.proposal_routes import router as proposal_router
@@ -112,6 +113,20 @@ def _hybrid_tick() -> None:
         log.warning("hybrid tick failed", extra={"error": str(exc)})
 
 
+def _conditional_tick() -> None:
+    """Watch armed conditional setups: expire stale ones, and on a confirmed trigger re-check +
+    open. Its own job/session so a firing setup (which runs the full analysis) never delays the
+    position monitor's stop/target management."""
+    from app.agents.conditional import check_conditional_setups
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            check_conditional_setups(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("conditional tick failed", extra={"error": str(exc)})
+
+
 def _register_monitor_job() -> None:
     from app.core.scheduler import get_scheduler
 
@@ -127,7 +142,12 @@ def _register_monitor_job() -> None:
     # Polls every 60s; Hybrid auto-pilot enforces its own 30-45 min interval.
     sched.add_job(_hybrid_tick, "interval", seconds=60, id="hybrid_autopilot",
                   replace_existing=True, max_instances=1)
-    log.info("position monitor (10s) + watchlist scanner (20s) + advisor (30s) + hybrid (60s poll) scheduled")
+    # Watches armed conditional setups every 15s (its own job so a firing trigger never stalls the
+    # position monitor). Only does real work when a trigger is hit.
+    sched.add_job(_conditional_tick, "interval", seconds=15, id="conditional_watch",
+                  replace_existing=True, max_instances=1)
+    log.info("position monitor (10s) + scanner (20s) + advisor (30s) + hybrid (60s) + "
+             "conditional watch (15s) scheduled")
 
 
 @asynccontextmanager
@@ -179,6 +199,7 @@ app.include_router(proposal_router)
 app.include_router(settings_router)
 app.include_router(backtest_router)
 app.include_router(journal_router)
+app.include_router(conditional_router)
 app.include_router(watchlist_router)
 app.include_router(ws_router)
 

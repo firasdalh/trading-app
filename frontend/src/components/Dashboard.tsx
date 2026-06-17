@@ -42,6 +42,7 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
 }
 import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
+import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
@@ -416,6 +417,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         onSelect={openPositionSymbol}
         onOpened={() => setPosBump((b) => b + 1)}
       />
+
+      <ConditionalsPanel />
 
       <PendingProposalsPanel
         onSelect={openPositionSymbol}

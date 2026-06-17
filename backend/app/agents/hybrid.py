@@ -42,6 +42,31 @@ def get_or_create_hybrid_config(session: Session) -> HybridConfig:
     return cfg
 
 
+def _arm_from(session: Session, cfg: HybridConfig, armable: list, exclude: str | None = None) -> None:
+    """Arm the strongest blocked-but-valid candidates as conditional break-entries, up to the
+    max_armed cap and skipping the symbol just opened at market. Hybrid-armed setups auto-execute
+    on the trigger (after the re-check), so the gate is the double-check, not a manual click."""
+    from app.agents.conditional import active_armed, arm_conditional
+
+    room = max(0, cfg.max_armed - len(active_armed(session)))
+    if room <= 0:
+        return
+    armed = 0
+    for _conf, it, cond, direction in sorted(armable, key=lambda x: -x[0]):
+        if armed >= room:
+            break
+        if exclude and _norm_symbol(it.symbol) == _norm_symbol(exclude):
+            continue
+        res = arm_conditional(
+            session, symbol=it.symbol, asset_class=it.asset_class, timeframe=it.timeframe,
+            direction=direction, order_type=cond.order_type, trigger_price=cond.trigger_price,
+            stop_loss=cond.stop_loss, take_profit=cond.take_profit, confidence=cond.confidence,
+            rr=cond.rr, rationale=cond.reason, source="hybrid", auto_execute=True,
+        )
+        if res is not None:
+            armed += 1
+
+
 def run_hybrid(session: Session) -> dict:
     """Scan + auto-open the single best qualifying setup (if any). Returns a short summary."""
     from app.agents.scanner import expire_stale_proposals
@@ -50,7 +75,13 @@ def run_hybrid(session: Session) -> dict:
     cfg = get_or_create_hybrid_config(session)
     threshold = cfg.min_confidence
 
+    # Blocked-but-valid candidates worth ARMING as conditional break-entries (see _arm_from). Armed
+    # on every exit path via done(), excluding any symbol we opened at market this tick.
+    armable: list[tuple[float, WatchItem, object, str]] = []
+
     def done(reason: str, opened: dict | None = None) -> dict:
+        if cfg.conditional_enabled and armable:
+            _arm_from(session, cfg, armable, exclude=(opened or {}).get("symbol"))
         cfg.last_result = reason
         session.add(cfg)
         session.add(AgentRun(agent="hybrid", event="tick",
@@ -101,6 +132,10 @@ def run_hybrid(session: Session) -> dict:
         if (prop.direction.value in ("long", "short") and dec.approved
                 and prop.confidence > threshold):
             candidates.append((prop.confidence, it))
+        # A blocked-but-valid setup carries a 'wait for the break' conditional — collect it to arm.
+        if prop.conditional is not None:
+            cond_dir = "long" if prop.conditional.order_type.startswith("buy") else "short"
+            armable.append((prop.conditional.confidence, it, prop.conditional, cond_dir))
 
     if not candidates:
         return done(f"no risk-approved setup above {threshold:.0%} confidence")

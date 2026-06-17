@@ -47,6 +47,10 @@ _SQLITE_ADDED_COLUMNS = {
     "positions": [
         ("confidence", "FLOAT"),
     ],
+    "hybrid_config": [
+        ("conditional_enabled", "BOOLEAN DEFAULT 1"),
+        ("max_armed", "INTEGER DEFAULT 3"),
+    ],
 }
 
 

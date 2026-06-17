@@ -559,12 +559,16 @@ class HybridConfigRequest(BaseModel):
     # direct POST can't make the auto-pilot more trigger-happy than documented.
     interval_seconds: int | None = Field(None, ge=1800, le=5400)  # 30-90 min
     min_confidence: float | None = Field(None, ge=0.5, le=0.95)   # 50-95%
+    conditional_enabled: bool | None = None
+    max_armed: int | None = Field(None, ge=0, le=10)
 
 
 class HybridView(BaseModel):
     enabled: bool
     interval_seconds: int
     min_confidence: float
+    conditional_enabled: bool
+    max_armed: int
     last_run_at: str | None = None
     last_result: str | None = None
 
@@ -575,7 +579,8 @@ def _hybrid_view(session: Session) -> HybridView:
     cfg = get_or_create_hybrid_config(session)
     return HybridView(
         enabled=cfg.enabled, interval_seconds=cfg.interval_seconds,
-        min_confidence=cfg.min_confidence, last_run_at=_iso_utc(cfg.last_run_at),
+        min_confidence=cfg.min_confidence, conditional_enabled=cfg.conditional_enabled,
+        max_armed=cfg.max_armed, last_run_at=_iso_utc(cfg.last_run_at),
         last_result=cfg.last_result,
     )
 
@@ -603,6 +608,10 @@ def hybrid_set_config(req: HybridConfigRequest, session: Session = Depends(get_s
     if req.min_confidence is not None and req.min_confidence != cfg.min_confidence:
         cfg.min_confidence = req.min_confidence
         changed_filter = True
+    if req.conditional_enabled is not None:
+        cfg.conditional_enabled = req.conditional_enabled
+    if req.max_armed is not None:
+        cfg.max_armed = req.max_armed
     if changed_filter:
         cfg.last_result = None
     session.commit()

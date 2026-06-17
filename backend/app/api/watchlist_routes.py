@@ -16,6 +16,7 @@ from app.core.database import get_session
 from app.core.logging import get_logger
 from app.models.db import WatchItem
 from app.models.enums import AssetClass
+from app.models.schemas import ConditionalSuggestion
 
 log = get_logger("api.watchlist")
 
@@ -141,6 +142,7 @@ class OpportunityView(BaseModel):
     risk_decision: str | None = None
     risk_reason: str | None = None
     already_open: bool = False
+    conditional: ConditionalSuggestion | None = None  # break-entry to arm if blocked by structure
 
 
 @router.get("/opportunities", response_model=list[OpportunityView])
@@ -180,6 +182,7 @@ def opportunities(
             take_profit=prop.take_profit, rr=rr, confidence=prop.confidence, watch=prop.watch,
             rationale=prop.rationale, risk_approved=dec.approved, risk_decision=dec.decision.value,
             risk_reason=dec.reason, already_open=it.symbol.upper() in open_syms,
+            conditional=prop.conditional,
         )
 
     # Pass 1 — rank the whole list with the deterministic engine (cheap, no LLM quota).

@@ -324,11 +324,52 @@ class HybridConfig(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     interval_seconds: Mapped[int] = mapped_column(Integer, default=2100)  # 35 min (30-45 range)
     min_confidence: Mapped[float] = mapped_column(Float, default=0.70)    # only > 70% conviction
+    # Conditional ('armed') setups: when a setup is valid but blocked by structure, arm a pending
+    # break-entry instead of discarding it; the Monitor re-checks + auto-opens on the trigger.
+    conditional_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_armed: Mapped[int] = mapped_column(Integer, default=3)            # cap on live armed setups
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)  # short note from the last tick
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+
+
+class ConditionalSetup(Base):
+    """An armed conditional ('pending') setup — a valid trade idea whose ENTRY waits for a price
+    trigger (e.g. a break of a support cluster), rather than entering at market now.
+
+    The Monitor watches the trigger; when it's hit (optionally on a confirmed candle close) the
+    full analysis is RE-RUN (the double-check) and the trade only opens if it still passes risk +
+    the AI review at that moment. So an armed setup never bypasses the Risk Manager.
+    """
+
+    __tablename__ = "conditional_setups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    asset_class: Mapped[str] = mapped_column(String(16))
+    timeframe: Mapped[str] = mapped_column(String(16), default="1h")
+    direction: Mapped[str] = mapped_column(String(16))          # Direction (long/short)
+    order_type: Mapped[str] = mapped_column(String(16))         # ConditionalOrderType
+    trigger_price: Mapped[float] = mapped_column(Float)
+    stop_loss: Mapped[float | None] = mapped_column(Float)
+    take_profit: Mapped[float | None] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)   # projected (re-scored at trigger)
+    rr: Mapped[float | None] = mapped_column(Float)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+
+    status: Mapped[str] = mapped_column(String(16), default="armed", index=True)  # ConditionalStatus
+    source: Mapped[str] = mapped_column(String(16), default="manual")   # manual | hybrid | scanner
+    auto_execute: Mapped[bool] = mapped_column(Boolean, default=False)  # fire on trigger vs queue for approval
+    require_close_confirm: Mapped[bool] = mapped_column(Boolean, default=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_proposal_id: Mapped[int | None] = mapped_column(Integer)  # proposal created at trigger
+    last_note: Mapped[str | None] = mapped_column(Text)
 
 
 class AgentRun(Base):

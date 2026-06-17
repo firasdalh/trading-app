@@ -92,3 +92,22 @@ class ProposalStatus(StrEnum):
     REJECTED = "rejected"                   # user rejected
     EXECUTED = "executed"                   # order submitted
     EXPIRED = "expired"                     # went stale before action
+
+
+class ConditionalOrderType(StrEnum):
+    """How a conditional (pending) setup enters once price reaches the trigger level."""
+
+    SELL_STOP = "sell_stop"   # short on a break DOWN through a support level (continuation)
+    BUY_STOP = "buy_stop"     # long on a break UP through a resistance level (continuation)
+    SELL_LIMIT = "sell_limit" # short on a bounce UP into resistance (better price)
+    BUY_LIMIT = "buy_limit"   # long on a dip DOWN into support (better price)
+
+
+class ConditionalStatus(StrEnum):
+    """Lifecycle of an armed conditional setup (a 'wait for the trigger' order)."""
+
+    ARMED = "armed"           # watching for the trigger
+    TRIGGERED = "triggered"   # trigger hit + re-check passed -> a proposal/position was created
+    REJECTED = "rejected"     # trigger hit but the re-check (double-check) declined it
+    EXPIRED = "expired"       # validity window elapsed without a trigger
+    CANCELLED = "cancelled"   # cancelled by the user

@@ -17,7 +17,13 @@ from datetime import datetime, timezone
 from app.agents.llm import analyze, llm_available
 from app.core.logging import get_logger
 from app.models.enums import AssetClass, Direction, ReviewDecision, TradingBias
-from app.models.schemas import FundamentalRead, TechnicalRead, TradeProposal, TradeReviewLLM
+from app.models.schemas import (
+    ConditionalSuggestion,
+    FundamentalRead,
+    TechnicalRead,
+    TradeProposal,
+    TradeReviewLLM,
+)
 
 log = get_logger("agents.orchestrator")
 
@@ -84,6 +90,7 @@ _STRUCT_STOP_BUFFER_ATR = 0.2  # place the structural stop this far BEYOND the s
 _STRUCT_STOP_MAX_ATR = 3.0     # if the invalidating swing is further than this, it's not a practical stop
 _RR = 2.0             # reward:risk target (baseline / fallback)
 _RR_MAX = 4.0         # cap the planned target at 4R so a far key level isn't an unrealistic target
+_MIN_RR_COND = 1.5    # only suggest a conditional break-entry if its R:R (from the trigger) clears this
 _RSI_OB = 75.0        # overbought / oversold caution thresholds
 _RSI_OS = 25.0
 _STRUCT_IGNORE = 0.5  # ignore overhead structure within 0.5R of entry (breakout zone)
@@ -224,6 +231,58 @@ def _key_levels(technical: TechnicalRead, tf0, entry: float) -> list[float]:
         if not out or (lv - out[-1]) > tol:
             out.append(round(lv, 6))
     return out
+
+
+def _conditional_break(
+    direction: Direction, entry: float, atr_v: float | None, levels: list[float],
+    target: float, confidence: float,
+) -> ConditionalSuggestion | None:
+    """If a key level sits BETWEEN entry and target (blocking the path), suggest a break-entry: a
+    stop order just beyond that level, stop on the other side of it, target = the original level.
+    R:R is recomputed FROM the trigger so it's honest; returns None if no blocker or R:R too thin.
+
+    This is the 'wait for the break' play a pro uses instead of chasing into structure (the UKOILm
+    case: short only once the 78.21 support cluster gives way)."""
+    if not atr_v or atr_v <= 0 or not levels or target <= 0 or entry <= 0:
+        return None
+    buf = max(0.1 * atr_v, entry * 5e-4)          # trigger/stop offset beyond the level (wick allowance)
+    stop_pad = max(0.5 * atr_v, buf)
+    if direction == Direction.LONG:
+        blocks = [lv for lv in levels if entry < lv < target]
+        if not blocks:
+            return None
+        block = min(blocks)                        # nearest overhead resistance on the path
+        trigger = round(block + buf, 6)
+        stop = round(block - stop_pad, 6)          # below the broken resistance (now support)
+        tp = round(target, 6)
+        risk = trigger - stop
+        if risk <= 0 or tp <= trigger:
+            return None
+        rr = (tp - trigger) / risk
+        order_type = "buy_stop"
+    elif direction == Direction.SHORT:
+        blocks = [lv for lv in levels if target < lv < entry]
+        if not blocks:
+            return None
+        block = max(blocks)                        # nearest support on the path down
+        trigger = round(block - buf, 6)
+        stop = round(block + stop_pad, 6)          # above the broken support (now resistance)
+        tp = round(target, 6)
+        risk = stop - trigger
+        if risk <= 0 or tp >= trigger:
+            return None
+        rr = (trigger - tp) / risk
+        order_type = "sell_stop"
+    else:
+        return None
+    if rr < _MIN_RR_COND:
+        return None
+    return ConditionalSuggestion(
+        order_type=order_type, trigger_price=trigger, stop_loss=stop, take_profit=tp,
+        confidence=round(confidence, 2), rr=round(rr, 2),
+        reason=f"Enter {direction.value} on a confirmed break of {round(block, 5)} "
+               f"(blocking level between entry and target).",
+    )
 
 
 def _deterministic_decision(
@@ -519,6 +578,9 @@ def _deterministic_decision(
     base.stop_loss = round(stop, 6)
     base.take_profit = round(target, 6)
     base.confidence = confidence
+    # If a key level blocks the path to target, also carry a 'wait for the break' conditional so
+    # the trade can be ARMED (not chased) — survives even if the LLM vetoes the immediate entry.
+    base.conditional = _conditional_break(direction, entry, atr_v, levels, target, confidence)
     base.rationale = (
         f"Confluence {direction.value.upper()}: {regime} regime, entry-TF trend={trend}, "
         f"macro={macro}, structure={struct}/{macro_struct}, ADX {adx_v}, MACD hist={macd_hist}, "

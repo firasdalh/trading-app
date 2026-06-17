@@ -173,12 +173,30 @@ export const api = {
     request<import("../types").OpportunityView[]>("/api/watchlist/opportunities"),
 
   hybridState: () => request<import("../types").HybridState>("/api/hybrid"),
-  setHybridConfig: (cfg: { enabled?: boolean; interval_seconds?: number; min_confidence?: number }) =>
+  setHybridConfig: (cfg: {
+    enabled?: boolean; interval_seconds?: number; min_confidence?: number;
+    conditional_enabled?: boolean; max_armed?: number;
+  }) =>
     request<import("../types").HybridState>("/api/hybrid/config", {
       method: "POST",
       body: JSON.stringify(cfg),
     }),
   hybridRun: () => request<import("../types").HybridState>("/api/hybrid/run", { method: "POST" }),
+
+  // Conditional ('armed' / pending) setups.
+  conditionals: () =>
+    request<import("../types").ConditionalSetupView[]>("/api/conditionals"),
+  armConditional: (body: {
+    symbol: string; asset_class: string; timeframe: string; direction: string;
+    order_type: string; trigger_price: number; stop_loss?: number | null;
+    take_profit?: number | null; confidence?: number; rr?: number | null; reason?: string;
+  }) =>
+    request<import("../types").ConditionalSetupView>("/api/conditionals", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  cancelConditional: (id: number) =>
+    request<{ cancelled: boolean }>(`/api/conditionals/${id}`, { method: "DELETE" }),
 
   llmStatus: () => request<LlmStatus>("/api/settings/llm"),
   setLlm: (body: { provider: string; model?: string; api_key?: string }) =>

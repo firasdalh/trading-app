@@ -59,6 +59,17 @@ export interface FundamentalRead {
   notes: string;
 }
 
+// A 'wait for the break' entry the engine suggests when a setup is valid but blocked by structure.
+export interface ConditionalSuggestion {
+  order_type: string;        // "sell_stop" | "buy_stop" | "sell_limit" | "buy_limit"
+  trigger_price: number;
+  stop_loss: number;
+  take_profit: number;
+  confidence: number;
+  rr: number;
+  reason: string;
+}
+
 export interface TradeProposal {
   symbol: string;
   asset_class: AssetClass;
@@ -71,8 +82,34 @@ export interface TradeProposal {
   rationale: string;
   watch?: boolean;
   review_decision: string | null;
+  conditional?: ConditionalSuggestion | null;
   technical: TechnicalRead | null;
   fundamental: FundamentalRead | null;
+}
+
+// An armed conditional setup (the Armed/Pending panel).
+export interface ConditionalSetupView {
+  id: number;
+  created_at: string;
+  symbol: string;
+  asset_class: string;
+  timeframe: string;
+  direction: string;
+  order_type: string;
+  trigger_price: number;
+  stop_loss: number | null;
+  take_profit: number | null;
+  confidence: number;
+  rr: number | null;
+  rationale: string;
+  status: string;            // armed | triggered | rejected | expired | cancelled
+  source: string;            // manual | hybrid | scanner
+  auto_execute: boolean;
+  require_close_confirm: boolean;
+  valid_until: string | null;
+  triggered_at: string | null;
+  result_proposal_id: number | null;
+  last_note: string | null;
 }
 
 export interface AnalyzeResponse {
@@ -264,6 +301,8 @@ export interface HybridState {
   enabled: boolean;
   interval_seconds: number;
   min_confidence: number;
+  conditional_enabled: boolean;
+  max_armed: number;
   last_run_at: string | null;
   last_result: string | null;
 }
@@ -284,6 +323,7 @@ export interface OpportunityView {
   risk_decision: string | null;
   risk_reason: string | null;
   already_open: boolean;
+  conditional?: ConditionalSuggestion | null;
 }
 
 export interface WatchItem {

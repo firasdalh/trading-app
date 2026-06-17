@@ -139,6 +139,23 @@ class TradeReviewLLM(BaseModel):
     concerns: list[str] = Field(default_factory=list)
 
 
+class ConditionalSuggestion(BaseModel):
+    """A 'wait for the trigger' entry the engine proposes when a setup is valid in direction but
+    the immediate entry is blocked by structure (e.g. a support cluster between entry and target).
+
+    Instead of discarding the idea, enter only once price clears the level — a break-stop order.
+    Levels/RR are computed FROM the trigger so the R:R is honest; the trade is re-checked at the
+    trigger before it ever opens."""
+
+    order_type: str            # ConditionalOrderType value (e.g. "sell_stop", "buy_stop")
+    trigger_price: float       # price at which the setup arms into a trade
+    stop_loss: float
+    take_profit: float
+    confidence: float = Field(0.0, ge=0.0, le=1.0)   # projected (re-scored at the trigger)
+    rr: float                  # reward:risk measured from the trigger entry
+    reason: str = ""
+
+
 class TradeProposal(BaseModel):
     """Output of the Orchestrator. ``direction == NO_TRADE`` is a valid, encouraged result."""
 
@@ -155,6 +172,10 @@ class TradeProposal(BaseModel):
     # True when the setup is forming (e.g. trend aligned but momentum not yet) — "watching",
     # waiting for a trigger, rather than a flat reject.
     watch: bool = False
+
+    # A conditional break-entry the engine suggests when the immediate entry is blocked by
+    # structure but the idea is valid once price clears the level (see ConditionalSuggestion).
+    conditional: ConditionalSuggestion | None = None
 
     # LLM reviewer outcome on the deterministic setup: "confirm" | "veto" | None (rules only).
     review_decision: str | None = None
