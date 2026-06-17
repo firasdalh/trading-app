@@ -28,32 +28,38 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
   const previewRef = useRef(preview);
   previewRef.current = preview;
 
-  const apply = (r: SizePreviewResponse) => {
+  // Update only the dollar figures — never the lot input (so a re-price doesn't fight typing).
+  const applyFigures = (r: SizePreviewResponse) => {
     setNotionalUsd(r.economics?.notional_usd ?? null);
     setRiskAmt(r.risk?.risk_amount ?? null);
     setMarginUsd(r.economics?.margin_usd ?? null);
     setMaxLots(r.max_lots ?? null);
     setCapped(r.capped);
-    const lv = r.economics?.lots ?? r.risk?.approved_qty ?? null;
-    if (lv != null) {
-      setLots(String(lv));
-      onLots?.(lv);
-    }
   };
 
-  // On mount, price at the previously-saved lot if there is one, else the AI default size.
+  // On mount, price at the previously-saved lot if there is one, else the AI default size — and
+  // seed the input ONCE from that (the only time we set the lot value programmatically).
   useEffect(() => {
     let cancelled = false;
     setBusy(true);
     previewRef.current(initialLots && initialLots > 0 ? initialLots : null)
-      .then((r) => { if (!cancelled) apply(r); })
+      .then((r) => {
+        if (cancelled) return;
+        applyFigures(r);
+        const lv = r.economics?.lots ?? r.risk?.approved_qty ?? null;
+        if (lv != null) {
+          setLots(String(lv));
+          onLots?.(lv);
+        }
+      })
       .catch(() => {})
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-price at the user's lot (debounced so typing doesn't spam the broker).
+  // Re-price at the user's lot (debounced so typing doesn't spam the broker). Updates the $ figures
+  // only — the input keeps exactly what you typed (the backend re-clamps to the cap at save/fire).
   const reprice = (val: string) => {
     const n = Number(val);
     const lv = Number.isFinite(n) && n > 0 ? n : null;
@@ -63,7 +69,7 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
     timer.current = setTimeout(async () => {
       setBusy(true);
       try {
-        apply(await previewRef.current(lv));
+        applyFigures(await previewRef.current(lv));
       } catch {
         /* ignore — keep last good figures */
       } finally {
