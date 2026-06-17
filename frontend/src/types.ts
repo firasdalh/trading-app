@@ -110,6 +110,7 @@ export interface ConditionalSetupView {
   triggered_at: string | null;
   result_proposal_id: number | null;
   last_note: string | null;
+  desired_lots: number | null;
 }
 
 export interface AnalyzeResponse {

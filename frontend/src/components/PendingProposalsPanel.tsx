@@ -135,7 +135,7 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
                 </div>
                 {p.entry != null && p.stop_loss != null && (
                   <TradeSizer
-                    proposalId={p.id}
+                    preview={(l) => api.sizePreview(p.id, l)}
                     entry={p.entry}
                     stopLoss={p.stop_loss}
                     takeProfit={p.take_profit}

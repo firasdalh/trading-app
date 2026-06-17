@@ -187,6 +187,60 @@ def test_armed_auto_cancelled_when_symbol_already_open(db_session, monkeypatch):
     assert s.status == "cancelled" and "already open" in (s.last_note or "")
 
 
+def test_conditional_size_preview_prices_from_trigger(db_session, monkeypatch):
+    """The armed-setup size preview prices off the trigger (as entry) via the standard sizer."""
+    import app.risk.service as risk_service
+    from app.api.conditional_routes import LotRequest, size_preview
+    from app.models.enums import RiskDecisionType
+    from app.models.schemas import RiskDecision
+
+    s = _arm(db_session)
+    seen: dict = {}
+
+    def fake_sp(session, record, desired_lots=None):
+        seen.update(entry=record.entry, symbol=record.symbol, lots=desired_lots)
+        return {"risk": RiskDecision(decision=RiskDecisionType.APPROVED, approved=True, reason="ok",
+                                     symbol=record.symbol, approved_qty=0.05, risk_amount=12.0),
+                "economics": {"lots": 0.05, "margin_usd": 30.0}, "capped": False, "max_lots": 0.1}
+
+    monkeypatch.setattr(risk_service, "size_preview", fake_sp)
+    res = size_preview(s.id, LotRequest(lots=0.05), session=db_session)
+    assert seen["entry"] == s.trigger_price and seen["symbol"] == s.symbol and seen["lots"] == 0.05
+    assert res.economics.margin_usd == 30.0 and res.max_lots == 0.1
+
+
+def test_set_conditional_lots_persists(db_session):
+    from app.api.conditional_routes import LotRequest, set_lots
+    s = _arm(db_session)
+    res = set_lots(s.id, LotRequest(lots=0.07), session=db_session)
+    assert res.desired_lots == 0.07
+    db_session.refresh(s)
+    assert s.desired_lots == 0.07
+
+
+def test_desired_lots_resizes_proposal_on_fire(db_session, monkeypatch):
+    import app.risk.service as risk_service
+    from app.models.db import TradeProposalRecord
+    from app.models.enums import RiskDecisionType
+    from app.models.schemas import RiskDecision
+
+    s = _arm(db_session, auto_execute=False, desired_lots=0.07)
+    _stub_market(monkeypatch, price=78.0)
+    monkeypatch.setattr(pipeline, "analyze_symbol",
+                        _fake_analyze("short", approved=True, status=ProposalStatus.PENDING_APPROVAL.value))
+    monkeypatch.setattr(risk_service, "size_preview",
+                        lambda session, record, desired_lots=None: {
+                            "risk": RiskDecision(decision=RiskDecisionType.APPROVED, approved=True,
+                                                 reason="ok", symbol=record.symbol, approved_qty=0.07,
+                                                 risk_amount=21.0),
+                            "economics": {"lots": 0.07}, "capped": False, "max_lots": 0.1})
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 1
+    db_session.refresh(s)
+    rec = db_session.get(TradeProposalRecord, s.result_proposal_id)
+    assert rec.approved_qty == 0.07 and s.status == "triggered"
+
+
 def test_arm_conditional_dedups_same_symbol_direction(db_session, monkeypatch):
     monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
     first = cond.arm_conditional(db_session, symbol="UKOILm", asset_class="energy", timeframe="1h",

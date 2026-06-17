@@ -172,6 +172,20 @@ def _fire(session: Session, s: ConditionalSetup) -> int:
         session.add(s)
         return 0
 
+    # Honor the user's chosen lot (re-clamped to the 2% cap) for the size it opens at.
+    if s.desired_lots and record is not None and record.status == ProposalStatus.PENDING_APPROVAL.value:
+        from app.risk.service import size_preview
+        try:
+            out = size_preview(session, record, desired_lots=s.desired_lots)
+            dec = out["risk"]
+            if dec.approved and dec.approved_qty and dec.approved_qty > 0:
+                record.approved_qty = dec.approved_qty
+                record.risk_amount = dec.risk_amount
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 - fall back to the default size on any sizing error
+            log.warning("conditional resize failed; using default size",
+                        extra={"symbol": s.symbol, "error": str(exc)})
+
     # Modes B/C already auto-executed inside analyze_symbol.
     if record is not None and record.status == ProposalStatus.EXECUTED.value:
         s.status = ConditionalStatus.TRIGGERED.value

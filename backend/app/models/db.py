@@ -375,6 +375,9 @@ class ConditionalSetup(Base):
     # when momentum realigns. Bounded by valid_until, an invalidation check, and the retry cap.
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retries: Mapped[int] = mapped_column(Integer, default=0)
+    # User-chosen lot to open at when this fires (None = the Risk Manager's default size). Always
+    # re-clamped to the 2% per-trade cap at fire time.
+    desired_lots: Mapped[float | None] = mapped_column(Float)
 
 
 class AgentRun(Base):

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice } from "../format";
 import { usePolling } from "../hooks/usePolling";
+import { TradeSizer } from "./TradeSizer";
 import type { ConditionalSetupView } from "../types";
 
 const STATUS_STYLE: Record<string, string> = {
@@ -77,6 +78,15 @@ export function ConditionalsPanel({ onSelect }: {
               <span className="text-bull">{fmtPrice(s.take_profit)}</span>
               {s.rr != null ? ` · ~${s.rr.toFixed(1)}R` : ""} · conf {(s.confidence * 100).toFixed(0)}%
             </div>
+            {s.status === "armed" && (
+              <TradeSizer
+                preview={(l) => api.conditionalSizePreview(s.id, l)}
+                onCommit={(l) => { void api.setConditionalLots(s.id, l).catch(() => {}); }}
+                entry={s.trigger_price}
+                stopLoss={s.stop_loss}
+                takeProfit={s.take_profit}
+              />
+            )}
             {s.last_note && <div className="mt-0.5 text-xs text-neutral-500">{s.last_note}</div>}
           </div>
         ))}

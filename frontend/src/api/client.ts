@@ -197,6 +197,16 @@ export const api = {
     }),
   cancelConditional: (id: number) =>
     request<{ cancelled: boolean }>(`/api/conditionals/${id}`, { method: "DELETE" }),
+  conditionalSizePreview: (id: number, lots: number | null) =>
+    request<import("../types").SizePreviewResponse>(`/api/conditionals/${id}/size-preview`, {
+      method: "POST",
+      body: JSON.stringify({ lots }),
+    }),
+  setConditionalLots: (id: number, lots: number | null) =>
+    request<import("../types").ConditionalSetupView>(`/api/conditionals/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ lots }),
+    }),
 
   llmStatus: () => request<LlmStatus>("/api/settings/llm"),
   setLlm: (body: { provider: string; model?: string; api_key?: string }) =>

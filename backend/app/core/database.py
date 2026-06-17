@@ -54,6 +54,7 @@ _SQLITE_ADDED_COLUMNS = {
     "conditional_setups": [
         ("cooldown_until", "DATETIME"),
         ("retries", "INTEGER DEFAULT 0"),
+        ("desired_lots", "FLOAT"),
     ],
 }
 

@@ -18,9 +18,15 @@ from sqlalchemy.orm import Session
 from app.agents.conditional import arm_conditional, cancel_conditional, list_conditionals
 from app.core.database import get_session
 from app.core.state import get_or_create_settings
-from app.models.enums import ExecutionMode
+from app.models.db import ConditionalSetup
+from app.models.enums import ConditionalStatus, ExecutionMode
+from app.models.schemas import SizePreviewResponse, TradeEconomics
 
 router = APIRouter(prefix="/api/conditionals", tags=["conditionals"])
+
+
+class LotRequest(BaseModel):
+    lots: float | None = Field(None, gt=0)
 
 
 class ArmRequest(BaseModel):
@@ -63,6 +69,7 @@ class ConditionalSetupView(BaseModel):
     triggered_at: datetime | None
     result_proposal_id: int | None
     last_note: str | None
+    desired_lots: float | None
 
 
 @router.get("", response_model=list[ConditionalSetupView])
@@ -86,6 +93,50 @@ def arm(req: ArmRequest, session: Session = Depends(get_session)) -> Conditional
     if s is None:
         raise HTTPException(status_code=409,
                             detail="already armed for this symbol/direction, or the symbol is open")
+    return ConditionalSetupView.model_validate(s)
+
+
+def _setup_shim(s: ConditionalSetup):
+    """A minimal proposal-like object from the armed setup's levels (trigger = entry), so the
+    standard Risk Manager size/economics logic can price it without a stored proposal."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        symbol=s.symbol, asset_class=s.asset_class, timeframe=s.timeframe, direction=s.direction,
+        entry=s.trigger_price, stop_loss=s.stop_loss, take_profit=s.take_profit,
+        confidence=s.confidence,
+    )
+
+
+@router.post("/{setup_id}/size-preview", response_model=SizePreviewResponse)
+def size_preview(setup_id: int, req: LotRequest | None = None,
+                 session: Session = Depends(get_session)) -> SizePreviewResponse:
+    """Risk verdict + $ economics (risk / cost) for an armed setup at a chosen lot — computed from
+    the trigger as the entry. Read-only; any size is clamped to the 2% per-trade cap."""
+    from app.risk.service import size_preview as _size_preview
+
+    s = session.get(ConditionalSetup, setup_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="not found")
+    out = _size_preview(session, _setup_shim(s), desired_lots=req.lots if req else None)
+    return SizePreviewResponse(
+        risk=out["risk"], economics=TradeEconomics(**out["economics"]),
+        capped=out["capped"], max_lots=out["max_lots"],
+    )
+
+
+@router.patch("/{setup_id}", response_model=ConditionalSetupView)
+def set_lots(setup_id: int, req: LotRequest, session: Session = Depends(get_session)) -> ConditionalSetupView:
+    """Set the lot this setup will open at when it fires (None = the AI's default size). Re-clamped
+    to the 2% cap at fire time."""
+    s = session.get(ConditionalSetup, setup_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="not found")
+    if s.status != ConditionalStatus.ARMED.value:
+        raise HTTPException(status_code=409, detail=f"cannot resize a setup in status '{s.status}'")
+    s.desired_lots = req.lots
+    session.commit()
+    session.refresh(s)
     return ConditionalSetupView.model_validate(s)
 
 

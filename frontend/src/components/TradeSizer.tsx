@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api/client";
 import { fmtUsd } from "../format";
 import type { SizePreviewResponse } from "../types";
 
-// Lot input + live dollar figures (risk / potential reward / cost) for a proposal. Adjust the lot
-// and the dollars update (broker-computed via size_preview; the backend clamps to the 2% per-trade
-// cap). Reports the chosen lot up to the parent so Approve uses it.
-export function TradeSizer({ proposalId, entry, stopLoss, takeProfit, onLots }: {
-  proposalId: number;
+// Lot input + live dollar figures (risk / potential reward / cost). Adjust the lot and the dollars
+// update (broker-computed via `preview`; the backend clamps to the 2% per-trade cap). `onLots` fires
+// immediately (parent tracks the chosen lot, e.g. for Approve); `onCommit` fires debounced (e.g. to
+// persist the lot on an armed setup). Works for any trade — proposals or armed conditionals.
+export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCommit }: {
+  preview: (lots: number | null) => Promise<SizePreviewResponse>;
   entry: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
-  onLots: (lots: number | null) => void;
+  onLots?: (lots: number | null) => void;
+  onCommit?: (lots: number | null) => void;
 }) {
   const [lots, setLots] = useState("");
   const [riskUsd, setRiskUsd] = useState<number | null>(null);
@@ -20,6 +21,10 @@ export function TradeSizer({ proposalId, entry, stopLoss, takeProfit, onLots }: 
   const [capped, setCapped] = useState(false);
   const [busy, setBusy] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Hold the latest preview closure in a ref so a new closure each render doesn't re-fire the mount
+  // fetch (the effect runs once; reprice always calls the current closure).
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
 
   const apply = (r: SizePreviewResponse) => {
     setRiskUsd(r.risk?.risk_amount ?? null);
@@ -29,7 +34,7 @@ export function TradeSizer({ proposalId, entry, stopLoss, takeProfit, onLots }: 
     const lv = r.economics?.lots ?? r.risk?.approved_qty ?? null;
     if (lv != null) {
       setLots(String(lv));
-      onLots(lv);
+      onLots?.(lv);
     }
   };
 
@@ -37,23 +42,25 @@ export function TradeSizer({ proposalId, entry, stopLoss, takeProfit, onLots }: 
   useEffect(() => {
     let cancelled = false;
     setBusy(true);
-    api.sizePreview(proposalId, null)
+    previewRef.current(null)
       .then((r) => { if (!cancelled) apply(r); })
       .catch(() => {})
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proposalId]);
+  }, []);
 
-  // Re-price at the user's lot (debounced so typing doesn't spam the broker).
+  // Re-price at the user's lot (debounced so typing doesn't spam the broker), then commit the lot.
   const reprice = (val: string) => {
     const n = Number(val);
-    onLots(Number.isFinite(n) && n > 0 ? n : null);
+    const lots = Number.isFinite(n) && n > 0 ? n : null;
+    onLots?.(lots);
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
       setBusy(true);
       try {
-        apply(await api.sizePreview(proposalId, Number.isFinite(n) && n > 0 ? n : null));
+        apply(await previewRef.current(lots));
+        onCommit?.(lots);
       } catch {
         /* ignore — keep last good figures */
       } finally {
@@ -74,7 +81,7 @@ export function TradeSizer({ proposalId, entry, stopLoss, takeProfit, onLots }: 
         <label className="text-xs text-neutral-400">
           <div className="mb-1">Size (lots)</div>
           <input
-            name={`lots-${proposalId}`}
+            name="lots"
             autoComplete="off"
             inputMode="decimal"
             value={lots}
