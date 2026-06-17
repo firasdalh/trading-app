@@ -104,6 +104,7 @@ export function ConditionalsPanel({ onSelect }: {
                 entry={s.trigger_price}
                 stopLoss={s.stop_loss}
                 takeProfit={s.take_profit}
+                initialLots={s.desired_lots}
               />
             )}
             {s.last_note && <div className="mt-0.5 text-xs text-neutral-500">{s.last_note}</div>}

@@ -6,13 +6,14 @@ import type { SizePreviewResponse } from "../types";
 // update (broker-computed via `preview`; the backend clamps to the 2% per-trade cap). `onLots` fires
 // immediately (parent tracks the chosen lot, e.g. for Approve). When `onCommit` is provided a Save
 // button persists the lot (e.g. on an armed setup). Works for proposals or armed conditionals.
-export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCommit }: {
+export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCommit, initialLots }: {
   preview: (lots: number | null) => Promise<SizePreviewResponse>;
   entry: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
   onLots?: (lots: number | null) => void;
   onCommit?: (lots: number | null) => void;
+  initialLots?: number | null;   // seed from a previously-saved lot (else the AI default)
 }) {
   const [lots, setLots] = useState("");
   const [notionalUsd, setNotionalUsd] = useState<number | null>(null);
@@ -40,11 +41,11 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
     }
   };
 
-  // AI default size + economics on mount.
+  // On mount, price at the previously-saved lot if there is one, else the AI default size.
   useEffect(() => {
     let cancelled = false;
     setBusy(true);
-    previewRef.current(null)
+    previewRef.current(initialLots && initialLots > 0 ? initialLots : null)
       .then((r) => { if (!cancelled) apply(r); })
       .catch(() => {})
       .finally(() => { if (!cancelled) setBusy(false); });
