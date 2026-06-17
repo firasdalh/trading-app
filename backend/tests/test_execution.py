@@ -329,3 +329,24 @@ def test_confidence_calibration_buckets(db_session):
     assert abs(by["70-80%"].avg_r - 0.5) < 1e-6           # (+2R, -1R) -> mean 0.5R
     assert by["90-100%"].trades == 1 and by["90-100%"].win_rate == 1.0
     assert by["50-60%"].trades == 0 and by["50-60%"].win_rate is None
+
+
+def test_journal_stats_expectancy_and_drawdown(db_session):
+    """Closed trades roll up into expectancy (mean R), profit factor, and max R-drawdown."""
+    from app.api.journal_routes import stats
+
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    def closed(pnl, i, risk=10.0):
+        return Position(symbol="X", asset_class="forex", direction="long", qty=1.0, entry_price=100.0,
+                        status=PositionStatus.CLOSED.value, realized_pnl=pnl, risk_amount=risk,
+                        closed_at=base + timedelta(hours=i))
+
+    db_session.add_all([closed(20.0, 0), closed(-10.0, 1), closed(10.0, 2)])  # R: +2, -1, +1
+    db_session.commit()
+    s = stats(session=db_session)
+    assert s.trades == 3 and s.wins == 2 and s.losses == 1
+    assert s.expectancy_r == 0.67 and s.total_r == 2.0
+    assert s.avg_win_r == 1.5 and s.avg_loss_r == -1.0
+    assert s.profit_factor == 3.0          # gross win 30 / gross loss 10
+    assert s.max_drawdown_r == 1.0         # cum 2 -> 1 -> 2; worst dip from peak = 1R

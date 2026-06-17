@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
-import type { CalibrationBucket, ReflectionReport } from "../types";
+import type { CalibrationBucket, JournalStats, ReflectionReport } from "../types";
 
 // Midpoint of a "70-80%" bucket label, used to judge whether the realized win rate matches the
 // confidence the engine assigned (the whole point of calibration).
@@ -26,6 +26,7 @@ function fmtDate(iso: string | null | undefined): string {
 export function JournalView() {
   const { data: trades } = usePolling(() => api.journalTrades(100), 8000, []);
   const { data: calib } = usePolling(() => api.journalCalibration(), 10000, []);
+  const { data: perf } = usePolling(() => api.journalStats(), 10000, []);
   const [reflection, setReflection] = useState<ReflectionReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +100,8 @@ export function JournalView() {
         )}
       </div>
 
+      <PerformanceCard perf={perf} />
+
       <CalibrationCard calib={calib} />
 
       <div className="card">
@@ -133,6 +136,36 @@ export function JournalView() {
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Performance in R: expectancy (the edge), win rate, profit factor, and the worst R-drawdown —
+// the numbers a desk reviews. R = realized P&L / risk taken, so it's instrument-agnostic.
+function PerformanceCard({ perf }: { perf: JournalStats | null }) {
+  if (!perf || perf.trades === 0) return null;
+  const exp = perf.expectancy_r;
+  return (
+    <div className="card">
+      <div className="mb-1 text-sm font-semibold">Performance (R)</div>
+      <p className="mb-2 text-xs text-neutral-500">
+        R = profit ÷ risk taken. Expectancy is your edge per trade; positive means the system makes
+        money over time. Over {perf.trades} closed trade{perf.trades === 1 ? "" : "s"} with recorded risk.
+      </p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <Tile label="Expectancy"
+              value={exp == null ? "—" : `${exp >= 0 ? "+" : ""}${exp.toFixed(2)}R`}
+              valueClass={(exp ?? 0) >= 0 ? "text-bull" : "text-bear"} />
+        <Tile label="Win rate" value={perf.win_rate == null ? "—" : `${(perf.win_rate * 100).toFixed(0)}%`} />
+        <Tile label="Avg win" value={perf.avg_win_r == null ? "—" : `+${perf.avg_win_r.toFixed(2)}R`}
+              valueClass="text-bull" />
+        <Tile label="Avg loss" value={perf.avg_loss_r == null ? "—" : `${perf.avg_loss_r.toFixed(2)}R`}
+              valueClass="text-bear" />
+        <Tile label="Profit factor" value={perf.profit_factor == null ? "—" : perf.profit_factor.toFixed(2)} />
+        <Tile label="Max drawdown"
+              value={perf.max_drawdown_r == null ? "—" : `-${perf.max_drawdown_r.toFixed(2)}R`}
+              valueClass="text-bear" />
       </div>
     </div>
   );

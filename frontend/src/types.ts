@@ -380,6 +380,19 @@ export interface CalibrationBucket {
   avg_r: number | null;       // mean realized R
 }
 
+export interface JournalStats {
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  expectancy_r: number | null;   // mean realized R per trade
+  avg_win_r: number | null;
+  avg_loss_r: number | null;
+  profit_factor: number | null;
+  total_r: number | null;
+  max_drawdown_r: number | null;
+}
+
 // Structured (and optionally Arabic) reformatting of a raw AI-review rationale.
 export interface ExplainedReview {
   decision: string;        // headline, e.g. "NO TRADE" / "ENTER SHORT"

@@ -78,6 +78,61 @@ def closed_trades(
     return [PositionView.model_validate(r) for r in rows]
 
 
+class JournalStats(BaseModel):
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float | None         # fraction 0-1
+    expectancy_r: float | None     # mean realized R per trade — the edge, in R
+    avg_win_r: float | None
+    avg_loss_r: float | None        # negative
+    profit_factor: float | None    # gross profit / gross loss ($)
+    total_r: float | None
+    max_drawdown_r: float | None   # worst peak-to-trough on the cumulative-R curve (>= 0)
+
+
+@router.get("/stats", response_model=JournalStats)
+def stats(session: Session = Depends(get_session)) -> JournalStats:
+    """Expectancy + R-multiple performance over CLOSED app-tracked trades (those with a recorded
+    risk_amount). Answers 'what's the edge, in R?' and 'how deep was the worst drawdown?' — the
+    numbers a desk reviews. Complements /calibration (which buckets the same trades by confidence)."""
+    rows = session.scalars(
+        select(Position)
+        .where(Position.status == PositionStatus.CLOSED.value,
+               Position.realized_pnl.is_not(None), Position.risk_amount.is_not(None))
+        .order_by(Position.closed_at.asc())
+    ).all()
+    rows = [r for r in rows if r.risk_amount]  # need risk_amount > 0 for an R-multiple
+    n = len(rows)
+    if n == 0:
+        return JournalStats(trades=0, wins=0, losses=0, win_rate=None, expectancy_r=None,
+                            avg_win_r=None, avg_loss_r=None, profit_factor=None,
+                            total_r=None, max_drawdown_r=None)
+
+    rs = [(r.realized_pnl or 0.0) / r.risk_amount for r in rows]
+    wins = [x for x in rs if x > 0]
+    losses = [x for x in rs if x < 0]
+    gross_win = sum((r.realized_pnl or 0.0) for r in rows if (r.realized_pnl or 0.0) > 0)
+    gross_loss = -sum((r.realized_pnl or 0.0) for r in rows if (r.realized_pnl or 0.0) < 0)
+
+    cum = peak = max_dd = 0.0
+    for x in rs:                         # drawdown on the cumulative-R equity curve
+        cum += x
+        peak = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+
+    return JournalStats(
+        trades=n, wins=len(wins), losses=len(losses),
+        win_rate=round(len(wins) / n, 3),
+        expectancy_r=round(sum(rs) / n, 2),
+        avg_win_r=round(sum(wins) / len(wins), 2) if wins else None,
+        avg_loss_r=round(sum(losses) / len(losses), 2) if losses else None,
+        profit_factor=round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
+        total_r=round(sum(rs), 2),
+        max_drawdown_r=round(max_dd, 2),
+    )
+
+
 @router.post("/reflect", response_model=ReflectionReport)
 def reflect(session: Session = Depends(get_session)) -> ReflectionReport:
     return run_reflection(session)

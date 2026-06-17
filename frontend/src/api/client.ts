@@ -223,4 +223,5 @@ export const api = {
   reflect: () => request<ReflectionReport>("/api/journal/reflect", { method: "POST" }),
   reflectionLatest: () => request<ReflectionReport | null>("/api/journal/reflection/latest"),
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
+  journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
 };
