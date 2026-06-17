@@ -336,6 +336,54 @@ def _conditional_pullback(
     )
 
 
+def _conditional_resumption(
+    direction: Direction, entry: float, ind: dict, atr_v: float | None,
+    levels: list[float], confidence: float,
+) -> ConditionalSuggestion | None:
+    """A momentum pullback isn't a dead end — arm a STOP order at the swing that RESUMES the trend:
+    a break above the pullback's swing high (long) or below the swing low (short). It fires only
+    when momentum re-aligns with the trend, which is exactly what the 'wait' was for. Stop sits
+    beyond the pullback (>= ~1xATR, anti-wick); target is the next key level or a 2R fallback."""
+    if not atr_v or atr_v <= 0 or entry <= 0:
+        return None
+    buf = max(0.1 * atr_v, entry * 5e-4)
+    floor = atr_v  # anti-wick: keep the stop at least ~1xATR from the trigger
+    sh, sl = ind.get("swing_high"), ind.get("swing_low")
+    if direction == Direction.LONG:
+        if not sh or sh <= entry:           # the pullback must sit BELOW the last swing high
+            return None
+        trigger = round(sh + buf, 6)
+        base_stop = (sl - buf) if (sl and sl < trigger) else (trigger - 1.5 * atr_v)
+        stop = round(min(base_stop, trigger - floor), 6)
+        risk = trigger - stop
+        ahead = sorted(lv for lv in (levels or []) if lv > trigger + buf)
+        tp = round(min(ahead[0] if ahead else trigger + _RR * risk, trigger + _RR_MAX * risk), 6)
+        order_type, swing = "buy_stop", sh
+    elif direction == Direction.SHORT:
+        if not sl or sl >= entry:           # the pullback must sit ABOVE the last swing low
+            return None
+        trigger = round(sl - buf, 6)
+        base_stop = (sh + buf) if (sh and sh > trigger) else (trigger + 1.5 * atr_v)
+        stop = round(max(base_stop, trigger + floor), 6)
+        risk = stop - trigger
+        below = sorted((lv for lv in (levels or []) if lv < trigger - buf), reverse=True)
+        tp = round(max(below[0] if below else trigger - _RR * risk, trigger - _RR_MAX * risk), 6)
+        order_type, swing = "sell_stop", sl
+    else:
+        return None
+    if risk <= 0:
+        return None
+    rr = (tp - trigger) / risk if direction == Direction.LONG else (trigger - tp) / risk
+    if rr < _MIN_RR_COND:
+        return None
+    return ConditionalSuggestion(
+        order_type=order_type, trigger_price=trigger, stop_loss=stop, take_profit=tp,
+        confidence=round(confidence, 2), rr=round(rr, 2),
+        reason=f"Enter {direction.value} when momentum resumes the trend "
+               f"(break of the pullback swing {round(swing, 5)}).",
+    )
+
+
 def _deterministic_decision(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
@@ -377,12 +425,17 @@ def _deterministic_decision(
     # timeframe trend (don't fight the macro) and the momentum-pullback wait.
     if trend == "up":
         if macd_hist is not None and macd_hist < -mom_thresh:
-            # Trend up but momentum meaningfully down = pullback. Wait for the long trigger.
+            # Trend up but momentum meaningfully down = pullback. Arm a resumption break instead of
+            # just waiting, so it fires when momentum turns back up.
             base.watch = True
             base.rationale = (
                 f"Uptrend pullback — momentum still down (MACD hist {macd_hist}, RSI {rsi}, "
-                f"−DI {mdi} > +DI {pdi}). Waiting for momentum to turn back up before going long."
+                f"−DI {mdi} > +DI {pdi}). Arm a long on a break back up to resume the trend."
             )
+            px = ind.get("last_close") or 0.0
+            base.conditional = _conditional_resumption(
+                Direction.LONG, px, ind, atr_v, _key_levels(technical, tf0, px),
+                round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
             return base
         if macro == "down":
             base.rationale = "No confluence: higher-timeframe trend is DOWN — not buying into it."
@@ -393,8 +446,12 @@ def _deterministic_decision(
             base.watch = True
             base.rationale = (
                 f"Downtrend pullback — momentum turning up (MACD hist {macd_hist}, RSI {rsi}, "
-                f"+DI {pdi} > −DI {mdi}). Waiting for momentum to roll back down before going short."
+                f"+DI {pdi} > −DI {mdi}). Arm a short on a break back down to resume the trend."
             )
+            px = ind.get("last_close") or 0.0
+            base.conditional = _conditional_resumption(
+                Direction.SHORT, px, ind, atr_v, _key_levels(technical, tf0, px),
+                round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
             return base
         if macro == "up":
             base.rationale = "No confluence: higher-timeframe trend is UP — not selling into it."

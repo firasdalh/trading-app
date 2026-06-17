@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import app.agents.conditional as cond
 import app.agents.pipeline as pipeline
-from app.agents.orchestrator import _conditional_break, _conditional_pullback
+from app.agents.orchestrator import _conditional_break, _conditional_pullback, _conditional_resumption
 from app.models.db import ConditionalSetup, TradeProposalRecord
 from app.models.enums import Direction, ProposalStatus, RiskDecisionType
 from app.models.schemas import AnalyzeResponse, RiskDecision, TradeProposal
@@ -49,6 +49,21 @@ def test_conditional_pullback_none_when_not_overextended():
     # Entry already at/below value -> no better pullback entry to wait for.
     assert _conditional_pullback(Direction.LONG, entry=100.0, ema20=100.0, atr_v=1.0,
                                  ind={}, target=112.0, confidence=0.6) is None
+
+
+def test_conditional_resumption_long_arms_on_break_of_swing_high():
+    # Uptrend pullback -> buy_stop above the last swing high, stop below it, target the next level.
+    c = _conditional_resumption(Direction.LONG, entry=100.0,
+                                ind={"swing_high": 100.5, "swing_low": 99.7},
+                                atr_v=0.3, levels=[102.0], confidence=0.6)
+    assert c is not None and c.order_type == "buy_stop"
+    assert c.trigger_price > 100.5 and c.stop_loss < 100.5 and c.rr >= 1.5
+
+
+def test_conditional_resumption_none_without_swing_above():
+    # No swing high above the current price -> nothing to break for a resumption.
+    assert _conditional_resumption(Direction.LONG, entry=100.0, ind={"swing_high": 99.0},
+                                   atr_v=0.3, levels=[102.0], confidence=0.6) is None
 
 
 # ---------------------------------------------------------------- service
