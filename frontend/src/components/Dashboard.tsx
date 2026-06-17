@@ -418,7 +418,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         onOpened={() => setPosBump((b) => b + 1)}
       />
 
-      <ConditionalsPanel />
+      <ConditionalsPanel onSelect={openPositionSymbol} />
 
       <PendingProposalsPanel
         onSelect={openPositionSymbol}

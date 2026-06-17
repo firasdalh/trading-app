@@ -14,7 +14,9 @@ const STATUS_STYLE: Record<string, string> = {
 
 // Armed / pending ('wait for the break') setups. On a confirmed trigger the system re-checks the
 // trade and only then opens it (Hybrid / Modes B-C) or queues it for approval (Mode A).
-export function ConditionalsPanel() {
+export function ConditionalsPanel({ onSelect }: {
+  onSelect?: (p: { symbol: string; asset_class: string }) => void;  // open on the chart
+} = {}) {
   const [bump, setBump] = useState(0);
   const { data } = usePolling(() => api.conditionals(), 10000, [bump]);
   const items: ConditionalSetupView[] = data ?? [];
@@ -46,7 +48,13 @@ export function ConditionalsPanel() {
         {visible.map((s) => (
           <div key={s.id} className="rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2">
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-semibold">{s.symbol}</span>
+              <button
+                onClick={() => onSelect?.({ symbol: s.symbol, asset_class: s.asset_class })}
+                className="font-semibold hover:text-blue-400 hover:underline"
+                title="Open on the chart"
+              >
+                {s.symbol}
+              </button>
               <span className="text-xs text-neutral-500">{s.timeframe}</span>
               <span className={`text-[10px] font-bold uppercase ${s.direction === "long" ? "text-bull" : "text-bear"}`}>
                 {s.direction}
