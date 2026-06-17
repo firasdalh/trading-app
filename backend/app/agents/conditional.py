@@ -214,10 +214,11 @@ def _fire(session: Session, s: ConditionalSetup) -> int:
 
 
 def check_conditional_setups(session: Session) -> dict:
-    """One pass: expire stale armed setups, then fire any whose trigger is hit (with re-check)."""
+    """One pass: expire stale armed setups, cancel any whose symbol is already open at the broker,
+    then fire any whose trigger is hit (with re-check)."""
     armed = active_armed(session)
     if not armed:
-        return {"checked": 0, "triggered": 0, "expired": 0}
+        return {"checked": 0, "triggered": 0, "expired": 0, "cancelled": 0}
 
     settings = get_or_create_settings(session)
     now = datetime.now(timezone.utc)
@@ -229,6 +230,24 @@ def check_conditional_setups(session: Session) -> dict:
             session.add(s)
             expired += 1
     if expired:
+        session.commit()
+        armed = [s for s in armed if s.status == ConditionalStatus.ARMED.value]
+
+    # A symbol already open at the broker makes its armed setup redundant — you're in the trade, and
+    # firing it would only get blocked by anti-stacking. Auto-cancel it so it can't double up and the
+    # panel stays honest. (live_broker_positions returns [] on an outage -> we never cancel blindly.)
+    try:
+        open_syms = {_norm_symbol(p.symbol) for p in live_broker_positions(session)}
+    except Exception:  # noqa: BLE001
+        open_syms = set()
+    cancelled = 0
+    for s in armed:
+        if _norm_symbol(s.symbol) in open_syms:
+            s.status = ConditionalStatus.CANCELLED.value
+            s.last_note = "auto-cancelled — a position is already open for this symbol"
+            session.add(s)
+            cancelled += 1
+    if cancelled:
         session.commit()
         armed = [s for s in armed if s.status == ConditionalStatus.ARMED.value]
 
@@ -272,4 +291,4 @@ def check_conditional_setups(session: Session) -> dict:
         triggered += _fire(session, s)
 
     session.commit()
-    return {"checked": len(armed), "triggered": triggered, "expired": expired}
+    return {"checked": len(armed), "triggered": triggered, "expired": expired, "cancelled": cancelled}

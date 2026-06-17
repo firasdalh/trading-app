@@ -174,6 +174,19 @@ def test_hybrid_arms_blocked_candidates(db_session, monkeypatch):
                for a in armed)
 
 
+def test_armed_auto_cancelled_when_symbol_already_open(db_session, monkeypatch):
+    """If a position for the symbol is already open at the broker, the armed setup is redundant and
+    is auto-cancelled (so a trigger can't try to stack a second position)."""
+    s = _arm(db_session)  # UKOILm short armed
+    monkeypatch.setattr(cond, "kill_switch_active", lambda s: False)
+    monkeypatch.setattr(cond, "live_broker_positions",
+                        lambda s: [SimpleNamespace(symbol="UKOILm", direction="short")])
+    out = cond.check_conditional_setups(db_session)
+    assert out["cancelled"] == 1
+    db_session.refresh(s)
+    assert s.status == "cancelled" and "already open" in (s.last_note or "")
+
+
 def test_arm_conditional_dedups_same_symbol_direction(db_session, monkeypatch):
     monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
     first = cond.arm_conditional(db_session, symbol="UKOILm", asset_class="energy", timeframe="1h",
