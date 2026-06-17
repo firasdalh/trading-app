@@ -124,18 +124,11 @@ def test_trigger_rejected_after_max_retries(db_session, monkeypatch):
     assert s.status == "rejected" and s.retries == cond._MAX_RETRIES
 
 
-def test_invalidated_when_price_reaches_stop_before_trigger(db_session, monkeypatch):
-    s = _arm(db_session)                       # sell_stop short, trigger 78.2, stop 78.4
-    _stub_market(monkeypatch, price=78.5)      # above the stop -> the break idea is dead
-    out = cond.check_conditional_setups(db_session)
-    assert out["triggered"] == 0
-    db_session.refresh(s)
-    assert s.status == "rejected" and "invalidated" in (s.last_note or "")
-
-
-def test_no_trigger_when_price_between_trigger_and_stop(db_session, monkeypatch):
+def test_no_trigger_when_price_above_sell_stop_trigger(db_session, monkeypatch):
+    # A break short sits ABOVE its trigger (and its stop) until the break — it must stay ARMED,
+    # not be wrongly invalidated for being on the far side of the stop.
     s = _arm(db_session)
-    _stub_market(monkeypatch, price=78.3)  # above trigger 78.2, below stop 78.4 -> wait, still armed
+    _stub_market(monkeypatch, price=78.5)  # above trigger 78.2 and above stop 78.4 -> still waiting
     out = cond.check_conditional_setups(db_session)
     assert out["triggered"] == 0
     db_session.refresh(s)

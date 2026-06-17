@@ -41,14 +41,6 @@ def _cooldown_minutes(timeframe: str) -> int:
     return _TF_MINUTES.get(timeframe, 60)
 
 
-def _invalidated(direction: str, price: float, stop_loss: float | None) -> bool:
-    """The idea is dead if price has already reached where the trade's stop would sit — i.e. the
-    break failed and reversed past it — so we shouldn't keep re-arming a clearly-broken setup."""
-    if stop_loss is None:
-        return False
-    return price >= stop_loss if direction == "short" else price <= stop_loss
-
-
 def _aware(dt: datetime) -> datetime:
     """SQLite may hand back naive datetimes; treat them as UTC for comparison."""
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -264,16 +256,9 @@ def check_conditional_setups(session: Session) -> dict:
             except Exception:  # noqa: BLE001 - fall back to the live quote
                 pass
 
-        # Invalidation: the break failed and price reached where the stop would sit -> drop it.
-        if _invalidated(s.direction, ref, s.stop_loss):
-            s.status = ConditionalStatus.REJECTED.value
-            s.last_note = "invalidated — price reached the stop level before triggering"
-            session.add(s)
-            log.info("conditional invalidated", extra={"symbol": s.symbol})
-            continue
-
         if not _crossed(s.order_type, ref, s.trigger_price):
-            continue
+            continue  # trigger not reached yet — keep waiting (a break order sits on the far side
+            # of its stop until the break, so there is no "price reached the stop" invalidation here)
 
         # Trigger hit.
         if ks:
