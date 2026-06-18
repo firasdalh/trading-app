@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
-import { fmtPrice } from "../format";
+import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import { ArmSetupButton } from "./ArmSetupButton";
 import { ReviewExplanation } from "./ReviewExplanation";
@@ -160,6 +160,14 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                   <div className="mt-1 text-xs tabular-nums text-neutral-400">
                     entry {fmtPrice(o.entry)} · SL <span className="text-bear">{fmtPrice(o.stop_loss)}</span> · TP{" "}
                     <span className="text-bull">{fmtPrice(o.take_profit)}</span>
+                  </div>
+                )}
+                {actionable && o.lots != null && o.lots > 0 && (
+                  <div className="mt-0.5 text-xs tabular-nums">
+                    <span className="text-neutral-500">would open</span>{" "}
+                    <span className="text-neutral-200">{o.lots} lots</span>
+                    {o.risk_usd != null && <> · risk <span className="text-bear">{fmtUsd(o.risk_usd)}</span></>}
+                    {o.reward_usd != null && <> · reward <span className="text-bull">{fmtUsd(o.reward_usd)}</span></>}
                   </div>
                 )}
                 <p className="mt-1 text-xs leading-relaxed text-neutral-500">

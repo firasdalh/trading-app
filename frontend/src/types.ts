@@ -328,6 +328,9 @@ export interface OpportunityView {
   risk_reason: string | null;
   already_open: boolean;
   conditional?: ConditionalSuggestion | null;
+  lots?: number | null;        // size that would be opened
+  risk_usd?: number | null;
+  reward_usd?: number | null;
 }
 
 export interface WatchItem {

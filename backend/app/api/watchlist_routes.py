@@ -143,6 +143,9 @@ class OpportunityView(BaseModel):
     risk_reason: str | None = None
     already_open: bool = False
     conditional: ConditionalSuggestion | None = None  # break-entry to arm if blocked by structure
+    lots: float | None = None       # the size that would be opened (Risk Manager, in lots)
+    risk_usd: float | None = None   # $ risk at that size
+    reward_usd: float | None = None # $ reward to target (risk × R)
 
 
 @router.get("/opportunities", response_model=list[OpportunityView])
@@ -176,13 +179,18 @@ def opportunities(
         if prop.entry and prop.stop_loss and prop.take_profit:
             risk = abs(prop.entry - prop.stop_loss)
             rr = round(abs(prop.take_profit - prop.entry) / risk, 2) if risk else None
+        # The size the Risk Manager would open, and the $ risk/reward at it (already computed in
+        # assess — no extra broker call). reward = risk × R.
+        lots = round(dec.approved_qty, 2) if dec.approved_qty else None
+        risk_usd = round(dec.risk_amount, 2) if dec.risk_amount else None
+        reward_usd = round(risk_usd * rr, 2) if (risk_usd and rr) else None
         return OpportunityView(
             symbol=it.symbol, asset_class=it.asset_class, timeframe=it.timeframe,
             direction=prop.direction.value, entry=prop.entry, stop_loss=prop.stop_loss,
             take_profit=prop.take_profit, rr=rr, confidence=prop.confidence, watch=prop.watch,
             rationale=prop.rationale, risk_approved=dec.approved, risk_decision=dec.decision.value,
             risk_reason=dec.reason, already_open=it.symbol.upper() in open_syms,
-            conditional=prop.conditional,
+            conditional=prop.conditional, lots=lots, risk_usd=risk_usd, reward_usd=reward_usd,
         )
 
     # Pass 1 — rank the whole list with the deterministic engine (cheap, no LLM quota).
