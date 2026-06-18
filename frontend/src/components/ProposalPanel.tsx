@@ -73,7 +73,7 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
     };
   }, [proposalId, actionable]);
 
-  // Re-price at a user-entered lot size (the backend clamps to the 2% per-trade ceiling).
+  // Re-price at a user-entered lot size (the backend clamps to the 3% per-trade ceiling).
   const reprice = async (val: string) => {
     if (!proposalId) return;
     const n = Number(val);
@@ -227,9 +227,9 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
                   type="button"
                   onClick={() => reprice(String(maxLots))}
                   className="mb-0.5 text-xs text-neutral-400 hover:text-neutral-200"
-                  title="Set the maximum size allowed by the 2% per-trade risk cap"
+                  title="Set the maximum size allowed by the 3% per-trade risk cap"
                 >
-                  max {maxLots} lots (2% cap)
+                  max {maxLots} lots (3% cap)
                 </button>
               )}
             </div>
