@@ -23,7 +23,7 @@ export function PositionsTable({ positions, onClose, onSetSlTp, onSelect }: Prop
               <tr>
                 <th className="px-2 py-2">Symbol</th>
                 <th className="px-2 py-2">Side</th>
-                <th className="px-2 py-2 text-right">Qty</th>
+                <th className="px-2 py-2 text-right" title="Position size in lots (what the broker holds)">Lots</th>
                 <th className="px-2 py-2 text-right" title="Margin required to hold the position (cost to open), in USD">
                   Cost
                 </th>
