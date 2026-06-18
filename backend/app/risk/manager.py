@@ -56,21 +56,25 @@ def size_position(
     entry: float,
     stop_loss: float,
     qty_step: float | None = None,
+    risk_per_lot: float | None = None,
 ) -> tuple[float, float]:
-    """Return (qty, risk_amount) for a target risk fraction of equity.
+    """Return (lots, risk_amount) for a target risk fraction of equity.
 
-    qty = (equity * risk_fraction) / |entry - stop|, floored to a tradable step.
-    risk_amount is recomputed from the *floored* qty so it reflects reality, not the target.
+    lots = (equity * risk_fraction) / risk_per_lot, floored to a tradable step.
+    ``risk_per_lot`` is the ACCOUNT-CURRENCY loss of one lot over the stop (currency-correct, from
+    the broker). When omitted it falls back to ``|entry - stop|`` — correct only when the quote
+    currency IS the account currency (the sim/USD path); the service always supplies the real value
+    for live brokers. risk_amount is recomputed from the *floored* lots so it reflects reality.
     """
-    stop_distance = abs(entry - stop_loss)
-    if stop_distance <= 0:
+    per_lot = risk_per_lot if (risk_per_lot and risk_per_lot > 0) else abs(entry - stop_loss)
+    if per_lot <= 0:
         return 0.0, 0.0
     target_risk = equity * risk_fraction
-    raw_qty = target_risk / stop_distance
+    raw_qty = target_risk / per_lot
     qty = _floor_to_step(raw_qty, qty_step)
     if qty <= _QTY_EPS:
         return 0.0, 0.0
-    return qty, qty * stop_distance
+    return qty, qty * per_lot
 
 
 def evaluate_proposal(
@@ -86,6 +90,7 @@ def evaluate_proposal(
     has_open_same_direction: bool = False,
     correlated_exposure: str | None = None,
     not_tradeable_reason: str | None = None,
+    risk_per_lot: float | None = None,
 ) -> RiskDecision:
     """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
 
@@ -198,7 +203,7 @@ def evaluate_proposal(
     # --- 6. size from risk-per-trade ---
     qty, risk_amount = size_position(
         equity=account.equity, risk_fraction=risk_fraction,
-        entry=entry, stop_loss=stop, qty_step=qty_step,
+        entry=entry, stop_loss=stop, qty_step=qty_step, risk_per_lot=risk_per_lot,
     )
     if qty <= _QTY_EPS:
         return _veto(symbol, "computed position size is zero (stop too wide for risk budget)", checks)
@@ -212,13 +217,10 @@ def evaluate_proposal(
 
     decision_type = RiskDecisionType.APPROVED
     if risk_amount > remaining:
-        # Shrink to fit the remaining exposure budget.
-        stop_distance = abs(entry - stop)
-        qty, risk_amount = (
-            _floor_to_step(remaining / stop_distance, qty_step),
-            0.0,
-        )
-        risk_amount = qty * stop_distance
+        # Shrink to fit the remaining exposure budget (per-lot risk in account currency).
+        per_lot = risk_per_lot if (risk_per_lot and risk_per_lot > 0) else abs(entry - stop)
+        qty = _floor_to_step(remaining / per_lot, qty_step) if per_lot > 0 else 0.0
+        risk_amount = qty * per_lot
         decision_type = RiskDecisionType.RESIZED
         if qty <= _QTY_EPS:
             return _veto(symbol, "exposure budget too small to size any position", checks)

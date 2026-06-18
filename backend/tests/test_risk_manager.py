@@ -88,6 +88,21 @@ def test_risk_per_trade_ceiling_is_enforced():
     assert d.approved_qty == 400.0
 
 
+def test_size_position_sizes_by_account_ccy_risk_per_lot():
+    from app.risk.manager import size_position
+    # $1000 equity, 3% budget = $30. With a currency-correct $20 risk-per-lot -> 1.5 lots, $30 risk.
+    lots, risk = size_position(equity=1000.0, risk_fraction=0.03, entry=100.0, stop_loss=99.0,
+                               risk_per_lot=20.0)
+    assert lots == 1.5 and risk == 30.0
+
+
+def test_size_position_falls_back_to_price_distance():
+    from app.risk.manager import size_position
+    # No risk_per_lot -> legacy |entry-stop| basis (correct for the USD-quoted / sim path).
+    lots, risk = size_position(equity=1000.0, risk_fraction=0.03, entry=100.0, stop_loss=99.0)
+    assert lots == 30.0 and risk == 30.0
+
+
 # ----------------------------------------------------------------- vetoes ----
 
 

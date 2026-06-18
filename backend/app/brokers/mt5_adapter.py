@@ -239,16 +239,33 @@ class Mt5BrokerAdapter(BrokerAdapter):
 
     # ---- orders ----
 
-    def _units_to_lots(self, info, units: float) -> float:
-        contract = float(getattr(info, "trade_contract_size", 1) or 1)
+    def _clamp_lots(self, info, lots: float) -> float:
+        """Clamp a LOT size to the symbol's step/min/max. Qty is in LOTS everywhere now (matching
+        what MT5 accepts), so there is no units->lots conversion here."""
         step = float(getattr(info, "volume_step", 0.01) or 0.01)
         vmin = float(getattr(info, "volume_min", step) or step)
         vmax = float(getattr(info, "volume_max", 1e9) or 1e9)
-        lots = units / contract if contract else units
-        # Floor to the step so we never round risk up; clamp to [min, max].
-        lots = (int(lots / step) * step) if step else lots
+        lots = (int(lots / step) * step) if step else lots   # floor to step (never round risk up)
         lots = max(vmin, min(vmax, lots))
-        return round(lots, 2)
+        ndp = len(str(step).split(".")[1]) if "." in str(step) else 0
+        return round(lots, ndp or 2)
+
+    def risk_per_lot(self, symbol: str, entry: float, stop: float) -> float | None:
+        """Account-currency loss of 1 lot moving entry->stop, via order_calc_profit (MT5 converts
+        FX, so a JPY pair / HKD index is reported in the USD account). None on failure."""
+        mt5 = self._mt5
+        try:
+            if not entry or not stop or entry == stop:
+                return None
+            sym = self._resolve_symbol(symbol)
+            order_type = getattr(mt5, "ORDER_TYPE_BUY", 0)
+            profit = mt5.order_calc_profit(order_type, sym, 1.0, float(entry), float(stop))
+            if profit is None:
+                return None
+            loss = abs(float(profit))
+            return loss if loss > 0 else None
+        except Exception:  # noqa: BLE001 - best-effort; caller falls back to price-distance sizing
+            return None
 
     def _filling(self, info):
         mt5 = self._mt5
@@ -268,7 +285,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
             tick = mt5.symbol_info_tick(sym)
             is_buy = request.side == OrderSide.BUY
             price = float(tick.ask if is_buy else tick.bid)
-            lots = self._units_to_lots(info, request.qty)
+            lots = self._clamp_lots(info, request.qty)   # request.qty is in LOTS
 
             req: dict = {
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -311,12 +328,10 @@ class Mt5BrokerAdapter(BrokerAdapter):
         views: list[PositionView] = []
         for i, p in enumerate(positions):
             is_long = p.type == getattr(mt5, "POSITION_TYPE_BUY", 0)
-            info = mt5.symbol_info(p.symbol)
-            contract = float(getattr(info, "trade_contract_size", 1) or 1) if info else 1.0
             views.append(PositionView(
                 id=i + 1, symbol=p.symbol, asset_class=AssetClass.FOREX.value,
                 direction="long" if is_long else "short",
-                qty=round(float(p.volume) * contract, 2),  # lots -> units, to match our sizing
+                qty=round(float(p.volume), 2),  # LOTS (qty is in lots everywhere now)
                 entry_price=float(p.price_open),
                 stop_loss=float(p.sl) or None, take_profit=float(p.tp) or None,
                 status="open", last_price=float(p.price_current),
@@ -343,8 +358,8 @@ class Mt5BrokerAdapter(BrokerAdapter):
         except Exception:  # noqa: BLE001 - margin is best-effort; never break the positions list
             return None
 
-    def quote_economics(self, symbol: str, qty_units: float, price: float, is_long: bool) -> dict | None:
-        """Cost/leverage of a HYPOTHETICAL order of ``qty_units`` at ``price`` (pre-trade).
+    def quote_economics(self, symbol: str, lots: float, price: float, is_long: bool) -> dict | None:
+        """Cost/leverage of a HYPOTHETICAL order of ``lots`` at ``price`` (pre-trade).
 
         Returns {lots, margin_usd, notional_usd, leverage}. MT5 does all currency conversion
         (``order_calc_margin``/``order_calc_profit``), so an HKD index is reported in the USD
@@ -354,7 +369,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
         try:
             sym = self._resolve_symbol(symbol)
             info = self._symbol_info(sym)
-            lots = self._units_to_lots(info, qty_units)
+            lots = self._clamp_lots(info, lots)
             order_type = getattr(mt5, "ORDER_TYPE_BUY", 0) if is_long else getattr(mt5, "ORDER_TYPE_SELL", 1)
             margin = mt5.order_calc_margin(order_type, sym, lots, float(price))
             margin = float(margin) if margin is not None else None

@@ -99,12 +99,13 @@ def test_ohlcv_mapping():
     assert s.candles[0].close == 1.105
 
 
-def test_units_to_lots_conversion():
+def test_clamp_lots_to_step_and_min():
+    # Qty is in LOTS everywhere now; the adapter only clamps to the symbol's step/min/max.
     a = _adapter()
     info = a._mt5.symbol_info("EURUSD")
-    assert a._units_to_lots(info, 100000) == 1.0     # 1 standard lot
-    assert a._units_to_lots(info, 150000) == 1.5
-    assert a._units_to_lots(info, 1000) == 0.01      # floored to volume_step, clamped to min
+    assert a._clamp_lots(info, 1.0) == 1.0
+    assert a._clamp_lots(info, 1.5) == 1.5
+    assert a._clamp_lots(info, 0.005) == 0.01        # clamped up to the broker minimum lot
 
 
 def test_account():
@@ -116,7 +117,7 @@ def test_submit_order_filled_buy():
     a = _adapter()
     res = a.submit_order(OrderRequest(symbol="EUR/USD", asset_class=AssetClass.FOREX,
                                       side=OrderSide.BUY, order_type=OrderType.MARKET,
-                                      qty=100000, stop_loss=1.095, take_profit=1.110))
+                                      qty=1.0, stop_loss=1.095, take_profit=1.110))   # qty in LOTS
     assert res.status == OrderStatus.FILLED
     assert res.avg_fill_price == 1.1002      # filled at ask for a buy
     assert res.filled_qty == 1.0             # lots
@@ -188,11 +189,11 @@ def test_set_sl_tp_clamps_to_min_stop_distance():
     assert fake.sent["sl"] == round(4434.90 + 0.50, 2)  # pushed to ask + min_dist = 4435.40
 
 
-def test_open_positions_lots_to_units():
+def test_open_positions_returns_lots():
     views = _adapter().get_open_positions()
     assert len(views) == 1
     assert views[0].direction == "long"
-    assert views[0].qty == 100000.0  # 1.0 lot * contract_size 100000
+    assert views[0].qty == 1.0  # LOTS (qty is in lots everywhere now)
 
 
 def test_serialized_mt5_passes_constants_and_serializes_calls():

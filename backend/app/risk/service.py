@@ -302,6 +302,25 @@ def broker_has_open_same_direction(session: Session, symbol: str, direction: str
     return any(_norm_symbol(p.symbol) == norm and p.direction == direction for p in positions)
 
 
+def _risk_per_lot(broker, symbol: str, entry: float | None, stop: float | None) -> float | None:
+    """Account-currency risk of 1 lot over the stop — the broker's value if available (currency-
+    correct via order_calc_profit), else ``|entry-stop| × contract_size`` (correct only when the
+    quote currency IS the account currency, e.g. the sim/USD path)."""
+    if not entry or not stop or entry == stop:
+        return None
+    try:
+        rpl = broker.risk_per_lot(symbol, entry, stop)
+        if rpl and rpl > 0:
+            return rpl
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        contract = broker.contract_size(symbol) or 1.0
+    except Exception:  # noqa: BLE001
+        contract = 1.0
+    return abs(entry - stop) * contract
+
+
 def assess(
     session: Session,
     proposal: TradeProposal,
@@ -352,6 +371,7 @@ def assess(
         has_open_same_direction=same_dir,
         correlated_exposure=correlated,
         not_tradeable_reason=not_tradeable,
+        risk_per_lot=_risk_per_lot(broker, proposal.symbol, proposal.entry, proposal.stop_loss),
     )
 
 
@@ -371,14 +391,12 @@ def proposal_from_record(record) -> TradeProposal:
     )
 
 
-def _risk_fraction_for_lots(
-    *, lots: float, contract_size: float, stop_distance: float, equity: float
-) -> float | None:
-    """The per-trade risk fraction that a desired LOT size implies. None if not computable."""
-    if lots <= 0 or stop_distance <= 0 or equity <= 0:
+def _risk_fraction_for_lots(*, lots: float, risk_per_lot: float | None, equity: float) -> float | None:
+    """The per-trade risk fraction that a desired LOT size implies (lots × account-ccy risk-per-lot
+    ÷ equity). None if not computable."""
+    if lots <= 0 or not risk_per_lot or risk_per_lot <= 0 or equity <= 0:
         return None
-    units = lots * (contract_size or 1.0)
-    return (units * stop_distance) / equity
+    return (lots * risk_per_lot) / equity
 
 
 def size_preview(session: Session, record, desired_lots: float | None = None) -> dict:
@@ -398,47 +416,42 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
     equity = account.equity
     entry = record.entry or 0.0
     stop = record.stop_loss or 0.0
-    stop_distance = abs(entry - stop)
-    contract = 1.0
-    try:
-        contract = broker.contract_size(record.symbol)
-    except Exception:  # noqa: BLE001
-        pass
+    rpl = _risk_per_lot(broker, record.symbol, entry, stop)   # account-ccy risk of 1 lot
 
     override_rf = None
     if desired_lots is not None:
-        override_rf = _risk_fraction_for_lots(
-            lots=desired_lots, contract_size=contract, stop_distance=stop_distance, equity=equity
-        )
+        override_rf = _risk_fraction_for_lots(lots=desired_lots, risk_per_lot=rpl, equity=equity)
 
     decision = assess(session, proposal, override_risk_fraction=override_rf)
 
     qty_step = _QTY_STEP.get(proposal.asset_class)
     ceiling = limits.risk_per_trade_ceiling
 
-    # Size used for the economics: the approved qty when the trade is allowed; otherwise the
-    # would-be sized qty (so the cost is still shown even when a gate like the daily-loss pause
-    # would block the trade). Both honour the clamped risk fraction + exposure budget.
+    # Size used for the economics: the approved LOTS when allowed; otherwise the would-be sized lots
+    # (so the cost still shows even when a gate would block it). Both honour the clamped risk
+    # fraction + exposure budget, sized off the account-currency risk-per-lot.
     if decision.approved and decision.approved_qty > 0:
-        qty_units = decision.approved_qty
+        lots = decision.approved_qty
     else:
         rf = min(override_rf if override_rf is not None else limits.risk_per_trade, ceiling)
-        qty_units, risk_amt = size_position(
-            equity=equity, risk_fraction=rf, entry=entry, stop_loss=stop, qty_step=qty_step
+        lots, risk_amt = size_position(
+            equity=equity, risk_fraction=rf, entry=entry, stop_loss=stop,
+            qty_step=qty_step, risk_per_lot=rpl,
         )
         exposure_remaining = equity * limits.max_total_exposure - account.total_risk_amount
-        if stop_distance > 0 and risk_amt > exposure_remaining and exposure_remaining > 0:
+        if rpl and risk_amt > exposure_remaining and exposure_remaining > 0:
             from app.risk.manager import _floor_to_step
 
-            qty_units = _floor_to_step(exposure_remaining / stop_distance, qty_step)
+            lots = _floor_to_step(exposure_remaining / rpl, qty_step)
 
-    # The 2% ceiling expressed back in lots, so the UI can show/limit the cap.
+    # The per-trade ceiling expressed in lots, so the UI can show/limit the cap.
     max_lots = None
-    if stop_distance > 0 and equity > 0:
-        ceiling_units, _ = size_position(
-            equity=equity, risk_fraction=ceiling, entry=entry, stop_loss=stop, qty_step=qty_step
+    if equity > 0:
+        ceiling_lots, _ = size_position(
+            equity=equity, risk_fraction=ceiling, entry=entry, stop_loss=stop,
+            qty_step=qty_step, risk_per_lot=rpl,
         )
-        max_lots = round(ceiling_units / (contract or 1.0), 2)
+        max_lots = round(ceiling_lots, 2)
 
     # Was the user's requested size reduced?
     capped = decision.decision == RiskDecisionType.RESIZED or (
@@ -446,10 +459,10 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
     )
 
     is_long = record.direction == "long"
-    econ = broker.quote_economics(record.symbol, qty_units, entry, is_long) or {}
+    econ = broker.quote_economics(record.symbol, lots, entry, is_long) or {}
     economics = {
         "lots": econ.get("lots"),
-        "qty_units": round(qty_units, 4) if qty_units else 0.0,
+        "qty_units": round(lots, 4) if lots else 0.0,
         "margin_usd": econ.get("margin_usd"),
         "notional_usd": econ.get("notional_usd"),
         "leverage": econ.get("leverage"),
