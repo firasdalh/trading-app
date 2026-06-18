@@ -47,12 +47,14 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
       // Mode A leaves it pending approval; approve to execute. Mode B already auto-executed.
       if (res.status === "pending_approval") await api.approve(res.proposal_id);
       onOpened?.();
-      await scan(); // refresh the list (the pair is now open)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      // Free the button the instant the trade is opened — don't hold it through the (slow,
+      // LLM-backed) list re-scan below.
       setOpeningKey(null);
     }
+    void scan();  // refresh the list in the background (its own "Scanning…" state); the pair is now open
   };
 
   const actionableCount = items?.filter(
