@@ -140,6 +140,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
 
   const { data: account } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
   const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
+  // Armed conditional setups — overlaid on the chart (trigger/SL/TP) for the charted symbol.
+  const { data: conditionals } = usePolling(() => api.conditionals(), 10000, []);
+  const armedLevels = (conditionals ?? []).filter((c) => c.status === "armed");
 
   const closePosition = async (p: { symbol: string; asset_class: string }) => {
     try {
@@ -384,6 +387,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           proposal={result?.proposal ?? null}
           liveQuote={liveQuote}
           positions={positions}
+          armed={armedLevels}
         />
         <p className="mt-2 text-xs text-neutral-500">
           Backtest and paper results do not guarantee live results.

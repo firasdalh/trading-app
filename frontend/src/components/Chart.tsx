@@ -18,6 +18,14 @@ import { fmtPrice } from "../format";
 import type { AssetClass, Candle, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
+export interface ArmedLevel {
+  symbol: string;
+  order_type: string;
+  trigger_price: number;
+  stop_loss: number | null;
+  take_profit: number | null;
+}
+
 interface Props {
   symbol: string;
   assetClass: AssetClass;
@@ -25,6 +33,7 @@ interface Props {
   proposal: TradeProposal | null;
   liveQuote: LiveQuote | null;
   positions: PositionView[] | null;
+  armed?: ArmedLevel[];
 }
 
 const EMA_CONFIG = [
@@ -115,7 +124,7 @@ function usdAtLevel(pos: PositionView, level: number | null | undefined): string
   return `${usd >= 0 ? "+" : "−"}$${Math.abs(usd).toFixed(2)}`;
 }
 
-export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions }: Props) {
+export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -133,6 +142,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const lastBarRef = useRef<CandlestickData | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
+  const armedLinesRef = useRef<IPriceLine[]>([]);
 
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = useState<Record<number, boolean>>({ 50: true, 100: false, 200: true });
@@ -490,6 +500,29 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       add(p.take_profit, "#26a69a", `TP ${tpUsd}`.trim());
     }
   }, [positions, symbol]);
+
+  // Armed conditional ('wait for the break') overlay — large-dashed amber lines for THIS symbol's
+  // armed setups, so the pending trigger/SL/TP are visible on the chart distinct from proposal
+  // (dashed) and open-position (solid) lines.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    armedLinesRef.current.forEach((l) => series.removePriceLine(l));
+    armedLinesRef.current = [];
+    const mine = (armed ?? []).filter((a) => a.symbol.toUpperCase() === symbol.toUpperCase());
+    const add = (price: number | null, color: string, title: string) => {
+      if (price == null) return;
+      armedLinesRef.current.push(
+        series.createPriceLine({ price, color, lineWidth: 1, lineStyle: LineStyle.LargeDashed,
+                                 axisLabelVisible: true, title }),
+      );
+    };
+    for (const a of mine) {
+      add(a.trigger_price, "#f59e0b", "⚡ Arm");   // amber trigger
+      add(a.stop_loss, "#ef5350", "⚡ SL");
+      add(a.take_profit, "#26a69a", "⚡ TP");
+    }
+  }, [armed, symbol]);
 
   const change = legend ? legend.close - legend.open : 0;
   const changePct = legend && legend.open ? (change / legend.open) * 100 : 0;
