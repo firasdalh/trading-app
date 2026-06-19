@@ -372,34 +372,34 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         </div>
       )}
 
-      {/* Main grid: chart + side panels */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="card lg:col-span-2">
-          <div className="mb-2 text-sm font-semibold">
-            {symbol} · {timeframe}
-          </div>
-          <Chart
-            symbol={symbol}
-            assetClass={assetClass}
-            timeframe={timeframe}
-            proposal={result?.proposal ?? null}
-            liveQuote={liveQuote}
-            positions={positions}
-          />
-          <p className="mt-2 text-xs text-neutral-500">
-            Backtest and paper results do not guarantee live results.
-          </p>
+      {/* Chart — full width so it gets the whole row (bigger, bordered) */}
+      <div className="card border-2 border-neutral-700">
+        <div className="mb-2 text-sm font-semibold">
+          {symbol} · {timeframe}
         </div>
-        <ProposalPanel
-          result={result}
-          status={status}
-          positionOpen={positionOpen}
-          busy={actionBusy}
-          equity={account?.equity ?? null}
-          onApprove={approve}
-          onReject={reject}
+        <Chart
+          symbol={symbol}
+          assetClass={assetClass}
+          timeframe={timeframe}
+          proposal={result?.proposal ?? null}
+          liveQuote={liveQuote}
+          positions={positions}
         />
+        <p className="mt-2 text-xs text-neutral-500">
+          Backtest and paper results do not guarantee live results.
+        </p>
       </div>
+
+      {/* Analysis — below the chart, full width (frees the whole row for the chart above) */}
+      <ProposalPanel
+        result={result}
+        status={status}
+        positionOpen={positionOpen}
+        busy={actionBusy}
+        equity={account?.equity ?? null}
+        onApprove={approve}
+        onReject={reject}
+      />
 
       <WatchlistPanel
         currentSymbol={symbol}

@@ -566,7 +566,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         </div>
       )}
 
-      <div ref={containerRef} className="h-[420px] w-full" />
+      <div ref={containerRef} className="h-[600px] w-full" />
       {showRsi && (
         <div className="relative mt-1">
           <span className="pointer-events-none absolute left-2 top-1 z-10 text-xs text-purple-300">RSI 14</span>
