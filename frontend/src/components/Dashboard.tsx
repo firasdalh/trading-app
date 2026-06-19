@@ -394,16 +394,19 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         </p>
       </div>
 
-      {/* Analysis — below the chart, full width (frees the whole row for the chart above) */}
-      <ProposalPanel
-        result={result}
-        status={status}
-        positionOpen={positionOpen}
-        busy={actionBusy}
-        equity={account?.equity ?? null}
-        onApprove={approve}
-        onReject={reject}
-      />
+      {/* Analysis (left) + Armed/pending setups (right), side by side below the chart */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <ProposalPanel
+          result={result}
+          status={status}
+          positionOpen={positionOpen}
+          busy={actionBusy}
+          equity={account?.equity ?? null}
+          onApprove={approve}
+          onReject={reject}
+        />
+        <ConditionalsPanel onSelect={openPositionSymbol} />
+      </div>
 
       <WatchlistPanel
         currentSymbol={symbol}
@@ -421,8 +424,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         onSelect={openPositionSymbol}
         onOpened={() => setPosBump((b) => b + 1)}
       />
-
-      <ConditionalsPanel onSelect={openPositionSymbol} />
 
       <PendingProposalsPanel
         onSelect={openPositionSymbol}

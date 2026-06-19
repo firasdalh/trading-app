@@ -43,7 +43,18 @@ export function ConditionalsPanel({ onSelect }: {
     }
   };
 
-  if (visible.length === 0) return null; // nothing armed yet — keep the dashboard clean
+  if (visible.length === 0) {
+    // Placeholder so the side-by-side column isn't blank when nothing is armed.
+    return (
+      <div className="card">
+        <div className="mb-1 text-sm font-semibold">Armed / pending setups</div>
+        <p className="text-xs text-neutral-500">
+          No armed setups. The Hybrid arms “wait for the break” setups here, or you can arm one from
+          a scan/analysis suggestion — its trigger then shows on the chart.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="card">
