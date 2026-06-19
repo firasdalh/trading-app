@@ -30,12 +30,14 @@ interface Props {
   equity?: number | null;
   onApprove: (lots?: number | null) => void;
   onReject: () => void;
+  onRunAnalysis?: () => void;   // re-run analysis for the charted symbol (same as the top button)
+  analyzing?: boolean;
 }
 
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (2%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, busy, equity, onApprove, onReject }: Props) {
+export function ProposalPanel({ result, status, positionOpen, busy, equity, onApprove, onReject, onRunAnalysis, analyzing }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -94,8 +96,17 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
 
   if (!result) {
     return (
-      <div className="card text-sm text-neutral-400">
-        No proposal yet. Pick a symbol and run analysis.
+      <div className="card space-y-2 text-sm text-neutral-400">
+        <div>No proposal yet. Pick a symbol and run analysis.</div>
+        {onRunAnalysis && (
+          <button
+            onClick={onRunAnalysis}
+            disabled={analyzing}
+            className="btn bg-blue-600 text-white hover:bg-blue-500"
+          >
+            {analyzing ? "Analyzing…" : "Run analysis"}
+          </button>
+        )}
       </div>
     );
   }
@@ -128,6 +139,16 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
         <div className="flex items-center gap-2">
           <ReviewBadge decision={proposal.review_decision} />
           <StatusBadge status={status} positionOpen={positionOpen} />
+          {onRunAnalysis && (
+            <button
+              onClick={onRunAnalysis}
+              disabled={analyzing}
+              className="btn bg-blue-600 text-white hover:bg-blue-500"
+              title="Re-run analysis for the charted symbol"
+            >
+              {analyzing ? "Analyzing…" : "Run analysis"}
+            </button>
+          )}
         </div>
       </div>
 

@@ -404,6 +404,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           equity={account?.equity ?? null}
           onApprove={approve}
           onReject={reject}
+          onRunAnalysis={runAnalysis}
+          analyzing={analyzing}
         />
         <ConditionalsPanel onSelect={openPositionSymbol} />
       </div>
