@@ -412,7 +412,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         currentSymbol={symbol}
         currentAsset={assetClass}
         currentTimeframe={timeframe}
-        mode={settings?.app.execution_mode}
         onSelect={(it) => {
           if (it.asset_class !== assetClass) setAssetClass(it.asset_class as AssetClass);
           setSymbol(it.symbol);

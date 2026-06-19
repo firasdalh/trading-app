@@ -1,19 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { displaySymbol } from "../format";
-import type { AssetClass, ExecutionMode, WatchlistResponse } from "../types";
+import type { AssetClass, WatchlistResponse } from "../types";
 
 interface Props {
   currentSymbol: string;
   currentAsset: AssetClass;
   currentTimeframe: string;
-  mode: ExecutionMode | undefined;
   onSelect?: (it: { symbol: string; asset_class: string; timeframe: string }) => void;
 }
 
-// Autonomous scanner control: the watched pairs, an on/off toggle, the scan interval, and
-// last-scan time. The AI analyzes these pairs on a schedule and acts per execution mode.
-export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, mode, onSelect }: Props) {
+// The watched pairs. The Hybrid auto-pilot scans these (the standalone auto-scanner toggle was
+// removed — Hybrid is the one scanner now). Add/remove pairs and click one to open it on the chart.
+export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, onSelect }: Props) {
   const [data, setData] = useState<WatchlistResponse | null>(null);
   const [busy, setBusy] = useState(false);
   // symbol (uppercase) -> instrument name, for hover tooltips. Fetched once per asset class.
@@ -60,66 +59,13 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
     }
   };
 
-  const autoOpens = mode === "B_AUTO_PAPER" || mode === "C_AUTO_LIVE";
-
   return (
     <div className="card space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold">Auto-scan watchlist</div>
-        <label className="flex items-center gap-2 text-sm">
-          <span className={data?.scan_enabled ? "text-bull" : "text-neutral-400"}>
-            {data?.scan_enabled ? "ON" : "OFF"}
-          </span>
-          <button
-            disabled={busy}
-            onClick={() => wrap(() => api.setScanConfig({ enabled: !data?.scan_enabled }))}
-            className={`relative h-5 w-10 rounded-full transition-colors ${
-              data?.scan_enabled ? "bg-bull" : "bg-neutral-700"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
-                data?.scan_enabled ? "left-5" : "left-0.5"
-              }`}
-            />
-          </button>
-        </label>
-      </div>
-
-      {/* What the scanner will do, given the current mode */}
-      <div
-        className={`rounded-md border px-2 py-1.5 text-xs ${
-          mode === "C_AUTO_LIVE"
-            ? "border-bear/50 bg-bear/10 text-bear"
-            : autoOpens
-              ? "border-warn/50 bg-warn/10 text-warn"
-              : "border-neutral-700 text-neutral-400"
-        }`}
-      >
-        {mode === "C_AUTO_LIVE"
-          ? "Mode C: scanner AUTO-OPENS live trades (real money) and the monitor auto-closes."
-          : mode === "B_AUTO_PAPER"
-            ? "Mode B: scanner auto-opens PAPER trades; the monitor auto-closes at stop/target."
-            : "Mode A: scanner queues proposals for your approval. Switch to Mode B/C in Settings to auto-open."}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <label className="flex items-center gap-1">
-          <span className="text-xs text-neutral-400">every</span>
-          <input
-            name="scan-interval"
-            type="number"
-            min={20}
-            max={3600}
-            value={data?.interval_seconds ?? 120}
-            onChange={(e) =>
-              setData((d) => (d ? { ...d, interval_seconds: Number(e.target.value) } : d))
-            }
-            onBlur={(e) => wrap(() => api.setScanConfig({ interval_seconds: Number(e.target.value) }))}
-            className="w-20 rounded bg-neutral-800 px-2 py-1"
-          />
-          <span className="text-xs text-neutral-400">s</span>
-        </label>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold">Watchlist</div>
+          <div className="text-xs text-neutral-500">Pairs the Hybrid auto-pilot scans.</div>
+        </div>
         <button
           disabled={busy}
           onClick={() => wrap(() => api.addWatch(currentSymbol, currentAsset, currentTimeframe))}
@@ -127,26 +73,6 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
         >
           + Add {currentSymbol} ({currentTimeframe})
         </button>
-        <button
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              await api.scanNow();
-              await load();
-            } finally {
-              setBusy(false);
-            }
-          }}
-          className="btn bg-blue-600 text-white hover:bg-blue-500"
-        >
-          Scan now
-        </button>
-        {data?.last_scan_at && (
-          <span className="text-xs text-neutral-500">
-            last scan {new Date(data.last_scan_at).toLocaleTimeString()}
-          </span>
-        )}
       </div>
 
       {!data || data.items.length === 0 ? (
@@ -163,42 +89,42 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
                 a.timeframe.localeCompare(b.timeframe),
             )
             .map((it) => {
-            const active =
-              it.symbol.toUpperCase() === currentSymbol.toUpperCase() &&
-              it.timeframe === currentTimeframe;
-            const name = descs[it.symbol.toUpperCase()];
-            return (
-              <span
-                key={it.id}
-                className={`flex items-center gap-2 rounded px-2 py-1 text-sm ${
-                  active ? "bg-blue-600 text-white" : "bg-neutral-800"
-                }`}
-              >
-                <button
-                  onClick={() => onSelect?.(it)}
-                  className="font-medium hover:underline"
-                  title={
-                    name
-                      ? `${name} — ${it.asset_class} · ${it.timeframe} (open on the chart)`
-                      : `Open ${displaySymbol(it.symbol)} (${it.asset_class} · ${it.timeframe}) on the chart`
-                  }
+              const active =
+                it.symbol.toUpperCase() === currentSymbol.toUpperCase() &&
+                it.timeframe === currentTimeframe;
+              const name = descs[it.symbol.toUpperCase()];
+              return (
+                <span
+                  key={it.id}
+                  className={`flex items-center gap-2 rounded px-2 py-1 text-sm ${
+                    active ? "bg-blue-600 text-white" : "bg-neutral-800"
+                  }`}
                 >
-                  {displaySymbol(it.symbol)}
-                </button>
-                <span className={`text-xs ${active ? "text-blue-100" : "text-neutral-500"}`}>
-                  {it.timeframe}
+                  <button
+                    onClick={() => onSelect?.(it)}
+                    className="font-medium hover:underline"
+                    title={
+                      name
+                        ? `${name} — ${it.asset_class} · ${it.timeframe} (open on the chart)`
+                        : `Open ${displaySymbol(it.symbol)} (${it.asset_class} · ${it.timeframe}) on the chart`
+                    }
+                  >
+                    {displaySymbol(it.symbol)}
+                  </button>
+                  <span className={`text-xs ${active ? "text-blue-100" : "text-neutral-500"}`}>
+                    {it.timeframe}
+                  </span>
+                  <button
+                    disabled={busy}
+                    onClick={() => wrap(() => api.removeWatch(it.id))}
+                    className={`hover:text-bear ${active ? "text-blue-200" : "text-neutral-500"}`}
+                    title="Remove from watchlist"
+                  >
+                    ✕
+                  </button>
                 </span>
-                <button
-                  disabled={busy}
-                  onClick={() => wrap(() => api.removeWatch(it.id))}
-                  className={`hover:text-bear ${active ? "text-blue-200" : "text-neutral-500"}`}
-                  title="Remove from watchlist"
-                >
-                  ✕
-                </button>
-              </span>
-            );
-          })}
+              );
+            })}
         </div>
       )}
     </div>
