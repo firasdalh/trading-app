@@ -40,6 +40,7 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
     },
   };
 }
+import { AccountBar } from "./AccountBar";
 import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
 import { ConditionalsPanel } from "./ConditionalsPanel";
@@ -261,6 +262,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-4 p-4">
+      {/* Always-visible account header: equity, day P&L, slots/exposure used, paused/kill-switch */}
+      <AccountBar account={account} risk={risk} settings={settings} positions={positions} />
+
       {/* Controls */}
       <div className="card flex flex-wrap items-end gap-3">
         <label className="text-sm">
