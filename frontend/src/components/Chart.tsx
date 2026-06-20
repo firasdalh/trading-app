@@ -539,6 +539,18 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   const myPos = (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase());
 
+  // Reset the view to the clean default: the most recent ~110 bars (big candles) with the price
+  // axis auto-fitted — undoing any zoom/pan/pinned-scale for clear visualization.
+  const recenter = () => {
+    const n = candlesRef.current.length;
+    const ts = chartRef.current?.timeScale();
+    if (ts && n) {
+      const VISIBLE = 110;
+      ts.setVisibleLogicalRange({ from: Math.max(0, n - VISIBLE), to: n + 6 });
+    }
+    seriesRef.current?.priceScale().applyOptions({ autoScale: true });
+  };
+
   return (
     <div className="relative">
       <div className="mb-2 flex items-center gap-2">
@@ -563,6 +575,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           className={`rounded px-2 py-0.5 text-xs ${showMacd ? "bg-neutral-700 text-blue-300" : "bg-neutral-900 text-neutral-500"}`}
         >
           MACD
+        </button>
+        <button
+          onClick={recenter}
+          className="ml-auto rounded bg-neutral-900 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700 hover:text-white"
+          title="Recenter — reset to the recent bars with the price axis auto-fitted"
+        >
+          ⊹ Recenter
         </button>
       </div>
 
