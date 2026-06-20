@@ -43,6 +43,7 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
 import { AccountBar } from "./AccountBar";
 import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
+import { ChartPositionBar } from "./ChartPositionBar";
 import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
@@ -384,6 +385,11 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         <div className="mb-2 text-sm font-semibold">
           {symbol} · {timeframe}
         </div>
+        {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close */}
+        <ChartPositionBar
+          pos={(positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null}
+          onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class })}
+        />
         <Chart
           symbol={symbol}
           assetClass={assetClass}

@@ -538,9 +538,6 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const changePct = legend && legend.open ? (change / legend.open) * 100 : 0;
 
   const myPos = (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase());
-  const posBE =
-    myPos?.stop_loss != null &&
-    Math.abs(myPos.stop_loss - myPos.entry_price) <= Math.abs(myPos.entry_price) * 1e-4;
 
   return (
     <div className="relative">
@@ -577,34 +574,6 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.close)}</span></span>
           <span className={change >= 0 ? "text-bull" : "text-bear"}>
             {change >= 0 ? "+" : ""}{fmtPrice(change)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
-          </span>
-        </div>
-      )}
-
-      {myPos && (
-        <div className="pointer-events-none absolute left-2 top-[3.5rem] z-10 flex flex-wrap items-center gap-2 text-xs tabular-nums">
-          <span
-            className={`rounded px-1.5 py-0.5 font-semibold ${
-              myPos.direction === "long" ? "bg-bull/20 text-bull" : "bg-bear/20 text-bear"
-            }`}
-          >
-            {myPos.direction === "long" ? "▲ LONG" : "▼ SHORT"} @ {fmtPrice(myPos.entry_price)}
-          </span>
-          {myPos.stop_loss != null && (
-            <span className="text-bear">
-              SL {fmtPrice(myPos.stop_loss)}{posBE ? " (BE)" : ""}
-              {usdAtLevel(myPos, myPos.stop_loss) && <span className="ml-1">{usdAtLevel(myPos, myPos.stop_loss)}</span>}
-            </span>
-          )}
-          {myPos.take_profit != null && (
-            <span className="text-bull">
-              TP {fmtPrice(myPos.take_profit)}
-              {usdAtLevel(myPos, myPos.take_profit) && <span className="ml-1">{usdAtLevel(myPos, myPos.take_profit)}</span>}
-            </span>
-          )}
-          <span className={myPos.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}>
-            {myPos.unrealized_pnl >= 0 ? "+" : ""}
-            {myPos.unrealized_pnl.toFixed(2)}
           </span>
         </div>
       )}
