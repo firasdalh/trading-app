@@ -245,7 +245,9 @@ class Mt5BrokerAdapter(BrokerAdapter):
         step = float(getattr(info, "volume_step", 0.01) or 0.01)
         vmin = float(getattr(info, "volume_min", step) or step)
         vmax = float(getattr(info, "volume_max", 1e9) or 1e9)
-        lots = (int(lots / step) * step) if step else lots   # floor to step (never round risk up)
+        # Floor to the step (never round risk up); +1e-9 first so a float artifact like
+        # 0.6/0.1 == 5.999999999999999 doesn't drop a whole step (-> 0.5 instead of 0.6).
+        lots = (int(lots / step + 1e-9) * step) if step else lots
         lots = max(vmin, min(vmax, lots))
         ndp = len(str(step).split(".")[1]) if "." in str(step) else 0
         return round(lots, ndp or 2)

@@ -3,7 +3,7 @@ import { fmtUsd } from "../format";
 import type { SizePreviewResponse } from "../types";
 
 // Lot input + live dollar figures (risk / potential reward / cost). Adjust the lot and the dollars
-// update (broker-computed via `preview`; the backend clamps to the 2% per-trade cap). `onLots` fires
+// update (broker-computed via `preview`; the backend clamps to the 3% per-trade cap). `onLots` fires
 // immediately (parent tracks the chosen lot, e.g. for Approve). When `onCommit` is provided a Save
 // button persists the lot (e.g. on an armed setup). Works for proposals or armed conditionals.
 export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCommit, initialLots }: {

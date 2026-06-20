@@ -387,7 +387,7 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
           {draftConf < 70 && (
             <p className="mt-2 text-[11px] leading-relaxed text-warn">
               Below the 70% default — Hybrid will auto-open lower-conviction setups. Every money
-              limit (≤2% per trade, daily-loss, exposure, position count) still applies.
+              limit (≤3% per trade, daily-loss, exposure, position count) still applies.
             </p>
           )}
         </div>

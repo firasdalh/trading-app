@@ -108,7 +108,7 @@ def preview_size(
 ) -> SizePreviewResponse:
     """Risk verdict + cost (margin) and leverage for this proposal at a chosen lot size.
 
-    Read-only. ``lots=None`` shows the AI's default size. Any size is clamped to the 2%
+    Read-only. ``lots=None`` shows the AI's default size. Any size is clamped to the 3%
     per-trade ceiling, so the returned economics never exceed the hard cap.
     """
     row = session.get(TradeProposalRecord, proposal_id)
@@ -133,7 +133,7 @@ def approve_proposal(
 ) -> ProposalView:
     """Mode A approval — the user confirms, and we submit the order via the active broker.
 
-    If ``lots`` is supplied, the trade is re-sized to that (clamped to the 2% per-trade ceiling
+    If ``lots`` is supplied, the trade is re-sized to that (clamped to the 3% per-trade ceiling
     by the Risk Manager) before execution. Execution gates (kill-switch, live-confirmation) are
     enforced in the executor; if a gate refuses, we surface 423 and leave it approved-unexecuted.
     """

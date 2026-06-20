@@ -329,7 +329,7 @@ def assess(
 ) -> RiskDecision:
     """Run a proposal through the deterministic Risk Manager against live state.
 
-    ``override_risk_fraction`` (Mode A manual size) is re-clamped to the 2% ceiling inside the
+    ``override_risk_fraction`` (Mode A manual size) is re-clamped to the 3% ceiling inside the
     manager, so a user-chosen size can never exceed the hard per-trade cap. ``cache`` (a
     ``ScanCache``) memoizes the broker open book + account for a multi-symbol scan; omit it for
     single-symbol assessments and the real open path so they always read fresh broker truth.
@@ -403,7 +403,7 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
     """Risk verdict + cost/leverage economics for a proposal at a chosen lot size.
 
     ``desired_lots=None`` uses the AI's default (risk_per_trade) sizing. Any desired size is
-    clamped to the 2% per-trade ceiling by the Risk Manager. Economics are computed on the
+    clamped to the 3% per-trade ceiling by the Risk Manager. Economics are computed on the
     resulting size so the user sees exactly what they'd spend and at what leverage.
     """
     from app.risk.manager import size_position

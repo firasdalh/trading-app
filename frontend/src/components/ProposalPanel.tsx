@@ -35,7 +35,7 @@ interface Props {
 }
 
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
-// risk-manager verdict, the cost/leverage + an adjustable (2%-capped) size, and each agent's
+// risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
 export function ProposalPanel({ result, status, positionOpen, busy, equity, onApprove, onReject, onRunAnalysis, analyzing }: Props) {
   const proposalId = result?.proposal_id ?? null;
@@ -196,7 +196,7 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
         <div className="text-neutral-400">{risk.reason}</div>
       </div>
 
-      {/* Cost, leverage, and an adjustable (2%-capped) size — what you'll spend before approving. */}
+      {/* Cost, leverage, and an adjustable (3%-capped) size — what you'll spend before approving. */}
       {!noTrade && (
         <div className="rounded-md border border-neutral-800 p-3 text-sm">
           <div className="mb-2 flex items-center justify-between">

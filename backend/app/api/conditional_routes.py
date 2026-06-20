@@ -154,7 +154,7 @@ def _setup_shim(s: ConditionalSetup):
 def size_preview(setup_id: int, req: LotRequest | None = None,
                  session: Session = Depends(get_session)) -> SizePreviewResponse:
     """Risk verdict + $ economics (risk / cost) for an armed setup at a chosen lot — computed from
-    the trigger as the entry. Read-only; any size is clamped to the 2% per-trade cap."""
+    the trigger as the entry. Read-only; any size is clamped to the 3% per-trade cap."""
     from app.risk.service import size_preview as _size_preview
 
     s = session.get(ConditionalSetup, setup_id)
@@ -170,7 +170,7 @@ def size_preview(setup_id: int, req: LotRequest | None = None,
 @router.patch("/{setup_id}", response_model=ConditionalSetupView)
 def set_lots(setup_id: int, req: LotRequest, session: Session = Depends(get_session)) -> ConditionalSetupView:
     """Set the lot this setup will open at when it fires (None = the AI's default size). Re-clamped
-    to the 2% cap at fire time."""
+    to the 3% cap at fire time."""
     s = session.get(ConditionalSetup, setup_id)
     if s is None:
         raise HTTPException(status_code=404, detail="not found")

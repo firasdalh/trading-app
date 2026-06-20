@@ -410,9 +410,9 @@ class SizePreviewResponse(BaseModel):
 
     risk: RiskDecision
     economics: TradeEconomics | None = None
-    # True when the requested size was reduced — by the 2% per-trade ceiling or the exposure budget.
+    # True when the requested size was reduced — by the 3% per-trade ceiling or the exposure budget.
     capped: bool = False
-    # Largest lot size allowed by the 2% per-trade ceiling (for the UI to show the cap). None if
+    # Largest lot size allowed by the 3% per-trade ceiling (for the UI to show the cap). None if
     # it can't be computed (no equity / stop).
     max_lots: float | None = None
 

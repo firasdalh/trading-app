@@ -184,7 +184,7 @@ def _fire(session: Session, s: ConditionalSetup) -> int:
         session.add(s)
         return 0
 
-    # Honor the user's chosen lot (re-clamped to the 2% cap) for the size it opens at.
+    # Honor the user's chosen lot (re-clamped to the 3% cap) for the size it opens at.
     if s.desired_lots and record is not None and record.status == ProposalStatus.PENDING_APPROVAL.value:
         from app.risk.service import size_preview
         try:

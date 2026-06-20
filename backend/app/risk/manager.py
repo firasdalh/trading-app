@@ -42,11 +42,16 @@ def _veto(symbol: str, reason: str, checks: dict[str, bool]) -> RiskDecision:
 
 
 def _floor_to_step(qty: float, step: float | None) -> float:
-    """Floor a quantity to a tradable increment so we never round risk *up*."""
+    """Floor a quantity to a tradable increment so we never round risk *up*.
+
+    A tiny epsilon is added before flooring so a value that is a step multiple only in theory but
+    sits just under it in floating point (e.g. 0.6/0.1 == 5.999999999999999, or 0.29/0.01 ==
+    28.999999999999996) doesn't lose a whole step. The epsilon is far smaller than any real step,
+    so it can never round a genuine size up past the risk budget."""
     if step is None or step <= 0:
         # Default: 8 decimal places (covers fractional crypto) without rounding up.
-        return math.floor(qty * 1e8) / 1e8
-    return math.floor(qty / step) * step
+        return math.floor(qty * 1e8 + 1e-6) / 1e8
+    return math.floor(qty / step + 1e-9) * step
 
 
 def size_position(
@@ -96,7 +101,7 @@ def evaluate_proposal(
 
     ``override_risk_fraction`` lets the user size a single trade up or down (Mode A manual size).
     It is ALWAYS re-clamped to the hard per-trade ceiling here, so a manual size can never exceed
-    RISK.md's 2% cap — the user can size up to the cap, never past it.
+    RISK.md's 3% cap — the user can size up to the cap, never past it.
     """
     symbol = proposal.symbol
     checks: dict[str, bool] = {}
