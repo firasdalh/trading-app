@@ -380,38 +380,39 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         </div>
       )}
 
-      {/* Open positions — quick-switch the chart between them */}
-      {(positions ?? []).length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-neutral-500">● Open</span>
-          {(positions ?? []).map((p) => {
-            const active = p.symbol.toUpperCase() === symbol.toUpperCase();
-            return (
-              <button
-                key={`${p.symbol}-${p.direction}`}
-                onClick={() => openPositionSymbol(p)}
-                title={`Switch chart to ${p.symbol} (${p.direction})`}
-                className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs ${
-                  active ? "bg-blue-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
-                }`}
-              >
-                <span className={p.direction === "long" ? "text-bull" : "text-bear"}>
-                  {p.direction === "long" ? "▲" : "▼"}
-                </span>
-                <span className="font-medium">{displaySymbol(p.symbol)}</span>
-                <span className={`tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}>
-                  {fmtUsd(p.unrealized_pnl, { sign: true })}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
       {/* Chart — full width so it gets the whole row (bigger, bordered) */}
       <div className="card border-2 border-neutral-700">
-        <div className="mb-2 text-sm font-semibold">
-          {symbol} · {timeframe}
+        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <span className="text-sm font-semibold">
+            {symbol} · {timeframe}
+          </span>
+          {/* Open positions — quick-switch the chart between them */}
+          {(positions ?? []).length > 0 && (
+            <span className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-neutral-500">● Open</span>
+              {(positions ?? []).map((p) => {
+                const active = p.symbol.toUpperCase() === symbol.toUpperCase();
+                return (
+                  <button
+                    key={`${p.symbol}-${p.direction}`}
+                    onClick={() => openPositionSymbol(p)}
+                    title={`Switch chart to ${p.symbol} (${p.direction})`}
+                    className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs ${
+                      active ? "bg-blue-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                    }`}
+                  >
+                    <span className={p.direction === "long" ? "text-bull" : "text-bear"}>
+                      {p.direction === "long" ? "▲" : "▼"}
+                    </span>
+                    <span className="font-medium">{displaySymbol(p.symbol)}</span>
+                    <span className={`tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}>
+                      {fmtUsd(p.unrealized_pnl, { sign: true })}
+                    </span>
+                  </button>
+                );
+              })}
+            </span>
+          )}
         </div>
         {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close */}
         <ChartPositionBar
