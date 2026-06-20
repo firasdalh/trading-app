@@ -48,15 +48,28 @@ def _contract_size(broker, symbol: str) -> float:
         return 1.0
 
 
+def _pnl(broker, pos, price: float) -> float:
+    """Account-currency P&L of ``pos`` valued at ``price``. Prefers the broker's currency-correct
+    figure (MT5 ``order_calc_profit`` converts a JPY/HKD quote into the USD account); falls back to
+    naive ``±lots × contract × price_diff`` (correct only when the quote ccy IS the account ccy,
+    e.g. the sim/USD path). Never raises."""
+    try:
+        p = broker.position_profit(pos.symbol, pos.direction, pos.qty, pos.entry_price, price)
+        if p is not None:
+            return round(float(p), 2)
+    except Exception:  # noqa: BLE001 - fall back to naive scaling
+        pass
+    sign = 1 if pos.direction == Direction.LONG.value else -1
+    return round(sign * pos.qty * _contract_size(broker, pos.symbol) * (price - pos.entry_price), 2)
+
+
 def _close_position(session: Session, pos: Position, broker, exit_price: float, reason: str) -> None:
     # Close the EXISTING position by ticket — never fire a fresh opposite order. On a hedging
     # MT5 account (Exness default) an opposing market order opens a NEW opposite position
     # instead of closing, which would silently flip a short into a long.
     result = broker.close_position(pos.symbol)
     fill = result.avg_fill_price or exit_price
-    sign = 1 if pos.direction == Direction.LONG.value else -1
-    contract = _contract_size(broker, pos.symbol)
-    realized = round(sign * pos.qty * contract * (fill - pos.entry_price), 2)
+    realized = _pnl(broker, pos, fill)  # broker-truth (currency-correct) when available
 
     pos.status = PositionStatus.CLOSED.value
     pos.closed_at = datetime.now(timezone.utc)
@@ -191,10 +204,8 @@ def monitor_positions(session: Session) -> dict:
             log.warning("monitor quote failed", extra={"symbol": pos.symbol, "error": str(exc)})
             continue
 
-        sign = 1 if pos.direction == Direction.LONG.value else -1
-        contract = _contract_size(broker, pos.symbol)
         pos.last_price = price
-        pos.unrealized_pnl = round(sign * pos.qty * contract * (price - pos.entry_price), 2)
+        pos.unrealized_pnl = _pnl(broker, pos, price)  # broker-truth (currency-correct) when available
 
         reason = _exit_reason(pos.direction, price, pos.stop_loss, pos.take_profit)
         if reason:

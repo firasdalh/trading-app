@@ -173,6 +173,15 @@ class BrokerAdapter(ABC):
         currency IS the account currency, e.g. the sim/USD path)."""
         return None
 
+    def position_profit(self, symbol: str, direction: str, lots: float, entry: float,
+                        exit_price: float) -> float | None:
+        """SIGNED account-currency P&L of ``lots`` of ``direction`` opened at ``entry`` and valued
+        at ``exit_price`` (current price for unrealized, fill for realized). Currency-correct when
+        the broker can compute it (MT5 ``order_calc_profit`` converts e.g. a JPY/HKD quote into the
+        USD account); None otherwise, so the caller falls back to ``±lots × contract × price_diff``
+        (correct only when the quote currency IS the account currency, e.g. the sim/USD path)."""
+        return None
+
     def reconcile(self) -> dict:
         """Reconcile local state against the broker on startup. Default: report positions.
 

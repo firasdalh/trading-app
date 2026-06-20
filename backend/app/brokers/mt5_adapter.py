@@ -269,6 +269,53 @@ class Mt5BrokerAdapter(BrokerAdapter):
         except Exception:  # noqa: BLE001 - best-effort; caller falls back to price-distance sizing
             return None
 
+    def position_profit(self, symbol: str, direction: str, lots: float, entry: float,
+                        exit_price: float) -> float | None:
+        """Signed account-currency P&L via order_calc_profit with the position's order type (MT5
+        converts the quote ccy, so a JPY pair / HKD index is reported in the USD account). The
+        SELL order type makes a price drop a profit, so the sign is already correct. None on
+        failure -> the monitor falls back to naive price-distance × contract scaling."""
+        mt5 = self._mt5
+        try:
+            if not lots or not entry or not exit_price:
+                return None
+            sym = self._resolve_symbol(symbol)
+            order_type = (getattr(mt5, "ORDER_TYPE_BUY", 0) if direction == "long"
+                          else getattr(mt5, "ORDER_TYPE_SELL", 1))
+            profit = mt5.order_calc_profit(order_type, sym, float(lots), float(entry), float(exit_price))
+            return float(profit) if profit is not None else None
+        except Exception:  # noqa: BLE001 - best-effort; caller falls back to naive P&L
+            return None
+
+    def _asset_class_for(self, symbol: str, info=None) -> str:
+        """Best-effort asset class for a broker symbol, from its MT5 path/name (the same keyword map
+        used for symbol discovery), so open/closed positions aren't all mislabelled 'forex'. Falls
+        back to forex when nothing matches or the lookup fails. Cached per symbol."""
+        cache = getattr(self, "_ac_cache", None)
+        if cache is None:
+            cache = {}
+            self._ac_cache = cache
+        key = symbol.upper()
+        if key in cache:
+            return cache[key]
+        path = name = ""
+        try:
+            si = info if info is not None else self._mt5.symbol_info(symbol)
+            if si is not None:
+                path = (getattr(si, "path", "") or "").lower()
+                name = (getattr(si, "name", "") or "").lower()
+        except Exception:  # noqa: BLE001
+            pass
+        ac = AssetClass.FOREX.value  # default/fallback
+        for asset_class, keywords in self._PATH_KEYWORDS.items():
+            if asset_class == AssetClass.FOREX:
+                continue  # checked implicitly as the default, so a stray 'fx' can't grab a CFD
+            if any(k in path or k in name for k in keywords):
+                ac = asset_class.value
+                break
+        cache[key] = ac
+        return ac
+
     def _filling(self, info):
         mt5 = self._mt5
         mode = getattr(info, "filling_mode", 0)
@@ -331,7 +378,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
         for i, p in enumerate(positions):
             is_long = p.type == getattr(mt5, "POSITION_TYPE_BUY", 0)
             views.append(PositionView(
-                id=i + 1, symbol=p.symbol, asset_class=AssetClass.FOREX.value,
+                id=i + 1, symbol=p.symbol, asset_class=self._asset_class_for(p.symbol),
                 direction="long" if is_long else "short",
                 qty=round(float(p.volume), 2),  # LOTS (qty is in lots everywhere now)
                 entry_price=float(p.price_open),
@@ -434,10 +481,11 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 for d in ds
             )
             close_ts = int(getattr(last_out, "time", 0) or 0)
+            sym = getattr(first_in, "symbol", "")
             out.append(PositionView(
                 id=pid,
-                symbol=getattr(first_in, "symbol", ""),
-                asset_class=AssetClass.FOREX.value,  # not surfaced for closed trades
+                symbol=sym,
+                asset_class=self._asset_class_for(sym) if sym else AssetClass.FOREX.value,
                 direction="long" if is_long else "short",
                 qty=vol,
                 entry_price=float(getattr(first_in, "price", 0) or 0),
