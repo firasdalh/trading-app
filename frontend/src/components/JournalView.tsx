@@ -30,6 +30,7 @@ export function JournalView() {
   const [reflection, setReflection] = useState<ReflectionReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);  // the report is long — collapsed by default
 
   useEffect(() => {
     api.reflectionLatest().then(setReflection).catch(() => {});
@@ -40,6 +41,7 @@ export function JournalView() {
     setError(null);
     try {
       setReflection(await api.reflect());
+      setOpen(true);  // show the fresh result
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -50,17 +52,36 @@ export function JournalView() {
   return (
     <div className="mx-auto max-w-7xl space-y-4 p-4">
       <div className="card space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-semibold">Reflection / Journal agent</div>
+        <div className="flex items-center justify-between gap-2">
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="flex items-center gap-2 text-sm font-semibold hover:text-white"
+            title={open ? "Collapse the report" : "Expand the report"}
+          >
+            <span className="text-neutral-500">{open ? "▾" : "▸"}</span>
+            Reflection / Journal agent
+            {!open && reflection && (
+              <span className="ml-1 text-xs font-normal text-neutral-500">
+                · win {(reflection.win_rate * 100).toFixed(0)}% · PF{" "}
+                {reflection.profit_factor == null ? "—" : reflection.profit_factor.toFixed(2)} · net{" "}
+                <span className={reflection.net_pnl >= 0 ? "text-bull" : "text-bear"}>
+                  {reflection.net_pnl >= 0 ? "+" : ""}{reflection.net_pnl.toFixed(0)}
+                </span>
+              </span>
+            )}
+          </button>
           <button onClick={runReflect} disabled={busy} className="btn bg-blue-600 text-white hover:bg-blue-500">
             {busy ? "Reflecting…" : "Run reflection"}
           </button>
         </div>
+        {error && <div className="text-sm text-bear">{error}</div>}
+
+        {open && (
+          <>
         <p className="text-xs text-neutral-500">
           Read-only: the reflection agent reviews closed trades for patterns and lessons. It
           can never place or modify a trade.
         </p>
-        {error && <div className="text-sm text-bear">{error}</div>}
 
         {reflection ? (
           <div className="space-y-3">
@@ -97,6 +118,8 @@ export function JournalView() {
           </div>
         ) : (
           <div className="text-sm text-neutral-500">No reflection yet. Click “Run reflection”.</div>
+        )}
+          </>
         )}
       </div>
 
