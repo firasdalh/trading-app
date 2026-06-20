@@ -160,16 +160,26 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
         </div>
       )}
 
-      <div className="flex items-center gap-3 text-sm">
-        <span className="text-neutral-400">Confidence</span>
-        <div className="h-2 flex-1 rounded bg-neutral-800">
-          <div
-            className="h-2 rounded bg-blue-500"
-            style={{ width: `${Math.round(proposal.confidence * 100)}%` }}
-          />
-        </div>
-        <span className="tabular-nums">{Math.round(proposal.confidence * 100)}%</span>
-      </div>
+      {(() => {
+        const pct = Math.round(proposal.confidence * 100);
+        const color = pct >= 70 ? "bg-bull" : pct >= 50 ? "bg-warn" : "bg-bear";
+        const txt = pct >= 70 ? "text-bull" : pct >= 50 ? "text-warn" : "text-bear";
+        return (
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-neutral-400">Confidence</span>
+            <div className="relative h-2 flex-1 rounded bg-neutral-800">
+              <div className={`h-2 rounded ${color}`} style={{ width: `${pct}%` }} />
+              {/* 70% marker — the Hybrid auto-open threshold, so you can see if it clears the bar. */}
+              <div
+                className="absolute top-[-2px] h-3 w-px bg-neutral-500"
+                style={{ left: "70%" }}
+                title="70% — Hybrid auto-open threshold"
+              />
+            </div>
+            <span className={`tabular-nums font-semibold ${txt}`}>{pct}%</span>
+          </div>
+        );
+      })()}
 
       {/* Risk Manager verdict — deterministic, final. */}
       <div

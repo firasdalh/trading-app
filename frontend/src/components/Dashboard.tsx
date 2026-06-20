@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import { assetLabel } from "../format";
+import { assetLabel, fmtPrice } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { useQuoteSocket } from "../hooks/useQuoteSocket";
@@ -332,7 +332,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           {liveQuote && (
             <span className="text-sm text-neutral-300">
               {liveQuote.symbol}{" "}
-              <span className="tabular-nums font-semibold">{liveQuote.price.toFixed(2)}</span>
+              <span className="tabular-nums font-semibold">{fmtPrice(liveQuote.price)}</span>
             </span>
           )}
           <button

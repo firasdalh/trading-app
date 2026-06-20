@@ -124,6 +124,16 @@ function usdAtLevel(pos: PositionView, level: number | null | undefined): string
   return `${usd >= 0 ? "+" : "−"}$${Math.abs(usd).toFixed(2)}`;
 }
 
+// A tiny line-style swatch for the overlay legend, so dashed (proposal) / solid (open position) /
+// large-dashed (armed) are distinguishable at a glance.
+function LineSwatch({ dash }: { dash: string }) {
+  return (
+    <svg width="22" height="6" className="inline-block align-middle">
+      <line x1="0" y1="3" x2="22" y2="3" stroke="#d4d4d4" strokeWidth="2" strokeDasharray={dash} />
+    </svg>
+  );
+}
+
 export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rsiContainerRef = useRef<HTMLDivElement>(null);
@@ -600,6 +610,30 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       )}
 
       <div ref={containerRef} className="h-[600px] w-full" />
+      {(() => {
+        const hasPos = !!myPos;
+        const hasProp = !!proposal && proposal.direction !== "no_trade" && !hasPos;
+        const hasArmed = (armed ?? []).some((a) => a.symbol.toUpperCase() === symbol.toUpperCase());
+        if (!hasPos && !hasProp && !hasArmed) return null;
+        return (
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-neutral-400">
+            {hasPos && (
+              <span className="inline-flex items-center gap-1"><LineSwatch dash="" /> Open position</span>
+            )}
+            {hasProp && (
+              <span className="inline-flex items-center gap-1"><LineSwatch dash="4 3" /> Proposal</span>
+            )}
+            {hasArmed && (
+              <span className="inline-flex items-center gap-1"><LineSwatch dash="8 4" /> Armed ⚡</span>
+            )}
+            <span className="text-neutral-700">|</span>
+            {(hasPos || hasProp) && <span className="text-blue-400">— Entry</span>}
+            {hasArmed && <span className="text-amber-400">— Arm trigger</span>}
+            <span className="text-bear">— Stop</span>
+            <span className="text-bull">— Target</span>
+          </div>
+        );
+      })()}
       {showRsi && (
         <div className="relative mt-1">
           <span className="pointer-events-none absolute left-2 top-1 z-10 text-xs text-purple-300">RSI 14</span>
