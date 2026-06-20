@@ -42,7 +42,8 @@ def test_conditional_pullback_offers_better_long_entry_at_value():
                               ind={"swing_low": 99.0}, target=112.0, confidence=0.6)
     assert c is not None and c.order_type == "buy_limit"
     assert c.trigger_price == 100.0 and c.stop_loss < 99.0  # at value, stop below the swing
-    assert c.take_profit == 112.0 and c.rr >= 1.5
+    # Target is R:R-capped (4R from the value entry: 100 + 4*1.5 = 106) instead of the far 112.
+    assert c.take_profit == 106.0 and c.rr == 4.0
 
 
 def test_conditional_pullback_none_when_not_overextended():

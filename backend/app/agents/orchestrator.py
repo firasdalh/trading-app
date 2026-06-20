@@ -291,10 +291,11 @@ def _conditional_pullback(
     direction: Direction, entry: float, ema20: float | None, atr_v: float | None,
     ind: dict, target: float, confidence: float,
 ) -> ConditionalSuggestion | None:
-    """When the entry is overextended (chasing far from value), suggest a LIMIT order back at value
-    (~EMA20) for a better entry instead of buying high / selling low. Stop sits beyond value/the
-    last swing; target is the structural target; R:R is measured from the value entry (so it's
-    better than chasing). Returns None if value isn't a better entry or R:R is too thin."""
+    """When the entry sits away from value (above EMA20 for a long / below for a short), suggest a
+    LIMIT order back at value (~EMA20) for a better entry instead of buying high / selling low. Stop
+    sits beyond value/the last swing; target is the structural target (R:R-capped); R:R is measured
+    from the value entry (so it beats chasing). Returns None if value isn't a better entry or R:R is
+    too thin."""
     if not ema20 or not atr_v or atr_v <= 0 or not target or target <= 0:
         return None
     pad = max(0.5 * atr_v, ema20 * 5e-4)
@@ -305,9 +306,11 @@ def _conditional_pullback(
         swing_low = ind.get("swing_low")
         stop_ref = swing_low if (swing_low and swing_low < ema20) else ema20
         stop = round(stop_ref - pad, 6)
-        tp = round(target, 6)
         risk = trigger - stop
-        if risk <= 0 or tp <= trigger:
+        if risk <= 0:
+            return None
+        tp = round(min(target, trigger + _RR_MAX * risk), 6)  # cap R:R so the value entry is honest
+        if tp <= trigger:
             return None
         rr = (tp - trigger) / risk
         order_type = "buy_limit"
@@ -318,9 +321,11 @@ def _conditional_pullback(
         swing_high = ind.get("swing_high")
         stop_ref = swing_high if (swing_high and swing_high > ema20) else ema20
         stop = round(stop_ref + pad, 6)
-        tp = round(target, 6)
         risk = stop - trigger
-        if risk <= 0 or tp >= trigger:
+        if risk <= 0:
+            return None
+        tp = round(max(target, trigger - _RR_MAX * risk), 6)  # cap R:R so the value entry is honest
+        if tp >= trigger:
             return None
         rr = (trigger - tp) / risk
         order_type = "sell_limit"
@@ -695,12 +700,14 @@ def _deterministic_decision(
     base.take_profit = round(target, 6)
     base.confidence = confidence
     # Carry a conditional ('wait') entry so the trade can be ARMED rather than chased (survives even
-    # if the LLM vetoes the immediate entry): a break-stop past a blocking level, or — failing that,
-    # when the entry is overextended — a limit back at value (~EMA20).
+    # if the LLM vetoes the immediate entry). Priority: a break-STOP past a blocking level (the trade
+    # is only valid after the break); otherwise — whenever the entry sits away from value (not already
+    # AT value) — a LIMIT back at value (~EMA20) for a better price than chasing. So most trend setups
+    # now expose a pullback-limit alternative, not just the extreme/overextended ones.
     base.conditional = (
         _conditional_break(direction, entry, atr_v, levels, target, confidence)
-        or (_conditional_pullback(direction, entry, ema20, atr_v, ind, target, confidence)
-            if overextended else None)
+        or (None if at_value
+            else _conditional_pullback(direction, entry, ema20, atr_v, ind, target, confidence))
     )
     base.rationale = (
         f"Confluence {direction.value.upper()}: {regime} regime, entry-TF trend={trend}, "
