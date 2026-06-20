@@ -428,6 +428,13 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           positions={positions}
           armed={armedLevels}
           onSetSlTp={(sl, tp) => setSlTp({ symbol, asset_class: assetClass }, sl, tp)}
+          onSetArmedLevels={async (id, levels) => {
+            try {
+              await api.setConditionalLevels(id, levels);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : String(e));
+            }
+          }}
         />
         <p className="mt-2 text-xs text-neutral-500">
           Backtest and paper results do not guarantee live results.

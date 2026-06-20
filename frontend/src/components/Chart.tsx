@@ -19,7 +19,9 @@ import type { AssetClass, Candle, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
 export interface ArmedLevel {
+  id: number;
   symbol: string;
+  direction: string;
   order_type: string;
   trigger_price: number;
   stop_loss: number | null;
@@ -36,6 +38,8 @@ interface Props {
   armed?: ArmedLevel[];
   // Commit a dragged SL/TP for the charted symbol's open position (null = leave that one unchanged).
   onSetSlTp?: (sl: number | null, tp: number | null) => void;
+  // Commit a dragged trigger/SL/TP for an armed setup (only the changed level is sent).
+  onSetArmedLevels?: (id: number, levels: { trigger_price?: number; stop_loss?: number; take_profit?: number }) => void;
 }
 
 const EMA_CONFIG = [
@@ -136,7 +140,7 @@ function LineSwatch({ dash }: { dash: string }) {
   );
 }
 
-export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp }: Props) {
+export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -155,16 +159,26 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
   const armedLinesRef = useRef<IPriceLine[]>([]);
-  // Drag-to-adjust SL/TP on the charted position: refs so the (once-attached) mouse handlers always
-  // read the current position + commit callback without re-binding listeners.
-  const slLineRef = useRef<IPriceLine | null>(null);
-  const tpLineRef = useRef<IPriceLine | null>(null);
-  const dragRef = useRef<{ kind: "sl" | "tp" } | null>(null);
+  // Drag-to-adjust price lines (position SL/TP + armed trigger/SL/TP). The overlay effects register
+  // a DragHandle per draggable line; the (once-attached) mouse handlers read them from refs so they
+  // never need re-binding. `validate` keeps a level on the correct side; `commit` persists on drop.
+  type DragHandle = {
+    key: string;            // namespaced; e.g. "pos-sl", "armed-7-trigger"
+    label: string;          // shown while dragging ("SL"/"TP"/"Trigger")
+    refPos: PositionView | null;  // for the $-at-level hint (position handles only)
+    line: IPriceLine;
+    price: number;          // the handle's current price
+    validate: (p: number) => boolean;
+    commit: (p: number) => void;
+  };
+  const handlesRef = useRef<DragHandle[]>([]);
+  const dragRef = useRef<DragHandle | null>(null);
   const dragPriceRef = useRef<number | null>(null);
-  const myPosRef = useRef<PositionView | null>(null);
   const onSetSlTpRef = useRef<Props["onSetSlTp"]>(onSetSlTp);
+  const onSetArmedRef = useRef<Props["onSetArmedLevels"]>(onSetArmedLevels);
   onSetSlTpRef.current = onSetSlTp;
-  const [dragHint, setDragHint] = useState<{ kind: "sl" | "tp"; price: number } | null>(null);
+  onSetArmedRef.current = onSetArmedLevels;
+  const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null } | null>(null);
 
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = useState<Record<number, boolean>>({ 50: true, 100: false, 200: true });
@@ -500,8 +514,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (dragRef.current) return;  // mid-drag: don't rebuild (a positions poll would snap the line back)
     posLinesRef.current.forEach((l) => series.removePriceLine(l));
     posLinesRef.current = [];
-    slLineRef.current = null;
-    tpLineRef.current = null;
+    handlesRef.current = handlesRef.current.filter((h) => !h.key.startsWith("pos-"));
     const mine = (positions ?? []).filter(
       (p) => p.symbol.toUpperCase() === symbol.toUpperCase(),
     );
@@ -515,6 +528,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     };
     for (const p of mine) {
       const arrow = p.direction === "long" ? "▲" : "▼";
+      const isLong = p.direction === "long";
       // When the stop has been moved to breakeven (SL ≈ entry) the two labels would stack on
       // the same axis pixel — merge them into one instead of overlapping.
       const be =
@@ -523,8 +537,22 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       const slUsd = usdAtLevel(p, p.stop_loss);
       const tpUsd = usdAtLevel(p, p.take_profit);
       add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL ${slUsd}`.trim() : `${arrow} entry`);
-      if (!be) slLineRef.current = add(p.stop_loss, "#ef5350", `SL ${slUsd} · drag`.trim());
-      tpLineRef.current = add(p.take_profit, "#26a69a", `TP ${tpUsd} · drag`.trim());
+      const slLine = be ? null : add(p.stop_loss, "#ef5350", `SL ${slUsd} · drag`.trim());
+      const tpLine = add(p.take_profit, "#26a69a", `TP ${tpUsd} · drag`.trim());
+      if (slLine && p.stop_loss != null) {
+        handlesRef.current.push({
+          key: "pos-sl", label: "SL", refPos: p, line: slLine, price: p.stop_loss,
+          validate: (x) => (isLong ? x < p.entry_price : x > p.entry_price),
+          commit: (x) => onSetSlTpRef.current?.(x, p.take_profit ?? null),
+        });
+      }
+      if (tpLine && p.take_profit != null) {
+        handlesRef.current.push({
+          key: "pos-tp", label: "TP", refPos: p, line: tpLine, price: p.take_profit,
+          validate: (x) => (isLong ? x > p.entry_price : x < p.entry_price),
+          commit: (x) => onSetSlTpRef.current?.(p.stop_loss ?? null, x),
+        });
+      }
     }
   }, [positions, symbol]);
 
@@ -534,20 +562,46 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
+    if (dragRef.current) return;  // mid-drag: don't rebuild (a poll would snap the dragged line back)
     armedLinesRef.current.forEach((l) => series.removePriceLine(l));
     armedLinesRef.current = [];
+    handlesRef.current = handlesRef.current.filter((h) => !h.key.startsWith("armed-"));
     const mine = (armed ?? []).filter((a) => a.symbol.toUpperCase() === symbol.toUpperCase());
-    const add = (price: number | null, color: string, title: string) => {
-      if (price == null) return;
-      armedLinesRef.current.push(
-        series.createPriceLine({ price, color, lineWidth: 1, lineStyle: LineStyle.LargeDashed,
-                                 axisLabelVisible: true, title }),
-      );
+    const add = (price: number | null, color: string, title: string): IPriceLine | null => {
+      if (price == null) return null;
+      const line = series.createPriceLine({
+        price, color, lineWidth: 1, lineStyle: LineStyle.LargeDashed, axisLabelVisible: true, title,
+      });
+      armedLinesRef.current.push(line);
+      return line;
     };
     for (const a of mine) {
-      add(a.trigger_price, "#f59e0b", "⚡ Arm");   // amber trigger
-      add(a.stop_loss, "#ef5350", "⚡ SL");
-      add(a.take_profit, "#26a69a", "⚡ TP");
+      const isLong = a.direction === "long";
+      const trigLine = add(a.trigger_price, "#f59e0b", "⚡ Arm · drag");   // amber trigger
+      const slLine = add(a.stop_loss, "#ef5350", "⚡ SL · drag");
+      const tpLine = add(a.take_profit, "#26a69a", "⚡ TP · drag");
+      // Trigger: side vs price isn't fixed (break vs limit), so just require it stay positive.
+      if (trigLine) {
+        handlesRef.current.push({
+          key: `armed-${a.id}-trigger`, label: "Trigger", refPos: null, line: trigLine,
+          price: a.trigger_price, validate: (x) => x > 0,
+          commit: (x) => onSetArmedRef.current?.(a.id, { trigger_price: x }),
+        });
+      }
+      if (slLine && a.stop_loss != null) {
+        handlesRef.current.push({
+          key: `armed-${a.id}-sl`, label: "SL", refPos: null, line: slLine, price: a.stop_loss,
+          validate: (x) => (isLong ? x < a.trigger_price : x > a.trigger_price),
+          commit: (x) => onSetArmedRef.current?.(a.id, { stop_loss: x }),
+        });
+      }
+      if (tpLine && a.take_profit != null) {
+        handlesRef.current.push({
+          key: `armed-${a.id}-tp`, label: "TP", refPos: null, line: tpLine, price: a.take_profit,
+          validate: (x) => (isLong ? x > a.trigger_price : x < a.trigger_price),
+          commit: (x) => onSetArmedRef.current?.(a.id, { take_profit: x }),
+        });
+      }
     }
   }, [armed, symbol]);
 
@@ -567,23 +621,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       return p == null ? null : Number(p);
     };
 
-    const handleAt = (e: MouseEvent): "sl" | "tp" | null => {
+    const handleAt = (e: MouseEvent): DragHandle | null => {
       const series = seriesRef.current;
-      const pos = myPosRef.current;
-      if (!series || !pos) return null;
+      if (!series) return null;
       const y = e.clientY - container.getBoundingClientRect().top;
-      let best: "sl" | "tp" | null = null;
+      let best: DragHandle | null = null;
       let bestDist = HIT;
-      const cands: [("sl" | "tp"), number | null | undefined, IPriceLine | null][] = [
-        ["sl", pos.stop_loss, slLineRef.current],
-        ["tp", pos.take_profit, tpLineRef.current],
-      ];
-      for (const [kind, price, line] of cands) {
-        if (price == null || !line) continue;   // only lines we actually drew are draggable
-        const c = series.priceToCoordinate(price);
+      for (const h of handlesRef.current) {
+        const c = series.priceToCoordinate(h.price);
         if (c == null) continue;
         const d = Math.abs(c - y);
-        if (d <= bestDist) { bestDist = d; best = kind; }
+        if (d <= bestDist) { bestDist = d; best = h; }
       }
       return best;
     };
@@ -597,14 +645,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       const price = yToPrice(e);
       if (price == null) return;
       dragPriceRef.current = price;
-      (drag.kind === "sl" ? slLineRef.current : tpLineRef.current)?.applyOptions({ price });
-      setDragHint({ kind: drag.kind, price });
+      drag.line.applyOptions({ price });
+      setDragHint({ label: drag.label, price, pos: drag.refPos });
     };
 
     const onDown = (e: MouseEvent) => {
-      const kind = handleAt(e);
-      if (!kind) return;
-      dragRef.current = { kind };
+      const handle = handleAt(e);
+      if (!handle) return;
+      dragRef.current = handle;
       dragPriceRef.current = null;
       chartRef.current?.applyOptions({ handleScroll: false, handleScale: false });
       e.preventDefault();
@@ -618,18 +666,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       container.style.cursor = "";
       const price = dragPriceRef.current;
       setDragHint(null);
-      const pos = myPosRef.current;
-      const handler = onSetSlTpRef.current;
-      if (price == null || !pos || !handler) return;
-      // Reject a wrong-side level (SL above entry on a long, etc.); the line snaps back on next poll.
-      const isLong = pos.direction === "long";
-      const ok = drag.kind === "sl"
-        ? (isLong ? price < pos.entry_price : price > pos.entry_price)
-        : (isLong ? price > pos.entry_price : price < pos.entry_price);
-      if (!ok) return;
-      const sl = drag.kind === "sl" ? price : pos.stop_loss ?? null;
-      const tp = drag.kind === "tp" ? price : pos.take_profit ?? null;
-      handler(sl, tp);
+      // Reject a wrong-side level; the line snaps back to the stored value on the next poll.
+      if (price == null || !drag.validate(price)) return;
+      drag.commit(price);
     };
 
     const onLeave = () => {
@@ -652,7 +691,6 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const changePct = legend && legend.open ? (change / legend.open) * 100 : 0;
 
   const myPos = (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase());
-  myPosRef.current = myPos ?? null;  // keep the drag handlers reading the live position
 
   // Reset the view to the clean default: the most recent ~110 bars (big candles) with the price
   // axis auto-fitted — undoing any zoom/pan/pinned-scale for clear visualization.
@@ -712,14 +750,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         </div>
       )}
 
-      {dragHint && myPos && (
+      {dragHint && (
         <div
-          className={`pointer-events-none absolute left-1/2 top-9 z-20 -translate-x-1/2 rounded px-2 py-1 text-xs font-semibold shadow ${
-            dragHint.kind === "sl" ? "bg-bear/90 text-white" : "bg-bull/90 text-white"
+          className={`pointer-events-none absolute left-1/2 top-9 z-20 -translate-x-1/2 rounded px-2 py-1 text-xs font-semibold text-white shadow ${
+            dragHint.label === "SL" ? "bg-bear/90" : dragHint.label === "TP" ? "bg-bull/90" : "bg-amber-500/90"
           }`}
         >
-          {dragHint.kind === "sl" ? "SL" : "TP"} → {fmtPrice(dragHint.price)}{" "}
-          {usdAtLevel(myPos, dragHint.price) && <span>({usdAtLevel(myPos, dragHint.price)})</span>}
+          {dragHint.label} → {fmtPrice(dragHint.price)}{" "}
+          {dragHint.pos && usdAtLevel(dragHint.pos, dragHint.price) && (
+            <span>({usdAtLevel(dragHint.pos, dragHint.price)})</span>
+          )}
         </div>
       )}
       <div ref={containerRef} className="h-[600px] w-full" />

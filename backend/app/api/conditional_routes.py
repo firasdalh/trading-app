@@ -182,6 +182,43 @@ def set_lots(setup_id: int, req: LotRequest, session: Session = Depends(get_sess
     return ConditionalSetupView.model_validate(s)
 
 
+class LevelsRequest(BaseModel):
+    """Drag-to-adjust the armed setup's levels (any subset). Only provided fields change."""
+    trigger_price: float | None = Field(None, gt=0)
+    stop_loss: float | None = Field(None, gt=0)
+    take_profit: float | None = Field(None, gt=0)
+
+
+@router.patch("/{setup_id}/levels", response_model=ConditionalSetupView)
+def set_levels(setup_id: int, req: LevelsRequest,
+               session: Session = Depends(get_session)) -> ConditionalSetupView:
+    """Adjust an armed setup's trigger / stop / target (e.g. dragged on the chart). Validates each
+    level sits on the correct side for the direction, then re-derives R:R. Armed setups only."""
+    s = session.get(ConditionalSetup, setup_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="not found")
+    if s.status != ConditionalStatus.ARMED.value:
+        raise HTTPException(status_code=409, detail=f"cannot adjust a setup in status '{s.status}'")
+
+    trigger = req.trigger_price if req.trigger_price is not None else s.trigger_price
+    stop = req.stop_loss if req.stop_loss is not None else s.stop_loss
+    tp = req.take_profit if req.take_profit is not None else s.take_profit
+    is_long = s.direction == "long"
+    if stop is not None and ((is_long and stop >= trigger) or (not is_long and stop <= trigger)):
+        raise HTTPException(status_code=400, detail="stop-loss is on the wrong side of the trigger")
+    if tp is not None and ((is_long and tp <= trigger) or (not is_long and tp >= trigger)):
+        raise HTTPException(status_code=400, detail="take-profit is on the wrong side of the trigger")
+
+    s.trigger_price = trigger
+    s.stop_loss = stop
+    s.take_profit = tp
+    risk = abs(trigger - stop) if stop is not None else None
+    s.rr = round(abs(tp - trigger) / risk, 2) if (tp is not None and risk) else s.rr
+    session.commit()
+    session.refresh(s)
+    return ConditionalSetupView.model_validate(s)
+
+
 @router.delete("/finished")
 def clear_finished_route(session: Session = Depends(get_session)) -> dict:
     """Remove all terminal (cancelled / rejected / expired / triggered) setups — armed ones stay."""

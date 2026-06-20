@@ -209,6 +209,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ lots }),
     }),
+  setConditionalLevels: (
+    id: number,
+    levels: { trigger_price?: number; stop_loss?: number; take_profit?: number },
+  ) =>
+    request<import("../types").ConditionalSetupView>(`/api/conditionals/${id}/levels`, {
+      method: "PATCH",
+      body: JSON.stringify(levels),
+    }),
 
   llmStatus: () => request<LlmStatus>("/api/settings/llm"),
   setLlm: (body: { provider: string; model?: string; api_key?: string }) =>
