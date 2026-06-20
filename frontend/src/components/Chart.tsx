@@ -34,6 +34,8 @@ interface Props {
   liveQuote: LiveQuote | null;
   positions: PositionView[] | null;
   armed?: ArmedLevel[];
+  // Commit a dragged SL/TP for the charted symbol's open position (null = leave that one unchanged).
+  onSetSlTp?: (sl: number | null, tp: number | null) => void;
 }
 
 const EMA_CONFIG = [
@@ -134,7 +136,7 @@ function LineSwatch({ dash }: { dash: string }) {
   );
 }
 
-export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed }: Props) {
+export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -153,6 +155,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
   const armedLinesRef = useRef<IPriceLine[]>([]);
+  // Drag-to-adjust SL/TP on the charted position: refs so the (once-attached) mouse handlers always
+  // read the current position + commit callback without re-binding listeners.
+  const slLineRef = useRef<IPriceLine | null>(null);
+  const tpLineRef = useRef<IPriceLine | null>(null);
+  const dragRef = useRef<{ kind: "sl" | "tp" } | null>(null);
+  const dragPriceRef = useRef<number | null>(null);
+  const myPosRef = useRef<PositionView | null>(null);
+  const onSetSlTpRef = useRef<Props["onSetSlTp"]>(onSetSlTp);
+  onSetSlTpRef.current = onSetSlTp;
+  const [dragHint, setDragHint] = useState<{ kind: "sl" | "tp"; price: number } | null>(null);
 
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = useState<Record<number, boolean>>({ 50: true, 100: false, 200: true });
@@ -485,16 +497,21 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
+    if (dragRef.current) return;  // mid-drag: don't rebuild (a positions poll would snap the line back)
     posLinesRef.current.forEach((l) => series.removePriceLine(l));
     posLinesRef.current = [];
+    slLineRef.current = null;
+    tpLineRef.current = null;
     const mine = (positions ?? []).filter(
       (p) => p.symbol.toUpperCase() === symbol.toUpperCase(),
     );
-    const add = (price: number | null | undefined, color: string, title: string) => {
-      if (price == null) return;
-      posLinesRef.current.push(
-        series.createPriceLine({ price, color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title }),
-      );
+    const add = (price: number | null | undefined, color: string, title: string): IPriceLine | null => {
+      if (price == null) return null;
+      const line = series.createPriceLine({
+        price, color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title,
+      });
+      posLinesRef.current.push(line);
+      return line;
     };
     for (const p of mine) {
       const arrow = p.direction === "long" ? "▲" : "▼";
@@ -506,8 +523,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       const slUsd = usdAtLevel(p, p.stop_loss);
       const tpUsd = usdAtLevel(p, p.take_profit);
       add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL ${slUsd}`.trim() : `${arrow} entry`);
-      if (!be) add(p.stop_loss, "#ef5350", `SL ${slUsd}`.trim());
-      add(p.take_profit, "#26a69a", `TP ${tpUsd}`.trim());
+      if (!be) slLineRef.current = add(p.stop_loss, "#ef5350", `SL ${slUsd} · drag`.trim());
+      tpLineRef.current = add(p.take_profit, "#26a69a", `TP ${tpUsd} · drag`.trim());
     }
   }, [positions, symbol]);
 
@@ -534,10 +551,108 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
   }, [armed, symbol]);
 
+  // Drag the SL/TP line directly on the chart to adjust it, committing to the broker on drop. The
+  // handlers read live state from refs, so they're attached once. While dragging we turn off chart
+  // scroll/scale so the pane doesn't pan, and the positions-poll rebuild is skipped (guard above).
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const HIT = 7; // px tolerance to grab a line
+
+    const yToPrice = (e: MouseEvent): number | null => {
+      const series = seriesRef.current;
+      if (!series) return null;
+      const y = e.clientY - container.getBoundingClientRect().top;
+      const p = series.coordinateToPrice(y);
+      return p == null ? null : Number(p);
+    };
+
+    const handleAt = (e: MouseEvent): "sl" | "tp" | null => {
+      const series = seriesRef.current;
+      const pos = myPosRef.current;
+      if (!series || !pos) return null;
+      const y = e.clientY - container.getBoundingClientRect().top;
+      let best: "sl" | "tp" | null = null;
+      let bestDist = HIT;
+      const cands: [("sl" | "tp"), number | null | undefined, IPriceLine | null][] = [
+        ["sl", pos.stop_loss, slLineRef.current],
+        ["tp", pos.take_profit, tpLineRef.current],
+      ];
+      for (const [kind, price, line] of cands) {
+        if (price == null || !line) continue;   // only lines we actually drew are draggable
+        const c = series.priceToCoordinate(price);
+        if (c == null) continue;
+        const d = Math.abs(c - y);
+        if (d <= bestDist) { bestDist = d; best = kind; }
+      }
+      return best;
+    };
+
+    const onMove = (e: MouseEvent) => {
+      const drag = dragRef.current;
+      if (!drag) {
+        container.style.cursor = handleAt(e) ? "ns-resize" : "";
+        return;
+      }
+      const price = yToPrice(e);
+      if (price == null) return;
+      dragPriceRef.current = price;
+      (drag.kind === "sl" ? slLineRef.current : tpLineRef.current)?.applyOptions({ price });
+      setDragHint({ kind: drag.kind, price });
+    };
+
+    const onDown = (e: MouseEvent) => {
+      const kind = handleAt(e);
+      if (!kind) return;
+      dragRef.current = { kind };
+      dragPriceRef.current = null;
+      chartRef.current?.applyOptions({ handleScroll: false, handleScale: false });
+      e.preventDefault();
+    };
+
+    const onUp = () => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      dragRef.current = null;
+      chartRef.current?.applyOptions({ handleScroll: true, handleScale: true });
+      container.style.cursor = "";
+      const price = dragPriceRef.current;
+      setDragHint(null);
+      const pos = myPosRef.current;
+      const handler = onSetSlTpRef.current;
+      if (price == null || !pos || !handler) return;
+      // Reject a wrong-side level (SL above entry on a long, etc.); the line snaps back on next poll.
+      const isLong = pos.direction === "long";
+      const ok = drag.kind === "sl"
+        ? (isLong ? price < pos.entry_price : price > pos.entry_price)
+        : (isLong ? price > pos.entry_price : price < pos.entry_price);
+      if (!ok) return;
+      const sl = drag.kind === "sl" ? price : pos.stop_loss ?? null;
+      const tp = drag.kind === "tp" ? price : pos.take_profit ?? null;
+      handler(sl, tp);
+    };
+
+    const onLeave = () => {
+      if (!dragRef.current) container.style.cursor = "";
+    };
+
+    container.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    container.addEventListener("mouseleave", onLeave);
+    return () => {
+      container.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      container.removeEventListener("mouseleave", onLeave);
+    };
+  }, []);
+
   const change = legend ? legend.close - legend.open : 0;
   const changePct = legend && legend.open ? (change / legend.open) * 100 : 0;
 
   const myPos = (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase());
+  myPosRef.current = myPos ?? null;  // keep the drag handlers reading the live position
 
   // Reset the view to the clean default: the most recent ~110 bars (big candles) with the price
   // axis auto-fitted — undoing any zoom/pan/pinned-scale for clear visualization.
@@ -597,6 +712,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         </div>
       )}
 
+      {dragHint && myPos && (
+        <div
+          className={`pointer-events-none absolute left-1/2 top-9 z-20 -translate-x-1/2 rounded px-2 py-1 text-xs font-semibold shadow ${
+            dragHint.kind === "sl" ? "bg-bear/90 text-white" : "bg-bull/90 text-white"
+          }`}
+        >
+          {dragHint.kind === "sl" ? "SL" : "TP"} → {fmtPrice(dragHint.price)}{" "}
+          {usdAtLevel(myPos, dragHint.price) && <span>({usdAtLevel(myPos, dragHint.price)})</span>}
+        </div>
+      )}
       <div ref={containerRef} className="h-[600px] w-full" />
       {(() => {
         const hasPos = !!myPos;
