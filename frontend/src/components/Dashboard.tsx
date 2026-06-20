@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import { assetLabel, fmtPrice } from "../format";
+import { assetLabel, displaySymbol, fmtPrice, fmtUsd } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { useQuoteSocket } from "../hooks/useQuoteSocket";
@@ -377,6 +377,34 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
       {error && (
         <div className="rounded-md border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">
           {error}
+        </div>
+      )}
+
+      {/* Open positions — quick-switch the chart between them */}
+      {(positions ?? []).length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-neutral-500">● Open</span>
+          {(positions ?? []).map((p) => {
+            const active = p.symbol.toUpperCase() === symbol.toUpperCase();
+            return (
+              <button
+                key={`${p.symbol}-${p.direction}`}
+                onClick={() => openPositionSymbol(p)}
+                title={`Switch chart to ${p.symbol} (${p.direction})`}
+                className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs ${
+                  active ? "bg-blue-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                }`}
+              >
+                <span className={p.direction === "long" ? "text-bull" : "text-bear"}>
+                  {p.direction === "long" ? "▲" : "▼"}
+                </span>
+                <span className="font-medium">{displaySymbol(p.symbol)}</span>
+                <span className={`tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}>
+                  {fmtUsd(p.unrealized_pnl, { sign: true })}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
 
