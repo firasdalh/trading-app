@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import { ArmSetupButton } from "./ArmSetupButton";
+import { RegimeBadge } from "./RegimeBadge";
 import { ReviewExplanation } from "./ReviewExplanation";
 import type { OpportunityView } from "../types";
 
@@ -133,6 +134,7 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                   <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${dir.cls}`}>
                     {o.watch ? "WATCHING" : dir.label}
                   </span>
+                  <RegimeBadge regime={o.regime} strategy={o.strategy} />
                   {actionable && (
                     <span className="text-xs tabular-nums text-neutral-400">
                       conf {(o.confidence * 100).toFixed(0)}%{o.rr ? ` · ${o.rr.toFixed(1)}R` : ""}

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { ArmSetupButton } from "./ArmSetupButton";
+import { RegimeBadge } from "./RegimeBadge";
 import { ReviewExplanation } from "./ReviewExplanation";
 import type { AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
 
@@ -513,29 +514,6 @@ function biasTone(bias: string): string {
   if (bias === "bullish") return "text-bull";
   if (bias === "bearish") return "text-bear";
   return "text-neutral-300";
-}
-
-function RegimeBadge({ regime, strategy }: { regime: string; strategy?: string | null }) {
-  const color: Record<string, string> = {
-    trending: "bg-bull/15 text-bull",
-    moderate: "bg-blue-500/15 text-blue-300",
-    ranging: "bg-warn/15 text-warn",
-    volatile: "bg-bear/15 text-bear",
-  };
-  const stratLabel: Record<string, string> = {
-    trend: "trend",
-    mean_reversion: "fade",
-    stand_aside: "aside",
-  };
-  const s = strategy ? stratLabel[strategy] ?? strategy : null;
-  return (
-    <span
-      className={`rounded px-2 py-0.5 text-xs font-medium ${color[regime] ?? "bg-neutral-700 text-neutral-200"}`}
-      title={`Market regime: ${regime}${s ? ` → ${strategy}` : ""}`}
-    >
-      {regime}{s ? ` · ${s}` : ""}
-    </span>
-  );
 }
 
 function DirectionBadge({ direction }: { direction: string }) {

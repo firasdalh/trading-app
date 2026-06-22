@@ -333,6 +333,8 @@ export interface OpportunityView {
   lots?: number | null;        // size that would be opened
   risk_usd?: number | null;
   reward_usd?: number | null;
+  regime?: string | null;
+  strategy?: string | null;
 }
 
 export interface WatchItem {

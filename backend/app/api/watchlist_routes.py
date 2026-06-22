@@ -146,6 +146,8 @@ class OpportunityView(BaseModel):
     lots: float | None = None       # the size that would be opened (Risk Manager, in lots)
     risk_usd: float | None = None   # $ risk at that size
     reward_usd: float | None = None # $ reward to target (risk × R)
+    regime: str | None = None       # market regime read (trending / ranging / volatile / moderate)
+    strategy: str | None = None     # strategy it permits (trend / mean_reversion / stand_aside)
 
 
 @router.get("/opportunities", response_model=list[OpportunityView])
@@ -191,6 +193,7 @@ def opportunities(
             rationale=prop.rationale, risk_approved=dec.approved, risk_decision=dec.decision.value,
             risk_reason=dec.reason, already_open=it.symbol.upper() in open_syms,
             conditional=prop.conditional, lots=lots, risk_usd=risk_usd, reward_usd=reward_usd,
+            regime=prop.regime, strategy=prop.strategy,
         )
 
     # Pass 1 — rank the whole list with the deterministic engine (cheap, no LLM quota).

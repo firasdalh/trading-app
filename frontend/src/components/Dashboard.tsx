@@ -44,6 +44,7 @@ import { AccountBar } from "./AccountBar";
 import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
 import { ChartPositionBar } from "./ChartPositionBar";
+import { RegimeBadge } from "./RegimeBadge";
 import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
@@ -386,6 +387,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           <span className="text-sm font-semibold">
             {symbol} · {timeframe}
           </span>
+          {result?.proposal?.regime && (
+            <RegimeBadge regime={result.proposal.regime} strategy={result.proposal.strategy} />
+          )}
           {/* Open positions — quick-switch the chart between them */}
           {(positions ?? []).length > 0 && (
             <span className="flex flex-wrap items-center gap-1.5">
