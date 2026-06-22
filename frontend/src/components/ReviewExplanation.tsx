@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api/client";
 import type { ExplainedReview } from "../types";
 
@@ -23,6 +23,23 @@ export function ReviewExplanation({ rationale }: { rationale: string }) {
   const [cache, setCache] = useState<Partial<Record<Lang, ExplainedReview>>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Invalidate cached explanations whenever the underlying proposal (rationale) changes — otherwise
+  // the EN and AR caches could be built from DIFFERENT proposals and contradict each other (one
+  // says SHORT, the other LONG). If the panel is open, re-fetch the shown language for the new text.
+  useEffect(() => {
+    setCache({});
+    setError(null);
+    if (!open || !rationale?.trim()) return;
+    let cancelled = false;
+    setLoading(true);
+    api.explainReview(rationale, lang)
+      .then((res) => { if (!cancelled) setCache({ [lang]: res }); })
+      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rationale]);
 
   if (!rationale?.trim()) return null;
 
