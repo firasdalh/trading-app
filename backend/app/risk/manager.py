@@ -232,17 +232,33 @@ def evaluate_proposal(
         return _veto(symbol, "no exposure budget left across open positions", checks)
 
     decision_type = RiskDecisionType.APPROVED
-    # A min-lot-floored trade can't be shrunk further (it's already the smallest tradable size), so
-    # we accept it as-is even if it exceeds the remaining budget. Otherwise, shrink to fit.
-    if risk_amount > remaining and not min_lot_floored:
+    if risk_amount > remaining:
+        if min_lot_floored:
+            # The per-trade cap is waived for the broker minimum, but the PORTFOLIO exposure cap is
+            # NOT: if even the minimum lot won't fit the remaining budget, veto (don't blow exposure).
+            return _veto(
+                symbol,
+                f"broker minimum lot risks ${risk_amount:.2f} — over the remaining exposure budget "
+                f"(${remaining:.2f}); no room for even the smallest trade",
+                checks,
+            )
+        # Shrink to fit the remaining exposure budget (per-lot risk in account currency).
         qty = _floor_to_step(remaining / per_lot, qty_step) if per_lot > 0 else 0.0
         risk_amount = qty * per_lot
         decision_type = RiskDecisionType.RESIZED
-        # The shrink may have dropped below the broker minimum — floor back up + flag.
+        # The shrink may have dropped below the broker minimum — floor back up + flag, then it must
+        # still fit the budget (same portfolio rule).
         if min_qty and qty < min_qty:
             qty = min_qty
             risk_amount = qty * per_lot
             min_lot_floored = True
+            if risk_amount > remaining:
+                return _veto(
+                    symbol,
+                    f"broker minimum lot risks ${risk_amount:.2f} — over the remaining exposure "
+                    f"budget (${remaining:.2f})",
+                    checks,
+                )
         elif qty <= _QTY_EPS:
             return _veto(symbol, "exposure budget too small to size any position", checks)
 

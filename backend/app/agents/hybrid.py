@@ -32,6 +32,18 @@ from app.risk.service import ScanCache, _norm_symbol, live_broker_positions
 
 log = get_logger("agents.hybrid")
 
+# Ranging fades are lower-conviction (engine caps them below trend setups), so the Hybrid takes one
+# on a LOWER bar than trend trades — but only when it's the single best available (a stronger trend
+# setup always outranks it). Trend setups still need the full min_confidence threshold.
+_MR_MIN_CONFIDENCE = 0.60
+
+
+def _effective_min_conf(strategy: str | None, threshold: float) -> float:
+    """The confidence bar a setup must clear to be a Hybrid candidate — lower for a ranging fade."""
+    if strategy == "mean_reversion":
+        return min(threshold, _MR_MIN_CONFIDENCE)
+    return threshold
+
 
 def get_or_create_hybrid_config(session: Session) -> HybridConfig:
     cfg = session.get(HybridConfig, 1)
@@ -130,7 +142,7 @@ def run_hybrid(session: Session) -> dict:
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue
         if (prop.direction.value in ("long", "short") and dec.approved
-                and prop.confidence > threshold):
+                and prop.confidence > _effective_min_conf(prop.strategy, threshold)):
             candidates.append((prop.confidence, it))
         # A blocked-but-valid setup carries a 'wait for the break' conditional — collect it to arm.
         if prop.conditional is not None:
@@ -138,7 +150,8 @@ def run_hybrid(session: Session) -> dict:
             armable.append((prop.conditional.confidence, it, prop.conditional, cond_dir))
 
     if not candidates:
-        return done(f"no risk-approved setup above {threshold:.0%} confidence")
+        return done(f"no risk-approved setup above {threshold:.0%} confidence "
+                    f"(ranging fades above {_MR_MIN_CONFIDENCE:.0%})")
 
     candidates.sort(key=lambda x: -x[0])
     _, best = candidates[0]
@@ -156,7 +169,8 @@ def run_hybrid(session: Session) -> dict:
                   "confidence": record.confidence}
         return done(f"opened {best.symbol} {record.direction} @ {record.confidence:.0%}", opened)
 
-    if (not res.risk.approved or res.proposal.confidence <= threshold
+    if (not res.risk.approved
+            or res.proposal.confidence <= _effective_min_conf(res.proposal.strategy, threshold)
             or res.proposal.direction.value not in ("long", "short")):
         return done(f"best ({best.symbol}) no longer qualifies after full review "
                     f"({res.proposal.confidence:.0%}, {res.risk.decision.value})")

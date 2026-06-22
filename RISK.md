@@ -34,9 +34,12 @@ The maximum you can lose on a single trade if the stop-loss is hit. Position siz
   minimum even though it risks MORE than 3% — because you cannot trade smaller. It is bounded by the
   minimum lot ("small money"), flagged to the user (`min_lot_floored`, an amber "⚠ broker min · over
   cap" note + the exact % in the verdict), and is the ONLY case sizing may exceed the per-trade cap.
-  Every OTHER gate (daily-loss, exposure>0, max positions, anti-stacking, correlation, kill-switch,
-  live-confirmation) still applies. This replaces the previous behaviour, which either vetoed the
-  trade or let the broker silently clamp a sub-minimum size up at order time (a hidden over-risk).
+  The **portfolio exposure cap is NOT waived**: a min-lot trade must still fit the remaining
+  `max_total_exposure` budget (vetoed if even the minimum won't fit), so several min-lot trades can't
+  stack past the budget. Every other gate (daily-loss, max positions, anti-stacking, correlation,
+  kill-switch, live-confirmation) still applies. This replaces the previous behaviour, which either
+  vetoed the trade or let the broker silently clamp a sub-minimum size up at order time (a hidden
+  over-risk).
 
 ### `max_open_positions` (default: 3)
 Caps how many trades can be open at once.

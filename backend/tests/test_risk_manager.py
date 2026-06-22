@@ -209,12 +209,12 @@ def test_min_lot_floors_up_and_flags():
     assert "minimum" in d.reason.lower()
 
 
-def test_min_lot_floor_accepts_even_over_exposure_budget():
-    # The min lot risks more than the remaining exposure budget too, but it can't be shrunk further,
-    # so it's accepted (you can't trade smaller than the broker minimum).
+def test_min_lot_floor_vetoed_when_over_exposure_budget():
+    # The per-trade cap is waived for the broker minimum, but the PORTFOLIO exposure cap is not:
+    # if even the min lot (2000 units -> $10k risk) won't fit the 6% budget ($6k), veto.
     d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
                           now=NOW, qty_step=1, min_qty=2000.0)
-    assert d.approved and d.min_lot_floored and d.approved_qty == 2000.0
+    assert not d.approved and "exposure budget" in d.reason
 
 
 def test_normal_size_not_min_lot_floored():

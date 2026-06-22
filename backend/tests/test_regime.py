@@ -14,6 +14,14 @@ def _tf(resistance=None, support=None) -> TimeframeRead:
                          resistance_levels=resistance or [], indicators={}, patterns=[], comment="")
 
 
+def test_hybrid_lowers_bar_for_ranging_fades():
+    # The Hybrid takes a ranging fade on a lower confidence bar than a trend trade.
+    from app.agents.hybrid import _MR_MIN_CONFIDENCE, _effective_min_conf
+    assert _effective_min_conf("trend", 0.70) == 0.70
+    assert _effective_min_conf("mean_reversion", 0.70) == _MR_MIN_CONFIDENCE
+    assert _effective_min_conf(None, 0.70) == 0.70
+
+
 def test_regime_policy_mapping():
     assert regime_policy("trending")["strategy"] == "trend"
     assert regime_policy("ranging")["strategy"] == "mean_reversion"
