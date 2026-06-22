@@ -525,7 +525,13 @@ def _deterministic_decision(
         base.rationale = "Standing aside: inside a high-impact event window."
         return base
 
-    tf0 = technical.timeframes[0] if technical.timeframes else None
+    # The ENTRY-timeframe read. Select it by matching the requested timeframe — NOT by position:
+    # the LLM technical path can return the timeframes in any order, so timeframes[0] is not
+    # guaranteed to be the entry TF (using the wrong TF would size off the wrong ATR/RSI/regime).
+    tf0 = None
+    if technical.timeframes:
+        tf0 = next((x for x in technical.timeframes if x.timeframe == timeframe),
+                   technical.timeframes[0])
     ind = tf0.indicators if tf0 else {}
     trend = _trend_from_indicators(ind, tf0.trend if tf0 else "sideways")  # from computed EMAs
     macro = _macro_trend(technical)                                       # higher-timeframe context

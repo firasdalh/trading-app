@@ -14,6 +14,29 @@ def _tf(resistance=None, support=None) -> TimeframeRead:
                          resistance_levels=resistance or [], indicators={}, patterns=[], comment="")
 
 
+def test_entry_timeframe_matched_by_param_not_position():
+    # The LLM technical path can return timeframes in any order, so the entry TF must be picked by
+    # matching the requested timeframe — not by position. Here the list is REVERSED (1d first) and
+    # only the 1h (entry) is ranging; the proposal's regime must come from the 1h read.
+    from datetime import datetime, timezone
+
+    from app.agents.orchestrator import _deterministic_decision
+    from app.models.enums import TradingBias
+    from app.models.schemas import FundamentalRead, TechnicalRead
+
+    def tf(name, adx):
+        return TimeframeRead(timeframe=name, trend="sideways", support_levels=[],
+                             resistance_levels=[], indicators={"adx": adx, "last_close": 100.0},
+                             patterns=[], comment="")
+
+    tech = TechnicalRead(symbol="X", timeframes=[tf("1d", 30.0), tf("1h", 15.0)],
+                         overall_trend="up", confidence=0.5, notes="")
+    fund = FundamentalRead(symbol="X", bias=TradingBias.NEUTRAL)
+    prop = _deterministic_decision("X", AssetClass.INDEX, "1h", tech, fund,
+                                   datetime(2026, 6, 23, tzinfo=timezone.utc))
+    assert prop.regime == "ranging"   # read the 1h (ADX 15), not the 1d (ADX 30)
+
+
 def test_hybrid_lowers_bar_for_ranging_fades():
     # The Hybrid takes a ranging fade on a lower confidence bar than a trend trade.
     from app.agents.hybrid import _MR_MIN_CONFIDENCE, _effective_min_conf
