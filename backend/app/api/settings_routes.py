@@ -83,12 +83,14 @@ def set_mode(req: ModeRequest, session: Session = Depends(get_session)) -> Setti
     settings = get_or_create_settings(session)
 
     if req.mode == ExecutionMode.C_AUTO_LIVE:
-        # Live auto-exec: require the typed phrase, switch to live, and record confirmation.
-        _check_phrase(req.confirm_phrase)
-        settings.broker_env = "live"
-        settings.live_confirmed_at = datetime.now(timezone.utc)
-        log.warning("execution mode -> C_AUTO_LIVE (live confirmed)")
-    elif req.mode == ExecutionMode.B_AUTO_PAPER:
+        # Mode C (auto-execute live) was removed at the user's request — the Hybrid auto-pilot is the
+        # automation path (and still requires live-confirmation to touch a real account).
+        raise HTTPException(
+            status_code=400,
+            detail="Mode C (auto-execute live) has been removed — use the Hybrid auto-pilot for "
+                   "automation.",
+        )
+    if req.mode == ExecutionMode.B_AUTO_PAPER:
         # Mode B is paper-only by definition.
         settings.broker_env = "paper"
         log.warning("execution mode -> B_AUTO_PAPER (paper)")

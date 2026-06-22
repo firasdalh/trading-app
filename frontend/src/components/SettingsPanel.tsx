@@ -18,13 +18,13 @@ interface Props {
   onChanged: () => void;
 }
 
+// Mode C (auto-execute live) was removed — the Hybrid auto-pilot is the automation path.
 const MODES: { value: ExecutionMode; label: string; desc: string }[] = [
   { value: "A_PROPOSE_APPROVE", label: "A · Propose & Approve", desc: "AI proposes; you approve every order." },
   { value: "B_AUTO_PAPER", label: "B · Auto-execute (Paper)", desc: "Risk-approved proposals execute automatically — paper only." },
-  { value: "C_AUTO_LIVE", label: "C · Auto-execute (LIVE)", desc: "Real money, no human in the loop. Requires the confirmation phrase." },
 ];
 
-// Settings modal: execution mode (A/B/C) with the live-confirmation gate, broker env,
+// Settings modal: execution mode (A/B) with the live-confirmation gate, broker env,
 // a read-only view of the RISK.md-bounded risk limits, and a flatten-all action.
 export function SettingsPanel({ settings, onClose, onChanged }: Props) {
   const [phrase, setPhrase] = useState("");
@@ -52,15 +52,7 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
   };
 
   const chooseMode = (mode: ExecutionMode) => {
-    if (mode === "C_AUTO_LIVE") {
-      if (!phrase.trim()) {
-        setError("Type the confirmation phrase to enable live auto-execution.");
-        return;
-      }
-      run(() => api.setMode(mode, phrase), "Live auto-execution enabled.");
-    } else {
-      run(() => api.setMode(mode), `Switched to ${mode}.`);
-    }
+    run(() => api.setMode(mode), `Switched to ${mode}.`);
   };
 
   return (
@@ -90,21 +82,16 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
           <div className="space-y-2">
             {MODES.map((m) => {
               const active = currentMode === m.value;
-              const danger = m.value === "C_AUTO_LIVE";
               return (
                 <button
                   key={m.value}
                   disabled={busy}
                   onClick={() => chooseMode(m.value)}
                   className={`w-full rounded-md border px-3 py-2 text-left text-sm ${
-                    active
-                      ? danger
-                        ? "border-bear bg-bear/15"
-                        : "border-blue-500 bg-blue-500/10"
-                      : "border-neutral-700 hover:bg-neutral-800"
+                    active ? "border-blue-500 bg-blue-500/10" : "border-neutral-700 hover:bg-neutral-800"
                   }`}
                 >
-                  <div className={`font-medium ${danger ? "text-bear" : ""}`}>{m.label}</div>
+                  <div className="font-medium">{m.label}</div>
                   <div className="text-xs text-neutral-400">{m.desc}</div>
                 </button>
               );
@@ -120,7 +107,7 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             type="text"
             value={phrase}
             onChange={(e) => setPhrase(e.target.value)}
-            placeholder="Required to enable Mode C / live trading"
+            placeholder="Required to enable live trading"
             className="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm"
           />
           {isLive && reconfirm && (
