@@ -57,6 +57,11 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
 
     if closes:
         indicators["last_close"] = round(closes[-1], 6)
+    if candles:
+        # Last bar's wick extremes — used to detect a rejection at a range edge (high tagged the
+        # level but the bar closed back off it) for the ranging mean-reversion confirmation.
+        indicators["last_high"] = round(candles[-1].high, 6)
+        indicators["last_low"] = round(candles[-1].low, 6)
     # Trend EMAs.
     for p in (20, 50, 200):
         val = ema(closes, p)
@@ -66,6 +71,11 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
     r = rsi(closes)
     if r is not None:
         indicators["rsi14"] = r
+        # Previous bar's RSI, so the engine can tell if momentum is TURNING back from an extreme
+        # (a rejection cue) rather than just being extreme.
+        rp = rsi(closes[:-1]) if len(closes) > 1 else None
+        if rp is not None:
+            indicators["rsi14_prev"] = rp
     m = macd(closes)
     if m is not None:
         indicators["macd"] = m["macd"]

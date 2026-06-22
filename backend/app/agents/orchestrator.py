@@ -220,24 +220,35 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradePropos
     res = _nearest_above(tf0, ind, price)
     sup = _nearest_below(tf0, ind, price)
     near = _MR_EDGE_ATR * atr
+    # Same-TF REJECTION confirmation: the bar must have actually TAGGED the edge (its wick reached
+    # the level) but CLOSED back off it — proof the edge held this bar, not a breakout in progress.
+    # (The close is on the inside by construction: the edge is the nearest level beyond `price`.)
+    last_high = ind.get("last_high")
+    last_low = ind.get("last_low")
+    rsi_prev = ind.get("rsi14_prev")
 
     direction = stop = target = None
     edge = None
-    if res is not None and (res - price) <= near and rsi is not None and rsi >= _RSI_OB and mean < price:
+    rejected_top = res is not None and last_high is not None and last_high >= res
+    rejected_bot = sup is not None and last_low is not None and last_low <= sup
+    if (res is not None and (res - price) <= near and rejected_top
+            and rsi is not None and rsi >= _RSI_OB and mean < price):
         direction, edge = Direction.SHORT, res
         stop = res + _MR_STOP_ATR * atr
         target = mean                       # revert to the mean
         risk = stop - price
         reward = price - target
-    elif sup is not None and (price - sup) <= near and rsi is not None and rsi <= _RSI_OS and mean > price:
+    elif (sup is not None and (price - sup) <= near and rejected_bot
+            and rsi is not None and rsi <= _RSI_OS and mean > price):
         direction, edge = Direction.LONG, sup
         stop = sup - _MR_STOP_ATR * atr
         target = mean
         risk = price - stop
         reward = target - price
     else:
-        base.rationale = ("Ranging — waiting for price to tag a range edge with RSI confirmation "
-                          "(overbought at resistance / oversold at support) before fading to the mean.")
+        base.rationale = ("Ranging — waiting for a REJECTION at a range edge (wick tags the level "
+                          "then closes back off it) with RSI overbought/oversold, before fading to "
+                          "the mean. No confirmed rejection yet.")
         return base
 
     if risk <= 0 or reward <= 0 or (reward / risk) < _MR_MIN_RR:
@@ -251,6 +262,10 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradePropos
     conf = 0.5
     if (direction == Direction.SHORT and rsi >= _RSI_OB + 5) or (direction == Direction.LONG and rsi <= _RSI_OS - 5):
         conf += 0.1
+    # RSI also TURNING back from the extreme (not just at it) = a stronger rejection.
+    if rsi_prev is not None and ((direction == Direction.SHORT and rsi < rsi_prev)
+                                 or (direction == Direction.LONG and rsi > rsi_prev)):
+        conf += 0.05
     if rr >= 1.5:
         conf += 0.05
     confidence = round(min(_MR_CONF_CAP, conf), 2)
