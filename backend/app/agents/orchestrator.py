@@ -894,19 +894,37 @@ def run_orchestrator(
         return proposal
 
     # --- LLM review of the deterministic setup (confirm / veto only) ---
+    # The checklist depends on the STRATEGY: a ranging mean-reversion FADE must NOT be judged like a
+    # trend trade (it is deliberately counter to the last leg, in a low-ADX market — those are the
+    # premise, not flaws), or the reviewer would veto every fade.
+    if proposal.strategy == "mean_reversion":
+        checklist = (
+            "This is a deliberate RANGING MEAN-REVERSION fade (regime=ranging). Judge it as a FADE, "
+            "NOT a trend trade: being counter to the last leg and a low-ADX / no-trend market are the "
+            "PREMISE of this strategy, NOT veto reasons. CONFIRM if price is at a real range edge "
+            "(resistance for a short / support for a long) showing a rejection, with adequate reward "
+            "back to the mean and no imminent high-impact event. VETO only if it is NOT actually at an "
+            "edge, there is no rejection, the reward to the mean is thin, or an event is imminent. "
+            "When unsure, confirm at lower confidence rather than veto."
+        )
+    else:
+        checklist = (
+            "Run your professional checklist (trend & structure, location/value vs chasing, momentum "
+            "confirmation, reward:risk vs the nearest opposing level, event & liquidity risk). Grade "
+            "it A/B/C. Confirm A/B, and confirm a marginal C at LOWER confidence; VETO only a clear "
+            "failure (counter-trend, no real R:R, an imminent high-impact event, or no trend). When "
+            "unsure, confirm at lower confidence rather than veto."
+        )
     user = (
         f"PROPOSED SETUP (from the deterministic strategy — you may only confirm or veto):\n"
         f"  symbol={symbol} timeframe={timeframe} direction={proposal.direction.value}\n"
+        f"  strategy={proposal.strategy} regime={proposal.regime}\n"
         f"  entry={proposal.entry} stop={proposal.stop_loss} target={proposal.take_profit} "
         f"confidence={proposal.confidence}\n  rationale={proposal.rationale}\n\n"
         f"TECHNICAL READ (all timeframes, indicators, support/resistance):\n"
         f"{technical.model_dump_json(indent=2)}\n\n"
         f"FUNDAMENTAL READ:\n{fundamental.model_dump_json(indent=2)}\n\n"
-        "Run your professional checklist (trend & structure, location/value vs chasing, momentum "
-        "confirmation, reward:risk vs the nearest opposing level, event & liquidity risk). Grade it "
-        "A/B/C. Confirm A/B, and confirm a marginal C at LOWER confidence; VETO only a clear failure "
-        "(counter-trend, no real R:R, an imminent high-impact event, or no trend). When unsure, "
-        "confirm at lower confidence rather than veto."
+        f"{checklist}"
     )
     review = analyze(system=_REVIEW_SYSTEM, user=user, schema=TradeReviewLLM, max_tokens=2000)
     if review is None:
