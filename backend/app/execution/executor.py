@@ -10,6 +10,8 @@ the proposal EXECUTED.
 """
 from __future__ import annotations
 
+import threading
+
 from sqlalchemy.orm import Session
 
 from app.brokers.registry import get_broker_for
@@ -39,8 +41,21 @@ class ExecutionBlocked(Exception):
     """Raised when execution is refused for a safety reason (kill-switch / live gate)."""
 
 
+# Serialize order submission across the scheduler's concurrent jobs (hybrid / conditional /
+# scanner Mode-B/C / advisor re-enter) so the anti-stacking check + fill + Position write run as
+# ONE atomic step. Without this, two openers could both pass the anti-stacking check before either
+# order fills and stack the same symbol. Opens are infrequent, so serializing them costs nothing.
+_EXEC_LOCK = threading.RLock()
+
+
 def execute_proposal(session: Session, record: TradeProposalRecord) -> OrderResult:
-    """Submit an approved proposal. Raises ExecutionBlocked if a safety gate refuses."""
+    """Submit an approved proposal (serialized via _EXEC_LOCK). Raises ExecutionBlocked if a safety
+    gate refuses."""
+    with _EXEC_LOCK:
+        return _execute_proposal(session, record)
+
+
+def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderResult:
     if record.approved_qty is None or record.approved_qty <= 0:
         raise ExecutionBlocked("no risk-approved quantity to execute")
     if record.direction not in (Direction.LONG.value, Direction.SHORT.value):
