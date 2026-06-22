@@ -102,6 +102,8 @@ _PULLBACK_ATR = 2.5   # price > this many ATR beyond EMA20 = stretched entry -> 
                       # steady trend rides ~2.4 ATR from the lagging EMA, so only flag real spikes)
 _VALUE_ENTRY_ATR = 1.0  # entry within ~1 ATR of the 20-EMA = a pullback to VALUE -> a pro's
                         # preferred trend entry (tight risk to the swing, lots of room to target)
+_STRETCHED_ATR = 1.5    # 1.5-2.5 ATR from value = getting stretched (small anti-chase penalty);
+                        # beyond _PULLBACK_ATR it's a full chase (bigger penalty) — see grading below
 
 _TF_RANK = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7}
 
@@ -649,14 +651,20 @@ def _deterministic_decision(
     )
     if macro_conflict:
         conf -= 0.1
-    if overextended:
-        conf -= 0.1  # stretched entry (mean-reversion bounce risk)
-    # Entry LOCATION: a pullback to value (within ~1 ATR of the 20-EMA) is the pro's preferred
-    # trend entry — small risk to the swing, large room to target. Reward it so pullback setups
-    # rank above chased ones in the scanner/Hybrid selection.
-    at_value = bool(ema20 and atr_v and abs(entry - ema20) <= _VALUE_ENTRY_ATR * atr_v)
-    if at_value:
-        conf += 0.1
+    # Entry LOCATION (anti-chase, graded): score the entry by its distance from value (EMA20) in
+    # ATRs. A pullback to value is the pro's entry (reward it); the further it's stretched the more
+    # we down-weight it — chasing far from value is where losers come from (today's HK50 short was
+    # chased to the low and squeezed). The bigger haircut pushes chased setups below the Hybrid
+    # threshold and ranks pullbacks above them in the scanner.
+    value_dist = abs(entry - ema20) / atr_v if (ema20 and atr_v and atr_v > 0) else None
+    at_value = value_dist is not None and value_dist <= _VALUE_ENTRY_ATR
+    if value_dist is not None:
+        if at_value:
+            conf += 0.1                       # pullback to value — preferred entry
+        elif value_dist >= _PULLBACK_ATR:
+            conf -= 0.18                      # chasing far from value — strong anti-chase
+        elif value_dist >= _STRETCHED_ATR:
+            conf -= 0.06                      # getting stretched
     rsi = ind.get("rsi14")
     if rsi is not None and ((direction == Direction.LONG and rsi >= _RSI_OB)
                             or (direction == Direction.SHORT and rsi <= _RSI_OS)):
