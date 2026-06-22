@@ -180,6 +180,11 @@ class TradeProposal(BaseModel):
     # LLM reviewer outcome on the deterministic setup: "confirm" | "veto" | None (rules only).
     review_decision: str | None = None
 
+    # Market regime read + the strategy it permits (trend / mean_reversion / stand_aside), so the
+    # "what are we doing and why" is explicit and visible rather than buried in the rationale.
+    regime: str | None = None
+    strategy: str | None = None
+
     # The full reasoning bundle that produced this proposal (for audit + UI).
     fundamental: FundamentalRead | None = None
     technical: TechnicalRead | None = None

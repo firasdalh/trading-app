@@ -95,6 +95,11 @@ _RR_MAX = 4.0         # cap the planned target at 4R so a far key level isn't an
 _MIN_RR_COND = 1.5    # only suggest a conditional break-entry if its R:R (from the trigger) clears this
 _RSI_OB = 75.0        # overbought / oversold caution thresholds
 _RSI_OS = 25.0
+# --- ranging-market mean-reversion (fade the range edges instead of trend-trading a flat market) ---
+_MR_EDGE_ATR = 0.6    # within this many ATR of a range edge counts as "at the edge"
+_MR_STOP_ATR = 0.6    # protective stop sits this many ATR beyond the edge
+_MR_MIN_RR = 1.0      # need >=1R from the edge back to the mean to bother fading
+_MR_CONF_CAP = 0.68   # cap mean-reversion confidence below strong-trend setups (lower-conviction edge)
 _STRUCT_IGNORE = 0.5  # ignore overhead structure within 0.5R of entry (breakout zone)
 _MIN_RR_TO_STRUCT = 1.0  # need >=1R of room to the next structure to take the trade
 _MOM_ATR_FRAC = 0.10  # counter-momentum only "matters" when |MACD hist| >= 10% of ATR (noise gate)
@@ -162,6 +167,106 @@ def _regime(ind: dict) -> str:
     if adx is not None and adx < _ADX_MIN:
         return "ranging"
     return "moderate"
+
+
+# Explicit, single-source regime -> strategy policy (the "what do we do in this regime?" table the
+# rest of the engine and the UI read, instead of scattered ad-hoc checks).
+_REGIME_POLICY = {
+    "trending": {"strategy": "trend", "note": "Trend continuation — trade with the trend."},
+    "moderate": {"strategy": "trend", "note": "Mild trend — trend continuation, lighter conviction."},
+    "ranging":  {"strategy": "mean_reversion", "note": "No trend — fade the range edges to the mean."},
+    "volatile": {"strategy": "stand_aside", "note": "Volatility expanding without a trend — whipsaw; stand aside."},
+}
+
+
+def regime_policy(regime: str) -> dict:
+    """The strategy a given regime permits: 'trend' / 'mean_reversion' / 'stand_aside'."""
+    return _REGIME_POLICY.get(regime, {"strategy": "trend", "note": ""})
+
+
+def _nearest_above(tf0, ind: dict, price: float) -> float | None:
+    """Nearest resistance ABOVE price (technical levels, fallback the last swing high)."""
+    cands = [l for l in ((tf0.resistance_levels if tf0 else []) or []) if l and l > price]
+    sh = ind.get("swing_high")
+    if sh and sh > price:
+        cands.append(sh)
+    return min(cands) if cands else None
+
+
+def _nearest_below(tf0, ind: dict, price: float) -> float | None:
+    """Nearest support BELOW price (technical levels, fallback the last swing low)."""
+    cands = [l for l in ((tf0.support_levels if tf0 else []) or []) if l and l < price]
+    sl = ind.get("swing_low")
+    if sl and sl < price:
+        cands.append(sl)
+    return max(cands) if cands else None
+
+
+def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradeProposal:
+    """RANGING regime: there's no trend to follow, so FADE the range edges back to the mean (EMA20)
+    — the pro's range play. Short a tag of resistance while overbought; long a tag of support while
+    oversold; stop just beyond the edge; target the mean. Confidence is capped below trend setups
+    (lower-conviction edge). Returns NO_TRADE when price isn't at an edge with RSI confirmation."""
+    base.regime = "ranging"
+    base.strategy = "mean_reversion"
+    atr = ind.get("atr14")
+    rsi = ind.get("rsi14")
+    price = ind.get("last_close")
+    mean = ind.get("ema20")
+    if not (atr and price and mean) or atr <= 0:
+        base.rationale = "Ranging, but no usable ATR/price/mean for a fade — sitting out."
+        return base
+
+    res = _nearest_above(tf0, ind, price)
+    sup = _nearest_below(tf0, ind, price)
+    near = _MR_EDGE_ATR * atr
+
+    direction = stop = target = None
+    edge = None
+    if res is not None and (res - price) <= near and rsi is not None and rsi >= _RSI_OB and mean < price:
+        direction, edge = Direction.SHORT, res
+        stop = res + _MR_STOP_ATR * atr
+        target = mean                       # revert to the mean
+        risk = stop - price
+        reward = price - target
+    elif sup is not None and (price - sup) <= near and rsi is not None and rsi <= _RSI_OS and mean > price:
+        direction, edge = Direction.LONG, sup
+        stop = sup - _MR_STOP_ATR * atr
+        target = mean
+        risk = price - stop
+        reward = target - price
+    else:
+        base.rationale = ("Ranging — waiting for price to tag a range edge with RSI confirmation "
+                          "(overbought at resistance / oversold at support) before fading to the mean.")
+        return base
+
+    if risk <= 0 or reward <= 0 or (reward / risk) < _MR_MIN_RR:
+        base.rationale = (f"Ranging fade skipped: reward to the mean is too thin "
+                          f"(R:R {round(reward / risk, 2) if risk > 0 else 0} < {_MR_MIN_RR}).")
+        return base
+
+    rr = reward / risk
+    # Confidence: a fade is lower-conviction than a trend trade. Reward a stretched RSI and a clean
+    # R:R, but cap it so a range play never outranks a strong-trend setup in the Hybrid selection.
+    conf = 0.5
+    if (direction == Direction.SHORT and rsi >= _RSI_OB + 5) or (direction == Direction.LONG and rsi <= _RSI_OS - 5):
+        conf += 0.1
+    if rr >= 1.5:
+        conf += 0.05
+    confidence = round(min(_MR_CONF_CAP, conf), 2)
+
+    base.direction = direction
+    base.entry = round(price, 6)
+    base.stop_loss = round(stop, 6)
+    base.take_profit = round(target, 6)
+    base.confidence = confidence
+    base.rationale = (
+        f"Mean-reversion {direction.value.upper()} (ranging regime): price tagged "
+        f"{'resistance' if direction == Direction.SHORT else 'support'} {round(edge, 5)} with RSI "
+        f"{rsi} ({'overbought' if direction == Direction.SHORT else 'oversold'}); fading back to the "
+        f"mean (EMA20 {round(mean, 5)}). Stop beyond the edge; R:R {round(rr, 2)}."
+    )
+    return base
 
 
 def _session_quality(asset_class: AssetClass, symbol: str, now: datetime) -> tuple[str, str]:
@@ -411,10 +516,19 @@ def _deterministic_decision(
     macro = _macro_trend(technical)                                       # higher-timeframe context
     bias = fundamental.bias
 
-    # --- regime gate #1: ranging (no trend) — don't trend-trade a market with no trend ---
+    # --- regime FIRST (the senior-trader read): pick the strategy the regime permits ---
     adx_v = ind.get("adx")
+    regime = _regime(ind)
+    policy = regime_policy(regime)
+    base.regime = regime
+    base.strategy = policy["strategy"]
+    # Ranging (no trend): fade the range edges back to the mean instead of trend-trading a flat tape.
+    if regime == "ranging":
+        return _mean_reversion_decision(base, ind, tf0)
+    # Low ADX but flagged volatile (a vol expansion without a trend) — whipsaw; stand aside.
     if adx_v is not None and adx_v < _ADX_MIN:
-        base.rationale = f"Standing aside: ranging regime (ADX {adx_v} < {_ADX_MIN:.0f}, no trend)."
+        base.rationale = (f"Standing aside: no trend (ADX {adx_v} < {_ADX_MIN:.0f}) and volatility "
+                          "expanding — whipsaw zone.")
         return base
 
     # --- direction from trend + fundamental + MACD momentum + higher-timeframe alignment ---
@@ -490,7 +604,7 @@ def _deterministic_decision(
     # --- regime gate #2: a sharp volatility blow-off WITHOUT a strong trend = whipsaw zone ---
     # A pro doesn't chase a chaotic expansion (often a news spike / capitulation); they wait for
     # it to settle. (A strong-trend breakout is classed "trending", not "volatile", so it passes.)
-    regime = _regime(ind)
+    # `regime` was already read up top (regime-first); reuse it.
     vol_ratio = ind.get("vol_atr_ratio")
     if regime == "volatile" and vol_ratio is not None and vol_ratio >= _REGIME_VOL_EXTREME:
         base.watch = True

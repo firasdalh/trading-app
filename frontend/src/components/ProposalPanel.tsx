@@ -135,6 +135,7 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
             <DirectionBadge direction={proposal.direction} />
           )}
           <span className="text-xs text-neutral-400">{proposal.timeframe}</span>
+          {proposal.regime && <RegimeBadge regime={proposal.regime} strategy={proposal.strategy} />}
         </div>
         <div className="flex items-center gap-2">
           <ReviewBadge decision={proposal.review_decision} />
@@ -512,6 +513,29 @@ function biasTone(bias: string): string {
   if (bias === "bullish") return "text-bull";
   if (bias === "bearish") return "text-bear";
   return "text-neutral-300";
+}
+
+function RegimeBadge({ regime, strategy }: { regime: string; strategy?: string | null }) {
+  const color: Record<string, string> = {
+    trending: "bg-bull/15 text-bull",
+    moderate: "bg-blue-500/15 text-blue-300",
+    ranging: "bg-warn/15 text-warn",
+    volatile: "bg-bear/15 text-bear",
+  };
+  const stratLabel: Record<string, string> = {
+    trend: "trend",
+    mean_reversion: "fade",
+    stand_aside: "aside",
+  };
+  const s = strategy ? stratLabel[strategy] ?? strategy : null;
+  return (
+    <span
+      className={`rounded px-2 py-0.5 text-xs font-medium ${color[regime] ?? "bg-neutral-700 text-neutral-200"}`}
+      title={`Market regime: ${regime}${s ? ` → ${strategy}` : ""}`}
+    >
+      {regime}{s ? ` · ${s}` : ""}
+    </span>
+  );
 }
 
 function DirectionBadge({ direction }: { direction: string }) {

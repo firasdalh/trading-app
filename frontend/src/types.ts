@@ -82,6 +82,8 @@ export interface TradeProposal {
   rationale: string;
   watch?: boolean;
   review_decision: string | null;
+  regime?: string | null;       // trending | moderate | ranging | volatile
+  strategy?: string | null;     // trend | mean_reversion | stand_aside
   conditional?: ConditionalSuggestion | null;
   technical: TechnicalRead | null;
   fundamental: FundamentalRead | null;
