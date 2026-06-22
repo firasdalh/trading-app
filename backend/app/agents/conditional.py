@@ -104,8 +104,10 @@ def arm_conditional(
     auto_execute: bool = False, valid_hours: int = _DEFAULT_VALID_HOURS,
     require_close_confirm: bool = True,
 ) -> ConditionalSetup | None:
-    """Arm a conditional setup. Returns None if a duplicate is already armed or the symbol is
-    already open at the broker (so we never stack a pending on top of a live position)."""
+    """Arm a conditional setup. Returns None if a duplicate is already armed, the symbol is already
+    open at the broker (never stack a pending on a live position), or the broker won't let us OPEN
+    this symbol/direction (a disabled / close-only instrument would just get stuck re-arming and
+    being vetoed at the trigger)."""
     norm = _norm_symbol(symbol)
     for e in active_armed(session):
         if _norm_symbol(e.symbol) == norm and e.direction == direction:
@@ -114,6 +116,18 @@ def arm_conditional(
         if any(_norm_symbol(p.symbol) == norm for p in live_broker_positions(session)):
             return None
     except Exception:  # noqa: BLE001 - if we can't read the book, still allow arming (no open)
+        pass
+    # Don't arm a setup the broker won't open (e.g. Exness has India 50 disabled) — it would only
+    # trigger, get vetoed at the double-check, and re-arm in a loop until it expires.
+    try:
+        from app.brokers.registry import get_broker_for
+
+        bm = get_or_create_settings(session).broker_map
+        ok_open, why = get_broker_for(AssetClass(asset_class), bm).can_open(symbol, direction)
+        if not ok_open:
+            log.info("arm refused — not tradeable", extra={"symbol": symbol, "reason": why})
+            return None
+    except Exception:  # noqa: BLE001 - a tradeability lookup failure shouldn't block arming
         pass
 
     s = ConditionalSetup(

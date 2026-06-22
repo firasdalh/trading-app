@@ -100,6 +100,11 @@ _MR_EDGE_ATR = 0.6    # within this many ATR of a range edge counts as "at the e
 _MR_STOP_ATR = 0.6    # protective stop sits this many ATR beyond the edge
 _MR_MIN_RR = 1.0      # need >=1R from the edge back to the mean to bother fading
 _MR_CONF_CAP = 0.68   # cap mean-reversion confidence below strong-trend setups (lower-conviction edge)
+# Range fades use a LOOSER RSI band than the trend-overextension thresholds (75/25): in a range RSI
+# oscillates ~35-65 and rarely reaches trend extremes (more so with Wilder's smoother RSI), so a
+# 75/25 gate would keep the fade dormant. You fade the EDGE of a range before RSI hits trend levels.
+_MR_RSI_OB = 66.0
+_MR_RSI_OS = 34.0
 _STRUCT_IGNORE = 0.5  # ignore overhead structure within 0.5R of entry (breakout zone)
 _MIN_RR_TO_STRUCT = 1.0  # need >=1R of room to the next structure to take the trade
 _MOM_ATR_FRAC = 0.10  # counter-momentum only "matters" when |MACD hist| >= 10% of ATR (noise gate)
@@ -220,35 +225,46 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradePropos
     res = _nearest_above(tf0, ind, price)
     sup = _nearest_below(tf0, ind, price)
     near = _MR_EDGE_ATR * atr
-    # Same-TF REJECTION confirmation: the bar must have actually TAGGED the edge (its wick reached
-    # the level) but CLOSED back off it — proof the edge held this bar, not a breakout in progress.
-    # (The close is on the inside by construction: the edge is the nearest level beyond `price`.)
     last_high = ind.get("last_high")
     last_low = ind.get("last_low")
     rsi_prev = ind.get("rsi14_prev")
+    bb_up = ind.get("bb_upper")
+    bb_lo = ind.get("bb_lower")
 
-    direction = stop = target = None
-    edge = None
-    rejected_top = res is not None and last_high is not None and last_high >= res
-    rejected_bot = sup is not None and last_low is not None and last_low <= sup
-    if (res is not None and (res - price) <= near and rejected_top
-            and rsi is not None and rsi >= _RSI_OB and mean < price):
-        direction, edge = Direction.SHORT, res
-        stop = res + _MR_STOP_ATR * atr
+    # The range EDGE the bar TAGGED then closed back inside (a rejection) — read TWO ways a pro reads
+    # "price reached the edge of the range": a structural level (pivot S/R or swing) OR the Bollinger
+    # band. Either one, with RSI in the (looser-than-trend) fade band, qualifies a fade to the mean.
+    up_edges: list[float] = []
+    if res is not None and (res - price) <= near and last_high is not None and last_high >= res:
+        up_edges.append(res)
+    if bb_up is not None and last_high is not None and last_high >= bb_up and price < bb_up:
+        up_edges.append(bb_up)
+    dn_edges: list[float] = []
+    if sup is not None and (price - sup) <= near and last_low is not None and last_low <= sup:
+        dn_edges.append(sup)
+    if bb_lo is not None and last_low is not None and last_low <= bb_lo and price > bb_lo:
+        dn_edges.append(bb_lo)
+
+    direction = stop = target = edge = None
+    edge_kind = ""
+    if up_edges and rsi is not None and rsi >= _MR_RSI_OB and mean < price:
+        direction = Direction.SHORT
+        edge = max(up_edges)
+        edge_kind = "resistance" if edge == res else "upper Bollinger band"
+        stop = max(edge, last_high) + _MR_STOP_ATR * atr
         target = mean                       # revert to the mean
-        risk = stop - price
-        reward = price - target
-    elif (sup is not None and (price - sup) <= near and rejected_bot
-            and rsi is not None and rsi <= _RSI_OS and mean > price):
-        direction, edge = Direction.LONG, sup
-        stop = sup - _MR_STOP_ATR * atr
+        risk, reward = stop - price, price - target
+    elif dn_edges and rsi is not None and rsi <= _MR_RSI_OS and mean > price:
+        direction = Direction.LONG
+        edge = min(dn_edges)
+        edge_kind = "support" if edge == sup else "lower Bollinger band"
+        stop = min(edge, last_low) - _MR_STOP_ATR * atr
         target = mean
-        risk = price - stop
-        reward = target - price
+        risk, reward = price - stop, target - price
     else:
-        base.rationale = ("Ranging — waiting for a REJECTION at a range edge (wick tags the level "
-                          "then closes back off it) with RSI overbought/oversold, before fading to "
-                          "the mean. No confirmed rejection yet.")
+        base.rationale = ("Ranging — waiting for a rejection at a range edge (a structural level or "
+                          "the Bollinger band) with RSI in the fade band, before fading to the mean. "
+                          "No confirmed rejection yet.")
         return base
 
     if risk <= 0 or reward <= 0 or (reward / risk) < _MR_MIN_RR:
@@ -260,7 +276,7 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradePropos
     # Confidence: a fade is lower-conviction than a trend trade. Reward a stretched RSI and a clean
     # R:R, but cap it so a range play never outranks a strong-trend setup in the Hybrid selection.
     conf = 0.5
-    if (direction == Direction.SHORT and rsi >= _RSI_OB + 5) or (direction == Direction.LONG and rsi <= _RSI_OS - 5):
+    if (direction == Direction.SHORT and rsi >= _MR_RSI_OB + 8) or (direction == Direction.LONG and rsi <= _MR_RSI_OS - 8):
         conf += 0.1
     # RSI also TURNING back from the extreme (not just at it) = a stronger rejection.
     if rsi_prev is not None and ((direction == Direction.SHORT and rsi < rsi_prev)
@@ -276,10 +292,9 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradePropos
     base.take_profit = round(target, 6)
     base.confidence = confidence
     base.rationale = (
-        f"Mean-reversion {direction.value.upper()} (ranging regime): price tagged "
-        f"{'resistance' if direction == Direction.SHORT else 'support'} {round(edge, 5)} with RSI "
-        f"{rsi} ({'overbought' if direction == Direction.SHORT else 'oversold'}); fading back to the "
-        f"mean (EMA20 {round(mean, 5)}). Stop beyond the edge; R:R {round(rr, 2)}."
+        f"Mean-reversion {direction.value.upper()} (ranging regime): price tagged the {edge_kind} "
+        f"{round(edge, 5)} with RSI {rsi} ({'high' if direction == Direction.SHORT else 'low'}); "
+        f"fading back to the mean (EMA20 {round(mean, 5)}). Stop beyond the edge; R:R {round(rr, 2)}."
     )
     return base
 
@@ -570,14 +585,17 @@ def _deterministic_decision(
             # Trend up but momentum meaningfully down = pullback. Arm a resumption break instead of
             # just waiting, so it fires when momentum turns back up.
             base.watch = True
-            base.rationale = (
-                f"Uptrend pullback — momentum still down (MACD hist {macd_hist}, RSI {rsi}, "
-                f"−DI {mdi} > +DI {pdi}). Arm a long on a break back up to resume the trend."
-            )
             px = ind.get("last_close") or 0.0
             base.conditional = _conditional_resumption(
                 Direction.LONG, px, ind, atr_v, _key_levels(technical, tf0, px),
                 round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+            armed_note = ("Arm a long on a break back up to resume the trend."
+                          if base.conditional is not None
+                          else "Waiting for momentum to turn back up (no clean break level to arm yet).")
+            base.rationale = (
+                f"Uptrend pullback — momentum still down (MACD hist {macd_hist}, RSI {rsi}, "
+                f"−DI {mdi} > +DI {pdi}). {armed_note}"
+            )
             return base
         if macro == "down":
             base.rationale = "No confluence: higher-timeframe trend is DOWN — not buying into it."
@@ -586,14 +604,17 @@ def _deterministic_decision(
     elif trend == "down":
         if macd_hist is not None and macd_hist > mom_thresh:
             base.watch = True
-            base.rationale = (
-                f"Downtrend pullback — momentum turning up (MACD hist {macd_hist}, RSI {rsi}, "
-                f"+DI {pdi} > −DI {mdi}). Arm a short on a break back down to resume the trend."
-            )
             px = ind.get("last_close") or 0.0
             base.conditional = _conditional_resumption(
                 Direction.SHORT, px, ind, atr_v, _key_levels(technical, tf0, px),
                 round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+            armed_note = ("Arm a short on a break back down to resume the trend."
+                          if base.conditional is not None
+                          else "Waiting for momentum to turn back down (no clean break level to arm yet).")
+            base.rationale = (
+                f"Downtrend pullback — momentum turning up (MACD hist {macd_hist}, RSI {rsi}, "
+                f"+DI {pdi} > −DI {mdi}). {armed_note}"
+            )
             return base
         if macro == "up":
             base.rationale = "No confluence: higher-timeframe trend is UP — not selling into it."
