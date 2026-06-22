@@ -14,21 +14,24 @@ def sma(values: list[float], period: int) -> float | None:
 
 
 def rsi(closes: list[float], period: int = 14) -> float | None:
-    """Classic RSI. Returns None if not enough data."""
+    """Wilder's RSI (RMA-smoothed over the whole series) — matches MT5/TradingView so the number on
+    the chart agrees with the broker's. Returns None if not enough data."""
     if len(closes) < period + 1:
         return None
-    gains, losses = 0.0, 0.0
-    for i in range(-period, 0):
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, len(closes)):
         change = closes[i] - closes[i - 1]
-        if change >= 0:
-            gains += change
-        else:
-            losses -= change
-    avg_gain = gains / period
-    avg_loss = losses / period
-    if avg_loss == 0:
+        gains.append(change if change > 0 else 0.0)
+        losses.append(-change if change < 0 else 0.0)
+    avg_gain = _rma(gains, period)
+    avg_loss = _rma(losses, period)
+    if not avg_gain or not avg_loss:
+        return None
+    ag, al = avg_gain[-1], avg_loss[-1]
+    if al == 0:
         return 100.0
-    rs = avg_gain / avg_loss
+    rs = ag / al
     return round(100 - (100 / (1 + rs)), 2)
 
 
