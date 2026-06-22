@@ -28,6 +28,7 @@ export interface RiskDecision {
   approved_qty: number;
   risk_amount: number;
   risk_pct_of_equity: number;
+  min_lot_floored?: boolean;   // sized up to the broker minimum; may exceed the per-trade cap
   checks: Record<string, boolean>;
 }
 

@@ -206,12 +206,23 @@ def evaluate_proposal(
         checks["cooldown_ok"] = True
 
     # --- 6. size from risk-per-trade ---
+    per_lot = risk_per_lot if (risk_per_lot and risk_per_lot > 0) else abs(entry - stop)
     qty, risk_amount = size_position(
         equity=account.equity, risk_fraction=risk_fraction,
         entry=entry, stop_loss=stop, qty_step=qty_step, risk_per_lot=risk_per_lot,
     )
+    # --- 6b. broker MINIMUM lot: you can't trade smaller. If the risk-budget size is below the
+    # broker minimum, floor it UP to the minimum and FLAG it — this trade may risk MORE than the
+    # per-trade cap, but it's the smallest the broker allows (small money). An explicit, accepted
+    # exception (RISK.md), surfaced to the user, rather than a veto or a silent order-time up-clamp.
+    min_lot_floored = False
+    if min_qty and qty < min_qty:
+        qty = min_qty
+        risk_amount = qty * per_lot
+        min_lot_floored = True
     if qty <= _QTY_EPS:
-        return _veto(symbol, "computed position size is zero (stop too wide for risk budget)", checks)
+        return _veto(symbol, "computed position size is zero (no broker minimum and stop too wide "
+                             "for the risk budget)", checks)
 
     # --- 7. total-exposure budget (may force a resize) ---
     exposure_budget = account.equity * limits.max_total_exposure
@@ -221,31 +232,38 @@ def evaluate_proposal(
         return _veto(symbol, "no exposure budget left across open positions", checks)
 
     decision_type = RiskDecisionType.APPROVED
-    if risk_amount > remaining:
-        # Shrink to fit the remaining exposure budget (per-lot risk in account currency).
-        per_lot = risk_per_lot if (risk_per_lot and risk_per_lot > 0) else abs(entry - stop)
+    # A min-lot-floored trade can't be shrunk further (it's already the smallest tradable size), so
+    # we accept it as-is even if it exceeds the remaining budget. Otherwise, shrink to fit.
+    if risk_amount > remaining and not min_lot_floored:
         qty = _floor_to_step(remaining / per_lot, qty_step) if per_lot > 0 else 0.0
         risk_amount = qty * per_lot
         decision_type = RiskDecisionType.RESIZED
-        if qty <= _QTY_EPS:
+        # The shrink may have dropped below the broker minimum — floor back up + flag.
+        if min_qty and qty < min_qty:
+            qty = min_qty
+            risk_amount = qty * per_lot
+            min_lot_floored = True
+        elif qty <= _QTY_EPS:
             return _veto(symbol, "exposure budget too small to size any position", checks)
 
-    # --- 8. minimum tradable size ---
-    if qty < min_qty:
-        checks["min_qty_ok"] = False
-        return _veto(symbol, f"position size {qty} below minimum {min_qty}", checks)
     checks["min_qty_ok"] = True
+    if min_lot_floored:
+        decision_type = RiskDecisionType.RESIZED
 
     risk_pct = risk_amount / account.equity
-    reason = (
-        "approved at full risk-per-trade size"
-        if decision_type == RiskDecisionType.APPROVED
-        else "approved but RESIZED to fit remaining exposure budget"
-    )
+    if min_lot_floored:
+        reason = (f"approved at the broker MINIMUM lot ({qty}) — risks {risk_pct * 100:.1f}% of "
+                  f"equity, above the {limits.risk_per_trade_ceiling * 100:.0f}% per-trade cap "
+                  "(can't trade smaller).")
+    elif decision_type == RiskDecisionType.APPROVED:
+        reason = "approved at full risk-per-trade size"
+    else:
+        reason = "approved but RESIZED to fit remaining exposure budget"
     log.info(
         "risk decision",
         extra={"symbol": symbol, "decision": decision_type.value, "qty": qty,
-               "risk_amount": round(risk_amount, 2), "risk_pct": round(risk_pct, 4)},
+               "risk_amount": round(risk_amount, 2), "risk_pct": round(risk_pct, 4),
+               "min_lot_floored": min_lot_floored},
     )
     return RiskDecision(
         decision=decision_type,
@@ -256,5 +274,6 @@ def evaluate_proposal(
         approved_qty=qty,
         risk_amount=round(risk_amount, 2),
         risk_pct_of_equity=round(risk_pct, 6),
+        min_lot_floored=min_lot_floored,
         checks=checks,
     )

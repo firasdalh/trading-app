@@ -29,6 +29,14 @@ The maximum you can lose on a single trade if the stop-loss is hit. Position siz
   size up or down (Proposal panel shows the spend/margin + leverage live). Any chosen size is
   re-run through the deterministic Risk Manager and **hard-clamped to the 3% ceiling above** —
   you can size up to the cap, never past it. The ceiling remains the one place sizing is bounded.
+- **Broker-minimum-lot exception (2026-06-23, at the user's explicit request):** when the 3%-budget
+  size is SMALLER than the broker's minimum tradable lot (e.g. 0.01), the trade is opened at that
+  minimum even though it risks MORE than 3% — because you cannot trade smaller. It is bounded by the
+  minimum lot ("small money"), flagged to the user (`min_lot_floored`, an amber "⚠ broker min · over
+  cap" note + the exact % in the verdict), and is the ONLY case sizing may exceed the per-trade cap.
+  Every OTHER gate (daily-loss, exposure>0, max positions, anti-stacking, correlation, kill-switch,
+  live-confirmation) still applies. This replaces the previous behaviour, which either vetoed the
+  trade or let the broker silently clamp a sub-minimum size up at order time (a hidden over-risk).
 
 ### `max_open_positions` (default: 3)
 Caps how many trades can be open at once.

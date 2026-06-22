@@ -166,6 +166,14 @@ class BrokerAdapter(ABC):
         """
         return 1.0
 
+    def lot_constraints(self, symbol: str) -> tuple[float | None, float | None]:
+        """The broker's (volume_step, volume_min) for a symbol, so the Risk Manager sizes in the
+        broker's real increments and knows the smallest tradable lot. ``(None, None)`` when the
+        broker can't report them (the sizer then uses generic defaults). Used to floor a too-small
+        risk-budget size UP to the broker minimum (you can't trade smaller) rather than approving a
+        sub-minimum size the broker would silently clamp up at order time."""
+        return None, None
+
     def risk_per_lot(self, symbol: str, entry: float, stop: float) -> float | None:
         """Account-currency loss of ONE lot if price moves entry->stop — the basis for currency-
         correct sizing (lots = risk budget ÷ risk_per_lot). None when the broker can't compute it;

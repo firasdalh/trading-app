@@ -197,10 +197,30 @@ def test_stop_too_wide_zero_size_vetoed():
     assert not d.approved
 
 
-def test_min_qty_vetoed():
+def test_min_lot_floors_up_and_flags():
+    # The risk-budget size (200) is below the broker minimum (1000): floor UP to the minimum and
+    # FLAG it — this trade now risks more than the per-trade cap, but it's the smallest tradable lot.
     d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
                           now=NOW, qty_step=1, min_qty=1000.0)
-    assert not d.approved and "below minimum" in d.reason
+    assert d.approved and d.min_lot_floored
+    assert d.approved_qty == 1000.0
+    assert d.risk_amount == 5000.0
+    assert d.risk_pct_of_equity == pytest.approx(0.05)   # 5% > the 2% cap, accepted at min lot
+    assert "minimum" in d.reason.lower()
+
+
+def test_min_lot_floor_accepts_even_over_exposure_budget():
+    # The min lot risks more than the remaining exposure budget too, but it can't be shrunk further,
+    # so it's accepted (you can't trade smaller than the broker minimum).
+    d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
+                          now=NOW, qty_step=1, min_qty=2000.0)
+    assert d.approved and d.min_lot_floored and d.approved_qty == 2000.0
+
+
+def test_normal_size_not_min_lot_floored():
+    d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
+                          now=NOW, qty_step=1, min_qty=10.0)
+    assert d.approved and d.min_lot_floored is False and d.approved_qty == 200.0
 
 
 def test_vetoes_when_broker_not_tradeable():

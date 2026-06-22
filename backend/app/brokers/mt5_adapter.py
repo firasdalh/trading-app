@@ -670,6 +670,20 @@ class Mt5BrokerAdapter(BrokerAdapter):
         except Exception:  # noqa: BLE001
             return 1.0
 
+    def lot_constraints(self, symbol: str) -> tuple[float | None, float | None]:
+        """The symbol's (volume_step, volume_min) from MT5 — the broker's real lot increments, so
+        the Risk Manager sizes in them and floors up to the true minimum instead of approving a
+        sub-min size that order_send would clamp up (silently raising risk)."""
+        try:
+            info = self._mt5.symbol_info(self._resolve_symbol(symbol))
+            if info is None:
+                return None, None
+            step = float(getattr(info, "volume_step", 0) or 0) or None
+            vmin = float(getattr(info, "volume_min", 0) or 0) or None
+            return step, vmin
+        except Exception:  # noqa: BLE001
+            return None, None
+
     def get_realized_pnl(self, since) -> float | None:
         """Sum profit + swap + commission of TRADE deals closed since ``since`` (terminal truth).
 

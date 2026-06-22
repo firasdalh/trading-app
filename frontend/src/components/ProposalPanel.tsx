@@ -186,11 +186,20 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
       {/* Risk Manager verdict — deterministic, final. */}
       <div
         className={`rounded-md border p-2 text-sm ${
-          risk.approved ? "border-bull/40 bg-bull/10" : "border-bear/40 bg-bear/10"
+          !risk.approved
+            ? "border-bear/40 bg-bear/10"
+            : risk.min_lot_floored
+              ? "border-warn/40 bg-warn/10"
+              : "border-bull/40 bg-bull/10"
         }`}
       >
         <div className="font-medium">
           Risk Manager: {risk.decision.toUpperCase()}
+          {risk.min_lot_floored && (
+            <span className="ml-2 rounded bg-warn/20 px-1.5 py-0.5 text-xs font-bold text-warn">
+              ⚠ broker min · over cap
+            </span>
+          )}
           {risk.approved && (
             <span className="ml-2 text-neutral-300">
               size {risk.approved_qty} · risk ${risk.risk_amount} (

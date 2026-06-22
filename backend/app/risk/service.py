@@ -302,6 +302,22 @@ def broker_has_open_same_direction(session: Session, symbol: str, direction: str
     return any(_norm_symbol(p.symbol) == norm and p.direction == direction for p in positions)
 
 
+def _lot_specs(broker, asset_class, symbol: str) -> tuple[float | None, float]:
+    """The broker's (lot_step, min_lot) for sizing — real broker increments when available, else
+    the generic per-asset-class step and a 0.0 minimum (no broker-min known)."""
+    step = _QTY_STEP.get(asset_class)
+    min_lot = 0.0
+    try:
+        b_step, b_min = broker.lot_constraints(symbol)
+        if b_step and b_step > 0:
+            step = b_step
+        if b_min and b_min > 0:
+            min_lot = b_min
+    except Exception:  # noqa: BLE001 - never let a broker hiccup block sizing
+        pass
+    return step, min_lot
+
+
 def _risk_per_lot(broker, symbol: str, entry: float | None, stop: float | None) -> float | None:
     """Account-currency risk of 1 lot over the stop — the broker's value if available (currency-
     correct via order_calc_profit), else ``|entry-stop| × contract_size`` (correct only when the
@@ -360,13 +376,15 @@ def assess(
                 not_tradeable = why
         except Exception:  # noqa: BLE001 - never let a tradeability lookup block sizing
             pass
+    qty_step, min_lot = _lot_specs(broker, proposal.asset_class, proposal.symbol)
     return evaluate_proposal(
         proposal,
         account,
         limits,
         now=datetime.now(timezone.utc),
         last_pair_close_at=last_pair_close_at(session, proposal.symbol),
-        qty_step=_QTY_STEP.get(proposal.asset_class),
+        qty_step=qty_step,
+        min_qty=min_lot,
         override_risk_fraction=override_risk_fraction,
         has_open_same_direction=same_dir,
         correlated_exposure=correlated,
@@ -424,7 +442,7 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
 
     decision = assess(session, proposal, override_risk_fraction=override_rf)
 
-    qty_step = _QTY_STEP.get(proposal.asset_class)
+    qty_step, min_lot = _lot_specs(broker, proposal.asset_class, record.symbol)
     ceiling = limits.risk_per_trade_ceiling
 
     # Size used for the economics: the approved LOTS when allowed; otherwise the would-be sized lots
@@ -443,15 +461,20 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
             from app.risk.manager import _floor_to_step
 
             lots = _floor_to_step(exposure_remaining / rpl, qty_step)
+        if min_lot and lots < min_lot:
+            lots = min_lot   # can't trade smaller than the broker minimum
 
-    # The per-trade ceiling expressed in lots, so the UI can show/limit the cap.
+    # The per-trade ceiling expressed in lots, so the UI can show/limit the cap. Floored to the
+    # broker minimum so the UI shows the size that would ACTUALLY open (never a sub-min figure).
     max_lots = None
     if equity > 0:
         ceiling_lots, _ = size_position(
             equity=equity, risk_fraction=ceiling, entry=entry, stop_loss=stop,
             qty_step=qty_step, risk_per_lot=rpl,
         )
-        max_lots = round(ceiling_lots, 2)
+        if min_lot and ceiling_lots < min_lot:
+            ceiling_lots = min_lot
+        max_lots = round(ceiling_lots, 4)
 
     # Was the user's requested size reduced?
     capped = decision.decision == RiskDecisionType.RESIZED or (
@@ -472,4 +495,5 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
             else None
         ),
     }
-    return {"risk": decision, "economics": economics, "capped": capped, "max_lots": max_lots}
+    return {"risk": decision, "economics": economics, "capped": capped, "max_lots": max_lots,
+            "min_lot_floored": decision.min_lot_floored}

@@ -245,6 +245,10 @@ class RiskDecision(BaseModel):
     approved_qty: float = 0.0
     risk_amount: float = 0.0
     risk_pct_of_equity: float = 0.0
+    # True when the size was floored UP to the broker's minimum lot because the risk-budget size was
+    # smaller — so this trade may risk MORE than the per-trade cap (you can't trade smaller). The UI
+    # flags it; it's an explicit, accepted exception (small money), not a cap breach we chose.
+    min_lot_floored: bool = False
     # Echo of the limits that were checked, for transparency in the UI/log.
     checks: dict[str, bool] = Field(default_factory=dict)
 
