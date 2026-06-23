@@ -150,6 +150,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(patch),
     }),
+  setTrendOnly: (enabled: boolean) =>
+    request<SettingsResponse>("/api/settings/trend-only", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
   setBrokerMap: (brokerMap: Record<string, string>) =>
     request<SettingsResponse>("/api/settings/broker-map", {
       method: "POST",

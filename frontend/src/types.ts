@@ -235,6 +235,7 @@ export interface SettingsResponse {
     broker_env: string;
     broker_map: Record<string, string>;
     kill_switch_engaged: boolean;
+    trend_only_mode: boolean;
     live_confirmed_at: string | null;
   };
   risk: {

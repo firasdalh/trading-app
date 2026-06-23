@@ -206,6 +206,21 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
     return build_settings_response(session)
 
 
+class TrendOnlyRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/trend-only", response_model=SettingsResponse)
+def set_trend_only(req: TrendOnlyRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle trend-only mode: when ON, the engine trades only a clear (ADX>=25) trend and stands
+    aside in moderate/ranging/volatile regimes (best risk-adjusted result in backtests)."""
+    settings = get_or_create_settings(session)
+    settings.trend_only_mode = req.enabled
+    session.commit()
+    log.info("trend-only mode set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
 def _try_mt5_connect() -> dict:
     """Attempt an MT5 connection and return a status dict (never raises)."""
     from app.brokers.base import BrokerError

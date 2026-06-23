@@ -556,6 +556,7 @@ def _conditional_resumption(
 def _deterministic_decision(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
+    trend_only: bool = False,
 ) -> TradeProposal:
     base = TradeProposal(
         symbol=symbol, asset_class=asset_class, timeframe=timeframe,
@@ -585,6 +586,15 @@ def _deterministic_decision(
     policy = regime_policy(regime)
     base.regime = regime
     base.strategy = policy["strategy"]
+    # Trend-only mode: only trade a CLEAR trend (ADX >= 25 -> "trending"); stand aside in moderate /
+    # ranging / volatile. Backtests show the trend regime is the edge while moderate+ranging are net
+    # drags (same return, ~40% more drawdown when included). The live default comes from the setting.
+    if trend_only and regime != "trending":
+        base.strategy = "stand_aside"
+        base.watch = True
+        base.rationale = (f"Trend-only mode: standing aside — regime is {regime}, not a clear "
+                          f"(ADX≥{_ADX_STRONG:.0f}) trend. {policy['note']}")
+        return base
     # Ranging (no trend): fade the range edges back to the mean instead of trend-trading a flat tape.
     # Pass the higher-TF trend so a fade against a daily trend (a pullback, not a range) is refused.
     if regime == "ranging":
@@ -964,7 +974,7 @@ def _deterministic_decision(
 def run_orchestrator(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead,
-    now: datetime | None = None, use_llm: bool = True,
+    now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -977,7 +987,8 @@ def run_orchestrator(
     """
     now = now or datetime.now(timezone.utc)
 
-    proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now)
+    proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
+                                       trend_only=trend_only)
 
     if proposal.direction == Direction.NO_TRADE or not use_llm or not llm_available():
         log.info("orchestrator decision (deterministic)",

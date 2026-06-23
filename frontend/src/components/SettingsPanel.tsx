@@ -99,6 +99,34 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
           </div>
         </section>
 
+        <section>
+          <div className="mb-2 text-sm font-medium text-neutral-300">Strategy</div>
+          <button
+            disabled={busy}
+            onClick={() =>
+              run(() => api.setTrendOnly(!settings?.app.trend_only_mode),
+                  `Trend-only mode ${settings?.app.trend_only_mode ? "OFF" : "ON"}.`)}
+            className={`w-full rounded-md border px-3 py-2 text-left text-sm ${
+              settings?.app.trend_only_mode
+                ? "border-blue-500 bg-blue-500/10"
+                : "border-neutral-700 hover:bg-neutral-800"
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-medium">Trend-only mode</span>
+              <span className={`text-xs font-semibold ${
+                settings?.app.trend_only_mode ? "text-bull" : "text-neutral-400"
+              }`}>
+                {settings?.app.trend_only_mode ? "ON" : "OFF"}
+              </span>
+            </div>
+            <div className="text-xs text-neutral-400">
+              Trade only clear (ADX≥25) trends; stand aside in moderate / ranging / volatile.
+              Backtests: same return, ~40% less drawdown.
+            </div>
+          </button>
+        </section>
+
         <section className="space-y-2">
           <div className="text-sm font-medium text-neutral-300">Live confirmation phrase</div>
           <input

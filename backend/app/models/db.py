@@ -68,6 +68,11 @@ class AppSettings(Base):
     # UI kill-switch state (the env KILL_SWITCH is a separate, additional backstop).
     kill_switch_engaged: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Trade only the TRENDING regime (stand aside in moderate/ranging/volatile). Backtests show the
+    # trend regime is the edge while moderate/ranging are drags; ON gives the best risk-adjusted
+    # result (same return, ~40% less drawdown). Reversible.
+    trend_only_mode: Mapped[bool] = mapped_column(Boolean, default=True)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

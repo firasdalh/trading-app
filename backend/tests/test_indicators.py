@@ -212,6 +212,22 @@ def test_strong_trend_ignores_immediate_structure():
     assert p.take_profit is not None and p.take_profit < p.entry
 
 
+def test_trend_only_stands_aside_in_moderate_regime():
+    # A moderate-regime (ADX 22) setup trades normally, but stands aside under trend-only mode.
+    tech = _multi_tf("up", "up", resistance=105.0, adx=22.0)
+    on = _deterministic_decision("X", AssetClass.FOREX, "1h", tech, _fund(), now=NOW, trend_only=True)
+    off = _deterministic_decision("X", AssetClass.FOREX, "1h", tech, _fund(), now=NOW, trend_only=False)
+    assert on.direction == Direction.NO_TRADE and on.watch and "trend-only" in on.rationale.lower()
+    assert off.direction == Direction.LONG
+
+
+def test_trend_only_still_trades_clear_trend():
+    # A clear trend (ADX 30 -> "trending") is still traded under trend-only mode.
+    tech = _multi_tf("up", "up", resistance=110.0, adx=30.0)
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", tech, _fund(), now=NOW, trend_only=True)
+    assert p.direction == Direction.LONG
+
+
 def _long_read(swing_low, recent_low):
     # A clean LONG (trend up on both TFs, ADX strong, entry at value) with a swing-low and optional
     # recent wick low, so the structural-stop placement can be exercised.

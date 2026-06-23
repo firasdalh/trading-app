@@ -345,6 +345,7 @@ class AppSettingsView(BaseModel):
     broker_env: str
     broker_map: dict
     kill_switch_engaged: bool
+    trend_only_mode: bool = True
     live_confirmed_at: datetime | None = None
 
 
