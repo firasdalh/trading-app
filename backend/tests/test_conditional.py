@@ -5,11 +5,10 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import app.agents.conditional as cond
-import app.agents.pipeline as pipeline
 from app.agents.orchestrator import _conditional_break, _conditional_pullback, _conditional_resumption
 from app.models.db import ConditionalSetup, TradeProposalRecord
 from app.models.enums import Direction, ProposalStatus, RiskDecisionType
-from app.models.schemas import AnalyzeResponse, RiskDecision, TradeProposal
+from app.models.schemas import RiskDecision
 
 
 # ---------------------------------------------------------------- engine helper
@@ -91,50 +90,124 @@ def _stub_market(monkeypatch, price: float):
     monkeypatch.setattr(cond, "kill_switch_active", lambda s: False)
 
 
-def _fake_analyze(direction: str, approved: bool, status: str):
-    def _impl(session, symbol, asset_class, timeframe, use_llm=True):
-        rec = TradeProposalRecord(symbol=symbol, asset_class=asset_class.value, timeframe=timeframe,
-                                  direction=direction, entry=78.0, stop_loss=78.4, take_profit=77.4,
-                                  confidence=0.62, status=status)
-        session.add(rec)
-        session.commit()
-        prop = TradeProposal(symbol=symbol, asset_class=asset_class, direction=Direction(direction),
-                             entry=78.0, stop_loss=78.4, take_profit=77.4, confidence=0.62)
-        risk = RiskDecision(
+def _tech():
+    """A minimal deterministic TechnicalRead for the re-check's reviewer context + audit."""
+    from app.models.schemas import TechnicalRead, TimeframeRead
+    return TechnicalRead(
+        symbol="UKOILm", overall_trend="down", confidence=0.5, notes="",
+        timeframes=[TimeframeRead(timeframe="1h", trend="down", support_levels=[77.0],
+                                  resistance_levels=[79.0], indicators={"adx": 28.0},
+                                  patterns=[], comment="")])
+
+
+def _stub_fire(monkeypatch, *, approved=True, qty=0.05, risk_amount=12.0,
+               veto=None, technical=True, captured=None):
+    """Stub the re-validation dependencies of ``_fire``: the market re-read, the AI thesis review,
+    the Risk Manager verdict, and the executor — so a test drives the double-check deterministically.
+
+    ``_fire`` now validates the ARMED levels (it no longer re-runs ``analyze_symbol``)."""
+    import app.agents.orchestrator as orch
+    import app.execution.executor as executor
+    import app.risk.service as risk_service
+
+    monkeypatch.setattr(cond, "_reread_technical", lambda session, s: (_tech() if technical else None))
+    monkeypatch.setattr(orch, "review_armed_setup",
+                        lambda *a, **k: ((False, veto) if veto else (True, "re-confirmed")))
+
+    def fake_assess(session, proposal, **k):
+        if captured is not None:
+            captured["proposal"] = proposal
+        return RiskDecision(
             decision=RiskDecisionType.APPROVED if approved else RiskDecisionType.VETOED,
-            approved=approved, reason="ok" if approved else "no", symbol=symbol)
-        return AnalyzeResponse(proposal_id=rec.id, status=rec.status, proposal=prop, risk=risk)
-    return _impl
+            approved=approved, reason="ok" if approved else "exposure full",
+            symbol=proposal.symbol, approved_qty=qty if approved else 0.0,
+            risk_amount=risk_amount if approved else 0.0)
+    monkeypatch.setattr(risk_service, "assess", fake_assess)
+
+    def fake_exec(session, record):
+        record.status = ProposalStatus.EXECUTED.value
+        session.commit()
+        return None
+    monkeypatch.setattr(executor, "execute_proposal", fake_exec)
+
+
+def test_mechanical_invalidation_target_and_stop():
+    # Pure unit: between the levels -> ok; at/through the target -> terminal (reject); snapped back
+    # through the stop -> non-terminal (re-arm). Both directions.
+    short = SimpleNamespace(direction="short", stop_loss=78.4, take_profit=77.4)
+    assert cond._mechanical_invalidation(short, 78.0) == (None, False)
+    assert cond._mechanical_invalidation(short, 77.3)[1] is True and "target" in cond._mechanical_invalidation(short, 77.3)[0]
+    assert cond._mechanical_invalidation(short, 78.5)[1] is False and "stop" in cond._mechanical_invalidation(short, 78.5)[0]
+    long = SimpleNamespace(direction="long", stop_loss=99.0, take_profit=105.0)
+    assert cond._mechanical_invalidation(long, 100.0) == (None, False)
+    assert cond._mechanical_invalidation(long, 105.5)[1] is True
+    assert cond._mechanical_invalidation(long, 98.5)[1] is False
 
 
 def test_trigger_fires_and_opens_on_break(db_session, monkeypatch):
     s = _arm(db_session)
     _stub_market(monkeypatch, price=78.0)  # below the 78.2 sell-stop trigger
-    monkeypatch.setattr(pipeline, "analyze_symbol",
-                        _fake_analyze("short", approved=True, status=ProposalStatus.EXECUTED.value))
+    _stub_fire(monkeypatch, approved=True)
     out = cond.check_conditional_setups(db_session)
     assert out["triggered"] == 1
     db_session.refresh(s)
     assert s.status == "triggered" and s.result_proposal_id is not None
 
 
-def test_trigger_rearms_when_recheck_declines(db_session, monkeypatch):
+def test_break_entry_validated_on_its_own_levels_not_from_market(db_session, monkeypatch):
+    # THE FIX: the double-check sizes the trade from the ARMED trigger/stop/target (where its R:R is
+    # real), NOT a fresh trade re-derived from the current price. So a break whose next level sits
+    # <1R below the *current* price (the old USOIL decline) still opens. We assert the proposal handed
+    # to the Risk Manager carries the armed levels, with entry == trigger.
+    s = _arm(db_session, trigger_price=73.935, stop_loss=74.321, take_profit=73.12)
+    _stub_market(monkeypatch, price=73.93)  # just through the break
+    captured: dict = {}
+    _stub_fire(monkeypatch, approved=True, captured=captured)
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 1
+    p = captured["proposal"]
+    assert p.entry == 73.935 and p.stop_loss == 74.321 and p.take_profit == 73.12
+    assert p.direction == Direction.SHORT
+
+
+def test_trigger_rearms_when_risk_declines(db_session, monkeypatch):
+    # Risk Manager says no at the trigger (e.g. exposure full) -> stays ARMED with a cooldown.
     s = _arm(db_session)
     _stub_market(monkeypatch, price=78.0)
-    # Double-check says NO_TRADE (timing miss) -> stays ARMED with a cooldown, nothing opens.
-    monkeypatch.setattr(pipeline, "analyze_symbol",
-                        _fake_analyze("no_trade", approved=False, status=ProposalStatus.RISK_VETOED.value))
+    _stub_fire(monkeypatch, approved=False)
     out = cond.check_conditional_setups(db_session)
     assert out["triggered"] == 0
     db_session.refresh(s)
     assert s.status == "armed" and s.retries == 1 and s.cooldown_until is not None
 
 
+def test_trigger_rearms_when_thesis_vetoed(db_session, monkeypatch):
+    # The AI reviewer vetoes the armed thesis at the trigger (e.g. higher-TF trend flipped against
+    # it) -> the level stays armed with a cooldown rather than opening into a broken thesis.
+    s = _arm(db_session)
+    _stub_market(monkeypatch, price=78.0)
+    _stub_fire(monkeypatch, veto="higher-timeframe trend flipped up")
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 0
+    db_session.refresh(s)
+    assert s.status == "armed" and s.retries == 1
+
+
+def test_trigger_rejected_when_move_already_hit_target(db_session, monkeypatch):
+    # Price gapped straight through to the target before we could fire -> the move is done; reject
+    # (re-arming the same level is pointless). A mechanical miss — no risk/LLM call needed.
+    s = _arm(db_session)  # short trigger 78.2, target 77.4
+    _stub_market(monkeypatch, price=77.3)  # already below the 77.4 target
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 0
+    db_session.refresh(s)
+    assert s.status == "rejected" and "target" in (s.last_note or "")
+
+
 def test_trigger_rejected_after_max_retries(db_session, monkeypatch):
     s = _arm(db_session, retries=cond._MAX_RETRIES - 1)
     _stub_market(monkeypatch, price=78.0)
-    monkeypatch.setattr(pipeline, "analyze_symbol",
-                        _fake_analyze("no_trade", approved=False, status=ProposalStatus.RISK_VETOED.value))
+    _stub_fire(monkeypatch, approved=False)
     cond.check_conditional_setups(db_session)
     db_session.refresh(s)
     assert s.status == "rejected" and s.retries == cond._MAX_RETRIES
@@ -236,14 +309,10 @@ def test_set_conditional_lots_persists(db_session):
 
 def test_desired_lots_resizes_proposal_on_fire(db_session, monkeypatch):
     import app.risk.service as risk_service
-    from app.models.db import TradeProposalRecord
-    from app.models.enums import RiskDecisionType
-    from app.models.schemas import RiskDecision
 
-    s = _arm(db_session, auto_execute=False, desired_lots=0.07)
+    s = _arm(db_session, auto_execute=False, desired_lots=0.07)  # Mode A -> queue for approval
     _stub_market(monkeypatch, price=78.0)
-    monkeypatch.setattr(pipeline, "analyze_symbol",
-                        _fake_analyze("short", approved=True, status=ProposalStatus.PENDING_APPROVAL.value))
+    _stub_fire(monkeypatch, approved=True, qty=0.05)  # default size 0.05; user wants 0.07
     monkeypatch.setattr(risk_service, "size_preview",
                         lambda session, record, desired_lots=None: {
                             "risk": RiskDecision(decision=RiskDecisionType.APPROVED, approved=True,

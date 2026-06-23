@@ -2,9 +2,16 @@
 
 A conditional setup is a valid trade idea whose ENTRY is deferred until price clears a level
 (e.g. a break of a support cluster). The Monitor calls :func:`check_conditional_setups` each pass:
-it expires stale ones, and when a trigger is hit it RE-RUNS the full analysis (the double-check) —
-the trade opens only if it still passes the Risk Manager + AI review at that moment. So an armed
-setup can never bypass any safety gate; it just removes the "chase into structure" entry.
+it expires stale ones, and when a trigger is hit it RE-VALIDATES the setup (the double-check) and
+opens only if it still passes — so an armed setup can never bypass any safety gate.
+
+The double-check validates the setup on its OWN plan (trigger/stop/target), NOT a fresh trade
+re-derived from the current price. A break entry sits, by definition, right at the level it is
+breaking, so a fresh "from here" read would see the next level <1R away and reject almost every
+valid break (its real reward is measured from the trigger). Instead the trigger fires only when:
+(1) no hard mechanical invalidation (the break already failed back through the stop, or the move
+already ran to target), (2) the AI reviewer doesn't veto the thesis as broken (trend flip /
+imminent event), and (3) the deterministic Risk Manager approves the size on the armed levels.
 
 Auto-firing (Hybrid / Modes B-C) approves+executes on the trigger; in Mode A a manually-armed
 setup is queued for the user's approval instead.
@@ -159,47 +166,142 @@ def _has_room(session: Session) -> bool:
         return False
 
 
-def _fire(session: Session, s: ConditionalSetup) -> int:
-    """Trigger hit -> re-run the full analysis (double-check) and open if it still qualifies.
-    Returns 1 if it became a real trade/approval, else 0 (and marks the setup rejected)."""
-    from app.agents.pipeline import analyze_symbol
+def _decline(session: Session, s: ConditionalSetup, why: str, *, terminal: bool) -> int:
+    """A re-check at the trigger did NOT open. By default keep the setup ARMED with a cooldown so a
+    still-valid level can fire again when conditions realign (a decline is usually a TIMING miss, not
+    a dead idea) — give up only when the idea is genuinely gone (``terminal``) or the retry cap is hit
+    (the validity window also bounds it). Always returns 0."""
+    s.retries += 1
+    if terminal:
+        s.status = ConditionalStatus.REJECTED.value
+        s.last_note = f"{why} — rejected"
+        log.info("conditional rejected", extra={"symbol": s.symbol, "note": s.last_note})
+    elif s.retries >= _MAX_RETRIES:
+        s.status = ConditionalStatus.REJECTED.value
+        s.last_note = f"re-check declined {s.retries}× — giving up ({why})"
+        log.info("conditional rejected (retry cap)", extra={"symbol": s.symbol, "note": s.last_note})
+    else:
+        cd = _cooldown_minutes(s.timeframe)
+        s.cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=cd)
+        s.last_note = f"re-check declined ({why}); re-armed — retry after ~{cd}m (try {s.retries})"
+        log.info("conditional re-armed after decline",
+                 extra={"symbol": s.symbol, "retries": s.retries, "cooldown_min": cd})
+    session.add(s)
+    return 0
+
+
+def _mechanical_invalidation(s: ConditionalSetup, ref: float) -> tuple[str | None, bool]:
+    """Hard, no-judgement invalidations checked at the trigger. Returns ``(reason, terminal)``:
+
+    - the move already ran to/through the TARGET -> missed; terminal (re-arming the same level is
+      pointless — price is already at the destination), so reject.
+    - price already snapped back through the protective STOP -> the break failed; NON-terminal, so
+      re-arm (the level may set up and break cleanly later).
+
+    ``None`` means no mechanical block; the thesis/risk checks decide from here."""
+    if s.take_profit is not None and (
+        (s.direction == Direction.LONG.value and ref >= s.take_profit)
+        or (s.direction == Direction.SHORT.value and ref <= s.take_profit)
+    ):
+        return "price already reached the target — move played out", True
+    if s.stop_loss is not None and (
+        (s.direction == Direction.LONG.value and ref <= s.stop_loss)
+        or (s.direction == Direction.SHORT.value and ref >= s.stop_loss)
+    ):
+        return "price already through the stop — break failed", False
+    return None, False
+
+
+def _reread_technical(session: Session, s: ConditionalSetup):
+    """Re-read the market (deterministic, no LLM) for the reviewer's context + the audit trail.
+    Returns a ``TechnicalRead`` or ``None`` if market data can't be fetched."""
+    from app.agents.pipeline import _timeframes_for
+    from app.agents.technical import run_technical
+    from app.models.schemas import OHLCVSeries
+
+    settings = get_or_create_settings(session)
+    broker = get_broker_for(AssetClass(s.asset_class), settings.broker_map)
+    series: list[OHLCVSeries] = []
+    for tf in _timeframes_for(s.timeframe):
+        try:
+            series.append(get_ohlcv_cached(broker, s.symbol, tf, limit=200))
+        except Exception:  # noqa: BLE001
+            pass
+    if not series:
+        return None
+    try:
+        return run_technical(s.symbol, series, use_llm=False)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
+    """Trigger hit -> RE-VALIDATE THE ARMED SETUP ON ITS OWN LEVELS and open if it still qualifies.
+
+    Unlike a fresh from-market analysis (which would reject almost every break entry because the
+    level it is breaking sits <1R away), this validates the setup's OWN plan: reject only a hard
+    mechanical invalidation, let the AI reviewer veto a broken thesis, then size + gate through the
+    deterministic Risk Manager on the armed entry/stop/target. Returns 1 if it became a real
+    trade/approval, else 0."""
+    from app.agents.orchestrator import review_armed_setup
+    from app.models.schemas import TradeProposal
+    from app.risk.service import assess
 
     s.triggered_at = datetime.now(timezone.utc)
+
+    # 1. Hard mechanical invalidations (no judgement, no LLM/data needed).
+    reason, terminal = _mechanical_invalidation(s, ref)
+    if reason:
+        return _decline(session, s, reason, terminal=terminal)
+
+    # 2. Build the proposal from the ARMED levels (trigger = entry) — the whole point: the R:R is
+    #    measured from the trigger, where it is real.
+    technical = _reread_technical(session, s)
+    proposal = TradeProposal(
+        symbol=s.symbol, asset_class=AssetClass(s.asset_class), timeframe=s.timeframe,
+        direction=Direction(s.direction), entry=s.trigger_price, stop_loss=s.stop_loss,
+        take_profit=s.take_profit, confidence=s.confidence or 0.6,
+        rationale=s.rationale or f"Armed {s.order_type} triggered at {s.trigger_price}.",
+        technical=technical,
+    )
+
+    # 3. AI second opinion on the ARMED thesis (confirm/veto; vetoes only a clear invalidation such
+    #    as a higher-timeframe trend flip or an imminent high-impact event). Needs a market read.
+    if technical is not None:
+        ok, why = review_armed_setup(proposal, technical, use_llm=True)
+        proposal.review_decision = "veto" if not ok else "confirm"
+        if not ok:
+            return _decline(session, s, why, terminal=False)
+
+    # 4. Deterministic Risk Manager — final gate, sized on the armed levels.
     try:
-        res = analyze_symbol(session, s.symbol, AssetClass(s.asset_class), s.timeframe, use_llm=True)
+        decision = assess(session, proposal)
     except Exception as exc:  # noqa: BLE001
-        s.last_note = f"re-check error: {exc}"
-        session.add(s)
-        log.warning("conditional re-check error", extra={"symbol": s.symbol, "error": str(exc)})
-        return 0
+        log.warning("conditional risk assess error", extra={"symbol": s.symbol, "error": str(exc)})
+        return _decline(session, s, f"risk re-check error: {exc}", terminal=False)
 
-    s.result_proposal_id = res.proposal_id
-    record = session.get(TradeProposalRecord, res.proposal_id)
+    # 5. Persist the proposal + verdict (audit trail + Mode-A approval queue).
+    record = TradeProposalRecord(
+        symbol=s.symbol, asset_class=s.asset_class, timeframe=s.timeframe,
+        direction=proposal.direction.value, entry=proposal.entry, stop_loss=proposal.stop_loss,
+        take_profit=proposal.take_profit, confidence=proposal.confidence,
+        rationale=proposal.rationale, review_decision=proposal.review_decision,
+        reasoning={"technical": technical.model_dump(mode="json")} if technical is not None else {},
+        risk_decision=decision.decision.value, risk_reason=decision.reason,
+        approved_qty=decision.approved_qty, risk_amount=decision.risk_amount,
+        status=(ProposalStatus.PENDING_APPROVAL.value if decision.approved
+                else ProposalStatus.RISK_VETOED.value),
+    )
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    s.result_proposal_id = record.id
 
-    # The double-check must still want the SAME direction, be tradeable, and pass risk.
-    if (res.proposal.direction.value != s.direction
-            or res.proposal.direction not in (Direction.LONG, Direction.SHORT)
-            or not res.risk.approved):
-        # Decline is usually a TIMING miss (e.g. momentum bouncing at the break). Keep the setup
-        # ARMED with a cooldown so it can fire again when momentum realigns — rather than killing a
-        # still-valid level. Give up only after the retry cap (validity window also bounds it).
-        s.retries += 1
-        why = f"{res.proposal.direction.value} / {res.risk.decision.value}"
-        if s.retries >= _MAX_RETRIES:
-            s.status = ConditionalStatus.REJECTED.value
-            s.last_note = f"re-check declined {s.retries}× — giving up ({why})"
-            log.info("conditional rejected (retry cap)", extra={"symbol": s.symbol, "note": s.last_note})
-        else:
-            cd = _cooldown_minutes(s.timeframe)
-            s.cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=cd)
-            s.last_note = f"re-check declined ({why}); re-armed — retry after ~{cd}m (try {s.retries})"
-            log.info("conditional re-armed after decline",
-                     extra={"symbol": s.symbol, "retries": s.retries, "cooldown_min": cd})
-        session.add(s)
-        return 0
+    if not decision.approved:
+        return _decline(session, s, f"risk: {decision.reason}", terminal=False)
 
     # Honor the user's chosen lot (re-clamped to the 3% cap) for the size it opens at.
-    if s.desired_lots and record is not None and record.status == ProposalStatus.PENDING_APPROVAL.value:
+    if s.desired_lots:
         from app.risk.service import size_preview
         try:
             out = size_preview(session, record, desired_lots=s.desired_lots)
@@ -212,16 +314,8 @@ def _fire(session: Session, s: ConditionalSetup) -> int:
             log.warning("conditional resize failed; using default size",
                         extra={"symbol": s.symbol, "error": str(exc)})
 
-    # Modes B/C already auto-executed inside analyze_symbol.
-    if record is not None and record.status == ProposalStatus.EXECUTED.value:
-        s.status = ConditionalStatus.TRIGGERED.value
-        s.last_note = "break confirmed → opened (auto mode)"
-        session.add(s)
-        log.warning("conditional opened", extra={"symbol": s.symbol})
-        return 1
-
-    # Auto-execute (Hybrid-armed): approve + execute now, like the Hybrid pick.
-    if s.auto_execute and record is not None and record.status == ProposalStatus.PENDING_APPROVAL.value:
+    # 6. Auto-execute (Hybrid / Modes B-C) opens now; Mode A queues for the user's approval.
+    if s.auto_execute:
         from app.execution.executor import ExecutionBlocked, execute_proposal
 
         record.status = ProposalStatus.APPROVED.value
@@ -245,7 +339,7 @@ def _fire(session: Session, s: ConditionalSetup) -> int:
         session.add(s)
         return 0
 
-    # Mode A, manually armed: leave the fresh proposal awaiting the user's approval.
+    # Mode A, manually armed: leave the proposal awaiting the user's approval.
     s.status = ConditionalStatus.TRIGGERED.value
     s.last_note = "break confirmed → queued for your approval"
     session.add(s)
@@ -328,7 +422,7 @@ def check_conditional_setups(session: Session) -> dict:
             s.last_note = "trigger hit but no room (position cap) — still armed"
             session.add(s)
             continue
-        triggered += _fire(session, s)
+        triggered += _fire(session, s, ref)
 
     session.commit()
     return {"checked": len(armed), "triggered": triggered, "expired": expired, "cancelled": cancelled}

@@ -973,3 +973,48 @@ def run_orchestrator(
     log.info("LLM confirmed deterministic setup",
              extra={"symbol": symbol, "direction": proposal.direction.value, "confidence": proposal.confidence})
     return proposal
+
+
+def review_armed_setup(
+    proposal: TradeProposal, technical: TechnicalRead, *, use_llm: bool = True,
+) -> tuple[bool, str]:
+    """Re-validate an ALREADY-ARMED conditional setup at the moment its price trigger hits.
+
+    This is the double-check for a pending break/pullback entry — judged on the setup's OWN plan,
+    NOT re-derived from the current price. A break entry sits, by definition, right at the level it
+    is breaking; re-deriving a fresh trade "from here" would see the next level <1R away and reject
+    almost every valid break (the bug this replaces). So the only question here is: has the THESIS
+    broken since we armed it? Returns ``(still_valid, reason)``.
+
+    The LLM may only CONFIRM or VETO; it vetoes ONLY a clear invalidation (the higher-timeframe
+    trend/structure has flipped against the setup, momentum has decisively reversed, or an imminent
+    high-impact event makes entry unsafe). If the LLM is unavailable we trust the armed plan — it was
+    already AI-reviewed when it was armed, and the deterministic Risk Manager remains the final gate.
+    """
+    if not use_llm or not llm_available():
+        return True, "LLM unavailable — trusting the armed plan"
+
+    user = (
+        f"AN ALREADY-VALIDATED CONDITIONAL SETUP JUST TRIGGERED (its price level was reached). You "
+        f"may only confirm or veto whether it is STILL valid to enter — do NOT re-derive a fresh "
+        f"trade from the current price.\n"
+        f"  symbol={proposal.symbol} timeframe={proposal.timeframe} direction={proposal.direction.value}\n"
+        f"  entry/trigger={proposal.entry} stop={proposal.stop_loss} target={proposal.take_profit} "
+        f"confidence={proposal.confidence}\n  original thesis: {proposal.rationale}\n\n"
+        f"TECHNICAL READ (all timeframes, indicators, support/resistance):\n"
+        f"{technical.model_dump_json(indent=2)}\n\n"
+        f"IMPORTANT — judge ONLY whether the original thesis is still intact. Do NOT veto because "
+        f"price is 'at the level', 'extended from value', or 'has no room to the next level' — a "
+        f"break/pullback entry is BY DEFINITION at its level, and its reward is measured from the "
+        f"trigger, not from here. CONFIRM unless there is a CLEAR invalidation: the higher-timeframe "
+        f"trend/structure has flipped AGAINST this {proposal.direction.value}, momentum has decisively "
+        f"reversed against it, or an imminent high-impact event makes entry unsafe. When unsure, CONFIRM."
+    )
+    review = analyze(system=_REVIEW_SYSTEM, user=user, schema=TradeReviewLLM, max_tokens=1500)
+    if review is None:
+        return True, "AI review unavailable — trusting the armed plan"
+    if review.decision == ReviewDecision.VETO:
+        concerns = ("; ".join(review.concerns)) if review.concerns else review.rationale
+        log.info("armed setup vetoed at trigger", extra={"symbol": proposal.symbol, "reason": concerns[:120]})
+        return False, f"thesis invalidated — {concerns[:180]}"
+    return True, f"AI re-confirmed at trigger: {review.rationale[:160]}"
