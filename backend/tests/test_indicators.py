@@ -178,17 +178,29 @@ def test_mtf_allows_long_when_higher_tf_agrees():
 
 
 def test_target_capped_at_resistance():
-    # Moderate trend (ADX 22): risk = 1.5*ATR(2) = 3; raw 2R target = 106; resistance 104 caps it.
+    # Moderate trend (ADX 22): risk = 1.5*ATR(2) = 3; raw 2R target = 106; resistance 105 (1.67R,
+    # above the 1.5R floor but below 2R) caps the target there.
     p = _deterministic_decision("X", AssetClass.FOREX, "1h",
-                                _multi_tf("up", "up", resistance=104.0, adx=22.0), _fund(), now=NOW)
-    assert p.direction == Direction.LONG and p.take_profit == 104.0
+                                _multi_tf("up", "up", resistance=105.0, adx=22.0), _fund(), now=NOW)
+    assert p.direction == Direction.LONG and p.take_profit == 105.0
 
 
 def test_too_little_room_to_resistance_vetoes():
-    # Moderate trend: resistance 102 is past the breakout buffer but < 1R (3) above entry -> sit out.
+    # Moderate trend: resistance 102 is past the breakout buffer but only ~0.7R above entry — below
+    # the 1.5R minimum to take a market entry, so the engine stands aside (no actionable trade).
     p = _deterministic_decision("X", AssetClass.FOREX, "1h",
                                 _multi_tf("up", "up", resistance=102.0, adx=22.0), _fund(), now=NOW)
-    assert p.direction == Direction.NO_TRADE and "room" in p.rationale.lower()
+    assert p.direction == Direction.NO_TRADE and "aside" in p.rationale.lower()
+
+
+def test_thin_rr_market_entry_stands_aside_at_1r():
+    # The USOIL case: a moderate trend whose only target gives ~1R at market (wide ATR stop) is ~1:1
+    # — negative expectancy after costs. The OLD engine took any >=1R trade; now it must stand aside
+    # (the 1.5R floor) and stay a non-actionable watch rather than propose the thin trade.
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h",
+                                _multi_tf("up", "up", resistance=103.0, adx=22.0), _fund(), now=NOW)
+    assert p.direction == Direction.NO_TRADE and p.watch is True and not p.is_actionable
+    assert "1.5r" in p.rationale.lower()
 
 
 def test_strong_trend_ignores_immediate_structure():
@@ -399,7 +411,8 @@ def test_divergence_against_extended_setup_watches():
 
 def test_target_snaps_to_prior_day_high():
     # Moderate long; the only nearby level is the institutional prior-day-high (104) on the daily TF.
-    ind = {"last_close": 100.0, "atr14": 2.0, "adx": 22.0, "macd_hist": 1.0}
+    # risk = 1.5*ATR(1.5) = 2.25, so 104 is ~1.78R — above the 1.5R floor; the target snaps to it.
+    ind = {"last_close": 100.0, "atr14": 1.5, "adx": 22.0, "macd_hist": 1.0}
     tech = TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
         TimeframeRead(timeframe="1h", trend="up", indicators=ind,
                       support_levels=[80], resistance_levels=[130]),       # pivots far away

@@ -93,6 +93,8 @@ _STRUCT_STOP_MAX_ATR = 3.0     # if the invalidating swing is further than this,
 _RR = 2.0             # reward:risk target (baseline / fallback)
 _RR_MAX = 4.0         # cap the planned target at 4R so a far key level isn't an unrealistic target
 _MIN_RR_COND = 1.5    # only suggest a conditional break-entry if its R:R (from the trigger) clears this
+_MIN_RR_ENTRY = 1.5   # don't TAKE a direct market entry below this R:R — ~1:1 is negative expectancy
+                      # after costs; stand aside and arm the better-priced break/pullback instead
 _RSI_OB = 75.0        # overbought / oversold caution thresholds
 _RSI_OS = 25.0
 # --- ranging-market mean-reversion (fade the range edges instead of trend-trading a flat market) ---
@@ -106,7 +108,6 @@ _MR_CONF_CAP = 0.68   # cap mean-reversion confidence below strong-trend setups 
 _MR_RSI_OB = 66.0
 _MR_RSI_OS = 34.0
 _STRUCT_IGNORE = 0.5  # ignore overhead structure within 0.5R of entry (breakout zone)
-_MIN_RR_TO_STRUCT = 1.0  # need >=1R of room to the next structure to take the trade
 _MOM_ATR_FRAC = 0.10  # counter-momentum only "matters" when |MACD hist| >= 10% of ATR (noise gate)
 _PULLBACK_ATR = 2.5   # price > this many ATR beyond EMA20 = stretched entry -> down-weight (a
                       # steady trend rides ~2.4 ATR from the lagging EMA, so only flag real spikes)
@@ -755,20 +756,25 @@ def _deterministic_decision(
     nearest = ahead[0] if ahead else None
     nearest_rr = (abs(nearest - entry) / risk) if nearest is not None else None
 
+    # Does a market entry NOW clear the minimum take-R:R? If the only level sits below _MIN_RR_ENTRY
+    # and the trend isn't strong enough to break through it, we DON'T chase the market entry — the
+    # wide market stop makes the direct R:R too thin (~1:1 is negative expectancy after costs). We
+    # arm the better-priced break/pullback alternative below and stand aside instead.
+    take_market = True
     if nearest is not None and nearest_rr < _RR:
         # A real key level sits BEFORE 2R — the path to a clean 2R isn't free.
-        if nearest_rr < _MIN_RR_TO_STRUCT and not strong:
-            side = "above" if direction == Direction.LONG else "below"
-            base.rationale = (f"Too little room: key level {round(nearest, 5)} is < {_MIN_RR_TO_STRUCT:.0f}R "
-                              f"{side} entry — R:R not real. Sitting out.")
-            return base
         if strong:
             # Strong trend can break the minor level — aim for the next clean >=2R level, else 2R.
             target = _clamp(past_2r[0]) if past_2r else two_r
             struct_note = f"~{abs(target - entry) / risk:.1f}R (strong trend through {round(nearest, 5)})"
-        else:
-            target = nearest  # moderate trend respects the level — cap there
+        elif nearest_rr >= _MIN_RR_ENTRY:
+            target = nearest  # moderate trend respects the level — acceptable R:R, cap there
             struct_note = f"capped at key level {round(nearest, 5)} (~{nearest_rr:.1f}R)"
+        else:
+            # Too thin to take at market — stand aside; the armed alternative below has real R:R.
+            take_market = False
+            target = nearest
+            struct_note = f"only ~{nearest_rr:.1f}R to {round(nearest, 5)} at market"
     elif past_2r:
         # Nearest meaningful level is already >=2R — clean target; a strong trend may run further.
         target = past_2r[0]
@@ -858,21 +864,42 @@ def _deterministic_decision(
         conf -= 0.05
     confidence = round(max(0.05, min(0.95, conf)), 2)
 
-    base.direction = direction
-    base.entry = round(entry, 6)
-    base.stop_loss = round(stop, 6)
-    base.take_profit = round(target, 6)
-    base.confidence = confidence
-    # Carry a conditional ('wait') entry so the trade can be ARMED rather than chased (survives even
-    # if the LLM vetoes the immediate entry). Priority: a break-STOP past a blocking level (the trade
-    # is only valid after the break); otherwise — whenever the entry sits away from value (not already
-    # AT value) — a LIMIT back at value (~EMA20) for a better price than chasing. So most trend setups
-    # now expose a pullback-limit alternative, not just the extreme/overextended ones.
+    # Carry a conditional ('wait') entry so the trade can be ARMED rather than chased — computed
+    # REGARDLESS of the market decision so it survives both an LLM veto AND a thin-R:R market sit-out.
+    # Priority: a break-STOP past a blocking level (valid only after the break); otherwise — whenever
+    # the entry sits away from value (not already AT value) — a LIMIT back at value (~EMA20).
     base.conditional = (
         _conditional_break(direction, entry, atr_v, levels, target, confidence)
         or (None if at_value
             else _conditional_pullback(direction, entry, ema20, atr_v, ind, target, confidence))
     )
+
+    # Thin direct R:R (the only level sits < _MIN_RR_ENTRY away, moderate trend): don't take the
+    # market entry — keep it a NO_TRADE/watch carrying the armed alternative (real R:R from a tighter
+    # stop / better entry). ~1:1 at market is negative expectancy after costs.
+    if not take_market:
+        side = "above" if direction == Direction.LONG else "below"
+        base.watch = True
+        if base.conditional is not None:
+            base.rationale = (
+                f"Standing aside at MARKET (a {direction.value.upper()} is valid): only ~{nearest_rr:.1f}R "
+                f"to the nearest level {round(nearest, 5)} {side} entry — below the {_MIN_RR_ENTRY:.1f}R "
+                f"minimum, the wide market stop makes the direct R:R too thin. Armed a better-priced "
+                f"{base.conditional.order_type} instead (a tighter stop / entry at value lifts the R:R)."
+            )
+        else:
+            base.rationale = (
+                f"Standing aside: a {direction.value.upper()} is valid but only ~{nearest_rr:.1f}R to the "
+                f"nearest level {round(nearest, 5)} {side} entry (below the {_MIN_RR_ENTRY:.1f}R minimum) "
+                f"and no clean armed alternative right now — waiting for a better entry."
+            )
+        return base
+
+    base.direction = direction
+    base.entry = round(entry, 6)
+    base.stop_loss = round(stop, 6)
+    base.take_profit = round(target, 6)
+    base.confidence = confidence
     base.rationale = (
         f"Confluence {direction.value.upper()}: {regime} regime, entry-TF trend={trend}, "
         f"macro={macro}, structure={struct}/{macro_struct}, ADX {adx_v}, MACD hist={macd_hist}, "
