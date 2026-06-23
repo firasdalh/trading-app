@@ -212,6 +212,37 @@ def test_strong_trend_ignores_immediate_structure():
     assert p.take_profit is not None and p.take_profit < p.entry
 
 
+def _long_read(swing_low, recent_low):
+    # A clean LONG (trend up on both TFs, ADX strong, entry at value) with a swing-low and optional
+    # recent wick low, so the structural-stop placement can be exercised.
+    ind = {"last_close": 100.0, "atr14": 1.0, "adx": 30.0, "macd_hist": 0.5,
+           "ema20": 100.0, "ema50": 99.0, "ema200": 98.0, "structure": 1.0, "swing_low": swing_low}
+    if recent_low is not None:
+        ind["recent_low"] = recent_low
+    macro = {"ema20": 100.0, "ema50": 99.0, "ema200": 98.0}
+    return TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend="up", indicators=ind, support_levels=[], resistance_levels=[110.0]),
+        TimeframeRead(timeframe="1d", trend="up", indicators=macro, support_levels=[], resistance_levels=[]),
+    ])
+
+
+def test_stop_extends_beyond_recent_wick_long():
+    # Beyond-the-wick: when a recent wick (97.5) already pierced the swing low (98.0), the stop is
+    # placed BELOW that wick — further than the plain swing stop — to dodge stop-hunts.
+    base = _deterministic_decision("X", AssetClass.FOREX, "1h", _long_read(98.0, None), _fund(), now=NOW)
+    wick = _deterministic_decision("X", AssetClass.FOREX, "1h", _long_read(98.0, 97.5), _fund(), now=NOW)
+    assert base.direction == Direction.LONG and wick.direction == Direction.LONG
+    assert wick.stop_loss < base.stop_loss   # wick-aware stop sits further from entry
+    assert wick.stop_loss < 97.5             # ...and below the recent wick extreme
+
+
+def test_stop_unchanged_when_no_wick_beyond_swing_long():
+    # If recent lows stayed ABOVE the swing (no wicking), placement is the plain swing stop.
+    plain = _deterministic_decision("X", AssetClass.FOREX, "1h", _long_read(98.0, None), _fund(), now=NOW)
+    nowick = _deterministic_decision("X", AssetClass.FOREX, "1h", _long_read(98.0, 98.3), _fund(), now=NOW)
+    assert plain.stop_loss == nowick.stop_loss
+
+
 # ---- market structure (swing highs/lows) ----
 
 def _zigzag(n: int, step_up: float, step_dn: float, up_len: int, dn_len: int) -> list[Candle]:

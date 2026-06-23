@@ -726,10 +726,16 @@ def _deterministic_decision(
     # with two guards — never tighter than the anti-wick floor (>= 1xATR, so noise can't pick it
     # off), and never wider than _STRUCT_STOP_MAX_ATR (a too-far swing isn't a practical stop).
     # Crypto keeps a wider ATR multiple. (These guards fixed the instant-wick crypto losses.)
+    # BEYOND-THE-WICK: when recent wicks have ALREADY pierced the swing, place the stop beyond those
+    # wicks (recent_low/recent_high) rather than just past the obvious swing — the swing+0.2ATR zone
+    # is exactly where stop-hunts reach. Only widens when there's evidence of wicking, and the
+    # _STRUCT_STOP_MAX_ATR cap still bounds it (a wick further than that falls back to the ATR stop).
     atr_mult = _ATR_STOP_MULT_CRYPTO if asset_class == AssetClass.CRYPTO else _ATR_STOP_MULT
     min_stop_dist = _MIN_STOP_ATR_FRAC * atr_v if atr_v else 0.0
     swing_low = ind.get("swing_low")
     swing_high = ind.get("swing_high")
+    recent_low = ind.get("recent_low")
+    recent_high = ind.get("recent_high")
     stop_basis = "ATR"
     if direction == Direction.LONG:
         atr_stop = entry - atr_mult * atr_v if atr_v else None
@@ -738,11 +744,16 @@ def _deterministic_decision(
         if (support is not None and atr_stop is not None and atr_stop < support < entry
                 and (entry - support) >= min_stop_dist):
             stop, stop_basis = support, "support"
-        # Structural stop: just below the last swing low (the long's invalidation), if practical.
+        # Structural stop: just below the last swing low (the long's invalidation), if practical —
+        # extended below recent wicks that already pierced it (anti stop-hunt).
         if atr_v and swing_low is not None and swing_low < entry:
-            struct_dist = (entry - swing_low) + _STRUCT_STOP_BUFFER_ATR * atr_v
+            struct_ref = swing_low
+            if recent_low is not None and recent_low < swing_low:
+                struct_ref = recent_low
+            struct_dist = (entry - struct_ref) + _STRUCT_STOP_BUFFER_ATR * atr_v
             if struct_dist <= _STRUCT_STOP_MAX_ATR * atr_v:
-                stop, stop_basis = entry - max(struct_dist, min_stop_dist), "swing-low structure"
+                stop = entry - max(struct_dist, min_stop_dist)
+                stop_basis = "swing-low structure" if struct_ref == swing_low else "swing/wick structure"
         risk = entry - stop
     else:
         atr_stop = entry + atr_mult * atr_v if atr_v else None
@@ -750,11 +761,16 @@ def _deterministic_decision(
         if (resistance is not None and atr_stop is not None and entry < resistance < atr_stop
                 and (resistance - entry) >= min_stop_dist):
             stop, stop_basis = resistance, "resistance"
-        # Structural stop: just above the last swing high (the short's invalidation), if practical.
+        # Structural stop: just above the last swing high (the short's invalidation), if practical —
+        # extended above recent wicks that already pierced it (anti stop-hunt).
         if atr_v and swing_high is not None and swing_high > entry:
-            struct_dist = (swing_high - entry) + _STRUCT_STOP_BUFFER_ATR * atr_v
+            struct_ref = swing_high
+            if recent_high is not None and recent_high > swing_high:
+                struct_ref = recent_high
+            struct_dist = (struct_ref - entry) + _STRUCT_STOP_BUFFER_ATR * atr_v
             if struct_dist <= _STRUCT_STOP_MAX_ATR * atr_v:
-                stop, stop_basis = entry + max(struct_dist, min_stop_dist), "swing-high structure"
+                stop = entry + max(struct_dist, min_stop_dist)
+                stop_basis = "swing-high structure" if struct_ref == swing_high else "swing/wick structure"
         risk = stop - entry
 
     if risk <= 0:
