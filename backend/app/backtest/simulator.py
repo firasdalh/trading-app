@@ -115,7 +115,7 @@ def _simulate_trade(symbol: str, candles: list, i: int, prop, *, max_hold: int,
 def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                     bars: int = 1500, context_bars: int = 600, max_hold: int = 96,
                     cooldown: int = 3, cost_r: float = 0.0,
-                    regimes: set[str] | None = None) -> list[BTTrade]:
+                    regimes: set[str] | None = None, scalp: bool = False) -> list[BTTrade]:
     """Replay the engine bar-by-bar over ``bars`` of history and return the simulated trades.
 
     At each entry-timeframe bar the engine is given the last 200 bars of EACH timeframe ending at
@@ -171,7 +171,8 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
             continue
 
         technical = run_technical(symbol, window, use_llm=False)
-        prop = _deterministic_decision(symbol, asset_class, timeframe, technical, fund, now=t_i)
+        prop = _deterministic_decision(symbol, asset_class, timeframe, technical, fund, now=t_i,
+                                       scalp=scalp)
         if not prop.is_actionable or prop.take_profit is None:
             i += 1
             continue

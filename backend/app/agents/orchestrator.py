@@ -116,6 +116,14 @@ _VALUE_ENTRY_ATR = 1.0  # entry within ~1 ATR of the 20-EMA = a pullback to VALU
 _STRETCHED_ATR = 1.5    # 1.5-2.5 ATR from value = getting stretched (small anti-chase penalty);
                         # beyond _PULLBACK_ATR it's a full chase (bigger penalty) — see grading below
 
+# --- 15m SCALPING (SCMS: Structure-Confirmed Momentum Scalp) — kept deliberately PARSIMONIOUS to
+# avoid overfitting: a tiny set of robust, orthogonal conditions (trend+MTF alignment, a pullback to
+# value that held, momentum confirmation) behind hard regime+session gates. No indicator soup. ---
+_SCALP_VALUE_ATR = 0.30   # "pulled back to value" = the bar tagged within 0.30xATR of the EMA20
+_SCALP_MIN_RR = 1.3       # minimum reward:risk for a scalp (a touch below swing trades; banked at 1R)
+_SCALP_STOP_MAX_ATR = 2.0 # a scalp's structural stop must be <= 2xATR — wider isn't a scalp, skip it
+_SCALP_TP_FIXED_RR = 1.5  # fallback target when there's no clean opposing level in range
+
 _TF_RANK = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7}
 
 
@@ -308,6 +316,123 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0, macro: str = "
         f"Mean-reversion {direction.value.upper()} (ranging regime): price tagged the {edge_kind} "
         f"{round(edge, 5)} with RSI {rsi} ({'high' if direction == Direction.SHORT else 'low'}); "
         f"fading back to the mean (EMA20 {round(mean, 5)}). Stop beyond the edge; R:R {round(rr, 2)}."
+    )
+    return base
+
+
+def _scalp_decision(base: TradeProposal, ind: dict, tf0, macro: str, regime: str,
+                    asset_class: AssetClass, symbol: str, now: datetime) -> TradeProposal:
+    """15m SCALP strategy (SCMS) — deliberately simple to resist overfitting.
+
+    The ONLY setup is a trend-pullback continuation: with the 15m trend (and not against the higher
+    timeframe), wait for a pullback that TAGGED value (the EMA20) and HELD, with momentum (MACD hist)
+    confirming the trend direction. Hard gates first: trade only in a directional regime (trending /
+    moderate — 15m's profitable buckets) and a liquid session (skip thin hours). Stop beyond the
+    pullback extreme (anti-wick floor, capped tight); target the nearest opposing structure (>= min
+    R:R) or a fixed 1.5R. Returns NO_TRADE/watch when any condition fails (which is most of the time —
+    that's the point). The live spread filter + scalp risk profile are layered on downstream."""
+    base.strategy = "scalp"
+    base.regime = regime
+    atr = ind.get("atr14")
+    price = ind.get("last_close")
+    ema20 = ind.get("ema20")
+    if not (atr and price and ema20) or atr <= 0:
+        base.rationale = "Scalp: no usable ATR/price/EMA20 — sitting out."
+        return base
+
+    # --- hard gates ---
+    if regime not in ("trending", "moderate"):
+        base.watch = True
+        base.rationale = f"Scalp: standing aside — {regime} regime (no clean 15m directional energy)."
+        return base
+    session_q, session_note = _session_quality(asset_class, symbol, now)
+    if session_q == "thin":
+        base.watch = True
+        base.rationale = f"Scalp: standing aside — thin/illiquid session ({session_note})."
+        return base
+
+    trend = _trend_from_indicators(ind)
+    macd = ind.get("macd_hist")
+    last_high, last_low = ind.get("last_high"), ind.get("last_low")
+    swing_high, swing_low = ind.get("swing_high"), ind.get("swing_low")
+    recent_high, recent_low = ind.get("recent_high"), ind.get("recent_low")
+    near_value = _SCALP_VALUE_ATR * atr
+
+    direction = stop = risk = None
+    if trend == "up" and macro != "down":
+        if (last_low is not None and last_low <= ema20 + near_value   # pulled back TO value
+                and price >= ema20                                    # and HELD (closed back above)
+                and macd is not None and macd > 0):                   # momentum confirms up
+            direction = Direction.LONG
+            ref = min(x for x in (swing_low, recent_low, last_low) if x is not None)
+            stop = ref - _STRUCT_STOP_BUFFER_ATR * atr
+            risk = price - stop
+    elif trend == "down" and macro != "up":
+        if (last_high is not None and last_high >= ema20 - near_value
+                and price <= ema20
+                and macd is not None and macd < 0):
+            direction = Direction.SHORT
+            ref = max(x for x in (swing_high, recent_high, last_high) if x is not None)
+            stop = ref + _STRUCT_STOP_BUFFER_ATR * atr
+            risk = stop - price
+
+    if direction is None or risk is None:
+        base.watch = True
+        base.rationale = "Scalp: waiting for a pullback-to-value that holds with momentum in the 15m trend."
+        return base
+
+    # Stop sanity: never tighter than the anti-wick floor, never wider than a scalp's cap.
+    min_stop = _MIN_STOP_ATR_FRAC * atr
+    if risk < min_stop:
+        stop = price - min_stop if direction == Direction.LONG else price + min_stop
+        risk = abs(price - stop)
+    if risk <= 0 or risk > _SCALP_STOP_MAX_ATR * atr:
+        base.watch = True
+        base.rationale = (f"Scalp: invalidation stop too wide ({risk / atr:.1f}xATR > "
+                          f"{_SCALP_STOP_MAX_ATR:.0f}) — not a scalp here.")
+        return base
+
+    # Target: nearest opposing structure if it clears the min R:R (capped at _RR_MAX), else a fixed
+    # 1.5R. If a level sits closer than the min R:R, the path is blocked — skip.
+    opp = _nearest_above(tf0, ind, price) if direction == Direction.LONG else _nearest_below(tf0, ind, price)
+    if opp is not None:
+        rr_opp = (opp - price) / risk if direction == Direction.LONG else (price - opp) / risk
+        if rr_opp < _SCALP_MIN_RR:
+            base.watch = True
+            base.rationale = (f"Scalp: nearest level {round(opp, 5)} is only {rr_opp:.1f}R away "
+                              f"(< {_SCALP_MIN_RR}) — no room. Standing aside.")
+            return base
+        cap = _RR_MAX * risk
+        target = min(opp, price + cap) if direction == Direction.LONG else max(opp, price - cap)
+    else:
+        target = price + _SCALP_TP_FIXED_RR * risk if direction == Direction.LONG else price - _SCALP_TP_FIXED_RR * risk
+    reward = abs(target - price)
+    rr = reward / risk
+
+    # Confidence: base + a few orthogonal bonuses (kept small to avoid over-tuning).
+    conf = 0.5
+    if macro == trend:                       # higher timeframe in the same direction
+        conf += 0.10
+    if session_q == "active":                # prime liquidity window
+        conf += 0.10
+    if abs(macd) >= _MOM_ATR_FRAC * atr:     # momentum is meaningful, not noise
+        conf += 0.05
+    vol = ind.get("vol_ratio")
+    if vol is not None and vol > 1.1:        # participation behind the move
+        conf += 0.05
+    if rr >= 2.0:
+        conf += 0.05
+    confidence = round(min(0.9, conf), 2)
+
+    base.direction = direction
+    base.entry = round(price, 6)
+    base.stop_loss = round(stop, 6)
+    base.take_profit = round(target, 6)
+    base.confidence = confidence
+    base.rationale = (
+        f"Scalp {direction.value.upper()} (15m {regime}, {session_q} session): pullback to value "
+        f"(EMA20 {round(ema20, 5)}) held with momentum (MACD hist {macd}); entry {base.entry}, stop "
+        f"{base.stop_loss} ({risk / atr:.1f}xATR), target {base.take_profit} (R:R {round(rr, 2)})."
     )
     return base
 
@@ -556,7 +681,7 @@ def _conditional_resumption(
 def _deterministic_decision(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
-    trend_only: bool = False,
+    trend_only: bool = False, scalp: bool = False,
 ) -> TradeProposal:
     base = TradeProposal(
         symbol=symbol, asset_class=asset_class, timeframe=timeframe,
@@ -586,6 +711,9 @@ def _deterministic_decision(
     policy = regime_policy(regime)
     base.regime = regime
     base.strategy = policy["strategy"]
+    # Scalp mode (15m): a dedicated, parsimonious scalp strategy replaces the swing logic entirely.
+    if scalp:
+        return _scalp_decision(base, ind, tf0, macro, regime, asset_class, symbol, now)
     # Trend-only mode: only trade a CLEAR trend (ADX >= 25 -> "trending"); stand aside in moderate /
     # ranging / volatile. Backtests show the trend regime is the edge while moderate+ranging are net
     # drags (same return, ~40% more drawdown when included). The live default comes from the setting.
@@ -975,6 +1103,7 @@ def run_orchestrator(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead,
     now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
+    scalp: bool = False,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -988,7 +1117,7 @@ def run_orchestrator(
     now = now or datetime.now(timezone.utc)
 
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
-                                       trend_only=trend_only)
+                                       trend_only=trend_only, scalp=scalp)
 
     if proposal.direction == Direction.NO_TRADE or not use_llm or not llm_available():
         log.info("orchestrator decision (deterministic)",
@@ -999,7 +1128,18 @@ def run_orchestrator(
     # The checklist depends on the STRATEGY: a ranging mean-reversion FADE must NOT be judged like a
     # trend trade (it is deliberately counter to the last leg, in a low-ADX market — those are the
     # premise, not flaws), or the reviewer would veto every fade.
-    if proposal.strategy == "mean_reversion":
+    if proposal.strategy == "scalp":
+        checklist = (
+            "This is a 15m TREND-PULLBACK SCALP: a WITH-trend entry on a pullback to value (EMA20) "
+            "that held, with momentum confirming, in a liquid session. Judge it as a SCALP, not a "
+            "swing trade: a ~1.3R+ target is acceptable (half is banked at +1R and the rest trails), "
+            "and being a quick 15m trade is the premise — do NOT veto for 'small target' or 'low "
+            "timeframe'. CONFIRM if it is with the trend at a value pullback with momentum and room to "
+            "the target. VETO only a clear flaw: against the higher-timeframe trend, no momentum, an "
+            "imminent high-impact event, or no room to the target. When unsure, confirm at lower "
+            "confidence."
+        )
+    elif proposal.strategy == "mean_reversion":
         checklist = (
             "This is a deliberate RANGING MEAN-REVERSION fade (regime=ranging). Judge it as a FADE, "
             "NOT a trend trade: being counter to the last leg and a low-ADX / no-trend market are the "
