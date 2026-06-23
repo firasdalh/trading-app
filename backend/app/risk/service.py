@@ -283,6 +283,33 @@ def last_pair_close_at(session: Session, symbol: str) -> datetime | None:
     return None
 
 
+def last_dir_loss_at(session: Session, symbol: str, direction: str) -> datetime | None:
+    """Close time of the MOST RECENT closed trade on this symbol+direction, but only if it was a
+    LOSS — for the loss-aware cooldown. Returns None if the last such trade won or there was none
+    (a win resets the cooldown — the setup worked, so re-entry is fine). A loss = realized_pnl < 0,
+    or, when P&L wasn't recorded, the exit went against the trade (stopped out)."""
+    if direction not in ("long", "short"):
+        return None
+    row = session.scalars(
+        select(Position)
+        .where(Position.symbol == symbol, Position.direction == direction,
+               Position.status == PositionStatus.CLOSED.value)
+        .order_by(Position.closed_at.desc())
+    ).first()
+    if not row or not row.closed_at:
+        return None
+    if row.realized_pnl is not None:
+        lost = row.realized_pnl < 0
+    elif row.last_price is not None and row.entry_price is not None:
+        lost = (row.last_price >= row.entry_price) if direction == "short" else (row.last_price <= row.entry_price)
+    else:
+        return None
+    if not lost:
+        return None
+    closed = row.closed_at
+    return closed if closed.tzinfo else closed.replace(tzinfo=timezone.utc)
+
+
 def _norm_symbol(s: str) -> str:
     """Loose symbol key for matching across formats (BTC/USD, BTCUSDm, BTCUSD)."""
     return "".join(ch for ch in (s or "").upper() if ch.isalnum())
@@ -383,6 +410,7 @@ def assess(
         limits,
         now=datetime.now(timezone.utc),
         last_pair_close_at=last_pair_close_at(session, proposal.symbol),
+        last_dir_loss_at=last_dir_loss_at(session, proposal.symbol, proposal.direction.value),
         qty_step=qty_step,
         min_qty=min_lot,
         override_risk_fraction=override_risk_fraction,

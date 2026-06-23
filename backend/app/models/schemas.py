@@ -228,6 +228,9 @@ class RiskLimits(BaseModel):
     max_daily_loss: float = 0.03
     max_total_exposure: float = 0.06
     per_pair_cooldown_minutes: int = 30
+    # After a STOP-OUT, stand down on the SAME symbol+direction for this much longer than the normal
+    # per-pair cooldown — re-entering a just-failed setup is how one stop becomes three (XAGGBP case).
+    loss_cooldown_minutes: int = 240
     risk_per_trade_ceiling: float = 0.03
     # Effective state of the daily-loss circuit breaker handed to the manager (already
     # resolved by the service layer). When False, the daily-loss gate is skipped.

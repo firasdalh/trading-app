@@ -164,6 +164,28 @@ def test_cooldown_elapsed_approved():
     assert d.approved
 
 
+def test_loss_cooldown_blocks_same_direction_after_stop_out():
+    # A stop-out 2h ago is past the 30-min per-pair cooldown but inside the 4h LOSS cooldown ->
+    # re-entering the same direction is blocked (the XAGGBP re-short loop).
+    d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
+                          now=NOW, last_dir_loss_at=NOW - timedelta(minutes=120), qty_step=1)
+    assert not d.approved and "loss cooldown" in d.reason
+
+
+def test_loss_cooldown_elapsed_approved():
+    d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
+                          now=NOW, last_dir_loss_at=NOW - timedelta(minutes=241), qty_step=1)
+    assert d.approved
+
+
+def test_loss_cooldown_does_not_block_when_no_recent_loss():
+    # The opposite direction (or a prior WIN) yields last_dir_loss_at=None -> not blocked, so a
+    # reversal after a failed break can still be taken.
+    d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
+                          now=NOW, last_dir_loss_at=None, qty_step=1)
+    assert d.approved
+
+
 def test_equity_nonpositive_vetoed():
     acct = make_account(equity=0.0)
     d = evaluate_proposal(make_proposal(), acct, make_limits(), now=NOW)

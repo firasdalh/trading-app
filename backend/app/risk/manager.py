@@ -89,6 +89,7 @@ def evaluate_proposal(
     *,
     now: datetime,
     last_pair_close_at: datetime | None = None,
+    last_dir_loss_at: datetime | None = None,
     qty_step: float | None = None,
     min_qty: float = 0.0,
     override_risk_fraction: float | None = None,
@@ -204,6 +205,23 @@ def evaluate_proposal(
             return _veto(symbol, f"per-pair cooldown active (~{mins} min left)", checks)
     else:
         checks["cooldown_ok"] = True
+
+    # --- 5b. loss-aware cooldown ---
+    # After a STOP-OUT, don't re-enter the SAME symbol+direction for a longer window. Re-shorting a
+    # just-failed break minutes/hours later is how one stop becomes three (the XAGGBP case: a failed
+    # break of 47 re-shorted 3x for back-to-back stops). The opposite direction is NOT blocked — a
+    # reclaimed/failed break often reverses. ``last_dir_loss_at`` is the close time of the most recent
+    # losing trade in THIS direction on this symbol (None if the last one won / there was none).
+    if last_dir_loss_at is not None:
+        loss_until = last_dir_loss_at + timedelta(minutes=limits.loss_cooldown_minutes)
+        loss_ok = now >= loss_until
+        checks["loss_cooldown_ok"] = loss_ok
+        if not loss_ok:
+            mins = max(0, math.ceil((loss_until - now).total_seconds() / 60))
+            return _veto(symbol, f"loss cooldown: last {proposal.direction.value} here was stopped out "
+                                 f"(~{mins} min before retrying this direction)", checks)
+    else:
+        checks["loss_cooldown_ok"] = True
 
     # --- 6. size from risk-per-trade ---
     per_lot = risk_per_lot if (risk_per_lot and risk_per_lot > 0) else abs(entry - stop)
