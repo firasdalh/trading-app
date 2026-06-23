@@ -46,6 +46,7 @@ _SQLITE_ADDED_COLUMNS = {
     ],
     "app_settings": [
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),
+        ("scalp_mode", "BOOLEAN DEFAULT 0"),
     ],
     "positions": [
         ("confidence", "FLOAT"),

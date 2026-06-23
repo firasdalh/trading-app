@@ -79,12 +79,14 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [analyzing, setAnalyzing] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scalpBusy, setScalpBusy] = useState(false);
 
   const [symbols, setSymbols] = useState<string[]>([]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [posBump, setPosBump] = useState(0);
   const liveQuote = useQuoteSocket(symbol, assetClass);
   const { data: brokerInfo } = usePolling(() => api.brokerInfo(assetClass), 6000, [assetClass]);
+  const scalp = !!settings?.app.scalp_mode;
 
   // Load the broker's available symbols for the chosen asset class. If the current symbol
   // isn't offered (e.g. switching to forex while on AAPL), jump to the first available one.
@@ -141,6 +143,12 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     };
   }, [symbol, assetClass, timeframe]);
 
+  // Scalping mode forces the chart + analysis to the 15m timeframe.
+  useEffect(() => {
+    if (scalp && timeframe !== "15m") setTimeframe("15m");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scalp]);
+
   const { data: account } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
   const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
   // Armed conditional setups — overlaid on the chart (trigger/SL/TP) for the charted symbol.
@@ -179,6 +187,19 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     const sym = result.proposal.symbol.toUpperCase();
     return positions.some((p) => p.symbol.toUpperCase() === sym);
   }, [positions, result]);
+
+  const toggleScalp = async () => {
+    setScalpBusy(true);
+    setError(null);
+    try {
+      await api.setScalpMode(!scalp);
+      onSettingsChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setScalpBusy(false);
+    }
+  };
 
   const runAnalysis = async () => {
     setAnalyzing(true);
@@ -301,7 +322,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
             name="dash-timeframe"
             value={timeframe}
             onChange={(e) => setTimeframe(e.target.value)}
-            className="rounded bg-neutral-800 px-2 py-1.5"
+            disabled={scalp}
+            title={scalp ? "Locked to 15m by Scalping Mode" : undefined}
+            className="rounded bg-neutral-800 px-2 py-1.5 disabled:opacity-50"
           >
             {TIMEFRAMES.map((t) => (
               <option key={t} value={t}>
@@ -310,6 +333,18 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
             ))}
           </select>
         </label>
+        <button
+          onClick={toggleScalp}
+          disabled={scalpBusy}
+          title="Scalping Mode: switch the whole system (charts + analysis + scanner) to 15m with the scalp strategy"
+          className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+            scalp
+              ? "border-amber-500 bg-amber-500/15 text-amber-300"
+              : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+          }`}
+        >
+          ⚡ Scalping {scalp ? "ON · 15m" : "OFF"}
+        </button>
         <div className="ml-auto flex items-center gap-3">
           {brokerInfo &&
             (() => {

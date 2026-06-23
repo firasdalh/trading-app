@@ -221,6 +221,21 @@ def set_trend_only(req: TrendOnlyRequest, session: Session = Depends(get_session
     return build_settings_response(session)
 
 
+class ScalpModeRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/scalp-mode", response_model=SettingsResponse)
+def set_scalp_mode(req: ScalpModeRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle scalping mode: when ON, the whole system (charts + analysis + scanner/hybrid) operates
+    on the 15m timeframe with the scalp strategy/risk profile. Reversible."""
+    settings = get_or_create_settings(session)
+    settings.scalp_mode = req.enabled
+    session.commit()
+    log.info("scalp mode set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
 def _try_mt5_connect() -> dict:
     """Attempt an MT5 connection and return a status dict (never raises)."""
     from app.brokers.base import BrokerError

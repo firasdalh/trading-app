@@ -73,6 +73,11 @@ class AppSettings(Base):
     # result (same return, ~40% less drawdown). Reversible.
     trend_only_mode: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Scalping mode: force the 15m timeframe everywhere (charts + analysis + scanner/hybrid) and use
+    # the scalp strategy/risk profile. OFF by default — the user activates it. (Overrides trend_only
+    # while on: 15m's "moderate" regime is profitable, unlike on 1h.)
+    scalp_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

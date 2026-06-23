@@ -44,6 +44,8 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
     account fetch instead of one per symbol; leave it None for a single-symbol preview."""
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
+    if settings.scalp_mode:
+        timeframe = "15m"   # scalp mode forces the 15m entry timeframe
     broker = get_broker_for(asset_class, settings.broker_map)
     series: list[OHLCVSeries] = []
     for tf in _timeframes_for(timeframe):
@@ -53,8 +55,9 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
             log.warning("preview ohlcv failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
     technical = run_technical(symbol, series, use_llm=use_llm)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)
-    proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental,
-                                now=now, use_llm=use_llm, trend_only=settings.trend_only_mode)
+    proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
+                                use_llm=use_llm,
+                                trend_only=settings.trend_only_mode and not settings.scalp_mode)
     decision = assess(session, proposal, cache=cache)
     return proposal, decision
 
@@ -92,6 +95,8 @@ def analyze_symbol(
     agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
+    if settings.scalp_mode:
+        timeframe = "15m"   # scalp mode forces the 15m entry timeframe
     broker = get_broker_for(asset_class, settings.broker_map)
 
     # 1. Market data across timeframes.
@@ -105,8 +110,9 @@ def analyze_symbol(
     # 2. Agents.
     technical = run_technical(symbol, series, use_llm=use_llm)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)
-    proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental,
-                                now=now, use_llm=use_llm, trend_only=settings.trend_only_mode)
+    proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
+                                use_llm=use_llm,
+                                trend_only=settings.trend_only_mode and not settings.scalp_mode)
 
     # 3. Persist the proposal + full reasoning bundle (audit trail).
     record = TradeProposalRecord(
