@@ -97,6 +97,14 @@ The sum of all open trades' risk cannot exceed this.
 Prevents immediately re-entering the same pair after a stop-out.
 - Why: re-entries right after a loss are usually emotional, not analytical.
 
+### `loss_cooldown` (default: 240 min after a STOP-OUT, same pair + same direction)
+A longer cooldown that triggers only after a LOSS: once the most recent closed trade on a
+symbol+direction was stopped out, that direction is blocked for `loss_cooldown_minutes`. The
+opposite direction is NOT blocked (a failed/reclaimed break often reverses); a later win resets it.
+- Why: re-entering a just-failed setup is how one stop becomes three (XAGGBPm re-shorted a failed
+  break of 47 three times in a session). The 30-min per-pair cooldown is too short to catch
+  re-entries that are hours apart.
+
 ### `execution_mode` (default: A — Propose & Approve)
 A = AI proposes, you approve. B = auto-execute paper only. C = auto-execute live.
 - Stay on A or B for months. Do not touch C until backtests AND a long paper run look sane.
