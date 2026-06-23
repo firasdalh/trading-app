@@ -31,6 +31,8 @@ from app.models.schemas import (
 
 log = get_logger("agents.technical")
 
+_RECLAIM_LOOKBACK = 12  # bars used for recent_high/recent_low (failed-break / reclaim detection)
+
 _SYSTEM = """You are a disciplined Technical Analyst on a trading desk. You receive OHLCV
 numbers across one or more timeframes (never images). For each timeframe, identify the
 trend, key support/resistance levels, relevant indicator readings, and notable price
@@ -62,6 +64,12 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         # level but the bar closed back off it) for the ranging mean-reversion confirmation.
         indicators["last_high"] = round(candles[-1].high, 6)
         indicators["last_low"] = round(candles[-1].low, 6)
+        # Extremes over a recent window — used to detect a FAILED break (price pierced a level in
+        # the recent past then traded back to the original side = a reclaim / bull-or-bear trap), so
+        # the engine won't keep arming a break of a level it just whipsawed across.
+        recent = candles[-_RECLAIM_LOOKBACK:]
+        indicators["recent_high"] = round(max(c.high for c in recent), 6)
+        indicators["recent_low"] = round(min(c.low for c in recent), 6)
     # Trend EMAs.
     for p in (20, 50, 200):
         val = ema(closes, p)

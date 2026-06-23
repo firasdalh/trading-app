@@ -165,7 +165,7 @@ def test_cooldown_elapsed_approved():
 
 
 def test_loss_cooldown_blocks_same_direction_after_stop_out():
-    # A stop-out 2h ago is past the 30-min per-pair cooldown but inside the 4h LOSS cooldown ->
+    # A stop-out 2h ago is past the 30-min per-pair cooldown but inside the 3h LOSS cooldown ->
     # re-entering the same direction is blocked (the XAGGBP re-short loop).
     d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
                           now=NOW, last_dir_loss_at=NOW - timedelta(minutes=120), qty_step=1)
@@ -173,8 +173,9 @@ def test_loss_cooldown_blocks_same_direction_after_stop_out():
 
 
 def test_loss_cooldown_elapsed_approved():
+    # Past the 3h (180 min) loss cooldown -> allowed again.
     d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
-                          now=NOW, last_dir_loss_at=NOW - timedelta(minutes=241), qty_step=1)
+                          now=NOW, last_dir_loss_at=NOW - timedelta(minutes=181), qty_step=1)
     assert d.approved
 
 

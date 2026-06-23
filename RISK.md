@@ -97,7 +97,7 @@ The sum of all open trades' risk cannot exceed this.
 Prevents immediately re-entering the same pair after a stop-out.
 - Why: re-entries right after a loss are usually emotional, not analytical.
 
-### `loss_cooldown` (default: 240 min after a STOP-OUT, same pair + same direction)
+### `loss_cooldown` (default: 180 min after a STOP-OUT, same pair + same direction)
 A longer cooldown that triggers only after a LOSS: once the most recent closed trade on a
 symbol+direction was stopped out, that direction is blocked for `loss_cooldown_minutes`. The
 opposite direction is NOT blocked (a failed/reclaimed break often reverses); a later win resets it.

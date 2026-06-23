@@ -35,6 +35,24 @@ def test_conditional_break_none_when_path_is_clear():
     assert _conditional_break(Direction.SHORT, 79.5, 0.3, [80.0, 81.0], 77.4, 0.6) is None
 
 
+def test_conditional_break_skips_reclaimed_support_short():
+    # Price already dipped BELOW the 78.2 support and traded back above it (recent_low < block) — a
+    # failed breakdown / bull trap. Don't arm another short break of it (the XAGGBP re-short loop).
+    trap = {"recent_low": 78.0, "recent_high": 80.5}
+    assert _conditional_break(Direction.SHORT, 79.5, 0.3, [77.0, 78.2, 80.0], 77.4, 0.6, trap) is None
+    # Recent low stayed ABOVE the level (untested support) -> still a clean break to arm.
+    clean = {"recent_low": 78.3, "recent_high": 80.5}
+    c = _conditional_break(Direction.SHORT, 79.5, 0.3, [77.0, 78.2, 80.0], 77.4, 0.6, clean)
+    assert c is not None and c.order_type == "sell_stop"
+
+
+def test_conditional_break_skips_reclaimed_resistance_long():
+    # Price spiked ABOVE the 104 resistance and fell back below (recent_high > block) — a failed
+    # breakout. Don't arm a long break of it.
+    trap = {"recent_high": 104.5, "recent_low": 96.0}
+    assert _conditional_break(Direction.LONG, 100.0, 1.0, [98.0, 104.0, 110.0], 110.0, 0.6, trap) is None
+
+
 def test_conditional_pullback_offers_better_long_entry_at_value():
     # Overextended LONG (entry 105 far above EMA20 100) -> buy_limit back at value (~100).
     c = _conditional_pullback(Direction.LONG, entry=105.0, ema20=100.0, atr_v=1.0,

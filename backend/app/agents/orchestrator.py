@@ -387,14 +387,18 @@ def _key_levels(technical: TechnicalRead, tf0, entry: float) -> list[float]:
 
 def _conditional_break(
     direction: Direction, entry: float, atr_v: float | None, levels: list[float],
-    target: float, confidence: float,
+    target: float, confidence: float, ind: dict | None = None,
 ) -> ConditionalSuggestion | None:
     """If a key level sits BETWEEN entry and target (blocking the path), suggest a break-entry: a
     stop order just beyond that level, stop on the other side of it, target = the original level.
     R:R is recomputed FROM the trigger so it's honest; returns None if no blocker or R:R too thin.
 
     This is the 'wait for the break' play a pro uses instead of chasing into structure (the UKOILm
-    case: short only once the 78.21 support cluster gives way)."""
+    case: short only once the 78.21 support cluster gives way).
+
+    ``ind`` (indicators) enables the FAILED-BREAK / reclaim guard: don't arm a break of a level that
+    price has ALREADY pierced and reclaimed in the recent window (a bull/bear trap) — the XAGGBP
+    case where a broken-then-reclaimed 47 got re-shorted into repeated stops."""
     if not atr_v or atr_v <= 0 or not levels or target <= 0 or entry <= 0:
         return None
     buf = max(0.1 * atr_v, entry * 5e-4)          # trigger/stop offset beyond the level (wick allowance)
@@ -429,6 +433,16 @@ def _conditional_break(
         return None
     if rr < _MIN_RR_COND:
         return None
+    # Failed-break / reclaim guard: if price has ALREADY pierced this level and traded back to the
+    # original side within the recent window, it's a whipsaw/trap, not a clean barrier — don't arm a
+    # break of it. (Short break of support: recent low dipped below the level but price is back above
+    # it. Long break of resistance: recent high spiked above but price is back below.)
+    if ind is not None:
+        recent_low, recent_high = ind.get("recent_low"), ind.get("recent_high")
+        if direction == Direction.SHORT and recent_low is not None and recent_low < block:
+            return None
+        if direction == Direction.LONG and recent_high is not None and recent_high > block:
+            return None
     return ConditionalSuggestion(
         order_type=order_type, trigger_price=trigger, stop_loss=stop, take_profit=tp,
         confidence=round(confidence, 2), rr=round(rr, 2),
@@ -882,7 +896,7 @@ def _deterministic_decision(
     # Priority: a break-STOP past a blocking level (valid only after the break); otherwise — whenever
     # the entry sits away from value (not already AT value) — a LIMIT back at value (~EMA20).
     base.conditional = (
-        _conditional_break(direction, entry, atr_v, levels, target, confidence)
+        _conditional_break(direction, entry, atr_v, levels, target, confidence, ind)
         or (None if at_value
             else _conditional_pullback(direction, entry, ema20, atr_v, ind, target, confidence))
     )
