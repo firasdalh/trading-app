@@ -107,6 +107,25 @@ def test_mean_reversion_stands_aside_mid_range():
     assert out.direction == Direction.NO_TRADE
 
 
+def test_mean_reversion_refuses_fade_against_higher_tf_trend():
+    # A SHORT fade of resistance is a valid RANGE play — but NOT when the higher timeframe is in an
+    # uptrend (that's a pullback, not a range). This is the USDJPY leak the backtest caught: ranging
+    # shorts into a 1d uptrend went 0/11. The same setup with a neutral higher TF still fades.
+    ind = {"atr14": 1.0, "rsi14": 80.0, "rsi14_prev": 82.0, "last_close": 100.0,
+           "last_high": 100.35, "ema20": 98.0}
+    assert _mean_reversion_decision(_base(), ind, _tf(resistance=[100.3]), "up").direction == Direction.NO_TRADE
+    assert _mean_reversion_decision(_base(), ind, _tf(resistance=[100.3]), "sideways").direction == Direction.SHORT
+
+
+def test_mean_reversion_refuses_long_fade_against_higher_tf_downtrend():
+    # Mirror: a LONG fade of support is refused under a higher-TF downtrend (a falling knife), but
+    # allowed when the higher TF isn't against it.
+    ind = {"atr14": 1.0, "rsi14": 20.0, "rsi14_prev": 18.0, "last_close": 100.0,
+           "last_low": 99.65, "ema20": 102.0}
+    assert _mean_reversion_decision(_base(), ind, _tf(support=[99.7]), "down").direction == Direction.NO_TRADE
+    assert _mean_reversion_decision(_base(), ind, _tf(support=[99.7]), "up").direction == Direction.LONG
+
+
 def test_mean_reversion_skips_thin_reward():
     # Rejection at resistance + overbought, but the mean is barely below price -> reward too thin.
     ind = {"atr14": 1.0, "rsi14": 80.0, "rsi14_prev": 82.0, "last_close": 100.0,

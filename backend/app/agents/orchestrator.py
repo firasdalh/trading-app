@@ -208,11 +208,15 @@ def _nearest_below(tf0, ind: dict, price: float) -> float | None:
     return max(cands) if cands else None
 
 
-def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradeProposal:
+def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0, macro: str = "sideways") -> TradeProposal:
     """RANGING regime: there's no trend to follow, so FADE the range edges back to the mean (EMA20)
     — the pro's range play. Short a tag of resistance while overbought; long a tag of support while
     oversold; stop just beyond the edge; target the mean. Confidence is capped below trend setups
-    (lower-conviction edge). Returns NO_TRADE when price isn't at an edge with RSI confirmation."""
+    (lower-conviction edge). Returns NO_TRADE when price isn't at an edge with RSI confirmation.
+
+    ``macro`` is the higher-timeframe trend: a fade AGAINST a clear higher-TF trend is refused — a
+    low-ADX patch inside a daily uptrend/downtrend is a PULLBACK, not a range, and fading it gets run
+    over (backtest: USDJPY ranging shorts into a 1d uptrend were 0/11)."""
     base.regime = "ranging"
     base.strategy = "mean_reversion"
     atr = ind.get("atr14")
@@ -266,6 +270,14 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0) -> TradePropos
         base.rationale = ("Ranging — waiting for a rejection at a range edge (a structural level or "
                           "the Bollinger band) with RSI in the fade band, before fading to the mean. "
                           "No confirmed rejection yet.")
+        return base
+
+    # Higher-timeframe trend guard: never fade AGAINST a clear higher-TF trend. A 1h "range" inside a
+    # daily uptrend is a pullback (short the resistance edge here and the trend runs you over); the
+    # same downtrend makes a long fade a falling-knife. Only fade WITH or neutral to the higher TF.
+    if (direction == Direction.SHORT and macro == "up") or (direction == Direction.LONG and macro == "down"):
+        base.rationale = (f"Ranging fade skipped: a {direction.value} would fade AGAINST the higher-"
+                          f"timeframe {macro}trend — that's a pullback in a trend, not a range. Sitting out.")
         return base
 
     if risk <= 0 or reward <= 0 or (reward / risk) < _MR_MIN_RR:
@@ -560,8 +572,9 @@ def _deterministic_decision(
     base.regime = regime
     base.strategy = policy["strategy"]
     # Ranging (no trend): fade the range edges back to the mean instead of trend-trading a flat tape.
+    # Pass the higher-TF trend so a fade against a daily trend (a pullback, not a range) is refused.
     if regime == "ranging":
-        return _mean_reversion_decision(base, ind, tf0)
+        return _mean_reversion_decision(base, ind, tf0, macro)
     # Low ADX but flagged volatile (a vol expansion without a trend) — whipsaw; stand aside.
     if adx_v is not None and adx_v < _ADX_MIN:
         base.rationale = (f"Standing aside: no trend (ADX {adx_v} < {_ADX_MIN:.0f}) and volatility "
