@@ -139,3 +139,10 @@ def test_simulate_symbol_runs_without_lookahead():
 def test_simulate_symbol_returns_empty_on_thin_history():
     broker = _FakeBroker({"1h": _trend(40, 1, 100.0, 0.05), "1d": _trend(5, 24, 100.0, 0.6)})
     assert simulate_symbol(broker, "X", AssetClass.FOREX, "1h", bars=40) == []
+
+
+def test_regime_filter_stands_aside():
+    # Restricting to an unreachable regime -> every proposal is skipped (no trades).
+    broker = _FakeBroker({"1h": _trend(320, 1, 100.0, 0.05), "1d": _trend(80, 24, 100.0, 0.6)})
+    assert simulate_symbol(broker, "X", AssetClass.FOREX, "1h", bars=320, context_bars=80,
+                           max_hold=24, cooldown=2, regimes={"nope"}) == []

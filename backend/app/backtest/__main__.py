@@ -45,7 +45,10 @@ def main() -> None:
     ap.add_argument("--cooldown", type=int, default=3, help="bars to wait after a trade closes")
     ap.add_argument("--cost-r", type=float, default=0.0, help="cost per trade in R (0 = gross)")
     ap.add_argument("--risk-pct", type=float, default=0.01, help="per-trade risk for %%-equity DD")
+    ap.add_argument("--regimes", default="", help="only trade these regimes, comma-separated "
+                    "(e.g. 'trending'); default = all")
     args = ap.parse_args()
+    regimes = {r.strip() for r in args.regimes.split(",") if r.strip()} or None
 
     session = SessionLocal()
     try:
@@ -62,7 +65,7 @@ def main() -> None:
                 print(f"… {sym} {tf} (last {args.bars} bars)…", flush=True)
                 tr = simulate_symbol(broker, sym, AssetClass(ac), tf, bars=args.bars,
                                      max_hold=args.max_hold, cooldown=args.cooldown,
-                                     cost_r=args.cost_r)
+                                     cost_r=args.cost_r, regimes=regimes)
                 print(f"   {sym}: {len(tr)} trades", flush=True)
                 all_trades.extend(tr)
             except Exception as exc:  # noqa: BLE001 - one bad symbol shouldn't kill the run

@@ -114,12 +114,17 @@ def _simulate_trade(symbol: str, candles: list, i: int, prop, *, max_hold: int,
 
 def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                     bars: int = 1500, context_bars: int = 600, max_hold: int = 96,
-                    cooldown: int = 3, cost_r: float = 0.0) -> list[BTTrade]:
+                    cooldown: int = 3, cost_r: float = 0.0,
+                    regimes: set[str] | None = None) -> list[BTTrade]:
     """Replay the engine bar-by-bar over ``bars`` of history and return the simulated trades.
 
     At each entry-timeframe bar the engine is given the last 200 bars of EACH timeframe ending at
     that bar (no look-ahead), exactly like the live scanner. While a trade is open (plus a short
-    cooldown) no new trade is taken, so overlapping signals aren't double-counted."""
+    cooldown) no new trade is taken, so overlapping signals aren't double-counted.
+
+    ``regimes`` (e.g. {"trending"}) restricts which market regimes are tradeable — the engine stands
+    aside in all others. This faithfully tests a 'trade only regime X' policy WITH path-dependency
+    (skipped trades free up later bars), not just by filtering the result."""
     from app.agents.pipeline import _timeframes_for
 
     tfs = _timeframes_for(timeframe)
@@ -169,6 +174,9 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
         prop = _deterministic_decision(symbol, asset_class, timeframe, technical, fund, now=t_i)
         if not prop.is_actionable or prop.take_profit is None:
             i += 1
+            continue
+        if regimes is not None and prop.regime not in regimes:
+            i += 1   # stand aside in regimes we're not trading (e.g. trade trending only)
             continue
 
         trade = _simulate_trade(symbol, entry_candles, i, prop, max_hold=max_hold, cost_r=cost_r)
