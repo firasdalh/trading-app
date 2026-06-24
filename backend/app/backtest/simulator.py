@@ -50,6 +50,7 @@ class BTTrade:
     outcome: str  # "target" | "stop" | "timeout"
     r: float      # realized R-multiple, net of cost_r
     bars_held: int
+    atr: float | None = None   # entry-TF ATR at the signal (for volatility-bucket analysis)
 
 
 @dataclass
@@ -75,7 +76,7 @@ def _neutral_fundamental(symbol: str) -> FundamentalRead:
 
 
 def _simulate_trade(symbol: str, candles: list, i: int, prop, *, max_hold: int,
-                    cost_r: float) -> BTTrade | None:
+                    cost_r: float, atr: float | None = None) -> BTTrade | None:
     """Walk forward from the signal bar ``i`` (entry at its close) to the first stop/target hit, or
     a time-stop at ``max_hold`` bars. Conservative: if a bar tags both levels, the STOP wins."""
     entry = float(prop.entry)
@@ -109,6 +110,7 @@ def _simulate_trade(symbol: str, candles: list, i: int, prop, *, max_hold: int,
         confidence=prop.confidence, entry_time=candles[i].ts, entry=entry, stop=stop, target=target,
         planned_rr=round(planned_rr, 2), exit_time=candles[exit_j].ts, exit=round(exit_px, 6),
         outcome=outcome, r=round(raw_r - cost_r, 4), bars_held=exit_j - i,
+        atr=round(atr, 6) if atr else None,
     )
 
 
@@ -180,7 +182,11 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
             i += 1   # stand aside in regimes we're not trading (e.g. trade trending only)
             continue
 
-        trade = _simulate_trade(symbol, entry_candles, i, prop, max_hold=max_hold, cost_r=cost_r)
+        tf0 = next((x for x in technical.timeframes if x.timeframe == timeframe),
+                   technical.timeframes[0] if technical.timeframes else None)
+        atr_at = tf0.indicators.get("atr14") if tf0 else None
+        trade = _simulate_trade(symbol, entry_candles, i, prop, max_hold=max_hold, cost_r=cost_r,
+                                atr=atr_at)
         if trade is None:
             i += 1
             continue
