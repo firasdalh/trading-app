@@ -14,6 +14,7 @@ from app.backtest.simulator import (
     compute_metrics,
     simulate_symbol,
     split_by_time,
+    time_folds,
 )
 from app.models.enums import AssetClass, Direction
 from app.models.schemas import Candle, OHLCVSeries, TradeProposal
@@ -120,6 +121,15 @@ def test_split_by_time_holdout():
     in_s, oos = split_by_time(trades, 0.3)   # cutoff at day 0 + 0.7*9 = 6.3 -> IS days 0..6, OOS 7..9
     assert len(in_s) == 7 and len(oos) == 3
     assert split_by_time(trades, 0.0) == (trades, [])
+
+
+def test_time_folds_align_and_cover():
+    trades = [_t_at(d) for d in range(12)]    # days 0..11
+    folds = time_folds(trades, 3)             # 3 equal-time folds over days 0..11
+    assert len(folds) == 3
+    assert sum(len(f) for f in folds) == 12   # every trade assigned exactly once
+    # earliest trade in fold 0, latest in the last fold
+    assert trades[0] in folds[0] and trades[-1] in folds[-1]
 
 
 # ---------------------------------------------------------------- end-to-end smoke

@@ -241,6 +241,24 @@ def split_by_time(trades: list[BTTrade], holdout: float) -> tuple[list[BTTrade],
             [t for t in trades if t.entry_time > cutoff])
 
 
+def time_folds(trades: list[BTTrade], n: int, lo=None, hi=None) -> list[list[BTTrade]]:
+    """Assign trades to ``n`` equal-TIME folds over [lo, hi] (the trades' own time range if not
+    given). Pass a shared lo/hi to align folds to the SAME calendar windows across symbols — so a
+    walk-forward judges every instrument on the same market periods. A robust edge is positive in the
+    MAJORITY of folds; a one-window fluke is not."""
+    if not trades or n < 1:
+        return [list(trades)]
+    times = [t.entry_time for t in trades]
+    lo = lo or min(times)
+    hi = hi or max(times)
+    span = (hi - lo).total_seconds() or 1.0
+    folds: list[list[BTTrade]] = [[] for _ in range(n)]
+    for t in trades:
+        frac = (t.entry_time - lo).total_seconds() / span
+        folds[min(n - 1, max(0, int(frac * n)))].append(t)
+    return folds
+
+
 def group_by(trades: list[BTTrade], key) -> dict:
     out: dict = {}
     for t in trades:
