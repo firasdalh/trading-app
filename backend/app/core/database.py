@@ -48,6 +48,9 @@ _SQLITE_ADDED_COLUMNS = {
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),
         ("scalp_mode", "BOOLEAN DEFAULT 0"),
     ],
+    "watch_items": [
+        ("recommended", "BOOLEAN DEFAULT 0"),
+    ],
     "positions": [
         ("confidence", "FLOAT"),
     ],

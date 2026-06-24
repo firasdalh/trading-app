@@ -346,6 +346,7 @@ export interface WatchItem {
   asset_class: string;
   timeframe: string;
   enabled: boolean;
+  recommended?: boolean;
 }
 
 export interface WatchlistResponse {

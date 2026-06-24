@@ -64,7 +64,10 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="text-sm font-semibold">Watchlist</div>
-          <div className="text-xs text-neutral-500">Pairs the Hybrid auto-pilot scans.</div>
+          <div className="text-xs text-neutral-500">
+            Pairs the Hybrid auto-pilot scans. <span className="text-amber-400">★</span> = walk-forward
+            validated core — add your own pairs anytime.
+          </div>
         </div>
         <button
           disabled={busy}
@@ -84,6 +87,7 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
           {[...data.items]
             .sort(
               (a, b) =>
+                Number(!!b.recommended) - Number(!!a.recommended) ||  // validated core first
                 a.asset_class.localeCompare(b.asset_class) ||
                 a.symbol.localeCompare(b.symbol) ||
                 a.timeframe.localeCompare(b.timeframe),
@@ -98,8 +102,11 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
                   key={it.id}
                   className={`flex items-center gap-2 rounded px-2 py-1 text-sm ${
                     active ? "bg-blue-600 text-white" : "bg-neutral-800"
-                  }`}
+                  }${it.recommended && !active ? " ring-1 ring-amber-500/50" : ""}`}
                 >
+                  {it.recommended && (
+                    <span title="Walk-forward validated core pair" className="text-amber-400">★</span>
+                  )}
                   <button
                     onClick={() => onSelect?.(it)}
                     className="font-medium hover:underline"

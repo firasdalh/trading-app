@@ -282,6 +282,9 @@ class WatchItem(Base):
     asset_class: Mapped[str] = mapped_column(String(16))
     timeframe: Mapped[str] = mapped_column(String(8), default="1h")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Marks a walk-forward-VALIDATED core pair (badged in the UI) vs. a user-added one, so the
+    # validated winners are visually distinct from custom additions.
+    recommended: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

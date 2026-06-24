@@ -38,6 +38,7 @@ class WatchItemView(BaseModel):
     asset_class: str
     timeframe: str
     enabled: bool
+    recommended: bool = False
 
 
 class ScanConfigRequest(BaseModel):
@@ -68,7 +69,8 @@ def _response(session: Session) -> WatchlistResponse:
     items = session.scalars(select(WatchItem).order_by(WatchItem.id)).all()
     return WatchlistResponse(
         items=[WatchItemView(id=i.id, symbol=i.symbol, asset_class=i.asset_class,
-                             timeframe=i.timeframe, enabled=i.enabled) for i in items],
+                             timeframe=i.timeframe, enabled=i.enabled,
+                             recommended=bool(getattr(i, "recommended", False))) for i in items],
         scan_enabled=cfg.enabled,
         interval_seconds=cfg.interval_seconds,
         last_scan_at=_iso_utc(cfg.last_scan_at),
