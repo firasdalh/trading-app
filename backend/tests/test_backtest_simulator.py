@@ -10,8 +10,11 @@ import pytest
 
 from app.backtest.simulator import (
     BTTrade,
+    _armed_outcome,
+    _crossed_intrabar,
     _simulate_trade,
     compute_metrics,
+    simulate_armed_symbol,
     simulate_symbol,
     split_by_time,
     time_folds,
@@ -168,6 +171,43 @@ def test_simulate_symbol_runs_without_lookahead():
 def test_simulate_symbol_returns_empty_on_thin_history():
     broker = _FakeBroker({"1h": _trend(40, 1, 100.0, 0.05), "1d": _trend(5, 24, 100.0, 0.6)})
     assert simulate_symbol(broker, "X", AssetClass.FOREX, "1h", bars=40) == []
+
+
+# ---------------------------------------------------------------- armed strategy
+
+def test_crossed_intrabar():
+    bar = _c(1, hi=102, lo=98, close=100)
+    assert _crossed_intrabar("buy_stop", bar, 101) and not _crossed_intrabar("buy_stop", bar, 103)
+    assert _crossed_intrabar("sell_stop", bar, 99) and not _crossed_intrabar("sell_stop", bar, 97)
+    assert _crossed_intrabar("buy_limit", bar, 99) and not _crossed_intrabar("buy_limit", bar, 97)
+    assert _crossed_intrabar("sell_limit", bar, 101) and not _crossed_intrabar("sell_limit", bar, 103)
+
+
+def test_armed_outcome_long_target_and_stop():
+    armed = {"order_type": "buy_stop", "trigger": 100.0, "stop": 99.0, "tp": 102.0}
+    win = [_c(0, 100, 100, 100), _c(1, 102.5, 100.2, 101)]   # fill bar i=0, next bar tags target
+    t = _armed_outcome("X", win, 0, armed, max_hold=10, cost_r=0)
+    assert t.outcome == "target" and t.r == 2.0 and t.direction == "long" and t.strategy == "buy_stop"
+    loss = [_c(0, 100, 100, 100), _c(1, 100.3, 98.5, 99)]
+    t2 = _armed_outcome("X", loss, 0, armed, max_hold=10, cost_r=0)
+    assert t2.outcome == "stop" and t2.r == -1.0
+
+
+def test_armed_outcome_short_and_invalid():
+    armed = {"order_type": "sell_stop", "trigger": 100.0, "stop": 101.0, "tp": 98.0}
+    win = [_c(0, 100, 100, 100), _c(1, 100.3, 97.5, 98)]
+    t = _armed_outcome("X", win, 0, armed, max_hold=10, cost_r=0)
+    assert t.outcome == "target" and t.r == 2.0 and t.direction == "short"
+    bad = {"order_type": "buy_stop", "trigger": 100.0, "stop": 100.0, "tp": 102.0}   # zero risk
+    assert _armed_outcome("X", win, 0, bad, max_hold=10, cost_r=0) is None
+
+
+def test_simulate_armed_symbol_runs():
+    broker = _FakeBroker({"1h": _trend(320, 1, 100.0, 0.05), "1d": _trend(80, 24, 100.0, 0.6)})
+    trades, stats = simulate_armed_symbol(broker, "X", AssetClass.FOREX, "1h", bars=320,
+                                          context_bars=80, valid_bars=8, max_hold=24, cooldown=2)
+    assert isinstance(trades, list) and set(stats) == {"armed", "filled", "expired"}
+    assert stats["filled"] == len(trades) and stats["armed"] >= stats["filled"]
 
 
 def test_regime_filter_stands_aside():

@@ -199,6 +199,140 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
     return trades
 
 
+def _crossed_intrabar(order_type: str, bar, trigger: float) -> bool:
+    """Did this bar reach a pending order's trigger? STOP = break beyond the level; LIMIT = pull into it."""
+    if order_type == "buy_stop":
+        return bar.high >= trigger
+    if order_type == "sell_stop":
+        return bar.low <= trigger
+    if order_type == "buy_limit":
+        return bar.low <= trigger
+    if order_type == "sell_limit":
+        return bar.high >= trigger
+    return False
+
+
+def _armed_outcome(symbol: str, candles: list, i: int, armed: dict, max_hold: int,
+                   cost_r: float) -> BTTrade | None:
+    """A pending order filled at its trigger on bar ``i`` -> walk forward to the first stop/target
+    (R measured from the TRIGGER). Conservative: stop checked first on an ambiguous bar."""
+    from app.backtest.engine import _exit_price
+
+    entry, stop, target = armed["trigger"], armed["stop"], armed["tp"]
+    if not (entry and stop and target):
+        return None
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    direction = Direction.LONG if armed["order_type"] in ("buy_stop", "buy_limit") else Direction.SHORT
+    is_long = direction == Direction.LONG
+    n = len(candles)
+    end = min(i + max_hold, n - 1)
+    outcome: str | None = None
+    exit_px = candles[end].close
+    exit_j = end
+    for j in range(i + 1, end + 1):
+        hit = _exit_price(direction, candles[j], stop, target)
+        if hit is not None:
+            exit_px, outcome, exit_j = hit[0], hit[1], j
+            break
+    if outcome is None:
+        outcome = "timeout"
+    raw_r = ((exit_px - entry) if is_long else (entry - exit_px)) / risk
+    return BTTrade(
+        symbol=symbol, direction=direction.value, regime="armed", strategy=armed["order_type"],
+        confidence=0.0, entry_time=candles[i].ts, entry=entry, stop=stop, target=target,
+        planned_rr=round(abs(target - entry) / risk, 2), exit_time=candles[exit_j].ts,
+        exit=round(exit_px, 6), outcome=outcome, r=round(raw_r - cost_r, 4), bars_held=exit_j - i,
+    )
+
+
+def simulate_armed_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
+                          bars: int = 3000, context_bars: int = 600, valid_bars: int = 16,
+                          max_hold: int = 96, cooldown: int = 3, cost_r: float = 0.0,
+                          trend_only: bool = False, scalp: bool = False):
+    """Backtest the ARMED / conditional strategy (the 'wait for the break, then fire' path).
+
+    At each bar the engine may emit a conditional (break-stop / pullback-limit / resumption-stop);
+    if so it is ARMED. If price reaches the trigger within ``valid_bars`` it fills AT the trigger and
+    runs to stop/target (R from the trigger); otherwise it EXPIRES. One armed setup / position at a
+    time. Returns ``(filled_trades, {"armed", "filled", "expired"})`` so we can read the fill rate AND
+    the edge of the trades that actually triggered."""
+    from app.agents.pipeline import _timeframes_for
+
+    tfs = _timeframes_for(timeframe)
+    series: dict[str, list] = {}
+    for tf in tfs:
+        limit = bars if tf == timeframe else context_bars
+        try:
+            sdata = broker.get_ohlcv(symbol, tf, limit=limit)
+            series[tf] = list(sdata.candles) if sdata and sdata.candles else []
+        except Exception:  # noqa: BLE001
+            series[tf] = []
+    entry = series.get(timeframe, [])
+    stats = {"armed": 0, "filled": 0, "expired": 0}
+    if len(entry) < _WINDOW + 5:
+        return [], stats
+
+    ts_index = {tf: [c.ts for c in series[tf]] for tf in tfs}
+    fund = _neutral_fundamental(symbol)
+    trades: list[BTTrade] = []
+    n = len(entry)
+    i = _WINDOW - 1
+    armed: dict | None = None
+    block_until = -1
+    while i < n:
+        bar = entry[i]
+        if armed is not None:
+            if _crossed_intrabar(armed["order_type"], bar, armed["trigger"]):
+                t = _armed_outcome(symbol, entry, i, armed, max_hold, cost_r)
+                armed = None
+                if t is not None:
+                    trades.append(t)
+                    stats["filled"] += 1
+                    exit_i = i + t.bars_held
+                    block_until = exit_i + cooldown
+                    i = exit_i + 1
+                    continue
+            elif i >= armed["expire"]:
+                stats["expired"] += 1
+                armed = None
+            i += 1
+            continue
+        if i <= block_until:
+            i += 1
+            continue
+
+        t_i = bar.ts
+        window: list[OHLCVSeries] = []
+        ok = True
+        for tf in tfs:
+            if tf == timeframe:
+                w = entry[max(0, i - _WINDOW + 1): i + 1]
+            else:
+                hi = bisect.bisect_right(ts_index[tf], t_i)
+                w = series[tf][max(0, hi - _WINDOW): hi]
+            if not w:
+                ok = False
+                break
+            window.append(OHLCVSeries(symbol=symbol, timeframe=tf, candles=w))
+        if not ok:
+            i += 1
+            continue
+
+        technical = run_technical(symbol, window, use_llm=False)
+        prop = _deterministic_decision(symbol, asset_class, timeframe, technical, fund, now=t_i,
+                                       trend_only=trend_only, scalp=scalp)
+        c = prop.conditional
+        if c is not None and c.trigger_price and c.stop_loss and c.take_profit:
+            armed = {"order_type": c.order_type, "trigger": c.trigger_price, "stop": c.stop_loss,
+                     "tp": c.take_profit, "expire": i + valid_bars}
+            stats["armed"] += 1
+        i += 1
+
+    return trades, stats
+
+
 def compute_metrics(trades: list[BTTrade], *, risk_pct: float = 0.01) -> BTMetrics:
     """Aggregate trades into the metrics a desk actually reads. ``risk_pct`` is the per-trade risk
     used only for the %-equity drawdown (the R-based stats are size-independent)."""
