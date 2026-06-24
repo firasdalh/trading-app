@@ -684,7 +684,11 @@ def _deterministic_decision(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
     trend_only: bool = False, scalp: bool = False,
+    disable: frozenset[str] = frozenset(),
 ) -> TradeProposal:
+    # ``disable`` is a BACKTEST-ONLY filter-ablation switch (the live path never passes it): naming a
+    # gate ("mtf", "momentum", "structure", "volatility", "divergence", "minrr") skips it, so the
+    # backtest can measure each filter's contribution (keep it if removing it hurts).
     base = TradeProposal(
         symbol=symbol, asset_class=asset_class, timeframe=timeframe,
         direction=Direction.NO_TRADE, confidence=0.0,
@@ -749,7 +753,7 @@ def _deterministic_decision(
     # below; it must not veto a clean technical trend. Direction is still gated by the higher-
     # timeframe trend (don't fight the macro) and the momentum-pullback wait.
     if trend == "up":
-        if macd_hist is not None and macd_hist < -mom_thresh:
+        if macd_hist is not None and macd_hist < -mom_thresh and "momentum" not in disable:
             # Trend up but momentum meaningfully down = pullback. Arm a resumption break instead of
             # just waiting, so it fires when momentum turns back up.
             base.watch = True
@@ -765,12 +769,12 @@ def _deterministic_decision(
                 f"−DI {mdi} > +DI {pdi}). {armed_note}"
             )
             return base
-        if macro == "down":
+        if macro == "down" and "mtf" not in disable:
             base.rationale = "No confluence: higher-timeframe trend is DOWN — not buying into it."
             return base
         direction = Direction.LONG
     elif trend == "down":
-        if macd_hist is not None and macd_hist > mom_thresh:
+        if macd_hist is not None and macd_hist > mom_thresh and "momentum" not in disable:
             base.watch = True
             px = ind.get("last_close") or 0.0
             base.conditional = _conditional_resumption(
@@ -784,7 +788,7 @@ def _deterministic_decision(
                 f"+DI {pdi} > −DI {mdi}). {armed_note}"
             )
             return base
-        if macro == "up":
+        if macro == "up" and "mtf" not in disable:
             base.rationale = "No confluence: higher-timeframe trend is UP — not selling into it."
             return base
         direction = Direction.SHORT
@@ -802,7 +806,7 @@ def _deterministic_decision(
         (direction == Direction.LONG and struct == "down" and macro_struct == "down")
         or (direction == Direction.SHORT and struct == "up" and macro_struct == "up")
     )
-    if against_struct:
+    if against_struct and "structure" not in disable:
         base.watch = True
         base.rationale = (
             f"Structure conflict: EMA trend reads {trend}, but market structure is {struct} "
@@ -816,7 +820,7 @@ def _deterministic_decision(
     # it to settle. (A strong-trend breakout is classed "trending", not "volatile", so it passes.)
     # `regime` was already read up top (regime-first); reuse it.
     vol_ratio = ind.get("vol_atr_ratio")
-    if regime == "volatile" and vol_ratio is not None and vol_ratio >= _REGIME_VOL_EXTREME:
+    if regime == "volatile" and vol_ratio is not None and vol_ratio >= _REGIME_VOL_EXTREME and "volatility" not in disable:
         base.watch = True
         base.rationale = (
             f"Volatile regime: volatility is expanding sharply (ATR {vol_ratio:.1f}x its baseline) "
@@ -849,7 +853,7 @@ def _deterministic_decision(
         (direction == Direction.LONG and ind.get("div_bull_hidden"))
         or (direction == Direction.SHORT and ind.get("div_bear_hidden"))
     )
-    if div_against and overextended:
+    if div_against and overextended and "divergence" not in disable:
         base.watch = True
         base.rationale = (
             f"Momentum divergence against the {direction.value} with price extended (RSI {rsi}) — "
@@ -955,7 +959,8 @@ def _deterministic_decision(
             struct_note = f"capped at key level {round(nearest, 5)} (~{nearest_rr:.1f}R)"
         else:
             # Too thin to take at market — stand aside; the armed alternative below has real R:R.
-            take_market = False
+            # (Ablation: with "minrr" disabled, take the thin trade anyway to measure the floor.)
+            take_market = "minrr" in disable
             target = nearest
             struct_note = f"only ~{nearest_rr:.1f}R to {round(nearest, 5)} at market"
     elif past_2r:
