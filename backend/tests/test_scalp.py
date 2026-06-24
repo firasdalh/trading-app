@@ -25,7 +25,8 @@ def _tf(resistance=None, support=None) -> TimeframeRead:
 def _long_ind(**over) -> dict:
     ind = {"atr14": 0.0010, "last_close": 1.1002, "ema20": 1.1000, "ema50": 1.0990,
            "ema200": 1.0980, "macd_hist": 0.0002, "last_low": 1.0999, "last_high": 1.1003,
-           "swing_low": 1.0995, "recent_low": 1.0994, "vol_ratio": 1.2}
+           "swing_low": 1.0995, "recent_low": 1.0994, "vol_ratio": 1.2,
+           "rsi14": 48.0, "rsi14_prev": 45.0}   # RSI turning UP from the pullback
     ind.update(over)
     return ind
 
@@ -52,15 +53,15 @@ def test_scalp_skips_thin_session():
     assert out.direction == Direction.NO_TRADE and "session" in out.rationale.lower()
 
 
-def test_scalp_needs_momentum_confirmation():
-    # Trend up but MACD against -> no entry (waits).
-    out = _scalp(_long_ind(macd_hist=-0.0002))
+def test_scalp_needs_rsi_turning_up():
+    # Price at value but RSI still FALLING (momentum hasn't turned) -> no entry (waits).
+    out = _scalp(_long_ind(rsi14=45.0, rsi14_prev=48.0))
     assert out.direction == Direction.NO_TRADE and "waiting" in out.rationale.lower()
 
 
 def test_scalp_needs_pullback_to_value():
-    # Price never pulled back near the EMA20 (last_low well above value) -> waits.
-    out = _scalp(_long_ind(last_low=1.1010))
+    # Price is extended ABOVE the value zone (not a pullback) -> waits.
+    out = _scalp(_long_ind(last_close=1.1010))
     assert out.direction == Direction.NO_TRADE
 
 
@@ -83,9 +84,10 @@ def test_scalp_skips_when_target_too_close():
 
 
 def test_scalp_short_mirror():
-    ind = {"atr14": 0.0010, "last_close": 1.0998, "ema20": 1.1000, "ema50": 1.1010,
-           "ema200": 1.1020, "macd_hist": -0.0002, "last_high": 1.1001, "last_low": 1.0997,
-           "swing_high": 1.1005, "recent_high": 1.1006, "vol_ratio": 1.2}
+    ind = {"atr14": 0.0010, "last_close": 1.1002, "ema20": 1.1000, "ema50": 1.1010,
+           "ema200": 1.1020, "macd_hist": -0.0002, "last_high": 1.1003, "last_low": 1.0999,
+           "swing_high": 1.1005, "recent_high": 1.1006, "vol_ratio": 1.2,
+           "rsi14": 52.0, "rsi14_prev": 55.0}   # downtrend, RSI turning DOWN at value
     out = _scalp_decision(_base(), ind, _tf(support=[1.0970]), "down", "trending",
                           AssetClass.FOREX, "EURUSD", ACTIVE)
     assert out.direction == Direction.SHORT and out.stop_loss > 1.1005 and out.take_profit < 1.0998

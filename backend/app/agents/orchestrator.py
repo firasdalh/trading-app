@@ -352,28 +352,30 @@ def _scalp_decision(base: TradeProposal, ind: dict, tf0, macro: str, regime: str
         return base
 
     trend = _trend_from_indicators(ind)
+    ema50 = ind.get("ema50")
+    rsi, rsi_prev = ind.get("rsi14"), ind.get("rsi14_prev")
     macd = ind.get("macd_hist")
     last_high, last_low = ind.get("last_high"), ind.get("last_low")
     swing_high, swing_low = ind.get("swing_high"), ind.get("swing_low")
-    recent_high, recent_low = ind.get("recent_high"), ind.get("recent_low")
-    near_value = _SCALP_VALUE_ATR * atr
+    band = _SCALP_VALUE_ATR * atr
+    rising = rsi is not None and rsi_prev is not None and rsi > rsi_prev   # momentum turning UP
+    falling = rsi is not None and rsi_prev is not None and rsi < rsi_prev  # momentum turning DOWN
 
     direction = stop = risk = None
-    if trend == "up" and macro != "down":
-        if (last_low is not None and last_low <= ema20 + near_value   # pulled back TO value
-                and price >= ema20                                    # and HELD (closed back above)
-                and macd is not None and macd > 0):                   # momentum confirms up
+    if trend == "up" and macro != "down" and ema50 is not None:
+        # Price pulled back into the VALUE ZONE (>= EMA50, <= just above EMA20 — trend intact, not
+        # extended) and RSI is turning back UP from the pullback (not yet overbought) — momentum
+        # resuming with the trend. A multi-bar pullback read, not a brittle single-bar wick.
+        if ema50 <= price <= ema20 + band and rising and rsi < 60:
             direction = Direction.LONG
-            ref = min(x for x in (swing_low, recent_low, last_low) if x is not None)
-            stop = ref - _STRUCT_STOP_BUFFER_ATR * atr
+            ref = swing_low if (swing_low is not None and swing_low < price) else last_low
+            stop = (ref if ref is not None else ema50) - _STRUCT_STOP_BUFFER_ATR * atr
             risk = price - stop
-    elif trend == "down" and macro != "up":
-        if (last_high is not None and last_high >= ema20 - near_value
-                and price <= ema20
-                and macd is not None and macd < 0):
+    elif trend == "down" and macro != "up" and ema50 is not None:
+        if ema20 - band <= price <= ema50 and falling and rsi > 40:
             direction = Direction.SHORT
-            ref = max(x for x in (swing_high, recent_high, last_high) if x is not None)
-            stop = ref + _STRUCT_STOP_BUFFER_ATR * atr
+            ref = swing_high if (swing_high is not None and swing_high > price) else last_high
+            stop = (ref if ref is not None else ema50) + _STRUCT_STOP_BUFFER_ATR * atr
             risk = stop - price
 
     if direction is None or risk is None:
@@ -415,7 +417,7 @@ def _scalp_decision(base: TradeProposal, ind: dict, tf0, macro: str, regime: str
         conf += 0.10
     if session_q == "active":                # prime liquidity window
         conf += 0.10
-    if abs(macd) >= _MOM_ATR_FRAC * atr:     # momentum is meaningful, not noise
+    if macd is not None and abs(macd) >= _MOM_ATR_FRAC * atr:  # momentum is meaningful, not noise
         conf += 0.05
     vol = ind.get("vol_ratio")
     if vol is not None and vol > 1.1:        # participation behind the move
@@ -431,7 +433,7 @@ def _scalp_decision(base: TradeProposal, ind: dict, tf0, macro: str, regime: str
     base.confidence = confidence
     base.rationale = (
         f"Scalp {direction.value.upper()} (15m {regime}, {session_q} session): pullback to value "
-        f"(EMA20 {round(ema20, 5)}) held with momentum (MACD hist {macd}); entry {base.entry}, stop "
+        f"(EMA20 {round(ema20, 5)}) with RSI turning ({rsi_prev}->{rsi}); entry {base.entry}, stop "
         f"{base.stop_loss} ({risk / atr:.1f}xATR), target {base.take_profit} (R:R {round(rr, 2)})."
     )
     return base
