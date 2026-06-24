@@ -228,6 +228,19 @@ def compute_metrics(trades: list[BTTrade], *, risk_pct: float = 0.01) -> BTMetri
     )
 
 
+def split_by_time(trades: list[BTTrade], holdout: float) -> tuple[list[BTTrade], list[BTTrade]]:
+    """Chronological in-sample / out-of-sample split. The last ``holdout`` fraction of the TIME span
+    is held out — a robust edge persists into this unseen tail; an overfit one decays. Returns
+    (in_sample, out_of_sample)."""
+    if not trades or holdout <= 0:
+        return list(trades), []
+    times = sorted(t.entry_time for t in trades)
+    lo, hi = times[0], times[-1]
+    cutoff = lo + (hi - lo) * (1 - holdout)
+    return ([t for t in trades if t.entry_time <= cutoff],
+            [t for t in trades if t.entry_time > cutoff])
+
+
 def group_by(trades: list[BTTrade], key) -> dict:
     out: dict = {}
     for t in trades:

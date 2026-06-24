@@ -48,6 +48,8 @@ def main() -> None:
     ap.add_argument("--regimes", default="", help="only trade these regimes, comma-separated "
                     "(e.g. 'trending'); default = all")
     ap.add_argument("--scalp", action="store_true", help="use the 15m SCALP strategy (SCMS)")
+    ap.add_argument("--holdout", type=float, default=0.0, help="hold out the last fraction of time as "
+                    "OUT-OF-SAMPLE and report it separately (e.g. 0.3); 0 = combined only")
     args = ap.parse_args()
     regimes = {r.strip() for r in args.regimes.split(",") if r.strip()} or None
 
@@ -73,8 +75,18 @@ def main() -> None:
                 print(f"   ! {sym} failed: {exc}", flush=True)
 
         print()
-        print(format_report(all_trades, title="BACKTEST — deterministic engine",
-                            risk_pct=args.risk_pct, cost_r=args.cost_r))
+        tag = "SCALP" if args.scalp else "deterministic engine"
+        if args.holdout > 0:
+            from app.backtest.simulator import split_by_time
+            in_s, oos = split_by_time(all_trades, args.holdout)
+            print(format_report(in_s, title=f"IN-SAMPLE — {tag} (first {(1 - args.holdout) * 100:.0f}% of time)",
+                                risk_pct=args.risk_pct, cost_r=args.cost_r))
+            print()
+            print(format_report(oos, title=f"OUT-OF-SAMPLE — {tag} (held-out last {args.holdout * 100:.0f}%)",
+                                risk_pct=args.risk_pct, cost_r=args.cost_r))
+        else:
+            print(format_report(all_trades, title=f"BACKTEST — {tag}",
+                                risk_pct=args.risk_pct, cost_r=args.cost_r))
     finally:
         session.close()
 

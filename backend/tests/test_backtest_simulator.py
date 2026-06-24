@@ -8,7 +8,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.backtest.simulator import BTTrade, _simulate_trade, compute_metrics, simulate_symbol
+from app.backtest.simulator import (
+    BTTrade,
+    _simulate_trade,
+    compute_metrics,
+    simulate_symbol,
+    split_by_time,
+)
 from app.models.enums import AssetClass, Direction
 from app.models.schemas import Candle, OHLCVSeries, TradeProposal
 
@@ -101,6 +107,19 @@ def test_metrics_core_values():
 
 def test_metrics_profit_factor_infinite_without_losses():
     assert compute_metrics([_t(2), _t(1.5)]).profit_factor == float("inf")
+
+
+def _t_at(day: int) -> BTTrade:
+    t = _t(1.0)
+    t.entry_time = T0 + timedelta(days=day)
+    return t
+
+
+def test_split_by_time_holdout():
+    trades = [_t_at(d) for d in range(10)]   # days 0..9
+    in_s, oos = split_by_time(trades, 0.3)   # cutoff at day 0 + 0.7*9 = 6.3 -> IS days 0..6, OOS 7..9
+    assert len(in_s) == 7 and len(oos) == 3
+    assert split_by_time(trades, 0.0) == (trades, [])
 
 
 # ---------------------------------------------------------------- end-to-end smoke
