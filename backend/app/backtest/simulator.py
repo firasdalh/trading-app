@@ -199,6 +199,167 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
     return trades
 
 
+def _tighter(is_long: bool, cur: float, new: float) -> bool:
+    """True if ``new`` is a tighter (risk-reducing) stop than ``cur`` for the side."""
+    if cur is None:
+        return True
+    return new > cur if is_long else new < cur
+
+
+def _exit_indicators(entry: list, j: int, macro_closes: list, macro_ts: list, t_j):
+    """Per-bar indicators for the advisor-aware exit: entry-TF trend (EMA20 vs 50), MACD hist, ATR,
+    and the higher-TF (macro) trend aligned to bar j's time. Uses a 200-bar window (like the live
+    engine)."""
+    import bisect as _b
+
+    from app.agents.indicators import atr as _atr
+    from app.agents.indicators import ema as _ema
+    from app.agents.indicators import macd as _macd
+
+    w = entry[max(0, j - 199): j + 1]
+    closes = [c.close for c in w]
+    e20, e50 = _ema(closes, 20), _ema(closes, 50)
+    trend = "up" if (e20 and e50 and e20 > e50) else ("down" if (e20 and e50 and e20 < e50) else "sideways")
+    m = _macd(closes)
+    mh = m["hist"] if m else None
+    a = _atr(w, 14)
+    macro = "sideways"
+    if macro_closes:
+        hi = _b.bisect_right(macro_ts, t_j)
+        cw = macro_closes[max(0, hi - 200): hi]
+        ce20, ce50 = _ema(cw, 20), _ema(cw, 50)
+        macro = "up" if (ce20 and ce50 and ce20 > ce50) else ("down" if (ce20 and ce50 and ce20 < ce50) else "sideways")
+    return trend, mh, a, macro
+
+
+def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
+                            bars: int = 3000, context_bars: int = 600, max_hold: int = 96,
+                            cooldown: int = 3, cost_r: float = 0.0, regimes: set[str] | None = None,
+                            weaken_gate: str = "new") -> list[BTTrade]:
+    """Like simulate_symbol, but the trade is exited the way the POSITION ADVISOR would manage it —
+    a DYNAMIC stop (breakeven at +1R, trail at +1.5R, close on a confirmed trend flip, and the
+    weakening->tighten) instead of the fixed entry stop. ``weaken_gate`` selects the tighten rule:
+      "old" = tighten on ANY profit + any weakening (the pre-fix behavior);
+      "new" = tighten only at >= +0.5R AND meaningful counter-momentum (the fix).
+    Everything else is identical across the two, so a diff isolates the gate change. (Approximate:
+    omits partial scale-out / CHoCH / news, which are the same in both arms.)"""
+    from app.agents.pipeline import _timeframes_for
+    from app.agents.position_advisor import (
+        _BREAKEVEN_R, _TRAIL_ATR_MULT, _TRAIL_R, _WEAKEN_MIN_R, _WEAKEN_MOM_ATR_FRAC,
+    )
+
+    tfs = _timeframes_for(timeframe)
+    series: dict[str, list] = {}
+    for tf in tfs:
+        limit = bars if tf == timeframe else context_bars
+        try:
+            sdata = broker.get_ohlcv(symbol, tf, limit=limit)
+            series[tf] = list(sdata.candles) if sdata and sdata.candles else []
+        except Exception:  # noqa: BLE001
+            series[tf] = []
+    entry = series.get(timeframe, [])
+    if len(entry) < _WINDOW + 5:
+        return []
+    ts_index = {tf: [c.ts for c in series[tf]] for tf in tfs}
+    macro_tf = tfs[-1] if len(tfs) > 1 else timeframe
+    macro_closes = [c.close for c in series.get(macro_tf, [])]
+    macro_ts = ts_index.get(macro_tf, [])
+    fund = _neutral_fundamental(symbol)
+    trades: list[BTTrade] = []
+    n = len(entry)
+    i = _WINDOW - 1
+    block_until = -1
+    while i < n:
+        if i <= block_until:
+            i += 1
+            continue
+        t_i = entry[i].ts
+        window: list[OHLCVSeries] = []
+        ok = True
+        for tf in tfs:
+            if tf == timeframe:
+                w = entry[max(0, i - _WINDOW + 1): i + 1]
+            else:
+                hi = bisect.bisect_right(ts_index[tf], t_i)
+                w = series[tf][max(0, hi - _WINDOW): hi]
+            if not w:
+                ok = False
+                break
+            window.append(OHLCVSeries(symbol=symbol, timeframe=tf, candles=w))
+        if not ok:
+            i += 1
+            continue
+        technical = run_technical(symbol, window, use_llm=False)
+        prop = _deterministic_decision(symbol, asset_class, timeframe, technical, fund, now=t_i)
+        if not prop.is_actionable or prop.take_profit is None:
+            i += 1
+            continue
+        if regimes is not None and prop.regime not in regimes:
+            i += 1
+            continue
+
+        d = prop.direction
+        is_long = d == Direction.LONG
+        entry_px, stop0, tp = float(prop.entry), float(prop.stop_loss), float(prop.take_profit)
+        plan_risk = abs(entry_px - stop0)
+        if plan_risk <= 0:
+            i += 1
+            continue
+        cur_stop = stop0
+        end = min(i + max_hold, n - 1)
+        outcome, exit_px, exit_j = None, entry[end].close, end
+        want, opp = ("up", "down") if is_long else ("down", "up")
+        for j in range(i + 1, end + 1):
+            bar = entry[j]
+            if is_long:
+                if bar.low <= cur_stop:
+                    outcome, exit_px, exit_j = "stop", cur_stop, j; break
+                if bar.high >= tp:
+                    outcome, exit_px, exit_j = "target", tp, j; break
+            else:
+                if bar.high >= cur_stop:
+                    outcome, exit_px, exit_j = "stop", cur_stop, j; break
+                if bar.low <= tp:
+                    outcome, exit_px, exit_j = "target", tp, j; break
+            close_j = bar.close
+            trend, mh, a, macro = _exit_indicators(entry, j, macro_closes, macro_ts, bar.ts)
+            if not a:
+                continue
+            profit = (close_j - entry_px) if is_long else (entry_px - close_j)
+            r = profit / plan_risk
+            if trend == opp and macro == opp:          # thesis invalidated -> close now
+                outcome, exit_px, exit_j = "advisor_close", close_j, j; break
+            if r >= _TRAIL_R:                          # trail
+                t = (close_j - _TRAIL_ATR_MULT * a) if is_long else (close_j + _TRAIL_ATR_MULT * a)
+                if _tighter(is_long, cur_stop, t):
+                    cur_stop = t
+            elif r >= _BREAKEVEN_R and _tighter(is_long, cur_stop, entry_px):  # breakeven
+                cur_stop = entry_px
+            mom_against = mh is not None and ((is_long and mh < 0) or ((not is_long) and mh > 0))
+            weak = (trend == opp and macro != opp) or (trend == "sideways") or mom_against
+            if weak:
+                if weaken_gate == "old":
+                    do_tighten = profit > 0
+                else:
+                    do_tighten = r >= _WEAKEN_MIN_R and mom_against and abs(mh) >= _WEAKEN_MOM_ATR_FRAC * a
+                if do_tighten:
+                    t = (close_j - _TRAIL_ATR_MULT * a) if is_long else (close_j + _TRAIL_ATR_MULT * a)
+                    if _tighter(is_long, cur_stop, t):
+                        cur_stop = t
+        if outcome is None:
+            outcome = "timeout"
+        raw_r = ((exit_px - entry_px) if is_long else (entry_px - exit_px)) / plan_risk
+        trades.append(BTTrade(
+            symbol=symbol, direction=d.value, regime=prop.regime, strategy=prop.strategy,
+            confidence=prop.confidence, entry_time=entry[i].ts, entry=entry_px, stop=stop0, target=tp,
+            planned_rr=round(abs(tp - entry_px) / plan_risk, 2), exit_time=entry[exit_j].ts,
+            exit=round(exit_px, 6), outcome=outcome, r=round(raw_r - cost_r, 4), bars_held=exit_j - i,
+        ))
+        block_until = exit_j + cooldown
+        i = exit_j + 1
+    return trades
+
+
 def _crossed_intrabar(order_type: str, bar, trigger: float) -> bool:
     """Did this bar reach a pending order's trigger? STOP = break beyond the level; LIMIT = pull into it."""
     if order_type == "buy_stop":

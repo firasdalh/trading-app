@@ -13,9 +13,11 @@ from app.backtest.simulator import (
     _armed_outcome,
     _crossed_intrabar,
     _simulate_trade,
+    _tighter,
     compute_metrics,
     simulate_armed_symbol,
     simulate_symbol,
+    simulate_symbol_advisor,
     split_by_time,
     time_folds,
 )
@@ -215,3 +217,23 @@ def test_regime_filter_stands_aside():
     broker = _FakeBroker({"1h": _trend(320, 1, 100.0, 0.05), "1d": _trend(80, 24, 100.0, 0.6)})
     assert simulate_symbol(broker, "X", AssetClass.FOREX, "1h", bars=320, context_bars=80,
                            max_hold=24, cooldown=2, regimes={"nope"}) == []
+
+
+# ---------------------------------------------------------------- advisor-aware exit
+
+def test_tighter_direction():
+    assert _tighter(True, 99.0, 99.5) and not _tighter(True, 99.0, 98.5)        # long: higher is tighter
+    assert _tighter(False, 101.0, 100.5) and not _tighter(False, 101.0, 101.5)  # short: lower is tighter
+    assert _tighter(True, None, 50.0)                                            # no stop -> any is tighter
+
+
+def test_simulate_symbol_advisor_runs_both_gates():
+    # The advisor-aware exit must run for both gates, return a list, and never produce a trade whose
+    # exit precedes its entry. The recorded stop is the ORIGINAL plan stop (dynamic stop is internal).
+    broker = _FakeBroker({"1h": _trend(320, 1, 100.0, 0.05), "1d": _trend(80, 24, 100.0, 0.6)})
+    for gate in ("old", "new"):
+        trades = simulate_symbol_advisor(broker, "X", AssetClass.FOREX, "1h", bars=320,
+                                         context_bars=80, max_hold=24, cooldown=2, weaken_gate=gate)
+        assert isinstance(trades, list)
+        for t in trades:
+            assert t.exit_time > t.entry_time and t.bars_held >= 1
