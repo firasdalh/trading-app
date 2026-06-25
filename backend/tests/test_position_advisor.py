@@ -216,13 +216,35 @@ def test_auto_decision_none_when_intact_no_event():
     assert advisor._auto_decision(_adv(thesis="intact"), _pos(), {}, None) is None
 
 
-def test_auto_decision_tightens_on_weakening_in_profit():
-    # short in modest profit (~0.5R, below the +1.5R trail), thesis weakening -> tighten now.
+def test_auto_decision_tightens_on_weakening_with_meaningful_momentum():
+    # short ~+0.5R, weakening with MEANINGFUL counter-momentum (MACD +1.5 >= 0.25*ATR) -> tighten.
     p = _pos(direction="short", stop=4470.0)
     decision = advisor._auto_decision(_adv(thesis="weakening"), p,
-                                      {"atr": 5.0, "last": 4444.0}, 10.0)
+                                      {"atr": 5.0, "last": 4444.0, "macd_hist": 1.5}, 10.0)
     assert decision is not None and decision["kind"] == "tighten"
     assert decision["stop"] < 4470.0  # only ever tighter than the current stop
+
+
+def test_auto_decision_no_tighten_on_tiny_momentum():
+    # +0.5R and weakening, but a near-zero MACD (0.3 < 0.25*ATR=1.25) is noise -> do NOT scratch it.
+    p = _pos(direction="short", stop=4470.0)
+    assert advisor._auto_decision(_adv(thesis="weakening"), p,
+                                  {"atr": 5.0, "last": 4444.0, "macd_hist": 0.3}, 10.0) is None
+
+
+def test_auto_decision_no_tighten_below_profit_floor():
+    # Only +0.3R (< 0.5R floor) even with meaningful momentum -> too early to tighten.
+    p = _pos(direction="short", stop=4470.0)
+    assert advisor._auto_decision(_adv(thesis="weakening"), p,
+                                  {"atr": 5.0, "last": 4446.0, "macd_hist": 1.5}, 10.0) is None
+
+
+def test_auto_decision_tightens_on_weakening_with_choch():
+    # +0.5R and weakening via a change-of-character (structure break) -> tighten even without momentum.
+    p = _pos(direction="short", stop=4470.0)
+    decision = advisor._auto_decision(_adv(thesis="weakening"), p,
+                                      {"atr": 5.0, "last": 4444.0, "choch": True}, 10.0)
+    assert decision is not None and decision["kind"] == "tighten"
 
 
 # --- multi-timeframe invalidation gating (entry-TF flip needs higher-TF confirmation) ---

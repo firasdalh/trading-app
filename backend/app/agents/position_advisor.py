@@ -36,6 +36,12 @@ _SEV_RANK = {"info": 0, "warn": 1, "danger": 2}
 
 # --- precision: don't cry wolf on tiny moves ---
 _MOM_ATR_FRAC = 0.10        # momentum counts as "against" only if |MACD hist| >= 10% of ATR
+# The weakening->tighten action (2b) is gated tighter than the "weakening" LABEL: only auto-tighten a
+# winner's stop when it's CLEARLY in profit AND the deterioration is REAL (meaningful counter-momentum
+# or a change-of-character) — so a near-zero MACD blip on a barely-profitable trade no longer scratches
+# it at breakeven. (The advice still SHOWS "weakening"; only the auto-action is more conservative.)
+_WEAKEN_MIN_R = 0.5         # require >= +0.5R of profit before the weakening-tighten fires
+_WEAKEN_MOM_ATR_FRAC = 0.25 # "meaningful" counter-momentum for the tighten: |MACD hist| >= 25% of ATR
 
 # --- auto-manage thresholds (R = profit / planned risk) ---
 _BREAKEVEN_R = 1.0          # at +1R, lock the stop to breakeven (trending/moderate regime)
@@ -505,15 +511,25 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
             return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
                     "reason": f"reached +{r:.1f}R — moving the stop to breakeven"}
 
-    # 2b) Thesis weakening while in profit -> tighten the stop NOW (don't wait for +1.5R). Locks
-    # gains exactly when the read is deteriorating; only ever risk-reducing.
-    if a.thesis == "weakening" and atr and last:
+    # 2b) Thesis weakening while CLEARLY in profit (>= +0.5R) AND with a REAL deterioration signal
+    # (meaningful counter-momentum or a change-of-character) -> tighten the stop to lock gains. Gated
+    # this way so a tiny near-zero MACD blip on a barely-profitable trade no longer scratches it at
+    # breakeven (the USDCHF case); only ever risk-reducing.
+    if a.thesis == "weakening" and atr and last and plan_risk:
         profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
-        if profit > 0:
+        r = profit / plan_risk
+        macd_hist = (ctx or {}).get("macd_hist")
+        mom_against = macd_hist is not None and (
+            (d == "long" and macd_hist < 0) or (d == "short" and macd_hist > 0)
+        ) and abs(macd_hist) >= _WEAKEN_MOM_ATR_FRAC * atr
+        real_deterioration = mom_against or bool((ctx or {}).get("choch"))
+        if r >= _WEAKEN_MIN_R and real_deterioration:
             tight = (last - _TRAIL_ATR_MULT * atr) if d == "long" else (last + _TRAIL_ATR_MULT * atr)
             if _tightens(d, p.stop_loss, tight):
+                why = "meaningful momentum against" if mom_against else "change-of-character"
                 return {"action": "set_stop", "kind": "tighten", "stop": round(tight, 5),
-                        "reason": "thesis weakening while in profit — tightening the stop to lock gains"}
+                        "reason": (f"+{r:.1f}R and thesis weakening ({why}) — tightening the stop "
+                                   "to lock gains")}
 
     # 3) Winning into imminent news -> lock breakeven even before +1R.
     if a.event_label is not None and p.unrealized_pnl > 0 and _stop_worse_than_entry(p):
