@@ -53,8 +53,8 @@ def test_winning_into_event_says_lock_in(monkeypatch):
     _patch(monkeypatch, [_pos(pnl=10.0)], [_event(45)])
     [a] = advisor.advise_positions(session=None)
     assert a.severity == "warn"
-    assert "winning into" in a.headline.lower()
-    assert "lock it in" in a.detail.lower() or "breakeven" in a.detail.lower()
+    assert "winning" in a.headline.lower()
+    assert "lock" in a.detail.lower()
     assert a.event_label == "US: ISM Services PMI"
 
 
@@ -62,7 +62,7 @@ def test_losing_into_event_says_cut(monkeypatch):
     _patch(monkeypatch, [_pos(pnl=-15.0)], [_event(30)])
     [a] = advisor.advise_positions(session=None)
     assert a.severity == "warn"
-    assert "losing into" in a.headline.lower()
+    assert "losing" in a.headline.lower()
     assert "clos" in a.detail.lower() or "reduc" in a.detail.lower()
 
 
@@ -70,7 +70,7 @@ def test_no_stop_into_event_is_danger(monkeypatch):
     _patch(monkeypatch, [_pos(pnl=5.0, stop=None)], [_event(20)])
     [a] = advisor.advise_positions(session=None)
     assert a.severity == "danger"
-    assert "protect" in a.headline.lower()
+    assert "no stop" in a.headline.lower()
 
 
 def test_no_event_winner_holds(monkeypatch):
@@ -94,7 +94,7 @@ def test_invalidated_thesis_escalates_to_danger(monkeypatch):
            thesis={"label": "invalidated", "note": "Plan check: trend flipped."})
     [a] = advisor.advise_positions(session=None)
     assert a.severity == "danger" and a.thesis == "invalidated"
-    assert "thesis broken" in a.headline.lower()
+    assert "trend flipped" in a.headline.lower()
     assert "plan check" in a.detail.lower()
 
 
@@ -118,7 +118,7 @@ def test_event_keeps_headline_even_when_thesis_invalidated(monkeypatch):
     _patch(monkeypatch, [_pos(pnl=10.0)], [_event(30)],
            thesis={"label": "invalidated", "note": "Plan check: trend flipped."})
     [a] = advisor.advise_positions(session=None)
-    assert "winning into" in a.headline.lower() and a.severity == "danger"
+    assert "winning" in a.headline.lower() and a.severity == "danger"
 
 
 # ---- auto-watch config + tick ----
@@ -270,7 +270,7 @@ def test_choch_against_position_warns_weakening():
     ctx = {"tf": "1h", "trend": "up", "macro": "up", "macro_tf": "1d", "macd_hist": 1.0,
            "atr": 2.0, "structure": "up", "choch": True}
     res = advisor._thesis_from_context(p, ctx)
-    assert res["label"] == "weakening" and "change-of-character" in res["note"].lower()
+    assert res["label"] == "weakening" and "early warning" in res["note"].lower()
 
 
 def test_trail_behind_structure_in_trending_regime():

@@ -182,6 +182,7 @@ def _thesis_from_context(p, ctx: dict) -> dict:
     tf, trend = ctx["tf"], ctx["trend"]
     macd_hist, atr = ctx.get("macd_hist"), ctx.get("atr")
     macro, macro_tf = ctx.get("macro"), ctx.get("macro_tf", tf)
+    side = "buy" if p.direction == "long" else "sell"
     want = "up" if p.direction == "long" else "down"
     opp = "down" if p.direction == "long" else "up"
 
@@ -191,38 +192,40 @@ def _thesis_from_context(p, ctx: dict) -> dict:
         # treat it as weakening so we don't auto-exit good trades on noise (the crypto lesson).
         if macro == opp:
             return {"label": "invalidated",
-                    "note": (f"Plan check: the trend now reads {trend.upper()} against your "
-                             f"{p.direction} on BOTH {tf} and the higher {macro_tf} timeframe. "
-                             "The setup no longer holds — consider exiting rather than hoping.")}
+                    "note": (f"Why: the trend has turned against your {side} on both the {tf} chart and "
+                             f"the bigger {macro_tf} chart. The reason you opened this trade is gone — "
+                             "it's usually better to take the exit than to hope it comes back.")}
         return {"label": "weakening",
-                "note": (f"Plan check: {tf} flipped {trend.upper()} against your {p.direction}, "
-                         f"but the higher {macro_tf} timeframe is still "
-                         f"{(macro or 'mixed').upper()} — likely a pullback, not a breakdown. "
-                         "Tighten the stop; don't bail blindly.")}
+                "note": (f"Why: the short-term {tf} chart turned against your {side}, but the bigger "
+                         f"{macro_tf} chart is still on your side — so this looks like a normal pullback, "
+                         "not a real reversal. Tighten your stop a little, but don't panic-exit.")}
 
     # Change-of-character: the structure we're riding just cracked (price broke back through the
-    # last swing). It's the EARLIEST reversal warning — before the EMA trend even flips — so a pro
+    # last swing). It's the EARLIEST reversal warning — before the trend even flips — so a pro
     # tightens / takes profit here rather than waiting. Treat as weakening.
     if ctx.get("choch") and ctx.get("structure") == want:
-        broke = "higher-low" if p.direction == "long" else "lower-high"
+        sign = ("price just dipped below its last higher low (the last small dip up)"
+                if p.direction == "long" else
+                "price just pushed above its last lower high (the last small bounce down)")
         return {"label": "weakening",
-                "note": (f"Plan check: change-of-character on {tf} — price broke the last {broke} "
-                         "swing. The structure is cracking; tighten the stop or take profit.")}
+                "note": (f"Why: an early warning sign on the {tf} chart — {sign}, which often comes "
+                         "just before a turn. The move is losing its footing. Consider tightening your "
+                         "stop or banking some profit.")}
 
     against = macd_hist is not None and (
         (p.direction == "long" and macd_hist < 0) or (p.direction == "short" and macd_hist > 0)
     )
     meaningful = against and atr and abs(macd_hist) >= _MOM_ATR_FRAC * atr
-    if trend != want:  # sideways: EMAs no longer aligned with the position
+    if trend != want:  # sideways: trend no longer aligned with the position
         return {"label": "weakening",
-                "note": (f"Plan check: the {tf} trend is flattening (now {trend}). "
-                         "Thesis weakening — tighten the stop or consider trimming.")}
+                "note": (f"Why: the {tf} trend has gone flat (no clear direction) — the move you're "
+                         "trading is stalling. Consider tightening your stop or trimming.")}
     if meaningful:
         return {"label": "weakening",
-                "note": (f"Plan check: momentum is rolling over on {tf} (MACD hist {macd_hist}). "
-                         "Thesis weakening — tighten the stop or consider trimming.")}
+                "note": (f"Why: momentum is fading on the {tf} chart — the push behind your trade is "
+                         "running out of steam. Consider tightening your stop or trimming.")}
     return {"label": "intact",
-            "note": f"Plan check: thesis intact — the {tf} trend is still {trend}, in your favour."}
+            "note": f"Good: the {tf} trend is still going your way. Nothing to fix — let it work."}
 
 
 def _position_thesis(session: Session, p, ctx: dict | None = None) -> dict | None:
@@ -244,28 +247,34 @@ def _r_multiple(session: Session, p, ctx: dict | None) -> float | None:
 
 
 def _base_advice(p, ev_label, ev_mins, winning, has_stop) -> tuple[str, str, str]:
-    """Event-proximity + protection advice (before folding in the thesis re-check)."""
+    """Event-proximity + protection advice, in plain language (before folding in the thesis note)."""
+    side = "buy" if p.direction == "long" else "sell"
+    lock = "up" if p.direction == "long" else "down"
     if ev_label is not None:
-        when_txt = f"in ~{ev_mins}m" if (ev_mins or 0) > 0 else "now"
+        when_txt = f"in about {ev_mins} min" if (ev_mins or 0) > 0 else "any moment now"
         if not has_stop:
-            return ("danger", f"Protect {p.symbol} before {ev_label} ({when_txt})",
-                    "No stop is set and a high-impact event is imminent. Set a stop now or close — "
-                    "holding through news unprotected is high risk.")
+            return ("danger", f"{p.symbol} — no stop set, and big news is coming",
+                    f"High-impact news ({ev_label}) is due {when_txt}, and this trade has NO stop-loss. "
+                    "Set a stop right now, or close the trade — holding through news with no protection "
+                    "can cost a lot very fast.")
         if winning:
-            return ("warn", f"{p.symbol} is winning into {ev_label} ({when_txt})",
-                    f"Lock it in: move the stop to breakeven (entry {p.entry_price}) or take "
-                    "partial/full profit before the release. News can reverse a winner fast.")
-        return ("warn", f"{p.symbol} is losing into {ev_label} ({when_txt})",
-                "Consider closing or reducing before the release — a spike can deepen the loss. "
-                "At minimum keep a tight stop.")
+            return ("warn", f"{p.symbol} — winning, but big news is coming",
+                    f"You're in profit and high-impact news ({ev_label}) is due {when_txt}. Consider "
+                    f"locking it in: move your stop {lock} to your entry price ({p.entry_price}) so the "
+                    "worst case is no loss, or take some/all of the profit. News can flip a winner in seconds.")
+        return ("warn", f"{p.symbol} — losing, and big news is coming",
+                f"You're down and high-impact news ({ev_label}) is due {when_txt}. A news spike could "
+                "deepen the loss — consider closing or trimming now, or at least keep a tight stop.")
     if not has_stop:
-        return ("warn", f"{p.symbol}: no stop set", "Add a stop to cap risk on this open position.")
+        return ("warn", f"{p.symbol} — no stop set",
+                "This trade has no stop-loss, so a sharp move could cost a lot. Set a stop to cap your risk.")
     if winning:
-        return ("info", f"{p.symbol} in profit",
-                "No imminent events. Consider trailing the stop to lock gains; otherwise hold and "
-                "let it work toward target.")
-    return ("info", f"{p.symbol} open",
-            "No imminent events and a stop is in place — hold and let stop/target manage it.")
+        return ("info", f"{p.symbol} — in profit, nothing urgent",
+                f"You're in profit and no major news is due soon. You can move your stop {lock} to lock "
+                "in some gain, or simply hold and let it work toward your target.")
+    return ("info", f"{p.symbol} — open, nothing urgent",
+            "No major news is due and your stop is set. Nothing to do — let your stop and target do "
+            f"their job on this {side}.")
 
 
 def advise_positions(session: Session) -> list[PositionAdvice]:
@@ -312,24 +321,27 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
         # profit and trails the rest. (The auto-advisor does this itself when enabled.)
         if (r_mult is not None and r_mult >= _PARTIAL_R
                 and not _already_scaled(session, p.symbol, p.qty, p.direction)):
-            detail = (f"{detail} At +{r_mult:.1f}R, consider scaling out "
-                      f"~{int(_PARTIAL_FRACTION * 100)}% and trailing the rest.")
+            detail = (f"{detail} You're past +{r_mult:.1f}x your risk — consider banking about "
+                      f"{int(_PARTIAL_FRACTION * 100)}% of the position now and trailing the rest to "
+                      "let it run.")
             if severity == "info":
                 severity = "warn"
         if thesis is not None:
             detail = f"{detail} {thesis['note']}"
             if r_mult is not None:
-                detail = f"{detail} (currently {r_mult:+.1f}R)"
+                word = "up" if r_mult >= 0 else "down"
+                detail = (f"{detail} (You're {word} about {abs(r_mult):.1f}x the amount you risked on "
+                          f"this trade — {r_mult:+.1f}R.)")
             # The thesis can escalate urgency. News keeps its headline (it's the nearer concern);
             # otherwise the thesis drives the headline too.
             if thesis_label == "invalidated":
                 severity = "danger"
                 if ev_label is None:
-                    headline = f"{p.symbol}: thesis broken — consider exiting"
+                    headline = f"{p.symbol} — trend flipped against you, consider exiting"
             elif thesis_label == "weakening" and _SEV_RANK[severity] < _SEV_RANK["warn"]:
                 severity = "warn"
                 if ev_label is None:
-                    headline = f"{p.symbol}: thesis weakening"
+                    headline = f"{p.symbol} — losing momentum"
 
         out.append(PositionAdvice(
             symbol=p.symbol, direction=p.direction, unrealized_pnl=round(p.unrealized_pnl, 2),

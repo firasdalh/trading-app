@@ -15,10 +15,10 @@ const TONE: Record<PositionAdvice["severity"], { box: string; chip: string; labe
 };
 
 const THESIS: Record<PositionAdvice["thesis"], { text: string; cls: string }> = {
-  intact: { text: "thesis intact", cls: "text-bull" },
-  weakening: { text: "thesis weakening", cls: "text-warn" },
-  invalidated: { text: "thesis broken", cls: "text-bear" },
-  unknown: { text: "thesis n/a", cls: "text-neutral-500" },
+  intact: { text: "on track", cls: "text-bull" },
+  weakening: { text: "losing steam", cls: "text-warn" },
+  invalidated: { text: "trend flipped", cls: "text-bear" },
+  unknown: { text: "no read", cls: "text-neutral-500" },
 };
 
 // AI guidance for OPEN positions — is each trade still on track vs. its plan, protect winners /
@@ -238,7 +238,7 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
                       className={`rounded bg-neutral-800 px-1 py-0.5 text-[10px] tabular-nums ${
                         a.r_multiple >= 0 ? "text-bull" : "text-bear"
                       }`}
-                      title="Progress in R (profit ÷ planned risk)"
+                      title="How far in profit vs. what you risked. +1.0R = you've made exactly what you put at risk; -1.0R = a full stop-out."
                     >
                       {a.r_multiple >= 0 ? "+" : ""}
                       {a.r_multiple.toFixed(1)}R
