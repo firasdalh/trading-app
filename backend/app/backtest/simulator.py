@@ -235,17 +235,21 @@ def _exit_indicators(entry: list, j: int, macro_closes: list, macro_ts: list, t_
 def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                             bars: int = 3000, context_bars: int = 600, max_hold: int = 96,
                             cooldown: int = 3, cost_r: float = 0.0, regimes: set[str] | None = None,
-                            weaken_gate: str = "new") -> list[BTTrade]:
+                            weaken_gate: str = "new", partial: bool = False) -> list[BTTrade]:
     """Like simulate_symbol, but the trade is exited the way the POSITION ADVISOR would manage it —
     a DYNAMIC stop (breakeven at +1R, trail at +1.5R, close on a confirmed trend flip, and the
     weakening->tighten) instead of the fixed entry stop. ``weaken_gate`` selects the tighten rule:
       "old" = tighten on ANY profit + any weakening (the pre-fix behavior);
       "new" = tighten only at >= +0.5R AND meaningful counter-momentum (the fix).
-    Everything else is identical across the two, so a diff isolates the gate change. (Approximate:
-    omits partial scale-out / CHoCH / news, which are the same in both arms.)"""
+    Everything else is identical across the two, so a diff isolates the gate change.
+    ``partial=True`` also models the advisor's scale-out: at +1.5R book half the position (locking
+    +1.5R on that half) and move the runner's stop to breakeven — the trade's R is then a blend of
+    the banked half and the runner's exit. (Still approximate: omits CHoCH / news / let-winners-run,
+    which are the same across arms.)"""
     from app.agents.pipeline import _timeframes_for
     from app.agents.position_advisor import (
-        _BREAKEVEN_R, _TRAIL_ATR_MULT, _TRAIL_R, _WEAKEN_MIN_R, _WEAKEN_MOM_ATR_FRAC,
+        _BREAKEVEN_R, _PARTIAL_FRACTION, _PARTIAL_R, _TRAIL_ATR_MULT, _TRAIL_R,
+        _WEAKEN_MIN_R, _WEAKEN_MOM_ATR_FRAC,
     )
 
     tfs = _timeframes_for(timeframe)
@@ -309,16 +313,28 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
         end = min(i + max_hold, n - 1)
         outcome, exit_px, exit_j = None, entry[end].close, end
         want, opp = ("up", "down") if is_long else ("down", "up")
+        banked_r, frac, scaled = 0.0, 1.0, False
+        plevel = entry_px + (_PARTIAL_R * plan_risk if is_long else -_PARTIAL_R * plan_risk)
         for j in range(i + 1, end + 1):
             bar = entry[j]
             if is_long:
                 if bar.low <= cur_stop:
                     outcome, exit_px, exit_j = "stop", cur_stop, j; break
-                if bar.high >= tp:
-                    outcome, exit_px, exit_j = "target", tp, j; break
             else:
                 if bar.high >= cur_stop:
                     outcome, exit_px, exit_j = "stop", cur_stop, j; break
+            # scale-out at +1.5R: bank half, move the runner's stop to breakeven (checked before the
+            # target so a bar that clears 1.5R banks the partial even if it then runs to the target).
+            if partial and not scaled and ((bar.high >= plevel) if is_long else (bar.low <= plevel)):
+                banked_r += frac * _PARTIAL_FRACTION * _PARTIAL_R
+                frac *= (1.0 - _PARTIAL_FRACTION)
+                scaled = True
+                if _tighter(is_long, cur_stop, entry_px):
+                    cur_stop = entry_px
+            if is_long:
+                if bar.high >= tp:
+                    outcome, exit_px, exit_j = "target", tp, j; break
+            else:
                 if bar.low <= tp:
                     outcome, exit_px, exit_j = "target", tp, j; break
             close_j = bar.close
@@ -348,7 +364,8 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
                         cur_stop = t
         if outcome is None:
             outcome = "timeout"
-        raw_r = ((exit_px - entry_px) if is_long else (entry_px - exit_px)) / plan_risk
+        exit_r = ((exit_px - entry_px) if is_long else (entry_px - exit_px)) / plan_risk
+        raw_r = banked_r + frac * exit_r   # banked half (if scaled) + the runner's exit
         trades.append(BTTrade(
             symbol=symbol, direction=d.value, regime=prop.regime, strategy=prop.strategy,
             confidence=prop.confidence, entry_time=entry[i].ts, entry=entry_px, stop=stop0, target=tp,

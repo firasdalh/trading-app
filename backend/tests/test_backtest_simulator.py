@@ -232,8 +232,24 @@ def test_simulate_symbol_advisor_runs_both_gates():
     # exit precedes its entry. The recorded stop is the ORIGINAL plan stop (dynamic stop is internal).
     broker = _FakeBroker({"1h": _trend(320, 1, 100.0, 0.05), "1d": _trend(80, 24, 100.0, 0.6)})
     for gate in ("old", "new"):
-        trades = simulate_symbol_advisor(broker, "X", AssetClass.FOREX, "1h", bars=320,
-                                         context_bars=80, max_hold=24, cooldown=2, weaken_gate=gate)
-        assert isinstance(trades, list)
-        for t in trades:
-            assert t.exit_time > t.entry_time and t.bars_held >= 1
+        for partial in (False, True):
+            trades = simulate_symbol_advisor(broker, "X", AssetClass.FOREX, "1h", bars=320,
+                                             context_bars=80, max_hold=24, cooldown=2,
+                                             weaken_gate=gate, partial=partial)
+            assert isinstance(trades, list)
+            for t in trades:
+                assert t.exit_time > t.entry_time and t.bars_held >= 1
+
+
+def test_partial_scaleout_caps_a_clean_target_winner():
+    # A clean winner that reaches +1.5R then the +2R target: WITHOUT partial it scores ~+2R; WITH
+    # partial it banks half at +1.5R and the runner targets +2R -> 0.5*1.5 + 0.5*2.0 = +1.75R < +2R.
+    broker = _FakeBroker({"1h": _trend(360, 1, 100.0, 0.06), "1d": _trend(90, 24, 100.0, 0.7)})
+    base = dict(bars=360, context_bars=90, max_hold=40, cooldown=2, weaken_gate="new")
+    plain = simulate_symbol_advisor(broker, "X", AssetClass.FOREX, "1h", partial=False, **base)
+    scaled = simulate_symbol_advisor(broker, "X", AssetClass.FOREX, "1h", partial=True, **base)
+    tgt_plain = [t for t in plain if t.outcome == "target"]
+    if tgt_plain:  # only assert when the synthetic series actually produced a target-hit winner
+        tp = tgt_plain[0]
+        ts = next(t for t in scaled if t.entry_time == tp.entry_time)
+        assert ts.r < tp.r  # the banked half at +1.5R caps the clean +2R winner
