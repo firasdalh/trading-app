@@ -42,6 +42,7 @@ export const api = {
   health: () => request<{ status: string }>("/health"),
   settings: () => request<SettingsResponse>("/api/settings"),
   riskState: () => request<RiskState>("/api/risk/state"),
+  resumeTrading: () => request<RiskState>("/api/risk/resume", { method: "POST" }),
 
   ohlcv: (symbol: string, assetClass: AssetClass, timeframe: string, limit = 200) =>
     request<OHLCVSeries>(

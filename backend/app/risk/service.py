@@ -261,13 +261,16 @@ def build_account_state(session: Session, broker: BrokerAdapter,
         daily.starting_equity = acct.equity
         session.commit()
 
+    # The daily-loss pause only COUNTS while the breaker is armed. With it OFF (demo/testing) a pause
+    # set earlier no longer blocks — consistent with the manager skipping the daily-loss veto.
+    breaker_on = get_or_create_risk_config(session).daily_loss_breaker_enabled
     return AccountState(
         equity=acct.equity,
         cash=acct.cash,
         open_positions=acct.open_positions,
         total_risk_amount=total_risk,
         daily_realized_pnl=daily.realized_pnl,
-        trading_paused=daily.trading_paused,
+        trading_paused=daily.trading_paused and breaker_on,
     )
 
 

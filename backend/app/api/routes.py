@@ -86,6 +86,9 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
         select(Position).where(Position.status == PositionStatus.OPEN.value)
     ).all()
     total_risk = round(sum((p.risk_amount or 0.0) for p in open_rows), 2)
+    # The pause only blocks while the breaker is armed; with it OFF the badge/banner shouldn't claim
+    # "paused" (the manager already skips the veto). The stored flag is kept for the new UTC day reset.
+    effective_paused = state.trading_paused and risk.daily_loss_breaker_enabled
     return RiskStateView(
         trade_date=state.trade_date,
         starting_equity=state.starting_equity,
@@ -93,12 +96,23 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
         unrealized_pnl=total_unrealized(session),
         total_risk_amount=total_risk,
         trades_count=state.trades_count,
-        trading_paused=state.trading_paused,
-        pause_reason=state.pause_reason,
+        trading_paused=effective_paused,
+        pause_reason=state.pause_reason if effective_paused else None,
         max_daily_loss=risk.max_daily_loss,
         daily_loss_limit_amount=limit_amount,
         daily_loss_breaker_enabled=risk.daily_loss_breaker_enabled,
     )
+
+
+@router.post("/api/risk/resume", response_model=RiskStateView, tags=["risk"])
+def resume_trading(session: Session = Depends(get_session)) -> RiskStateView:
+    """Manually clear today's daily-loss trading pause (the 'Resume trading' button). The breaker
+    stays armed and can pause again if the day's realized loss hits the limit later today."""
+    state = get_or_create_daily_state(session)
+    state.trading_paused = False
+    state.pause_reason = None
+    session.commit()
+    return read_risk_state(session)
 
 
 @router.post("/api/risk/preview", response_model=RiskDecision, tags=["risk"])

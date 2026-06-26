@@ -39,6 +39,21 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
     }
   }
 
+  async function resume() {
+    const ok = window.confirm(
+      "Resume trading?\n\nThis clears today's daily-loss pause. The breaker stays armed and will " +
+        "pause again if the day's realized loss reaches the limit.",
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.resumeTrading();
+      onChanged?.();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const dailyLoss = risk ? -Math.min(0, risk.realized_pnl) : 0;
   const dailyLimit = risk?.daily_loss_limit_amount ?? null;
   const dailyPct = dailyLimit ? Math.min(1, dailyLoss / dailyLimit) : 0;
@@ -56,9 +71,20 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
       <div className="flex items-center justify-between">
         <div className="text-sm font-semibold">Risk Dashboard</div>
         {risk?.trading_paused && (
-          <span className="rounded bg-bear px-2 py-0.5 text-xs font-bold text-white">
-            TRADING PAUSED
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded bg-bear px-2 py-0.5 text-xs font-bold text-white">
+              TRADING PAUSED
+            </span>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={resume}
+              title="Clear today's daily-loss pause and allow new trades again."
+              className="rounded bg-neutral-700 px-2 py-0.5 text-xs font-semibold text-neutral-100 hover:bg-neutral-600 disabled:opacity-50"
+            >
+              Resume trading
+            </button>
+          </div>
         )}
       </div>
 
