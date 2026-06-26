@@ -212,8 +212,10 @@ def opportunities(
     meta: list[WatchItem] = []  # WatchItem parallel to `out`, so pass 2 can re-run a row by index
     for it in items:
         try:
-            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=ai_led, cache=cache)
+            # AI-led: deterministic reads (read_llm=False) + AI decision (use_llm=True) -> 1 AI call
+            # per pair, not 3. Else: fully deterministic, cheap.
+            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class), it.timeframe,
+                                       use_llm=ai_led, read_llm=False if ai_led else None, cache=cache)
         except Exception as exc:  # noqa: BLE001
             log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue

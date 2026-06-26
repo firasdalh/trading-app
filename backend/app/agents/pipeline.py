@@ -36,12 +36,17 @@ def _timeframes_for(primary: str) -> list[str]:
 
 
 def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
-                   use_llm: bool = False, cache=None):
+                   use_llm: bool = False, cache=None, read_llm: bool | None = None):
     """Analyse a symbol and run it through the Risk Manager WITHOUT persisting or executing —
     used to rank opportunities across the watchlist. Returns (proposal, risk_decision).
 
     ``cache`` (a ``risk.service.ScanCache``) lets a multi-symbol scan share one broker open-book +
-    account fetch instead of one per symbol; leave it None for a single-symbol preview."""
+    account fetch instead of one per symbol; leave it None for a single-symbol preview.
+
+    ``read_llm`` decouples the technical/fundamental READ agents from the decision: the AI-led scan
+    runs the reads DETERMINISTICALLY (read_llm=False) while the orchestrator still uses the LLM
+    (use_llm=True), so it spends ONE AI call per pair (the decision) instead of three. Defaults to
+    ``use_llm`` (reads follow the decision)."""
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
     if settings.scalp_mode:
@@ -53,8 +58,9 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
             series.append(get_ohlcv_cached(broker, symbol, tf, limit=200))
         except Exception as exc:  # noqa: BLE001
             log.warning("preview ohlcv failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
-    technical = run_technical(symbol, series, use_llm=use_llm)
-    fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)
+    reads = use_llm if read_llm is None else read_llm
+    technical = run_technical(symbol, series, use_llm=reads)
+    fundamental = run_fundamental(symbol, now=now, use_llm=reads)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, scalp=settings.scalp_mode,
                                 trend_only=settings.trend_only_mode and not settings.scalp_mode,

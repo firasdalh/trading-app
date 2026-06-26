@@ -27,7 +27,7 @@ def test_opportunities_ranks_actionable_approved_first(db_session, monkeypatch):
     db_session.commit()
     table = _props()
     monkeypatch.setattr(pipeline, "preview_symbol",
-                        lambda s, sym, ac, tf, use_llm=False, cache=None: table[sym])
+                        lambda s, sym, ac, tf, use_llm=False, cache=None, read_llm=None: table[sym])
     monkeypatch.setattr(risk_service, "live_broker_positions", lambda s: [])
 
     res = opportunities(session=db_session)
@@ -50,7 +50,7 @@ def test_opportunities_deep_pass_applies_llm_veto(db_session, monkeypatch):
                               confidence=0.0, rationale="VETOED by AI review: chasing into resistance"),
                 RiskDecision(decision=RiskDecisionType.VETOED, approved=False, reason="no trade", symbol="BBB"))
 
-    def fake_preview(s, sym, ac, tf, use_llm=False, cache=None):
+    def fake_preview(s, sym, ac, tf, use_llm=False, cache=None, read_llm=None):
         return llm_veto if use_llm else det_good
 
     monkeypatch.setattr(pipeline, "preview_symbol", fake_preview)
@@ -68,7 +68,7 @@ def test_opportunities_marks_already_open(db_session, monkeypatch):
     db_session.commit()
     table = _props()
     monkeypatch.setattr(pipeline, "preview_symbol",
-                        lambda s, sym, ac, tf, use_llm=False, cache=None: table["BBB"])
+                        lambda s, sym, ac, tf, use_llm=False, cache=None, read_llm=None: table["BBB"])
     monkeypatch.setattr(risk_service, "live_broker_positions",
                         lambda s: [type("P", (), {"symbol": "BBB", "direction": "long"})()])
     res = opportunities(session=db_session)
