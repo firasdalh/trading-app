@@ -292,19 +292,27 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
 
     for p in live_broker_positions(session):
         try:
-            events = cal.get_events(p.symbol, lookahead_hours=12)
+            events = cal.get_events(p.symbol, lookahead_hours=12, include_medium=True)
         except Exception:  # noqa: BLE001
             events = []
 
         ev_label: str | None = None
         ev_mins: int | None = None
+        soft: list[tuple[int, str]] = []
         for e in events:
-            if str(e.importance).lower() != "high":
-                continue
             mins = int((_aware(e.when) - now).total_seconds() / 60)
-            if -_IN_WINDOW_AFTER_MIN <= mins <= _IMMINENT_BEFORE_MIN:
-                if ev_mins is None or mins < ev_mins:
-                    ev_label, ev_mins = e.label, mins
+            if str(e.importance).lower() == "high":
+                if -_IN_WINDOW_AFTER_MIN <= mins <= _IMMINENT_BEFORE_MIN:
+                    if ev_mins is None or mins < ev_mins:
+                        ev_label, ev_mins = e.label, mins
+            elif str(e.importance).lower() == "medium" and 0 <= mins <= 480:
+                # SOFT heads-up only (e.g. a Fed speech) — never gates; high-impact drives the hard
+                # event warning above.
+                soft.append((mins, e.label))
+        soft.sort(key=lambda x: x[0])
+        events_soon = " · ".join(
+            f"{lbl} {('~%dm' % m) if m < 90 else ('~%.1fh' % (m / 60))}" for m, lbl in soft[:3]
+        ) or None
 
         winning = p.unrealized_pnl > 0
         has_stop = p.stop_loss is not None and p.stop_loss != 0
@@ -347,6 +355,7 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
             symbol=p.symbol, direction=p.direction, unrealized_pnl=round(p.unrealized_pnl, 2),
             has_stop=has_stop, severity=severity, headline=headline, detail=detail,
             thesis=thesis_label, r_multiple=r_mult, event_label=ev_label, minutes_to_event=ev_mins,
+            events_soon=events_soon,
         ))
     return out, contexts
 

@@ -254,6 +254,14 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
                   </span>
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-neutral-300">{a.detail}</p>
+                {a.events_soon && (
+                  <div
+                    className="mt-1 text-xs text-warn/90"
+                    title="Upcoming medium-impact events (e.g. a central-bank speech) — a heads-up only. It does NOT pause the trade; the hard stand-aside is high-impact events only."
+                  >
+                    📅 {a.events_soon}
+                  </div>
+                )}
               </div>
             );
           })}

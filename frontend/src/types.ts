@@ -193,6 +193,7 @@ export interface PositionAdvice {
   r_multiple: number | null;
   event_label: string | null;
   minutes_to_event: number | null;
+  events_soon?: string | null;
 }
 
 export interface AdvisorAction {

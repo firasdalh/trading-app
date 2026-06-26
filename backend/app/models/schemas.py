@@ -340,6 +340,7 @@ class PositionAdvice(BaseModel):
     r_multiple: float | None = None   # progress in R (profit / planned risk)
     event_label: str | None = None
     minutes_to_event: int | None = None
+    events_soon: str | None = None    # SOFT heads-up: upcoming medium-impact events (display only)
 
 
 class RiskConfigView(BaseModel):

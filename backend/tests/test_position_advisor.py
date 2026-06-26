@@ -31,7 +31,7 @@ class _Cal:
     def __init__(self, events):
         self._events = events
 
-    def get_events(self, symbol, lookahead_hours=24):
+    def get_events(self, symbol, lookahead_hours=24, include_medium=False):
         return self._events
 
 
@@ -85,6 +85,15 @@ def test_far_off_event_is_not_imminent(monkeypatch):
     _patch(monkeypatch, [_pos(pnl=8.0)], [_event(360)])
     [a] = advisor.advise_positions(session=None)
     assert a.event_label is None and a.severity == "info"
+
+
+def test_medium_event_is_soft_heads_up_not_a_warning(monkeypatch):
+    # A MEDIUM-impact event (e.g. a Fed speech) shows as a soft heads-up, NOT the hard news warning.
+    med = _event(mins_from_now=40, importance="medium")
+    _patch(monkeypatch, [_pos(pnl=8.0)], [med])
+    [a] = advisor.advise_positions(session=None)
+    assert a.events_soon and "ISM" in a.events_soon   # surfaced softly
+    assert a.event_label is None and a.severity == "info"  # not gated/escalated
 
 
 # ---- thesis re-check folding ----
