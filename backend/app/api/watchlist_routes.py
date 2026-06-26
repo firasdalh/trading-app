@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.agents.scanner import get_or_create_scan_config, run_scan
 from app.core.database import get_session
 from app.core.logging import get_logger
+from app.core.state import get_or_create_settings
 from app.models.db import WatchItem
 from app.models.enums import AssetClass
 from app.models.schemas import ConditionalSuggestion
@@ -178,6 +179,13 @@ def opportunities(
     cache = ScanCache(open_book=[(p.symbol, p.direction) for p in live])
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
 
+    # AI-LED scan: when the AI is the decider, it evaluates EVERY pair directly (one cheap LLM call
+    # each — on-demand only, "Scan watchlist" isn't polled) so it can surface setups the deterministic
+    # trend-only filter would reject. Otherwise the cheap deterministic engine ranks the list and the
+    # LLM only re-judges the few actionable candidates (pass 2).
+    settings = get_or_create_settings(session)
+    ai_led = settings.ai_led_mode and not settings.scalp_mode and llm_available()
+
     def _view(it: WatchItem, prop, dec) -> OpportunityView:
         rr = None
         if prop.entry and prop.stop_loss and prop.take_profit:
@@ -198,23 +206,25 @@ def opportunities(
             regime=prop.regime, strategy=prop.strategy,
         )
 
-    # Pass 1 — rank the whole list with the deterministic engine (cheap, no LLM quota).
+    # Pass 1 — score every pair. AI-led: the AI decides each (use_llm=True). Else: the cheap
+    # deterministic engine ranks the list (no LLM quota).
     out: list[OpportunityView] = []
     meta: list[WatchItem] = []  # WatchItem parallel to `out`, so pass 2 can re-run a row by index
     for it in items:
         try:
             prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=False, cache=cache)
+                                       it.timeframe, use_llm=ai_led, cache=cache)
         except Exception as exc:  # noqa: BLE001
             log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue
         out.append(_view(it, prop, dec))
         meta.append(it)
 
-    # Pass 2 — re-judge the ACTIONABLE candidates (the only ones you can open) with the LLM reviewer,
-    # capped at the strongest _DEEP_MAX so a manual scan stays fast. A veto turns the row into
-    # NO_TRADE with confidence 0, so it drops out of the actionable tier exactly like Run analysis.
-    if deep and llm_available():
+    # Pass 2 — only when NOT AI-led (AI-led already decided each pair with the LLM in pass 1). Here the
+    # deterministic engine ranked the list, so re-judge the ACTIONABLE candidates with the LLM
+    # reviewer, capped at the strongest _DEEP_MAX so a manual scan stays fast. A veto turns the row
+    # into NO_TRADE with confidence 0, so it drops out of the actionable tier exactly like Run analysis.
+    if deep and not ai_led and llm_available():
         idxs = [i for i, o in enumerate(out)
                 if o.direction in ("long", "short") and o.risk_approved and not o.already_open]
         idxs.sort(key=lambda i: -out[i].confidence)
