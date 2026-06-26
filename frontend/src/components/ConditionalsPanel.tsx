@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice } from "../format";
 import { usePolling } from "../hooks/usePolling";
+import { ago, localTime, until } from "./advisorFormat";
 import { TradeSizer } from "./TradeSizer";
 import type { ConditionalSetupView } from "../types";
 
@@ -97,6 +98,10 @@ export function ConditionalsPanel({ onSelect }: {
               {s.source === "hybrid" && (
                 <span className="rounded bg-blue-600/30 px-1 py-0.5 text-[10px] text-blue-200">hybrid</span>
               )}
+              <span className="text-[10px] text-neutral-500" title={`armed ${localTime(s.created_at)}`}>
+                armed {ago(s.created_at)}
+                {s.status === "armed" && s.valid_until ? ` · expires ${until(s.valid_until)}` : ""}
+              </span>
               {s.status === "armed" && (
                 <button onClick={() => cancel(s.id)} className="ml-auto text-xs text-neutral-500 hover:text-bear">
                   cancel

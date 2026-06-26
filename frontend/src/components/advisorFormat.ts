@@ -10,6 +10,24 @@ export function ago(iso: string | null): string {
   return `${Math.round(secs / 3600)}h ago`;
 }
 
+// Relative "in x" for a FUTURE ISO timestamp (e.g. an expiry); "expired" once it's past.
+export function until(iso: string | null): string {
+  if (!iso) return "";
+  const safe = /[Z+]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const secs = Math.round((new Date(safe).getTime() - Date.now()) / 1000);
+  if (secs <= 0) return "expired";
+  if (secs < 60) return `in ${secs}s`;
+  if (secs < 3600) return `in ${Math.round(secs / 60)}m`;
+  return `in ${Math.round(secs / 3600)}h`;
+}
+
+// Absolute local timestamp for a tooltip (so hovering shows the exact time).
+export function localTime(iso: string | null): string {
+  if (!iso) return "";
+  const safe = /[Z+]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
+  return new Date(safe).toLocaleString();
+}
+
 // Human label for an advisor action/kind.
 export function actionText(a: { action: string; kind?: string | null; stop?: number | null; reason?: string | null }): string {
   if (a.action === "close" || a.kind === "close") return "closed position";
