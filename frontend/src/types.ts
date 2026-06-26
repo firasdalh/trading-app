@@ -339,6 +339,7 @@ export interface OpportunityView {
   reward_usd?: number | null;
   regime?: string | null;
   strategy?: string | null;
+  events_soon?: string | null;
 }
 
 export interface WatchItem {

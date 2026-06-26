@@ -63,7 +63,8 @@ class EconomicCalendarProvider(ABC):
     name = "abstract"
 
     @abstractmethod
-    def get_events(self, symbol: str, lookahead_hours: int = 24) -> list[CalendarEvent]: ...
+    def get_events(self, symbol: str, lookahead_hours: int = 24,
+                   include_medium: bool = False) -> list[CalendarEvent]: ...
 
 
 class SentimentProvider(ABC):
@@ -94,7 +95,8 @@ class StubCalendarProvider(EconomicCalendarProvider):
     def __init__(self, events: list[CalendarEvent] | None = None) -> None:
         self._events = events or []
 
-    def get_events(self, symbol: str, lookahead_hours: int = 24) -> list[CalendarEvent]:
+    def get_events(self, symbol: str, lookahead_hours: int = 24,
+                   include_medium: bool = False) -> list[CalendarEvent]:
         return list(self._events)
 
 
@@ -164,11 +166,12 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
                 countries.append(country)
         return countries
 
-    def get_events(self, symbol: str, lookahead_hours: int = 24) -> list[CalendarEvent]:
+    def get_events(self, symbol: str, lookahead_hours: int = 24,
+                   include_medium: bool = False) -> list[CalendarEvent]:
         countries = self._countries(symbol)
         if not countries:
             return []
-        cache_key = ",".join(sorted(countries))
+        cache_key = ",".join(sorted(countries)) + ("|med" if include_medium else "")
         now = datetime.now(timezone.utc)
         cached = self._cache.get(cache_key)
         if cached and (now - cached[0]).total_seconds() < 3600:
@@ -192,14 +195,17 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
             resp = httpx.get(self._URL, params=params, headers=headers, timeout=8.0)
             resp.raise_for_status()
             rows = resp.json().get("result", [])
+            min_imp = 0 if include_medium else 1   # medium(0)+high when asked, else high(1) only
             events: list[CalendarEvent] = []
             for e in rows:
-                if int(e.get("importance", -2)) < 1:   # high-impact only
+                imp = int(e.get("importance", -2))
+                if imp < min_imp:
                     continue
                 when = datetime.fromisoformat(str(e.get("date", "")).replace("Z", "+00:00"))
                 events.append(CalendarEvent(
                     label=f"{e.get('country', '')}: {e.get('title', 'event')}",
-                    when=when, importance="high", country=str(e.get("country", "")),
+                    when=when, importance="high" if imp >= 1 else "medium",
+                    country=str(e.get("country", "")),
                     forecast=_f(e.get("forecast")), previous=_f(e.get("previous")),
                     actual=_f(e.get("actual")),
                 ))

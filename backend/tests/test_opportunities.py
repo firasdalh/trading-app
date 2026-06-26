@@ -63,6 +63,34 @@ def test_opportunities_deep_pass_applies_llm_veto(db_session, monkeypatch):
     assert res[0].confidence == 0.0 and "VETOED" in res[0].rationale
 
 
+def test_events_soon_lists_upcoming_medium_only(monkeypatch):
+    """The soft heads-up lists upcoming medium/high events within the window and excludes past /
+    far-out ones. Display-only — it never gates the trade."""
+    from datetime import datetime, timedelta, timezone
+
+    import app.data.providers as providers
+    from app.api.watchlist_routes import _events_soon
+    from app.data.providers import CalendarEvent
+
+    now = datetime.now(timezone.utc)
+    evs = [
+        CalendarEvent(label="US: Fed Speech", when=now + timedelta(minutes=40), importance="medium", country="US"),
+        CalendarEvent(label="US: CPI", when=now + timedelta(hours=3), importance="high", country="US"),
+        CalendarEvent(label="US: Released", when=now - timedelta(hours=1), importance="high", country="US"),
+        CalendarEvent(label="US: FarOut", when=now + timedelta(hours=20), importance="medium", country="US"),
+    ]
+
+    class _Cal:
+        def get_events(self, symbol, lookahead_hours=24, include_medium=False):
+            return evs
+
+    monkeypatch.setattr(providers, "get_calendar_provider", lambda: _Cal())
+    note = _events_soon("USDJPYm", hours=8)
+    assert note and "Fed Speech" in note and "CPI" in note
+    assert "Released" not in note and "FarOut" not in note   # past + beyond-window excluded
+    assert "(medium)" in note and "(high)" in note
+
+
 def test_opportunities_marks_already_open(db_session, monkeypatch):
     db_session.add(WatchItem(symbol="BBB", asset_class="forex", timeframe="1h", enabled=True))
     db_session.commit()

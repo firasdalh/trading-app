@@ -24,6 +24,31 @@ log = get_logger("api.watchlist")
 # How many of the strongest ACTIONABLE candidates get the (costlier) LLM review in a deep scan.
 # Bounds the LLM calls per scan; watch/forming rows aren't openable, so they stay deterministic.
 _DEEP_MAX = 6
+
+
+def _events_soon(symbol: str, hours: int = 8) -> str | None:
+    """A SOFT heads-up of upcoming MEDIUM/high-impact events (e.g. a Fed speech) for the symbol —
+    DISPLAY ONLY. It never gates a trade; the hard stand-aside remains high-impact only."""
+    from datetime import datetime, timezone
+
+    from app.data.providers import get_calendar_provider
+
+    now = datetime.now(timezone.utc)
+    try:
+        evs = get_calendar_provider().get_events(symbol, lookahead_hours=hours, include_medium=True)
+    except Exception:  # noqa: BLE001 - a calendar hiccup must never break the scan
+        return None
+    upcoming = []
+    for e in evs:
+        when = e.when if e.when.tzinfo else e.when.replace(tzinfo=timezone.utc)
+        mins = int((when - now).total_seconds() / 60)
+        if 0 <= mins <= hours * 60:
+            upcoming.append((mins, e))
+    if not upcoming:
+        return None
+    upcoming.sort(key=lambda x: x[0])
+    fmt = lambda m: f"~{m}m" if m < 90 else f"~{round(m / 60, 1)}h"  # noqa: E731
+    return " · ".join(f"{e.label} {fmt(m)} ({e.importance})" for m, e in upcoming[:3])
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
 
@@ -151,6 +176,7 @@ class OpportunityView(BaseModel):
     reward_usd: float | None = None # $ reward to target (risk × R)
     regime: str | None = None       # market regime read (trending / ranging / volatile / moderate)
     strategy: str | None = None     # strategy it permits (trend / mean_reversion / stand_aside)
+    events_soon: str | None = None  # SOFT heads-up: upcoming medium/high-impact events (display only)
 
 
 @router.get("/opportunities", response_model=list[OpportunityView])
@@ -203,7 +229,7 @@ def opportunities(
             rationale=prop.rationale, risk_approved=dec.approved, risk_decision=dec.decision.value,
             risk_reason=dec.reason, already_open=it.symbol.upper() in open_syms,
             conditional=prop.conditional, lots=lots, risk_usd=risk_usd, reward_usd=reward_usd,
-            regime=prop.regime, strategy=prop.strategy,
+            regime=prop.regime, strategy=prop.strategy, events_soon=_events_soon(it.symbol),
         )
 
     # Pass 1 — score every pair. AI-led: the AI decides each (use_llm=True). Else: the cheap

@@ -160,6 +160,14 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                     </button>
                   )}
                 </div>
+                {o.events_soon && (
+                  <div
+                    className="mt-1 text-xs text-warn/90"
+                    title="Upcoming medium/high-impact events — a heads-up only. It does NOT block the trade; the hard stand-aside is high-impact events only."
+                  >
+                    📅 {o.events_soon}
+                  </div>
+                )}
                 {actionable && o.entry != null && (
                   <div className="mt-1 text-xs tabular-nums text-neutral-400">
                     entry {fmtPrice(o.entry)} · SL <span className="text-bear">{fmtPrice(o.stop_loss)}</span> · TP{" "}
