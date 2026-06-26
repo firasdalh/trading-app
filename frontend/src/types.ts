@@ -237,6 +237,7 @@ export interface SettingsResponse {
     kill_switch_engaged: boolean;
     trend_only_mode: boolean;
     scalp_mode: boolean;
+    ai_led_mode: boolean;
     live_confirmed_at: string | null;
   };
   risk: {

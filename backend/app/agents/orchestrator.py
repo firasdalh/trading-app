@@ -21,6 +21,7 @@ from app.models.schemas import (
     ConditionalSuggestion,
     FundamentalRead,
     TechnicalRead,
+    TradeDecisionLLM,
     TradeProposal,
     TradeReviewLLM,
 )
@@ -61,6 +62,32 @@ In `rationale`, state the GRADE (A/B/C) and the one or two factors that drove th
 desk head explaining a call. In `concerns`, list the specific risks. Set `confidence` to your honest
 conviction (0-1) — modest for B, high for A, and you will be vetoing C.
 Return strict JSON: decision ("confirm"|"veto"), confidence (0-1), rationale, concerns[]."""
+
+_AI_DECIDE_SYSTEM = """You are a trader with 30 years on institutional desks (FX, indices, commodities,
+crypto), now RUNNING the book — you MAKE the call, you are not a rubber stamp. You decide whether to
+go LONG, go SHORT, or STAND ASIDE, and you set the entry, stop, and target yourself.
+
+You receive the full read: every timeframe's indicators (EMAs, RSI, MACD, ADX/DI, ATR), market
+structure, support/resistance, the regime, the higher-timeframe (macro) trend, and the fundamental
+lean. Treat these as INPUTS to weigh with judgment — synthesise them like a desk head, NOT as a
+mechanical checklist.
+
+How you survive (principles, not rigid rules):
+- Be selective. STAND ASIDE is a professional, encouraged answer — most of the time there is no edge.
+  Only act on setups you would risk real money on.
+- Trade WITH the dominant higher-timeframe trend and structure. Do not fight a strong macro trend.
+- Enter at VALUE (a pullback to a level / moving average), not by chasing an extended move.
+- Demand a clean reward:risk of at least 1.5R to the target before price hits opposing structure;
+  prefer ~2R+.
+- Respect momentum; avoid imminent high-impact events and illiquid, trendless tape.
+
+You MUST place a protective stop and a target on the correct side of the entry, sized to real
+structure (use ATR for distance). Assume a MARKET entry near the current price. Sizing and the hard
+risk limits are handled by a separate deterministic Risk Manager downstream — you NEVER size.
+
+Return strict JSON: action ("long"|"short"|"stand_aside"), conviction (0-1, your honest edge),
+entry, stop_loss, take_profit (price numbers; null only when standing aside), rationale (your
+desk-head reasoning), key_risks[] (what would make this trade wrong)."""
 
 
 def _now_in_stand_aside(fundamental: FundamentalRead, now: datetime) -> bool:
@@ -1106,11 +1133,118 @@ def _deterministic_decision(
     return base
 
 
+def _ai_decision(
+    symbol: str, asset_class: AssetClass, timeframe: str,
+    technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
+) -> TradeProposal | None:
+    """AI-LED decision: the AI Orchestrator is the DECIDER (direction + levels + conviction), not a
+    confirm/veto vote. Returns a TradeProposal, or ``None`` when the LLM is unavailable/failed so the
+    caller can fall back to the deterministic engine. Capital-protective guardrails are applied by the
+    caller (``_apply_guardrails``); the Risk Manager remains the final authority downstream."""
+    base = TradeProposal(
+        symbol=symbol, asset_class=asset_class, timeframe=timeframe,
+        direction=Direction.NO_TRADE, confidence=0.0, strategy="ai",
+        technical=technical, fundamental=fundamental,
+    )
+    # Hard safety even in AI mode: never trade inside a flagged high-impact event window.
+    if _now_in_stand_aside(fundamental, now):
+        base.rationale = "Standing aside: inside a high-impact event window."
+        base.strategy = "stand_aside"
+        return base
+
+    tf0 = None
+    if technical.timeframes:
+        tf0 = next((x for x in technical.timeframes if x.timeframe == timeframe),
+                   technical.timeframes[0])
+    ind = tf0.indicators if tf0 else {}
+    regime = _regime(ind)
+    base.regime = regime
+    macro = _macro_trend(technical)
+    last = ind.get("last_close")
+
+    brief = (
+        f"INSTRUMENT: {symbol}  entry timeframe: {timeframe}  asset class: {asset_class.value}\n"
+        f"REGIME: {regime}  ENTRY-TF TREND: {_trend_from_indicators(ind, tf0.trend if tf0 else 'sideways')}"
+        f"  HIGHER-TF (MACRO) TREND: {macro}  STRUCTURE: {_structure_label(ind)}\n"
+        f"CURRENT PRICE: {last}  ATR(14): {ind.get('atr14')}\n\n"
+        f"TECHNICAL READ (all timeframes, indicators, support/resistance):\n"
+        f"{technical.model_dump_json(indent=2)}\n\n"
+        f"FUNDAMENTAL READ:\n{fundamental.model_dump_json(indent=2)}\n\n"
+        "Make the call now."
+    )
+    decision = analyze(system=_AI_DECIDE_SYSTEM, user=brief, schema=TradeDecisionLLM, max_tokens=2500)
+    if decision is None:
+        return None  # LLM down/failed -> caller falls back to the deterministic engine
+
+    if decision.action == "stand_aside":
+        base.strategy = "stand_aside"
+        base.rationale = f"AI stood aside: {decision.rationale}"
+        return base
+
+    base.direction = Direction.LONG if decision.action == "long" else Direction.SHORT
+    # Honest R:R for a MARKET entry: price in at the current market, not a wished-for level. Keep the
+    # AI's absolute stop/target levels; the guardrails then validate side + R:R against the real entry.
+    base.entry = last if last else decision.entry
+    base.stop_loss = decision.stop_loss
+    base.take_profit = decision.take_profit
+    base.confidence = round(decision.conviction, 2)
+    base.review_decision = "ai"
+    risks = (" | risks: " + "; ".join(decision.key_risks)) if decision.key_risks else ""
+    base.rationale = f"AI-led {base.direction.value.upper()}: {decision.rationale}{risks}"
+    return base
+
+
+def _apply_guardrails(proposal: TradeProposal, technical: TechnicalRead) -> TradeProposal:
+    """Thin, capital-protective checks on an AI-led proposal — the only deterministic gates left in
+    AI-led mode (the mechanical entry filters are folded into the AI's judgment). Any failure converts
+    the proposal to NO_TRADE. The Risk Manager remains the final authority downstream."""
+    if proposal.direction == Direction.NO_TRADE:
+        return proposal
+    d = proposal.direction
+    entry, stop, tp = proposal.entry, proposal.stop_loss, proposal.take_profit
+
+    def _block(why: str) -> TradeProposal:
+        log.info("AI proposal blocked by guardrail", extra={"symbol": proposal.symbol, "why": why})
+        proposal.rationale = f"AI {d.value.upper()} blocked ({why}). {proposal.rationale}"
+        proposal.direction = Direction.NO_TRADE
+        proposal.entry = proposal.stop_loss = proposal.take_profit = None
+        proposal.confidence = 0.0
+        proposal.review_decision = "veto"
+        return proposal
+
+    if entry is None or stop is None or tp is None:
+        return _block("incomplete entry/stop/target")
+    if d == Direction.LONG and not (stop < entry < tp):
+        return _block("stop/target on the wrong side of entry for a long")
+    if d == Direction.SHORT and not (tp < entry < stop):
+        return _block("stop/target on the wrong side of entry for a short")
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return _block("zero risk distance")
+    rr = abs(tp - entry) / risk
+    if rr < _MIN_RR_ENTRY:
+        return _block(f"reward:risk {rr:.2f} below the {_MIN_RR_ENTRY:.1f}R floor")
+    # Don't fight a strong higher-timeframe trend (the one load-bearing deterministic check we keep).
+    macro = _macro_trend(technical)
+    if (d == Direction.LONG and macro == "down") or (d == Direction.SHORT and macro == "up"):
+        return _block(f"against the higher-timeframe trend (macro {macro})")
+    # ATR sanity: the stop must be a sane distance — not a hair-trigger, not absurdly wide.
+    tf0 = next((x for x in technical.timeframes if x.timeframe == proposal.timeframe),
+               technical.timeframes[0]) if technical.timeframes else None
+    atr = tf0.indicators.get("atr14") if tf0 else None
+    if atr:
+        if risk < 0.25 * atr:
+            return _block("stop too tight vs ATR (hair-trigger)")
+        if risk > 6.0 * atr:
+            return _block("stop too wide vs ATR")
+    return proposal
+
+
 def run_orchestrator(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead,
     now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
-    scalp: bool = False,
+    scalp: bool = False, ai_led: bool = False,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -1122,6 +1256,21 @@ def run_orchestrator(
        never change direction/levels or raise risk. The Risk Manager remains final downstream.
     """
     now = now or datetime.now(timezone.utc)
+
+    # AI-LED mode: the AI Orchestrator DECIDES (direction + levels + conviction), policed only by
+    # thin capital-protective guardrails. Active only when the LLM is enabled AND available — on the
+    # cheap scanner loop (use_llm=False) or any LLM failure we fall through to the deterministic
+    # engine + confirm/veto review below (the backtestable reference + safety fallback).
+    if ai_led and use_llm and llm_available():
+        ai = _ai_decision(symbol, asset_class, timeframe, technical, fundamental, now)
+        if ai is not None:
+            decided = _apply_guardrails(ai, technical)
+            log.info("orchestrator decision (AI-led)",
+                     extra={"symbol": symbol, "direction": decided.direction.value,
+                            "confidence": decided.confidence})
+            return decided
+        log.warning("AI-led decision unavailable; falling back to deterministic",
+                    extra={"symbol": symbol})
 
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
                                        trend_only=trend_only, scalp=scalp)

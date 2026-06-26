@@ -236,6 +236,22 @@ def set_scalp_mode(req: ScalpModeRequest, session: Session = Depends(get_session
     return build_settings_response(session)
 
 
+class AiLedModeRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/ai-led-mode", response_model=SettingsResponse)
+def set_ai_led_mode(req: AiLedModeRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle AI-led decisions: when ON, the AI Orchestrator decides the trade (direction, levels,
+    conviction) from the full read, policed by thin guardrails + the deterministic Risk Manager.
+    OFF instantly reverts to the deterministic engine + confirm/veto review. Reversible."""
+    settings = get_or_create_settings(session)
+    settings.ai_led_mode = req.enabled
+    session.commit()
+    log.info("ai-led mode set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
 def _try_mt5_connect() -> dict:
     """Attempt an MT5 connection and return a status dict (never raises)."""
     from app.brokers.base import BrokerError

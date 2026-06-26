@@ -78,6 +78,13 @@ class AppSettings(Base):
     # while on: 15m's "moderate" regime is profitable, unlike on 1h.)
     scalp_mode: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # AI-LED decisions: the AI Orchestrator DECIDES the trade (direction + levels + conviction) from
+    # the full read, instead of only confirming/vetoing the deterministic engine. Thin deterministic
+    # guardrails (R:R floor, extreme-regime veto, level sanity) + the Risk Manager still police it.
+    # Falls back to the deterministic engine when the LLM is off/unavailable (e.g. the scanner loop).
+    # Default ON. Toggle OFF to instantly revert to the deterministic + confirm/veto engine.
+    ai_led_mode: Mapped[bool] = mapped_column(Boolean, default=True)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

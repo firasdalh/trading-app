@@ -6,6 +6,7 @@ LLM output into these defensively; malformed output is rejected, never executed.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -137,6 +138,20 @@ class TradeReviewLLM(BaseModel):
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     rationale: str = ""
     concerns: list[str] = Field(default_factory=list)
+
+
+class TradeDecisionLLM(BaseModel):
+    """The AI Orchestrator's DECISION in AI-led mode — the AI is the decider, not just a
+    confirm/veto vote. It chooses the direction and the levels; deterministic guardrails + the
+    Risk Manager still police it downstream. ``stand_aside`` is an encouraged answer."""
+
+    action: Literal["long", "short", "stand_aside"]
+    conviction: float = Field(0.0, ge=0.0, le=1.0)   # becomes the proposal confidence
+    entry: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    rationale: str = ""
+    key_risks: list[str] = Field(default_factory=list)
 
 
 class ConditionalSuggestion(BaseModel):
@@ -347,6 +362,7 @@ class AppSettingsView(BaseModel):
     kill_switch_engaged: bool
     trend_only_mode: bool = True
     scalp_mode: bool = False
+    ai_led_mode: bool = True
     live_confirmed_at: datetime | None = None
 
 

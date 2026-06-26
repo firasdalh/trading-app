@@ -47,6 +47,7 @@ _SQLITE_ADDED_COLUMNS = {
     "app_settings": [
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),
         ("scalp_mode", "BOOLEAN DEFAULT 0"),
+        ("ai_led_mode", "BOOLEAN DEFAULT 1"),
     ],
     "watch_items": [
         ("recommended", "BOOLEAN DEFAULT 0"),
