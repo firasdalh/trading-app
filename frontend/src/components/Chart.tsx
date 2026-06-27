@@ -196,8 +196,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const emaRefs = useRef<Record<number, ISeriesApi<"Line">>>({});
-  const stUpRef = useRef<ISeriesApi<"Line"> | null>(null);    // SuperTrend line while bullish (green)
-  const stDownRef = useRef<ISeriesApi<"Line"> | null>(null);  // SuperTrend line while bearish (red)
+  const stRef = useRef<ISeriesApi<"Line"> | null>(null);  // SuperTrend (ONE line, per-point colour)
   const rsiChartRef = useRef<IChartApi | null>(null);
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdContainerRef = useRef<HTMLDivElement>(null);
@@ -277,15 +276,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         crosshairMarkerVisible: false,
       });
     }
-    // SuperTrend = two line series (green while bullish, red while bearish); each carries whitespace
-    // where the other is active, so the band cleanly flips sides on a trend change.
-    stUpRef.current = chart.addLineSeries({
-      color: "#26a69a", lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false,
-    });
-    stDownRef.current = chart.addLineSeries({
-      color: "#ef5350", lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false,
+    // SuperTrend = ONE line whose per-point colour flips (green bullish / red bearish). A single
+    // coloured line (not two series) avoids lightweight-charts connecting an inactive series across
+    // the bars where it should be hidden — which drew two parallel lines.
+    stRef.current = chart.addLineSeries({
+      lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
     });
 
     chart.subscribeCrosshairMove((param) => {
@@ -303,8 +298,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       seriesRef.current = null;
       volumeRef.current = null;
       emaRefs.current = {};
-      stUpRef.current = null;
-      stDownRef.current = null;
+      stRef.current = null;
     };
   }, []);
 
@@ -455,8 +449,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         seriesRef.current.setData([]);
         volumeRef.current.setData([]);
         for (const { period } of EMA_CONFIG) emaRefs.current[period]?.setData([]);
-        stUpRef.current?.setData([]);
-        stDownRef.current?.setData([]);
+        stRef.current?.setData([]);
         rsiSeriesRef.current?.setData([]);
         macdLineRef.current?.setData([]);
         macdSignalRef.current?.setData([]);
@@ -544,32 +537,25 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   }
 
   function applySuperTrend(candles: Candle[]) {
-    const up = stUpRef.current;
-    const down = stDownRef.current;
-    if (!up || !down) return;
+    const line = stRef.current;
+    if (!line) return;
     if (!showSt || !candles.length) {
-      up.setData([]);
-      down.setData([]);
+      line.setData([]);
       return;
     }
     const times = candles.map(toTime);
     const { st, dir } = superTrend(candles);
-    const upData: (LineData | WhitespaceData)[] = [];
-    const downData: (LineData | WhitespaceData)[] = [];
+    // ONE line; each point carries its own colour so the line flips green<->red at trend changes.
+    // Whitespace during the ATR warmup keeps the leading gap (no spurious line before it's valid).
+    const data: (LineData | WhitespaceData)[] = [];
     for (let i = 0; i < candles.length; i++) {
-      if (st[i] === null) {
-        upData.push({ time: times[i] });
-        downData.push({ time: times[i] });
-      } else if (dir[i] === 1) {
-        upData.push({ time: times[i], value: st[i] as number });
-        downData.push({ time: times[i] });
-      } else {
-        downData.push({ time: times[i], value: st[i] as number });
-        upData.push({ time: times[i] });
-      }
+      data.push(
+        st[i] === null
+          ? { time: times[i] }
+          : { time: times[i], value: st[i] as number, color: dir[i] === 1 ? "#26a69a" : "#ef5350" },
+      );
     }
-    up.setData(upData);
-    down.setData(downData);
+    line.setData(data);
   }
 
   // Live quote -> update the last candle.
