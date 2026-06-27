@@ -118,6 +118,55 @@ function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
   return { macd, signal, hist };
 }
 
+// SuperTrend (ATR bands that flip with trend). Returns, per bar, the line value and direction
+// (1 = up/bullish support below price, -1 = down/bearish resistance above price); null in warmup.
+// Standard params: ATR period 10, multiplier 3, Wilder-smoothed ATR — matches TradingView.
+function superTrend(candles: Candle[], period = 10, mult = 3): { st: (number | null)[]; dir: number[] } {
+  const n = candles.length;
+  const st: (number | null)[] = new Array(n).fill(null);
+  const dir: number[] = new Array(n).fill(0);
+  if (n < period + 1) return { st, dir };
+  const tr = (i: number) =>
+    Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close),
+    );
+  const atr: number[] = new Array(n).fill(0);
+  let seed = 0;
+  for (let i = 1; i <= period; i++) seed += tr(i);
+  atr[period] = seed / period;
+  for (let i = period + 1; i < n; i++) atr[i] = (atr[i - 1] * (period - 1) + tr(i)) / period;
+
+  let finalUpper = 0;
+  let finalLower = 0;
+  let prevDir = 1;
+  for (let i = period; i < n; i++) {
+    const hl2 = (candles[i].high + candles[i].low) / 2;
+    const bu = hl2 + mult * atr[i];
+    const bl = hl2 - mult * atr[i];
+    if (i === period) {
+      finalUpper = bu;
+      finalLower = bl;
+      prevDir = 1;
+      dir[i] = 1;
+      st[i] = bl;
+      continue;
+    }
+    const prevUpper = finalUpper;
+    const prevLower = finalLower;
+    finalUpper = bu < prevUpper || candles[i - 1].close > prevUpper ? bu : prevUpper;
+    finalLower = bl > prevLower || candles[i - 1].close < prevLower ? bl : prevLower;
+    let d = prevDir;
+    if (prevDir === 1 && candles[i].close < finalLower) d = -1;
+    else if (prevDir === -1 && candles[i].close > finalUpper) d = 1;
+    dir[i] = d;
+    prevDir = d;
+    st[i] = d === 1 ? finalLower : finalUpper;
+  }
+  return { st, dir };
+}
+
 // The dollar P&L an open position would show AT a given price level (e.g. its SL or TP). Derived
 // from the live floating P&L per price unit — which already encodes lot size, contract size and
 // FX conversion — so it's exact in the account currency. Empty until price moves off entry (the
@@ -147,6 +196,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const emaRefs = useRef<Record<number, ISeriesApi<"Line">>>({});
+  const stUpRef = useRef<ISeriesApi<"Line"> | null>(null);    // SuperTrend line while bullish (green)
+  const stDownRef = useRef<ISeriesApi<"Line"> | null>(null);  // SuperTrend line while bearish (red)
   const rsiChartRef = useRef<IChartApi | null>(null);
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdContainerRef = useRef<HTMLDivElement>(null);
@@ -184,6 +235,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [showEma, setShowEma] = useState<Record<number, boolean>>({ 50: true, 100: false, 200: true });
   const [showRsi, setShowRsi] = useState(true);
   const [showMacd, setShowMacd] = useState(true);
+  const [showSt, setShowSt] = useState(true);
 
   const toTime = (c: Candle) => Math.floor(Date.parse(c.ts) / 1000) as UTCTimestamp;
 
@@ -225,6 +277,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         crosshairMarkerVisible: false,
       });
     }
+    // SuperTrend = two line series (green while bullish, red while bearish); each carries whitespace
+    // where the other is active, so the band cleanly flips sides on a trend change.
+    stUpRef.current = chart.addLineSeries({
+      color: "#26a69a", lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    stDownRef.current = chart.addLineSeries({
+      color: "#ef5350", lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
 
     chart.subscribeCrosshairMove((param) => {
       const bar = param.seriesData.get(series) as CandlestickData | undefined;
@@ -241,6 +303,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       seriesRef.current = null;
       volumeRef.current = null;
       emaRefs.current = {};
+      stUpRef.current = null;
+      stDownRef.current = null;
     };
   }, []);
 
@@ -366,6 +430,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         applyEmas(series.candles);
         applyRsi();
         applyMacd();
+        applySuperTrend(series.candles);
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
@@ -390,6 +455,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         seriesRef.current.setData([]);
         volumeRef.current.setData([]);
         for (const { period } of EMA_CONFIG) emaRefs.current[period]?.setData([]);
+        stUpRef.current?.setData([]);
+        stDownRef.current?.setData([]);
         rsiSeriesRef.current?.setData([]);
         macdLineRef.current?.setData([]);
         macdSignalRef.current?.setData([]);
@@ -406,6 +473,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     applyEmas(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showEma]);
+
+  useEffect(() => {
+    applySuperTrend(candlesRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSt]);
 
   function applyEmas(candles: Candle[]) {
     if (!candles.length) return;
@@ -469,6 +541,35 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     histSeries.setData(histData);
     macdLine.setData(macdData);
     signalLine.setData(signalData);
+  }
+
+  function applySuperTrend(candles: Candle[]) {
+    const up = stUpRef.current;
+    const down = stDownRef.current;
+    if (!up || !down) return;
+    if (!showSt || !candles.length) {
+      up.setData([]);
+      down.setData([]);
+      return;
+    }
+    const times = candles.map(toTime);
+    const { st, dir } = superTrend(candles);
+    const upData: (LineData | WhitespaceData)[] = [];
+    const downData: (LineData | WhitespaceData)[] = [];
+    for (let i = 0; i < candles.length; i++) {
+      if (st[i] === null) {
+        upData.push({ time: times[i] });
+        downData.push({ time: times[i] });
+      } else if (dir[i] === 1) {
+        upData.push({ time: times[i], value: st[i] as number });
+        downData.push({ time: times[i] });
+      } else {
+        downData.push({ time: times[i], value: st[i] as number });
+        upData.push({ time: times[i] });
+      }
+    }
+    up.setData(upData);
+    down.setData(downData);
   }
 
   // Live quote -> update the last candle.
@@ -728,6 +829,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           className={`rounded px-2 py-0.5 text-xs ${showMacd ? "bg-neutral-700 text-blue-300" : "bg-neutral-900 text-neutral-500"}`}
         >
           MACD
+        </button>
+        <button
+          onClick={() => setShowSt((v) => !v)}
+          className={`rounded px-2 py-0.5 text-xs ${showSt ? "bg-neutral-700 text-emerald-300" : "bg-neutral-900 text-neutral-500"}`}
+          title="SuperTrend (ATR 10 ×3) — green band = uptrend (support), red band = downtrend (resistance)"
+        >
+          SuperTrend
         </button>
         <button
           onClick={recenter}
