@@ -45,6 +45,7 @@ interface Props {
 }
 
 const EMA_CONFIG = [
+  { period: 20, color: "#e879f9" },
   { period: 50, color: "#f59e0b" },
   { period: 100, color: "#eab308" },
   { period: 200, color: "#2962ff" },
@@ -317,7 +318,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null } | null>(null);
 
   const [legend, setLegend] = useState<Legend | null>(null);
-  const [showEma, setShowEma] = useState<Record<number, boolean>>({ 50: true, 100: false, 200: true });
+  const [showEma, setShowEma] = useState<Record<number, boolean>>({ 20: true, 50: true, 100: false, 200: true });
   const [showRsi, setShowRsi] = useState(true);
   const [showMacd, setShowMacd] = useState(true);
   const [showSt, setShowSt] = useState(true);
