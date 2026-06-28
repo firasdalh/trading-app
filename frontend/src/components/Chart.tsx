@@ -170,12 +170,12 @@ function superTrend(candles: Candle[], period = 10, mult = 3): { st: (number | n
   return { st, dir };
 }
 
-// Pullback detector layered on SuperTrend. In an UPTREND (SuperTrend green), a full candle closing
-// below EMA20 is a dip — we score how much it looks like a healthy BUY-THE-DIP that resumes up:
-//   trend bullish +25 · price below EMA20 +20 · RSI<=46 +15 · volume falling +15 ·
-//   bullish engulfing +10 · higher-low intact +15  (=100). The DOWNTREND mirror scores a
-// sell-the-rally (RSI>=54, bearish engulfing, lower-high intact). Returns qualifying bars
-// (score >= 70), one per contiguous pullback (its strongest bar) — an EARLY continuation entry.
+// Pullback detector layered on SuperTrend. A pullback is NOTICED only when BOTH trigger conditions
+// hold: in an UPTREND (green) a full candle closes BELOW EMA20 AND RSI < 53 (a dip → buy-the-dip);
+// in a DOWNTREND (red) a full candle closes ABOVE EMA20 AND RSI > 46 (a bounce → sell-the-rally).
+// Once triggered we score confidence /100: trend +25 · price-vs-EMA20 +20 · RSI gate +15 ·
+// volume falling +15 · engulfing +10 · structure (higher-low / lower-high) intact +15. Returns
+// qualifying bars (score >= 70), one per contiguous pullback (its strongest bar) — an EARLY entry.
 function pullbackSignals(candles: Candle[]): { i: number; score: number; bullish: boolean }[] {
   const n = candles.length;
   const out: { i: number; score: number; bullish: boolean }[] = [];
@@ -218,18 +218,18 @@ function pullbackSignals(candles: Candle[]): { i: number; score: number; bullish
     const c = candles[i];
     const p = candles[i - 1];
     if (dir[i] === 1) {
-      if (c.close >= e) return null; // need the dip: a full candle closed below EMA20
-      let s = 25 + 20; // bullish trend + price-below-EMA20 (the trigger)
-      if (r <= 46) s += 15;
+      // Trigger (both required): a full candle closed BELOW EMA20 AND RSI < 53.
+      if (c.close >= e || r >= 53) return null;
+      let s = 25 + 20 + 15; // bullish trend + price-below-EMA20 + RSI<53 (the trigger conditions)
       if (c.volume < volAvg(i)) s += 15;
       if (c.close > c.open && p.close < p.open && c.close >= p.open && c.open <= p.close) s += 10; // bull engulf
       const piv = lastTwo(pivLow, i - L);
       if (piv.length === 2 && candles[piv[0]].low > candles[piv[1]].low) s += 15; // higher-low intact
       return { score: s, bullish: true };
     }
-    if (c.close <= e) return null; // mirror: a full candle closed above EMA20 in a downtrend
-    let s = 25 + 20;
-    if (r >= 54) s += 15;
+    // Downtrend mirror trigger (both required): a full candle closed ABOVE EMA20 AND RSI > 46.
+    if (c.close <= e || r <= 46) return null;
+    let s = 25 + 20 + 15; // bearish trend + price-above-EMA20 + RSI>46
     if (c.volume < volAvg(i)) s += 15;
     if (c.close < c.open && p.close > p.open && c.close <= p.open && c.open >= p.close) s += 10; // bear engulf
     const piv = lastTwo(pivHigh, i - L);
