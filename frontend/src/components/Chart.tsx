@@ -10,6 +10,8 @@ import {
   LineData,
   LineStyle,
   LogicalRange,
+  SeriesMarker,
+  Time,
   UTCTimestamp,
   WhitespaceData,
 } from "lightweight-charts";
@@ -167,6 +169,90 @@ function superTrend(candles: Candle[], period = 10, mult = 3): { st: (number | n
   return { st, dir };
 }
 
+// Pullback detector layered on SuperTrend. In an UPTREND (SuperTrend green), a full candle closing
+// below EMA20 is a dip — we score how much it looks like a healthy BUY-THE-DIP that resumes up:
+//   trend bullish +25 · price below EMA20 +20 · RSI<=46 +15 · volume falling +15 ·
+//   bullish engulfing +10 · higher-low intact +15  (=100). The DOWNTREND mirror scores a
+// sell-the-rally (RSI>=54, bearish engulfing, lower-high intact). Returns qualifying bars
+// (score >= 70), one per contiguous pullback (its strongest bar) — an EARLY continuation entry.
+function pullbackSignals(candles: Candle[]): { i: number; score: number; bullish: boolean }[] {
+  const n = candles.length;
+  const out: { i: number; score: number; bullish: boolean }[] = [];
+  if (n < 30) return out;
+  const closes = candles.map((c) => c.close);
+  const ema20 = ema(closes, 20);
+  const rsi = rsiCalc(closes, 14);
+  const { dir } = superTrend(candles);
+  const L = 3; // swing-pivot half-window
+  const pivLow: boolean[] = new Array(n).fill(false);
+  const pivHigh: boolean[] = new Array(n).fill(false);
+  for (let j = L; j < n - L; j++) {
+    let lo = true;
+    let hi = true;
+    for (let k = j - L; k <= j + L; k++) {
+      if (candles[k].low < candles[j].low) lo = false;
+      if (candles[k].high > candles[j].high) hi = false;
+    }
+    pivLow[j] = lo;
+    pivHigh[j] = hi;
+  }
+  const volAvg = (i: number) => {
+    let s = 0;
+    let c = 0;
+    for (let k = Math.max(0, i - 10); k < i; k++) {
+      s += candles[k].volume;
+      c++;
+    }
+    return c ? s / c : 0;
+  };
+  const lastTwo = (arr: boolean[], upto: number) => {
+    const idx: number[] = [];
+    for (let j = upto; j >= 0 && idx.length < 2; j--) if (arr[j]) idx.push(j);
+    return idx;
+  };
+  const scoreAt = (i: number): { score: number; bullish: boolean } | null => {
+    const e = ema20[i];
+    const r = rsi[i];
+    if (e === undefined || r === null || dir[i] === 0) return null;
+    const c = candles[i];
+    const p = candles[i - 1];
+    if (dir[i] === 1) {
+      if (c.close >= e) return null; // need the dip: a full candle closed below EMA20
+      let s = 25 + 20; // bullish trend + price-below-EMA20 (the trigger)
+      if (r <= 46) s += 15;
+      if (c.volume < volAvg(i)) s += 15;
+      if (c.close > c.open && p.close < p.open && c.close >= p.open && c.open <= p.close) s += 10; // bull engulf
+      const piv = lastTwo(pivLow, i - L);
+      if (piv.length === 2 && candles[piv[0]].low > candles[piv[1]].low) s += 15; // higher-low intact
+      return { score: s, bullish: true };
+    }
+    if (c.close <= e) return null; // mirror: a full candle closed above EMA20 in a downtrend
+    let s = 25 + 20;
+    if (r >= 54) s += 15;
+    if (c.volume < volAvg(i)) s += 15;
+    if (c.close < c.open && p.close > p.open && c.close <= p.open && c.open >= p.close) s += 10; // bear engulf
+    const piv = lastTwo(pivHigh, i - L);
+    if (piv.length === 2 && candles[piv[0]].high < candles[piv[1]].high) s += 15; // lower-high intact
+    return { score: s, bullish: false };
+  };
+  const TH = 70;
+  let run: { i: number; score: number; bullish: boolean }[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    let best = run[0];
+    for (const x of run) if (x.score > best.score) best = x;
+    out.push(best);
+    run = [];
+  };
+  for (let i = 1; i < n; i++) {
+    const r = scoreAt(i);
+    if (r && r.score >= TH) run.push({ i, score: r.score, bullish: r.bullish });
+    else flush();
+  }
+  flush();
+  return out;
+}
+
 // The dollar P&L an open position would show AT a given price level (e.g. its SL or TP). Derived
 // from the live floating P&L per price unit — which already encodes lot size, contract size and
 // FX conversion — so it's exact in the account currency. Empty until price moves off entry (the
@@ -235,6 +321,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [showRsi, setShowRsi] = useState(true);
   const [showMacd, setShowMacd] = useState(true);
   const [showSt, setShowSt] = useState(true);
+  const [showPb, setShowPb] = useState(true);
 
   const toTime = (c: Candle) => Math.floor(Date.parse(c.ts) / 1000) as UTCTimestamp;
 
@@ -425,6 +512,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         applyRsi();
         applyMacd();
         applySuperTrend(series.candles);
+        applyPullback(series.candles);
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
@@ -447,6 +535,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         if (cancelled || !seriesRef.current || !volumeRef.current) return;
         candlesRef.current = [];
         seriesRef.current.setData([]);
+        seriesRef.current.setMarkers([]);
         volumeRef.current.setData([]);
         for (const { period } of EMA_CONFIG) emaRefs.current[period]?.setData([]);
         stRef.current?.setData([]);
@@ -471,6 +560,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     applySuperTrend(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSt]);
+
+  useEffect(() => {
+    applyPullback(candlesRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPb]);
 
   function applyEmas(candles: Candle[]) {
     if (!candles.length) return;
@@ -556,6 +650,23 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       );
     }
     line.setData(data);
+  }
+
+  function applyPullback(candles: Candle[]) {
+    const series = seriesRef.current;
+    if (!series) return;
+    if (!showPb || !candles.length) {
+      series.setMarkers([]);
+      return;
+    }
+    const markers: SeriesMarker<Time>[] = pullbackSignals(candles).map((s) => ({
+      time: toTime(candles[s.i]),
+      position: s.bullish ? "belowBar" : "aboveBar",
+      color: s.bullish ? "#26a69a" : "#ef5350",
+      shape: s.bullish ? "arrowUp" : "arrowDown",
+      text: `PB ${s.score}`,
+    }));
+    series.setMarkers(markers);
   }
 
   // Live quote -> update the last candle.
@@ -822,6 +933,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           title="SuperTrend (ATR 10 ×3) — green band = uptrend (support), red band = downtrend (resistance)"
         >
           SuperTrend
+        </button>
+        <button
+          onClick={() => setShowPb((v) => !v)}
+          className={`rounded px-2 py-0.5 text-xs ${showPb ? "bg-neutral-700 text-amber-300" : "bg-neutral-900 text-neutral-500"}`}
+          title="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70."
+        >
+          Pullback
         </button>
         <button
           onClick={recenter}
