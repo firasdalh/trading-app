@@ -18,6 +18,7 @@ from app.backtest.simulator import (
     simulate_armed_symbol,
     simulate_symbol,
     simulate_symbol_advisor,
+    simulate_symbol_stband,
     split_by_time,
     time_folds,
 )
@@ -239,6 +240,17 @@ def test_simulate_symbol_advisor_runs_both_gates():
             assert isinstance(trades, list)
             for t in trades:
                 assert t.exit_time > t.entry_time and t.bars_held >= 1
+
+
+def test_simulate_symbol_stband_runs():
+    # The SuperTrend-band strategy must run on a trend, return valid trades, and never exit before
+    # it enters. A steady uptrend should produce at least one long.
+    broker = _FakeBroker({"1h": _trend(320, 1, 100.0, 0.08)})
+    trades = simulate_symbol_stband(broker, "X", AssetClass.FOREX, "1h", bars=320, max_hold=40, cooldown=1)
+    assert isinstance(trades, list)
+    for t in trades:
+        assert t.exit_time > t.entry_time and t.bars_held >= 1
+        assert t.strategy == "supertrend_band" and t.stop != t.entry
 
 
 def test_partial_scaleout_caps_a_clean_target_winner():

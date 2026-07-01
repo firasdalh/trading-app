@@ -377,6 +377,92 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
     return trades
 
 
+def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
+                           bars: int = 3000, max_hold: int = 200, cooldown: int = 1,
+                           cost_r: float = 0.0) -> list[BTTrade]:
+    """Backtest the SuperTrend + EMA20-band breakout strategy WITH its SuperTrend trailing stop.
+
+    Single timeframe (the strategy only uses entry-TF indicators). Long when SuperTrend is up AND a
+    candle closes above EMA20-high; short when down AND closes below EMA20-low. Stop starts on the
+    SuperTrend line and TRAILS it each bar (tighten-only); exit on the trailed stop, a 3R backstop,
+    or a SuperTrend flip. Causal (SuperTrend/EMA computed left-to-right) — no look-ahead. R is
+    measured from the INITIAL risk (|entry - first SuperTrend stop|)."""
+    from app.agents.indicators import ST_PERIOD, _ema_full, supertrend_series
+
+    try:
+        sdata = broker.get_ohlcv(symbol, timeframe, limit=bars)
+        candles = list(sdata.candles) if sdata and sdata.candles else []
+    except Exception:  # noqa: BLE001
+        return []
+    n = len(candles)
+    if n < ST_PERIOD + 30:
+        return []
+    st = supertrend_series(candles)
+    st_line, st_dir = st["line"], st["dir"]
+    eh = _ema_full([c.high for c in candles], 20)
+    el = _ema_full([c.low for c in candles], 20)
+
+    trades: list[BTTrade] = []
+    i = 21           # warmup: EMA20 valid from index 19, SuperTrend from ST_PERIOD
+    block_until = -1
+    while i < n:
+        if i <= block_until:
+            i += 1
+            continue
+        d, line_i, hi_i, lo_i, c = st_dir[i], st_line[i], eh[i], el[i], candles[i]
+        if line_i is None or hi_i is None or lo_i is None or d == 0:
+            i += 1
+            continue
+        if d == 1 and c.close > hi_i and line_i < c.close:
+            direction, entry, stop0, is_long = "long", c.close, line_i, True
+        elif d == -1 and c.close < lo_i and line_i > c.close:
+            direction, entry, stop0, is_long = "short", c.close, line_i, False
+        else:
+            i += 1
+            continue
+        risk = abs(entry - stop0)
+        if risk <= 0:
+            i += 1
+            continue
+        tp = entry + 3 * risk if is_long else entry - 3 * risk
+        cur_stop = stop0
+        end = min(i + max_hold, n - 1)
+        outcome, exit_px, exit_j = "timeout", candles[end].close, end
+        want_dir = 1 if is_long else -1
+        for j in range(i + 1, end + 1):
+            bar = candles[j]
+            # Trail the stop to the SuperTrend line while the trend agrees (tighten-only).
+            if st_dir[j] == want_dir and st_line[j] is not None:
+                if is_long and st_line[j] > cur_stop:
+                    cur_stop = st_line[j]
+                elif (not is_long) and st_line[j] < cur_stop:
+                    cur_stop = st_line[j]
+            # Intrabar exit — stop first (conservative), then the 3R backstop.
+            if is_long:
+                if bar.low <= cur_stop:
+                    outcome, exit_px, exit_j = "stop", cur_stop, j; break
+                if bar.high >= tp:
+                    outcome, exit_px, exit_j = "target", tp, j; break
+            else:
+                if bar.high >= cur_stop:
+                    outcome, exit_px, exit_j = "stop", cur_stop, j; break
+                if bar.low <= tp:
+                    outcome, exit_px, exit_j = "target", tp, j; break
+            # SuperTrend flipped against the position -> exit at the close.
+            if st_dir[j] == -want_dir:
+                outcome, exit_px, exit_j = "flip", bar.close, j; break
+        raw_r = ((exit_px - entry) if is_long else (entry - exit_px)) / risk
+        trades.append(BTTrade(
+            symbol=symbol, direction=direction, regime="supertrend", strategy="supertrend_band",
+            confidence=0.7, entry_time=candles[i].ts, entry=round(entry, 6), stop=round(stop0, 6),
+            target=round(tp, 6), planned_rr=3.0, exit_time=candles[exit_j].ts, exit=round(exit_px, 6),
+            outcome=outcome, r=round(raw_r - cost_r, 4), bars_held=exit_j - i,
+        ))
+        block_until = exit_j + cooldown
+        i = exit_j + 1
+    return trades
+
+
 def _crossed_intrabar(order_type: str, bar, trigger: float) -> bool:
     """Did this bar reach a pending order's trigger? STOP = break beyond the level; LIMIT = pull into it."""
     if order_type == "buy_stop":
