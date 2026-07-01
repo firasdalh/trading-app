@@ -379,7 +379,8 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
 
 def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                            bars: int = 3000, max_hold: int = 200, cooldown: int = 1,
-                           cost_r: float = 0.0, adx_min: float | None = None) -> list[BTTrade]:
+                           cost_r: float = 0.0, adx_min: float | None = None,
+                           fresh_flip: int | None = None) -> list[BTTrade]:
     """Backtest the SuperTrend + EMA20-band breakout strategy WITH its SuperTrend trailing stop.
 
     Single timeframe (the strategy only uses entry-TF indicators). Long when SuperTrend is up AND a
@@ -389,7 +390,9 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
     measured from the INITIAL risk (|entry - first SuperTrend stop|).
 
     ``adx_min`` (optional): only take a signal when ADX at the entry bar >= this value — a regime /
-    chop filter (ADX computed causally on a trailing window)."""
+    chop filter (ADX computed causally on a trailing window).
+    ``fresh_flip`` (optional): only enter within this many bars of the SuperTrend flip — i.e. EARLY
+    in a new trend, not on a late mid-trend band-break."""
     from app.agents.indicators import ST_PERIOD, _ema_full, adx, supertrend_series
 
     try:
@@ -402,6 +405,13 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
         return []
     st = supertrend_series(candles)
     st_line, st_dir = st["line"], st["dir"]
+    # Bars since the last SuperTrend flip (for the fresh-flip filter).
+    bars_since_flip: list[int | None] = [None] * n
+    last_flip: int | None = None
+    for k in range(1, n):
+        if st_dir[k] != 0 and st_dir[k - 1] != 0 and st_dir[k] != st_dir[k - 1]:
+            last_flip = k
+        bars_since_flip[k] = (k - last_flip) if last_flip is not None else None
     eh = _ema_full([c.high for c in candles], 20)
     el = _ema_full([c.low for c in candles], 20)
 
@@ -421,6 +431,10 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
         elif d == -1 and c.close < lo_i and line_i > c.close:
             direction, entry, stop0, is_long = "short", c.close, line_i, False
         else:
+            i += 1
+            continue
+        # Fresh-flip filter: only enter EARLY in a new trend (within N bars of the SuperTrend flip).
+        if fresh_flip is not None and (bars_since_flip[i] is None or bars_since_flip[i] > fresh_flip):
             i += 1
             continue
         # Regime / chop filter: skip the signal unless the trend is strong enough (ADX >= adx_min),
