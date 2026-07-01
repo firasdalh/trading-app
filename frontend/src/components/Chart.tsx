@@ -173,7 +173,7 @@ function superTrend(candles: Candle[], period = 10, mult = 3): { st: (number | n
 // Pullback detector layered on SuperTrend. A pullback is NOTICED only when BOTH trigger conditions
 // hold: in an UPTREND (green) a full candle closes BELOW EMA20 AND RSI < 53 (a dip → buy-the-dip);
 // in a DOWNTREND (red) a full candle closes ABOVE EMA20 AND RSI > 46 (a bounce → sell-the-rally).
-// Confidence (max 85): trend +25 · (the EMA20-close + RSI trigger together) +20 · volume falling
+// Confidence (max 100): trend +25 · (the EMA20-close + RSI trigger together) +35 · volume falling
 // +15 · engulfing +10 · structure (higher-low / lower-high) intact +15. Returns qualifying bars
 // (score >= 70), one per contiguous pullback (its strongest bar) — an EARLY entry.
 function pullbackSignals(candles: Candle[]): { i: number; score: number; bullish: boolean }[] {
@@ -220,7 +220,7 @@ function pullbackSignals(candles: Candle[]): { i: number; score: number; bullish
     if (dir[i] === 1) {
       // Trigger (both required): a full candle closed BELOW EMA20 AND RSI < 53.
       if (c.close >= e || r >= 53) return null;
-      let s = 25 + 20; // bullish trend +25 ; (full candle below EMA20 AND RSI < 53) +20
+      let s = 25 + 35; // trend +25 ; (full candle below EMA20 AND RSI < 53) +35
       if (c.volume < volAvg(i)) s += 15;
       if (c.close > c.open && p.close < p.open && c.close >= p.open && c.open <= p.close) s += 10; // bull engulf
       const piv = lastTwo(pivLow, i - L);
@@ -229,7 +229,7 @@ function pullbackSignals(candles: Candle[]): { i: number; score: number; bullish
     }
     // Downtrend mirror trigger (both required): a full candle closed ABOVE EMA20 AND RSI > 46.
     if (c.close <= e || r <= 46) return null;
-    let s = 25 + 20; // bearish trend +25 ; (full candle above EMA20 AND RSI > 46) +20
+    let s = 25 + 35; // trend +25 ; (full candle above EMA20 AND RSI > 46) +35
     if (c.volume < volAvg(i)) s += 15;
     if (c.close < c.open && p.close > p.open && c.close <= p.open && c.open >= p.close) s += 10; // bear engulf
     const piv = lastTwo(pivHigh, i - L);
@@ -938,7 +938,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         <button
           onClick={() => setShowPb((v) => !v)}
           className={`rounded px-2 py-0.5 text-xs ${showPb ? "bg-neutral-700 text-amber-300" : "bg-neutral-900 text-neutral-500"}`}
-          title="Pullback score (0-85) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70."
+          title="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70."
         >
           Pullback
         </button>
