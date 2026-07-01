@@ -379,15 +379,18 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
 
 def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                            bars: int = 3000, max_hold: int = 200, cooldown: int = 1,
-                           cost_r: float = 0.0) -> list[BTTrade]:
+                           cost_r: float = 0.0, adx_min: float | None = None) -> list[BTTrade]:
     """Backtest the SuperTrend + EMA20-band breakout strategy WITH its SuperTrend trailing stop.
 
     Single timeframe (the strategy only uses entry-TF indicators). Long when SuperTrend is up AND a
     candle closes above EMA20-high; short when down AND closes below EMA20-low. Stop starts on the
     SuperTrend line and TRAILS it each bar (tighten-only); exit on the trailed stop, a 3R backstop,
     or a SuperTrend flip. Causal (SuperTrend/EMA computed left-to-right) — no look-ahead. R is
-    measured from the INITIAL risk (|entry - first SuperTrend stop|)."""
-    from app.agents.indicators import ST_PERIOD, _ema_full, supertrend_series
+    measured from the INITIAL risk (|entry - first SuperTrend stop|).
+
+    ``adx_min`` (optional): only take a signal when ADX at the entry bar >= this value — a regime /
+    chop filter (ADX computed causally on a trailing window)."""
+    from app.agents.indicators import ST_PERIOD, _ema_full, adx, supertrend_series
 
     try:
         sdata = broker.get_ohlcv(symbol, timeframe, limit=bars)
@@ -420,6 +423,13 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
         else:
             i += 1
             continue
+        # Regime / chop filter: skip the signal unless the trend is strong enough (ADX >= adx_min),
+        # computed causally on a trailing window.
+        if adx_min is not None:
+            av = adx(candles[max(0, i - 120): i + 1])
+            if av is None or av["adx"] < adx_min:
+                i += 1
+                continue
         risk = abs(entry - stop0)
         if risk <= 0:
             i += 1
