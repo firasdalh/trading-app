@@ -284,6 +284,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const emaRefs = useRef<Record<number, ISeriesApi<"Line">>>({});
   const stRef = useRef<ISeriesApi<"Line"> | null>(null);  // SuperTrend (ONE line, per-point colour)
+  const emaHiRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of highs (upper band)
+  const emaLoRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of lows (lower band)
   const rsiChartRef = useRef<IChartApi | null>(null);
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdContainerRef = useRef<HTMLDivElement>(null);
@@ -323,6 +325,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [showMacd, setShowMacd] = useState(true);
   const [showSt, setShowSt] = useState(true);
   const [showPb, setShowPb] = useState(true);
+  const [showBand, setShowBand] = useState(true);
 
   const toTime = (c: Candle) => Math.floor(Date.parse(c.ts) / 1000) as UTCTimestamp;
 
@@ -370,6 +373,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     stRef.current = chart.addLineSeries({
       lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
     });
+    // EMA20 of highs / lows = a band around price (the SuperTrend-band breakout strategy).
+    emaHiRef.current = chart.addLineSeries({
+      color: "#22d3ee", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    emaLoRef.current = chart.addLineSeries({
+      color: "#f97316", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
 
     chart.subscribeCrosshairMove((param) => {
       const bar = param.seriesData.get(series) as CandlestickData | undefined;
@@ -387,6 +399,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       volumeRef.current = null;
       emaRefs.current = {};
       stRef.current = null;
+      emaHiRef.current = null;
+      emaLoRef.current = null;
     };
   }, []);
 
@@ -514,6 +528,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         applyMacd();
         applySuperTrend(series.candles);
         applyPullback(series.candles);
+        applyBand(series.candles);
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
@@ -540,6 +555,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         volumeRef.current.setData([]);
         for (const { period } of EMA_CONFIG) emaRefs.current[period]?.setData([]);
         stRef.current?.setData([]);
+        emaHiRef.current?.setData([]);
+        emaLoRef.current?.setData([]);
         rsiSeriesRef.current?.setData([]);
         macdLineRef.current?.setData([]);
         macdSignalRef.current?.setData([]);
@@ -566,6 +583,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     applyPullback(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showPb]);
+
+  useEffect(() => {
+    applyBand(candlesRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showBand]);
 
   function applyEmas(candles: Candle[]) {
     if (!candles.length) return;
@@ -668,6 +690,28 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       text: `PB ${s.score}`,
     }));
     series.setMarkers(markers);
+  }
+
+  function applyBand(candles: Candle[]) {
+    const hi = emaHiRef.current;
+    const lo = emaLoRef.current;
+    if (!hi || !lo) return;
+    if (!showBand || !candles.length) {
+      hi.setData([]);
+      lo.setData([]);
+      return;
+    }
+    const times = candles.map(toTime);
+    const eh = ema(candles.map((c) => c.high), 20);
+    const el = ema(candles.map((c) => c.low), 20);
+    const hiData: LineData[] = [];
+    const loData: LineData[] = [];
+    for (let i = 0; i < candles.length; i++) {
+      if (eh[i] !== undefined) hiData.push({ time: times[i], value: eh[i] as number });
+      if (el[i] !== undefined) loData.push({ time: times[i], value: el[i] as number });
+    }
+    hi.setData(hiData);
+    lo.setData(loData);
   }
 
   // Live quote -> update the last candle.
@@ -941,6 +985,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           title="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70."
         >
           Pullback
+        </button>
+        <button
+          onClick={() => setShowBand((v) => !v)}
+          className={`rounded px-2 py-0.5 text-xs ${showBand ? "bg-neutral-700 text-cyan-300" : "bg-neutral-900 text-neutral-500"}`}
+          title="EMA20 of highs / lows = a band around price. The SuperTrend Strategy enters on a candle close BEYOND this band in the SuperTrend direction."
+        >
+          EMA20 H/L
         </button>
         <button
           onClick={recenter}

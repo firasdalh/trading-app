@@ -239,6 +239,7 @@ export interface SettingsResponse {
     trend_only_mode: boolean;
     scalp_mode: boolean;
     ai_led_mode: boolean;
+    st_band_mode: boolean;
     live_confirmed_at: string | null;
   };
   risk: {

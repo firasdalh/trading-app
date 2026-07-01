@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from app.agents.indicators import adx, atr, bollinger, ema, macd, market_structure, volume_ratio
+from app.agents.indicators import (
+    adx, atr, bollinger, ema, macd, market_structure, supertrend, volume_ratio,
+)
 from app.agents.orchestrator import _deterministic_decision, _regime, _session_quality
 from app.models.enums import AssetClass, Direction, TradingBias
 from app.models.schemas import Candle, FundamentalRead, TechnicalRead, TimeframeRead
@@ -54,6 +56,16 @@ def test_macd_sign_follows_direction():
     down = macd([float(i) for i in range(80, 1, -1)])
     assert up is not None and up["macd"] > 0
     assert down is not None and down["macd"] < 0
+
+
+def test_supertrend_direction_and_side():
+    r_up = _ramp()
+    up = supertrend(r_up)
+    r_dn = _ramp(start=160.0, step=-0.5)
+    dn = supertrend(r_dn)
+    # Uptrend: line below price (green support); downtrend: line above price (red resistance).
+    assert up is not None and up["dir"] == 1 and up["line"] < r_up[-1].close
+    assert dn is not None and dn["dir"] == -1 and dn["line"] > r_dn[-1].close
 
 
 def test_bollinger_flat_zero_width():

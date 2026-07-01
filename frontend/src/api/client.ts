@@ -166,6 +166,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
+  setStBandMode: (enabled: boolean) =>
+    request<SettingsResponse>("/api/settings/st-band-mode", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
   setBrokerMap: (brokerMap: Record<string, string>) =>
     request<SettingsResponse>("/api/settings/broker-map", {
       method: "POST",

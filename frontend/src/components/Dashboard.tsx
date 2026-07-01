@@ -80,6 +80,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scalpBusy, setScalpBusy] = useState(false);
+  const [stBandBusy, setStBandBusy] = useState(false);
 
   const [symbols, setSymbols] = useState<string[]>([]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
@@ -87,6 +88,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const liveQuote = useQuoteSocket(symbol, assetClass);
   const { data: brokerInfo } = usePolling(() => api.brokerInfo(assetClass), 6000, [assetClass]);
   const scalp = !!settings?.app.scalp_mode;
+  const stBand = !!settings?.app.st_band_mode;
 
   // Load the broker's available symbols for the chosen asset class. If the current symbol
   // isn't offered (e.g. switching to forex while on AAPL), jump to the first available one.
@@ -198,6 +200,19 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setScalpBusy(false);
+    }
+  };
+
+  const toggleStBand = async () => {
+    setStBandBusy(true);
+    setError(null);
+    try {
+      await api.setStBandMode(!stBand);
+      onSettingsChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStBandBusy(false);
     }
   };
 
@@ -344,6 +359,18 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           }`}
         >
           ⚡ Scalping {scalp ? "ON · 15m" : "OFF"}
+        </button>
+        <button
+          onClick={toggleStBand}
+          disabled={stBandBusy}
+          title="SuperTrend Strategy: trade the mechanical SuperTrend + EMA20-band breakout (long on a close above the band in an uptrend / short below it in a downtrend; stop trails the SuperTrend line). Overrides AI-led + Scalp while on."
+          className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+            stBand
+              ? "border-emerald-500 bg-emerald-500/15 text-emerald-300"
+              : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+          }`}
+        >
+          📈 SuperTrend {stBand ? "ON" : "OFF"}
         </button>
         <div className="ml-auto flex items-center gap-3">
           {brokerInfo &&

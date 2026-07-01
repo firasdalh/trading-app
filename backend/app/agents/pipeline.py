@@ -62,9 +62,11 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
     technical = run_technical(symbol, series, use_llm=reads)
     fundamental = run_fundamental(symbol, now=now, use_llm=reads)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
-                                use_llm=use_llm, scalp=settings.scalp_mode,
+                                use_llm=use_llm, scalp=settings.scalp_mode and not settings.st_band_mode,
                                 trend_only=settings.trend_only_mode and not settings.scalp_mode,
-                                ai_led=settings.ai_led_mode and not settings.scalp_mode)
+                                ai_led=(settings.ai_led_mode and not settings.scalp_mode
+                                        and not settings.st_band_mode),
+                                st_band=settings.st_band_mode)
     decision = assess(session, proposal, cache=cache)
     return proposal, decision
 
@@ -118,9 +120,11 @@ def analyze_symbol(
     technical = run_technical(symbol, series, use_llm=use_llm)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
-                                use_llm=use_llm, scalp=settings.scalp_mode,
+                                use_llm=use_llm, scalp=settings.scalp_mode and not settings.st_band_mode,
                                 trend_only=settings.trend_only_mode and not settings.scalp_mode,
-                                ai_led=settings.ai_led_mode and not settings.scalp_mode)
+                                ai_led=(settings.ai_led_mode and not settings.scalp_mode
+                                        and not settings.st_band_mode),
+                                st_band=settings.st_band_mode)
 
     # 3. Persist the proposal + full reasoning bundle (audit trail).
     record = TradeProposalRecord(

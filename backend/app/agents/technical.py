@@ -16,6 +16,7 @@ from app.agents.indicators import (
     market_structure,
     reference_levels,
     rsi,
+    supertrend,
     swing_levels,
     trend_from_emas,
     volume_ratio,
@@ -75,6 +76,18 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         val = ema(closes, p)
         if val is not None:
             indicators[f"ema{p}"] = val
+    # EMA20 of highs / lows = a band around price (the SuperTrend-band breakout strategy enters on a
+    # close beyond this band in the SuperTrend direction).
+    eh, el = ema([c.high for c in candles], 20), ema([c.low for c in candles], 20)
+    if eh is not None:
+        indicators["ema20_high"] = eh
+    if el is not None:
+        indicators["ema20_low"] = el
+    # SuperTrend (ATR 10 x2.3): trend direction + the trailing-stop line for the breakout strategy.
+    st = supertrend(candles)
+    if st is not None:
+        indicators["supertrend"] = st["line"]
+        indicators["supertrend_dir"] = float(st["dir"])
     # Momentum.
     r = rsi(closes)
     if r is not None:

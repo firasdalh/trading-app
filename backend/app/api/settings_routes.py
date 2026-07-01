@@ -252,6 +252,22 @@ def set_ai_led_mode(req: AiLedModeRequest, session: Session = Depends(get_sessio
     return build_settings_response(session)
 
 
+class StBandModeRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/st-band-mode", response_model=SettingsResponse)
+def set_st_band_mode(req: StBandModeRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle the SuperTrend + EMA20-band breakout strategy: when ON, the engine trades only that
+    mechanical strategy (long above the band in a SuperTrend uptrend / short below it in a downtrend;
+    stop trails the SuperTrend line). Overrides AI-led + scalp while on. Reversible."""
+    settings = get_or_create_settings(session)
+    settings.st_band_mode = req.enabled
+    session.commit()
+    log.info("st-band mode set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
 def _try_mt5_connect() -> dict:
     """Attempt an MT5 connection and return a status dict (never raises)."""
     from app.brokers.base import BrokerError

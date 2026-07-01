@@ -85,6 +85,11 @@ class AppSettings(Base):
     # Default ON. Toggle OFF to instantly revert to the deterministic + confirm/veto engine.
     ai_led_mode: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # SuperTrend + EMA20-band breakout strategy: a mechanical mode (long above the band in a
+    # SuperTrend uptrend / short below it in a downtrend; stop trails the SuperTrend line). When ON
+    # it overrides AI-led + scalp. Toggle from the dashboard. OFF by default.
+    st_band_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

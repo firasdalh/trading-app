@@ -244,6 +244,50 @@ def atr(candles: list[Candle], period: int = 14) -> float | None:
     return round(rma[-1], 6) if rma else None
 
 
+ST_PERIOD = 10     # SuperTrend ATR period
+ST_FACTOR = 2.3    # SuperTrend ATR multiplier (matches the chart overlay)
+
+
+def supertrend(candles: list[Candle], period: int = ST_PERIOD, mult: float = ST_FACTOR) -> dict | None:
+    """SuperTrend — a trend-following band that flips sides. Returns the LAST bar's
+    ``{"line": band value, "dir": 1 (up/support below price) | -1 (down/resistance above)}``,
+    or None if there isn't enough data. Wilder-smoothed ATR; identical to the chart's overlay."""
+    n = len(candles)
+    if n < period + 1:
+        return None
+
+    def _tr(i: int) -> float:
+        h, lo, pc = candles[i].high, candles[i].low, candles[i - 1].close
+        return max(h - lo, abs(h - pc), abs(lo - pc))
+
+    atr_i = [0.0] * n                          # Wilder ATR aligned to candle index (valid i >= period)
+    atr_i[period] = sum(_tr(i) for i in range(1, period + 1)) / period
+    for i in range(period + 1, n):
+        atr_i[i] = (atr_i[i - 1] * (period - 1) + _tr(i)) / period
+
+    final_upper = final_lower = 0.0
+    prev_dir = 1
+    line = 0.0
+    for i in range(period, n):
+        hl2 = (candles[i].high + candles[i].low) / 2
+        bu = hl2 + mult * atr_i[i]
+        bl = hl2 - mult * atr_i[i]
+        if i == period:
+            final_upper, final_lower, prev_dir, line = bu, bl, 1, bl
+            continue
+        prev_upper, prev_lower = final_upper, final_lower
+        final_upper = bu if (bu < prev_upper or candles[i - 1].close > prev_upper) else prev_upper
+        final_lower = bl if (bl > prev_lower or candles[i - 1].close < prev_lower) else prev_lower
+        d = prev_dir
+        if prev_dir == 1 and candles[i].close < final_lower:
+            d = -1
+        elif prev_dir == -1 and candles[i].close > final_upper:
+            d = 1
+        prev_dir = d
+        line = final_lower if d == 1 else final_upper
+    return {"line": round(line, 6), "dir": prev_dir}
+
+
 def adx(candles: list[Candle], period: int = 14) -> dict | None:
     """Wilder's ADX with +DI/-DI. ADX < ~20 => weak/no trend (chop)."""
     if len(candles) < 2 * period + 1:

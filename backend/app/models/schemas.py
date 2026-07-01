@@ -364,6 +364,7 @@ class AppSettingsView(BaseModel):
     trend_only_mode: bool = True
     scalp_mode: bool = False
     ai_led_mode: bool = True
+    st_band_mode: bool = False
     live_confirmed_at: datetime | None = None
 
 
