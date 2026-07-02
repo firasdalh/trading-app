@@ -707,63 +707,71 @@ def _conditional_resumption(
     )
 
 
-_ST_BAND_TP_R = 3.0  # backstop take-profit (R) so the Risk Manager can size; the trailing SuperTrend
-#                      line is the REAL exit (moved by the monitor). Not meant to cap most trades.
+_ST_BAND_MIN_RR = 1.5   # skip a signal whose structure target is closer than this
+_ST_BAND_TP_R = 2.0     # fallback target (R) when there's no clean opposing S/R level
 
 
-def _supertrend_band_decision(base: TradeProposal, ind: dict, symbol: str) -> TradeProposal:
-    """Mechanical SuperTrend + EMA20-band breakout. Enter WITH the SuperTrend when a candle closes
-    beyond the EMA20 high/low band; the stop sits ON the SuperTrend line (trailed live by the
-    monitor). No hard TP — a far ~3R backstop is set only so the deterministic Risk Manager can
-    size the trade. NO_TRADE when price is inside the band or the SuperTrend disagrees."""
+def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) -> TradeProposal:
+    """Mechanical SuperTrend + EMA20-band breakout with STRUCTURE-BASED exits. Enter WITH the
+    SuperTrend when a candle closes beyond the EMA20 high/low band. The STOP sits just beyond the
+    nearest support (long) / resistance (short); the TARGET is the next opposing S/R level — an ATR /
+    2R fallback is used when structure is absent. Requires >= 1.5R; NO_TRADE inside the band or when
+    the SuperTrend disagrees with the breakout side."""
     base.strategy = "supertrend_band"
     st_dir = ind.get("supertrend_dir")
-    st_line = ind.get("supertrend")
     ema_h = ind.get("ema20_high")
     ema_l = ind.get("ema20_low")
     last = ind.get("last_close")
-    if None in (st_dir, st_line, ema_h, ema_l, last):
+    atr_v = ind.get("atr14") or 0.0
+    if None in (st_dir, ema_h, ema_l, last):
         base.rationale = "SuperTrend-band: not enough data to compute the SuperTrend / EMA20 band."
         return base
 
     if st_dir > 0 and last > ema_h:
-        if st_line >= last:  # right at a flip — no valid stop below price yet
-            base.rationale = "SuperTrend-band: long signal but the SuperTrend line isn't below price yet."
-            return base
-        risk = last - st_line
-        base.direction = Direction.LONG
-        base.entry, base.stop_loss = round(last, 6), round(st_line, 6)
-        base.take_profit = round(last + _ST_BAND_TP_R * risk, 6)
-        base.confidence = 0.7
-        base.rationale = (
-            f"SuperTrend-band LONG: uptrend (SuperTrend green) and price closed above EMA20-high "
-            f"{round(ema_h, 6)}. Stop on the SuperTrend line {round(st_line, 6)} (trails); backstop "
-            f"target {base.take_profit} (~{_ST_BAND_TP_R:.0f}R)."
-        )
-        return base
-
-    if st_dir < 0 and last < ema_l:
-        if st_line <= last:  # right at a flip — no valid stop above price yet
-            base.rationale = "SuperTrend-band: short signal but the SuperTrend line isn't above price yet."
-            return base
-        risk = st_line - last
-        base.direction = Direction.SHORT
-        base.entry, base.stop_loss = round(last, 6), round(st_line, 6)
-        base.take_profit = round(last - _ST_BAND_TP_R * risk, 6)
-        base.confidence = 0.7
-        base.rationale = (
-            f"SuperTrend-band SHORT: downtrend (SuperTrend red) and price closed below EMA20-low "
-            f"{round(ema_l, 6)}. Stop on the SuperTrend line {round(st_line, 6)} (trails); backstop "
-            f"target {base.take_profit} (~{_ST_BAND_TP_R:.0f}R)."
-        )
-        return base
-
-    if ema_l <= last <= ema_h:
-        base.rationale = (f"SuperTrend-band: no trade — price {round(last, 6)} is inside the EMA20 band "
-                          f"[{round(ema_l, 6)}, {round(ema_h, 6)}].")
+        direction, is_long = Direction.LONG, True
+    elif st_dir < 0 and last < ema_l:
+        direction, is_long = Direction.SHORT, False
     else:
-        base.rationale = ("SuperTrend-band: no trade — the breakout side doesn't match the SuperTrend "
-                          f"({'up' if st_dir > 0 else 'down'}).")
+        if ema_l <= last <= ema_h:
+            base.rationale = (f"SuperTrend-band: no trade — price {round(last, 6)} inside the EMA20 band "
+                              f"[{round(ema_l, 6)}, {round(ema_h, 6)}].")
+        else:
+            base.rationale = ("SuperTrend-band: no trade — the breakout side doesn't match the "
+                              f"SuperTrend ({'up' if st_dir > 0 else 'down'}).")
+        return base
+
+    # Structure-based stop & target (support/resistance), with a beyond-the-wick buffer and ATR/2R
+    # fallbacks when there's no clean level.
+    buf = 0.2 * atr_v
+    entry = last
+    if is_long:
+        sup, res = _nearest_below(tf0, ind, entry), _nearest_above(tf0, ind, entry)
+        stop = (sup - buf) if sup is not None else (entry - 1.5 * atr_v)
+        tp = res if res is not None else (entry + _ST_BAND_TP_R * (entry - stop))
+        stop_src, tp_src = ("support" if sup is not None else "1.5xATR"), ("resistance" if res is not None else "2R")
+    else:
+        res, sup = _nearest_above(tf0, ind, entry), _nearest_below(tf0, ind, entry)
+        stop = (res + buf) if res is not None else (entry + 1.5 * atr_v)
+        tp = sup if sup is not None else (entry - _ST_BAND_TP_R * (stop - entry))
+        stop_src, tp_src = ("resistance" if res is not None else "1.5xATR"), ("support" if sup is not None else "2R")
+
+    risk = abs(entry - stop)
+    if risk <= 0:
+        base.rationale = "SuperTrend-band: no valid stop distance from structure."
+        return base
+    rr = abs(tp - entry) / risk
+    if rr < _ST_BAND_MIN_RR:
+        base.rationale = (f"SuperTrend-band: {direction.value} signal but the structure target is only "
+                          f"{rr:.2f}R (< {_ST_BAND_MIN_RR}R) — skipping.")
+        return base
+    base.direction = direction
+    base.entry, base.stop_loss, base.take_profit = round(entry, 6), round(stop, 6), round(tp, 6)
+    base.confidence = 0.7
+    base.rationale = (
+        f"SuperTrend-band {direction.value.upper()}: SuperTrend {'up' if is_long else 'down'} + close "
+        f"{'above EMA20-high' if is_long else 'below EMA20-low'}. Stop beyond {stop_src} "
+        f"{base.stop_loss}, target at {tp_src} {base.take_profit} ({rr:.1f}R)."
+    )
     return base
 
 
@@ -806,7 +814,7 @@ def _deterministic_decision(
     base.strategy = policy["strategy"]
     # SuperTrend-band breakout mode: a dedicated mechanical strategy replaces the swing logic.
     if st_band:
-        return _supertrend_band_decision(base, ind, symbol)
+        return _supertrend_band_decision(base, ind, tf0, symbol)
     # Scalp mode (15m): a dedicated, parsimonious scalp strategy replaces the swing logic entirely.
     if scalp:
         return _scalp_decision(base, ind, tf0, macro, regime, asset_class, symbol, now)

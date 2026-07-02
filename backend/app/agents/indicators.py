@@ -245,7 +245,7 @@ def atr(candles: list[Candle], period: int = 14) -> float | None:
 
 
 ST_PERIOD = 10     # SuperTrend ATR period
-ST_FACTOR = 2.3    # SuperTrend ATR multiplier (matches the chart overlay)
+ST_FACTOR = 2.7    # SuperTrend ATR multiplier (matches the chart overlay)
 
 
 def supertrend_series(candles: list[Candle], period: int = ST_PERIOD,

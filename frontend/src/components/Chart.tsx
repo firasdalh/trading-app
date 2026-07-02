@@ -123,8 +123,8 @@ function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
 
 // SuperTrend (ATR bands that flip with trend). Returns, per bar, the line value and direction
 // (1 = up/bullish support below price, -1 = down/bearish resistance above price); null in warmup.
-// Params: ATR period 10, multiplier 2.3, Wilder-smoothed ATR.
-function superTrend(candles: Candle[], period = 10, mult = 2.3): { st: (number | null)[]; dir: number[] } {
+// Params: ATR period 10, multiplier 2.7, Wilder-smoothed ATR.
+function superTrend(candles: Candle[], period = 10, mult = 2.7): { st: (number | null)[]; dir: number[] } {
   const n = candles.length;
   const st: (number | null)[] = new Array(n).fill(null);
   const dir: number[] = new Array(n).fill(0);
@@ -975,7 +975,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         <button
           onClick={() => setShowSt((v) => !v)}
           className={`rounded px-2 py-0.5 text-xs ${showSt ? "bg-neutral-700 text-emerald-300" : "bg-neutral-900 text-neutral-500"}`}
-          title="SuperTrend (ATR 10 ×2.3) — green band = uptrend (support), red band = downtrend (resistance)"
+          title="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red band = downtrend (resistance)"
         >
           SuperTrend
         </button>

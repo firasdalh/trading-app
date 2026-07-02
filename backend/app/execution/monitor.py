@@ -179,44 +179,6 @@ def _reconcile_closed_at_broker(session: Session, settings, open_positions: list
     return reconciled
 
 
-def _trail_one_supertrend(session: Session, settings, pos: Position, broker, price: float) -> None:
-    """SuperTrend-band strategy: trail this position's stop to the current SuperTrend (2.3) line —
-    TIGHTEN-ONLY (never loosens), so 'the stop follows SuperTrend'. Risk-reducing; still respects the
-    live-execution gate (paper is always allowed). No-op unless the line is a tighter valid stop."""
-    from app.agents.indicators import supertrend
-    from app.core.state import live_execution_allowed
-    from app.data.ohlcv_cache import get_ohlcv_cached
-    from app.models.db import WatchItem
-
-    if not broker.is_paper and not live_execution_allowed(settings):
-        return
-    tf = session.scalar(select(WatchItem.timeframe).where(WatchItem.symbol == pos.symbol)) or "1h"
-    try:
-        candles = get_ohlcv_cached(broker, pos.symbol, tf, limit=200).candles
-    except Exception as exc:  # noqa: BLE001 - a data hiccup must never break the monitor pass
-        log.warning("supertrend trail: ohlcv failed", extra={"symbol": pos.symbol, "error": str(exc)})
-        return
-    st = supertrend(candles)
-    if not st:
-        return
-    line = round(st["line"], 6)
-    cur = pos.stop_loss
-    is_long = pos.direction == Direction.LONG.value
-    # Only trail when the line is on the correct side of price AND tighter than the current stop.
-    tighter = (line < price and (cur is None or line > cur)) if is_long \
-        else (line > price and (cur is None or line < cur))
-    if not tighter:
-        return
-    try:
-        res = broker.set_sl_tp(pos.symbol, line, pos.take_profit)
-        if res.status.value not in ("error", "rejected"):
-            pos.stop_loss = line
-            session.add(pos)
-            log.info("supertrend trail", extra={"symbol": pos.symbol, "stop": line, "from": cur})
-    except Exception as exc:  # noqa: BLE001
-        log.warning("supertrend trail failed", extra={"symbol": pos.symbol, "error": str(exc)})
-
-
 def monitor_positions(session: Session) -> dict:
     """One monitoring pass over all open positions. Returns a small summary dict."""
     settings = get_or_create_settings(session)
@@ -244,11 +206,6 @@ def monitor_positions(session: Session) -> dict:
 
         pos.last_price = price
         pos.unrealized_pnl = _pnl(broker, pos, price)  # broker-truth (currency-correct) when available
-
-        # SuperTrend-band strategy: trail the stop to the SuperTrend line (tighten-only) before the
-        # exit check, so 'the stop follows SuperTrend'.
-        if settings.st_band_mode:
-            _trail_one_supertrend(session, settings, pos, broker, price)
 
         reason = _exit_reason(pos.direction, price, pos.stop_loss, pos.take_profit)
         if reason:

@@ -469,7 +469,7 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
                            bars: int = 3000, max_hold: int = 200, cooldown: int = 1,
                            cost_r: float = 0.0, adx_min: float | None = None,
                            fresh_flip: int | None = None, entry_mode: str = "band",
-                           pb_threshold: float = 70.0) -> list[BTTrade]:
+                           pb_threshold: float = 70.0, exit_mode: str = "trail") -> list[BTTrade]:
     """Backtest a SuperTrend strategy WITH its SuperTrend trailing stop.
 
     ``entry_mode``:
@@ -549,24 +549,43 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
             if av is None or av["adx"] < adx_min:
                 i += 1
                 continue
-        risk = abs(entry - stop0)
-        if risk <= 0:
-            i += 1
-            continue
-        tp = entry + 3 * risk if is_long else entry - 3 * risk
+        # Exit levels: static STRUCTURE (support/resistance) or the SuperTrend TRAIL.
+        if exit_mode == "structure":
+            lb = candles[max(0, i - 20):i]
+            wlo = min(cd.low for cd in lb) if lb else entry
+            whi = max(cd.high for cd in lb) if lb else entry
+            atr_i = abs(entry - line_i) / 2.7 if line_i else 0.0   # SuperTrend line ~ 2.7*ATR from price
+            buf = 0.2 * atr_i
+            if is_long:
+                stop0 = (wlo - buf) if wlo < entry else entry - 1.5 * atr_i
+                risk = entry - stop0
+                tp = whi if whi > entry else entry + 2 * risk
+            else:
+                stop0 = (whi + buf) if whi > entry else entry + 1.5 * atr_i
+                risk = stop0 - entry
+                tp = wlo if wlo < entry else entry - 2 * risk
+            if risk <= 0 or abs(tp - entry) / risk < 1.5:
+                i += 1
+                continue
+        else:  # trail
+            risk = abs(entry - stop0)
+            if risk <= 0:
+                i += 1
+                continue
+            tp = entry + 3 * risk if is_long else entry - 3 * risk
         cur_stop = stop0
         end = min(i + max_hold, n - 1)
         outcome, exit_px, exit_j = "timeout", candles[end].close, end
         want_dir = 1 if is_long else -1
         for j in range(i + 1, end + 1):
             bar = candles[j]
-            # Trail the stop to the SuperTrend line while the trend agrees (tighten-only).
-            if st_dir[j] == want_dir and st_line[j] is not None:
+            if exit_mode == "trail" and st_dir[j] == want_dir and st_line[j] is not None:
+                # Trail the stop to the SuperTrend line while the trend agrees (tighten-only).
                 if is_long and st_line[j] > cur_stop:
                     cur_stop = st_line[j]
                 elif (not is_long) and st_line[j] < cur_stop:
                     cur_stop = st_line[j]
-            # Intrabar exit — stop first (conservative), then the 3R backstop.
+            # Intrabar exit — stop first (conservative), then target.
             if is_long:
                 if bar.low <= cur_stop:
                     outcome, exit_px, exit_j = "stop", cur_stop, j; break
@@ -577,14 +596,15 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
                     outcome, exit_px, exit_j = "stop", cur_stop, j; break
                 if bar.low <= tp:
                     outcome, exit_px, exit_j = "target", tp, j; break
-            # SuperTrend flipped against the position -> exit at the close.
-            if st_dir[j] == -want_dir:
+            # SuperTrend flip exit (trailing mode only).
+            if exit_mode == "trail" and st_dir[j] == -want_dir:
                 outcome, exit_px, exit_j = "flip", bar.close, j; break
         raw_r = ((exit_px - entry) if is_long else (entry - exit_px)) / risk
         trades.append(BTTrade(
             symbol=symbol, direction=direction, regime="supertrend", strategy=strat_label,
             confidence=0.7, entry_time=candles[i].ts, entry=round(entry, 6), stop=round(stop0, 6),
-            target=round(tp, 6), planned_rr=3.0, exit_time=candles[exit_j].ts, exit=round(exit_px, 6),
+            target=round(tp, 6), planned_rr=round(abs(tp - entry) / risk, 2),
+            exit_time=candles[exit_j].ts, exit=round(exit_px, 6),
             outcome=outcome, r=round(raw_r - cost_r, 4), bars_held=exit_j - i,
         ))
         block_until = exit_j + cooldown
