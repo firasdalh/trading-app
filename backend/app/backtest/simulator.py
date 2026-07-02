@@ -377,22 +377,113 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
     return trades
 
 
+def _pullback_scores(candles: list, st_dir: list[int], L: int = 3) -> tuple[list[float], list[bool]]:
+    """Per-bar Pullback confidence (0-100) + direction, ported from the chart (causal). In a
+    SuperTrend UPtrend it scores a buy-the-dip (close<EMA20 AND RSI<53 = the +35 trigger, then
+    volume falling +15, bullish engulfing +10, higher-low intact +15, trend +25); the DOWNtrend
+    mirror scores a sell-the-rally. Score 0 when the trigger isn't met."""
+    from app.agents.indicators import _ema_full
+
+    n = len(candles)
+    scores = [0.0] * n
+    longs = [True] * n
+    if n < 30:
+        return scores, longs
+    closes = [c.close for c in candles]
+    ema20 = _ema_full(closes, 20)
+    # Wilder RSI series (causal), matching the chart's rsiCalc.
+    rsi: list[float | None] = [None] * n
+    period = 14
+    if n > period:
+        gains = losses = 0.0
+        for i in range(1, period + 1):
+            ch = closes[i] - closes[i - 1]
+            gains += ch if ch > 0 else 0.0
+            losses += -ch if ch < 0 else 0.0
+        ag, al = gains / period, losses / period
+        rsi[period] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+        for i in range(period + 1, n):
+            ch = closes[i] - closes[i - 1]
+            ag = (ag * (period - 1) + (ch if ch > 0 else 0.0)) / period
+            al = (al * (period - 1) + (-ch if ch < 0 else 0.0)) / period
+            rsi[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    piv_low = [False] * n
+    piv_high = [False] * n
+    for j in range(L, n - L):
+        win = candles[j - L: j + L + 1]
+        if candles[j].low == min(c.low for c in win):
+            piv_low[j] = True
+        if candles[j].high == max(c.high for c in win):
+            piv_high[j] = True
+
+    def _vol_avg(i: int) -> float:
+        s = c = 0.0
+        for k in range(max(0, i - 10), i):
+            s += candles[k].volume
+            c += 1
+        return s / c if c else 0.0
+
+    def _last_two(arr, upto):
+        idx = []
+        for j in range(upto, -1, -1):
+            if arr[j]:
+                idx.append(j)
+                if len(idx) == 2:
+                    break
+        return idx
+
+    for i in range(1, n):
+        e, r, d = ema20[i], rsi[i], st_dir[i]
+        if e is None or r is None or d == 0:
+            continue
+        c, p = candles[i], candles[i - 1]
+        longs[i] = d == 1
+        if d == 1:
+            if not (c.close < e and r < 53):
+                continue
+            s = 25 + 35
+            if c.volume < _vol_avg(i):
+                s += 15
+            if c.close > c.open and p.close < p.open and c.close >= p.open and c.open <= p.close:
+                s += 10
+            pv = _last_two(piv_low, i - L)
+            if len(pv) == 2 and candles[pv[0]].low > candles[pv[1]].low:
+                s += 15
+            scores[i] = s
+        else:
+            if not (c.close > e and r > 46):
+                continue
+            s = 25 + 35
+            if c.volume < _vol_avg(i):
+                s += 15
+            if c.close < c.open and p.close > p.open and c.close <= p.open and c.open >= p.close:
+                s += 10
+            pv = _last_two(piv_high, i - L)
+            if len(pv) == 2 and candles[pv[0]].high < candles[pv[1]].high:
+                s += 15
+            scores[i] = s
+    return scores, longs
+
+
 def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                            bars: int = 3000, max_hold: int = 200, cooldown: int = 1,
                            cost_r: float = 0.0, adx_min: float | None = None,
-                           fresh_flip: int | None = None) -> list[BTTrade]:
-    """Backtest the SuperTrend + EMA20-band breakout strategy WITH its SuperTrend trailing stop.
+                           fresh_flip: int | None = None, entry_mode: str = "band",
+                           pb_threshold: float = 70.0) -> list[BTTrade]:
+    """Backtest a SuperTrend strategy WITH its SuperTrend trailing stop.
 
-    Single timeframe (the strategy only uses entry-TF indicators). Long when SuperTrend is up AND a
-    candle closes above EMA20-high; short when down AND closes below EMA20-low. Stop starts on the
-    SuperTrend line and TRAILS it each bar (tighten-only); exit on the trailed stop, a 3R backstop,
-    or a SuperTrend flip. Causal (SuperTrend/EMA computed left-to-right) — no look-ahead. R is
-    measured from the INITIAL risk (|entry - first SuperTrend stop|).
+    ``entry_mode``:
+      "band"     — the breakout: long when SuperTrend up AND a candle closes above EMA20-high; short
+                   when down AND closes below EMA20-low (buy strength).
+      "pullback" — the VALUE entry: long when SuperTrend up AND the Pullback score >= pb_threshold
+                   (buy-the-dip); short when down AND the score fires (sell-the-rally).
 
-    ``adx_min`` (optional): only take a signal when ADX at the entry bar >= this value — a regime /
-    chop filter (ADX computed causally on a trailing window).
-    ``fresh_flip`` (optional): only enter within this many bars of the SuperTrend flip — i.e. EARLY
-    in a new trend, not on a late mid-trend band-break."""
+    Single timeframe. Stop starts on the SuperTrend line and TRAILS it each bar (tighten-only); exit
+    on the trailed stop, a 3R backstop, or a SuperTrend flip. Causal (no look-ahead); R is measured
+    from the INITIAL risk (|entry - first SuperTrend stop|).
+
+    ``adx_min`` (optional): only take a signal when ADX at the entry bar >= this value.
+    ``fresh_flip`` (optional): only enter within this many bars of the SuperTrend flip."""
     from app.agents.indicators import ST_PERIOD, _ema_full, adx, supertrend_series
 
     try:
@@ -414,6 +505,8 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
         bars_since_flip[k] = (k - last_flip) if last_flip is not None else None
     eh = _ema_full([c.high for c in candles], 20)
     el = _ema_full([c.low for c in candles], 20)
+    pb_scores, pb_longs = _pullback_scores(candles, st_dir) if entry_mode == "pullback" else ([], [])
+    strat_label = f"supertrend_{entry_mode}"
 
     trades: list[BTTrade] = []
     i = 21           # warmup: EMA20 valid from index 19, SuperTrend from ST_PERIOD
@@ -422,15 +515,27 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
         if i <= block_until:
             i += 1
             continue
-        d, line_i, hi_i, lo_i, c = st_dir[i], st_line[i], eh[i], el[i], candles[i]
-        if line_i is None or hi_i is None or lo_i is None or d == 0:
+        d, line_i, c = st_dir[i], st_line[i], candles[i]
+        if line_i is None or d == 0:
             i += 1
             continue
-        if d == 1 and c.close > hi_i and line_i < c.close:
-            direction, entry, stop0, is_long = "long", c.close, line_i, True
-        elif d == -1 and c.close < lo_i and line_i > c.close:
-            direction, entry, stop0, is_long = "short", c.close, line_i, False
-        else:
+        direction = None
+        if entry_mode == "pullback":
+            # Value entry: a high Pullback score in the SuperTrend direction, with the SuperTrend
+            # line on the correct side to be the stop.
+            if pb_scores[i] >= pb_threshold:
+                if pb_longs[i] and line_i < c.close:
+                    direction, entry, stop0, is_long = "long", c.close, line_i, True
+                elif (not pb_longs[i]) and line_i > c.close:
+                    direction, entry, stop0, is_long = "short", c.close, line_i, False
+        else:  # band breakout
+            hi_i, lo_i = eh[i], el[i]
+            if hi_i is not None and lo_i is not None:
+                if d == 1 and c.close > hi_i and line_i < c.close:
+                    direction, entry, stop0, is_long = "long", c.close, line_i, True
+                elif d == -1 and c.close < lo_i and line_i > c.close:
+                    direction, entry, stop0, is_long = "short", c.close, line_i, False
+        if direction is None:
             i += 1
             continue
         # Fresh-flip filter: only enter EARLY in a new trend (within N bars of the SuperTrend flip).
@@ -477,7 +582,7 @@ def simulate_symbol_stband(broker, symbol: str, asset_class: AssetClass, timefra
                 outcome, exit_px, exit_j = "flip", bar.close, j; break
         raw_r = ((exit_px - entry) if is_long else (entry - exit_px)) / risk
         trades.append(BTTrade(
-            symbol=symbol, direction=direction, regime="supertrend", strategy="supertrend_band",
+            symbol=symbol, direction=direction, regime="supertrend", strategy=strat_label,
             confidence=0.7, entry_time=candles[i].ts, entry=round(entry, 6), stop=round(stop0, 6),
             target=round(tp, 6), planned_rr=3.0, exit_time=candles[exit_j].ts, exit=round(exit_px, 6),
             outcome=outcome, r=round(raw_r - cost_r, 4), bars_held=exit_j - i,
