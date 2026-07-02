@@ -16,7 +16,7 @@ from app.agents.indicators import (
     market_structure,
     reference_levels,
     rsi,
-    supertrend,
+    supertrend_series,
     swing_levels,
     trend_from_emas,
     volume_ratio,
@@ -83,11 +83,19 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         indicators["ema20_high"] = eh
     if el is not None:
         indicators["ema20_low"] = el
-    # SuperTrend (ATR 10 x2.3): trend direction + the trailing-stop line for the breakout strategy.
-    st = supertrend(candles)
-    if st is not None:
-        indicators["supertrend"] = st["line"]
-        indicators["supertrend_dir"] = float(st["dir"])
+    # SuperTrend (ATR 10 x2.7): trend direction + the line, plus "bars since the last flip" so the
+    # breakout strategy can require a FRESH flip (early entry) rather than a late mid-trend break.
+    sts = supertrend_series(candles)
+    dirs = sts["dir"]
+    if dirs and dirs[-1] != 0:
+        indicators["supertrend"] = sts["line"][-1]
+        indicators["supertrend_dir"] = float(dirs[-1])
+        last_flip = None
+        for k in range(1, len(dirs)):
+            if dirs[k] != 0 and dirs[k - 1] != 0 and dirs[k] != dirs[k - 1]:
+                last_flip = k
+        if last_flip is not None:
+            indicators["supertrend_bars_since_flip"] = float(len(dirs) - 1 - last_flip)
     # Momentum.
     r = rsi(closes)
     if r is not None:

@@ -11,9 +11,9 @@ def _base() -> TradeProposal:
                          direction=Direction.NO_TRADE, confidence=0.0)
 
 
-def _inputs(dir_, ema_h, ema_l, last, atr=2.0, support=None, resistance=None):
+def _inputs(dir_, ema_h, ema_l, last, atr=2.0, support=None, resistance=None, bars_since_flip=1.0):
     ind = {"supertrend_dir": dir_, "ema20_high": ema_h, "ema20_low": ema_l,
-           "last_close": last, "atr14": atr}
+           "last_close": last, "atr14": atr, "supertrend_bars_since_flip": bars_since_flip}
     tf0 = TimeframeRead(
         timeframe="1h", trend="up" if dir_ > 0 else "down", indicators=ind,
         support_levels=[support] if support is not None else [],
@@ -51,6 +51,14 @@ def test_no_trade_when_supertrend_disagrees():
     ind, tf0 = _inputs(1.0, ema_h=105, ema_l=100, last=90, atr=2.0, support=80, resistance=110)
     p = _supertrend_band_decision(_base(), ind, tf0, "X")
     assert p.direction == Direction.NO_TRADE and "match" in p.rationale.lower()
+
+
+def test_no_trade_when_flip_is_stale():
+    # Valid long setup, but the SuperTrend flip was long ago -> not an early entry -> skip.
+    ind, tf0 = _inputs(1.0, ema_h=108, ema_l=104, last=110, atr=2.0, support=105, resistance=120,
+                       bars_since_flip=20.0)
+    p = _supertrend_band_decision(_base(), ind, tf0, "X")
+    assert p.direction == Direction.NO_TRADE and "fresh flip" in p.rationale.lower()
 
 
 def test_no_trade_when_target_too_close():

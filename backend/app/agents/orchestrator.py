@@ -707,8 +707,9 @@ def _conditional_resumption(
     )
 
 
-_ST_BAND_MIN_RR = 1.5   # skip a signal whose structure target is closer than this
-_ST_BAND_TP_R = 2.0     # fallback target (R) when there's no clean opposing S/R level
+_ST_BAND_MIN_RR = 1.5      # skip a signal whose structure target is closer than this
+_ST_BAND_TP_R = 2.0        # fallback target (R) when there's no clean opposing S/R level
+_ST_BAND_FRESH_FLIP = 3    # EARLY entry: only take the break within this many bars of a SuperTrend flip
 
 
 def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) -> TradeProposal:
@@ -738,6 +739,14 @@ def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) 
         else:
             base.rationale = ("SuperTrend-band: no trade — the breakout side doesn't match the "
                               f"SuperTrend ({'up' if st_dir > 0 else 'down'}).")
+        return base
+
+    # EARLY entry only: require a FRESH SuperTrend flip (skip late mid-trend band-breaks, which
+    # backtested worst). bars_since_flip is None when the read couldn't compute it.
+    bsf = ind.get("supertrend_bars_since_flip")
+    if bsf is None or bsf > _ST_BAND_FRESH_FLIP:
+        base.rationale = (f"SuperTrend-band: {direction.value} signal but not a fresh flip "
+                          f"(bars since flip: {bsf}) — waiting for an early entry.")
         return base
 
     # Structure-based stop & target (support/resistance), with a beyond-the-wick buffer and ATR/2R
