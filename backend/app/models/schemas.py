@@ -365,6 +365,7 @@ class AppSettingsView(BaseModel):
     scalp_mode: bool = False
     ai_led_mode: bool = True
     st_band_mode: bool = False
+    journal_reset_at: datetime | None = None
     live_confirmed_at: datetime | None = None
 
 

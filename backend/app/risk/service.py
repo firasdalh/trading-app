@@ -62,6 +62,11 @@ def broker_closed_trades(session: Session, lookback_days: int = 120) -> list[Pos
     settings = get_or_create_settings(session)
     bm = settings.broker_map or {}
     since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    # "Start fresh from now" marker: only show trades closed at/after it (broker history untouched).
+    reset = getattr(settings, "journal_reset_at", None)
+    if reset is not None:
+        reset = reset if reset.tzinfo else reset.replace(tzinfo=timezone.utc)
+        since = max(since, reset)
     seen: set[str] = set()
     out: list[PositionView] = []
     supported = False
@@ -80,6 +85,9 @@ def broker_closed_trades(session: Session, lookback_days: int = 120) -> list[Pos
             out.extend(res)
     if not supported:
         return None
+    if reset is not None:  # belt-and-suspenders vs a broker that ignores the `since` bound
+        out = [v for v in out if v.closed_at and
+               (v.closed_at if v.closed_at.tzinfo else v.closed_at.replace(tzinfo=timezone.utc)) >= reset]
     out.sort(
         key=lambda v: v.closed_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True
     )

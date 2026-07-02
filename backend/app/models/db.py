@@ -90,6 +90,11 @@ class AppSettings(Base):
     # it overrides AI-led + scalp. Toggle from the dashboard. OFF by default.
     st_band_mode: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Journal "start fresh from now" marker: when set, the trade journal + stats + calibration only
+    # count trades CLOSED at/after this time (the broker's full deal history is untouched — this just
+    # filters the view). None = show everything. Set it to start a clean test period.
+    journal_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

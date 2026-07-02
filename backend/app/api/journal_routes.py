@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -13,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.reflection import latest_reflection, run_reflection
 from app.core.database import get_session
+from app.core.state import get_or_create_settings
 from app.models.db import Position
 from app.models.enums import PositionStatus
 from app.models.schemas import PositionView, ReflectionReport
@@ -33,13 +36,12 @@ def calibration(session: Session = Depends(get_session)) -> list[CalibrationBuck
     """Per-confidence-bucket win rate + avg R over CLOSED app-tracked trades — i.e. does the
     engine's confidence actually predict outcomes? (Does "70%" win ~70%?) Use it to recalibrate
     the score and the Hybrid auto-open threshold once enough trades have accumulated."""
-    rows = session.scalars(
-        select(Position).where(
-            Position.status == PositionStatus.CLOSED.value,
-            Position.confidence.is_not(None),
-            Position.realized_pnl.is_not(None),
-        )
-    ).all()
+    conds = [Position.status == PositionStatus.CLOSED.value,
+             Position.confidence.is_not(None), Position.realized_pnl.is_not(None)]
+    reset = get_or_create_settings(session).journal_reset_at
+    if reset is not None:
+        conds.append(Position.closed_at >= reset)
+    rows = session.scalars(select(Position).where(*conds)).all()
     edges = [(0.0, 0.5), (0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.01)]
     out: list[CalibrationBucket] = []
     for lo, hi in edges:
@@ -65,15 +67,16 @@ def closed_trades(
     match the Exness journal exactly; falls back to app-tracked closed positions otherwise."""
     from app.risk.service import broker_closed_trades
 
-    broker_trades = broker_closed_trades(session)
+    broker_trades = broker_closed_trades(session)  # already respects the journal reset marker
     if broker_trades is not None:
         return broker_trades[:limit]
 
+    conds = [Position.status == PositionStatus.CLOSED.value]
+    reset = get_or_create_settings(session).journal_reset_at
+    if reset is not None:
+        conds.append(Position.closed_at >= reset)
     rows = session.scalars(
-        select(Position)
-        .where(Position.status == PositionStatus.CLOSED.value)
-        .order_by(Position.closed_at.desc())
-        .limit(limit)
+        select(Position).where(*conds).order_by(Position.closed_at.desc()).limit(limit)
     ).all()
     return [PositionView.model_validate(r) for r in rows]
 
@@ -96,11 +99,13 @@ def stats(session: Session = Depends(get_session)) -> JournalStats:
     """Expectancy + R-multiple performance over CLOSED app-tracked trades (those with a recorded
     risk_amount). Answers 'what's the edge, in R?' and 'how deep was the worst drawdown?' — the
     numbers a desk reviews. Complements /calibration (which buckets the same trades by confidence)."""
+    conds = [Position.status == PositionStatus.CLOSED.value,
+             Position.realized_pnl.is_not(None), Position.risk_amount.is_not(None)]
+    reset = get_or_create_settings(session).journal_reset_at
+    if reset is not None:
+        conds.append(Position.closed_at >= reset)
     rows = session.scalars(
-        select(Position)
-        .where(Position.status == PositionStatus.CLOSED.value,
-               Position.realized_pnl.is_not(None), Position.risk_amount.is_not(None))
-        .order_by(Position.closed_at.asc())
+        select(Position).where(*conds).order_by(Position.closed_at.asc())
     ).all()
     rows = [r for r in rows if r.risk_amount]  # need risk_amount > 0 for an R-multiple
     n = len(rows)
@@ -131,6 +136,30 @@ def stats(session: Session = Depends(get_session)) -> JournalStats:
         total_r=round(sum(rs), 2),
         max_drawdown_r=round(max_dd, 2),
     )
+
+
+class JournalResetView(BaseModel):
+    journal_reset_at: datetime | None
+
+
+@router.post("/reset", response_model=JournalResetView)
+def reset_journal(session: Session = Depends(get_session)) -> JournalResetView:
+    """Start a FRESH journal from now: the trade log, stats, and calibration then only count trades
+    closed at/after this moment. Non-destructive — the broker's full deal history is untouched; call
+    DELETE /journal/reset to show everything again."""
+    settings = get_or_create_settings(session)
+    settings.journal_reset_at = datetime.now(timezone.utc)
+    session.commit()
+    return JournalResetView(journal_reset_at=settings.journal_reset_at)
+
+
+@router.delete("/reset", response_model=JournalResetView)
+def clear_journal_reset(session: Session = Depends(get_session)) -> JournalResetView:
+    """Undo the reset marker — show the full trade history again (nothing was ever deleted)."""
+    settings = get_or_create_settings(session)
+    settings.journal_reset_at = None
+    session.commit()
+    return JournalResetView(journal_reset_at=None)
 
 
 @router.post("/reflect", response_model=ReflectionReport)

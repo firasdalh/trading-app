@@ -24,12 +24,44 @@ function fmtDate(iso: string | null | undefined): string {
 
 // Journal: closed-trade log + the read-only Reflection agent's patterns and lessons.
 export function JournalView() {
-  const { data: trades } = usePolling(() => api.journalTrades(100), 8000, []);
-  const { data: calib } = usePolling(() => api.journalCalibration(), 10000, []);
-  const { data: perf } = usePolling(() => api.journalStats(), 10000, []);
+  const [bump, setBump] = useState(0);
+  const { data: trades } = usePolling(() => api.journalTrades(100), 8000, [bump]);
+  const { data: calib } = usePolling(() => api.journalCalibration(), 10000, [bump]);
+  const { data: perf } = usePolling(() => api.journalStats(), 10000, [bump]);
   const [reflection, setReflection] = useState<ReflectionReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const resetJournal = async () => {
+    if (!window.confirm(
+      "Start a FRESH journal from now?\n\nThe trade log, performance, and calibration will only " +
+        "count trades that close from this moment on. Nothing is deleted — your broker's full " +
+        "history is untouched, and you can restore the full view anytime.",
+    )) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.resetJournal();
+      setBump((b) => b + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restoreJournal = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.restoreJournal();
+      setBump((b) => b + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   const [open, setOpen] = useState(false);  // the report is long — collapsed by default
 
   useEffect(() => {
@@ -128,7 +160,27 @@ export function JournalView() {
       <CalibrationCard calib={calib} />
 
       <div className="card">
-        <div className="mb-2 text-sm font-semibold">Closed trades ({trades?.length ?? 0})</div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <span className="text-sm font-semibold">Closed trades ({trades?.length ?? 0})</span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={restoreJournal}
+              disabled={busy}
+              className="text-xs text-neutral-500 hover:text-neutral-300"
+              title="Show the full broker history again (undo a previous reset)."
+            >
+              Show all
+            </button>
+            <button
+              onClick={resetJournal}
+              disabled={busy}
+              className="text-xs text-neutral-400 hover:text-bear"
+              title="Start a fresh journal from now — the log + stats only count trades from this point on. Your broker's full history is NOT deleted."
+            >
+              Start fresh ↺
+            </button>
+          </div>
+        </div>
         {!trades || trades.length === 0 ? (
           <div className="text-sm text-neutral-500">No closed trades yet.</div>
         ) : (

@@ -49,6 +49,7 @@ _SQLITE_ADDED_COLUMNS = {
         ("scalp_mode", "BOOLEAN DEFAULT 0"),
         ("ai_led_mode", "BOOLEAN DEFAULT 1"),
         ("st_band_mode", "BOOLEAN DEFAULT 0"),
+        ("journal_reset_at", "DATETIME"),
     ],
     "watch_items": [
         ("recommended", "BOOLEAN DEFAULT 0"),
