@@ -310,6 +310,26 @@ def test_volatile_regime_banks_breakeven_earlier():
     assert volat is not None and volat["kind"] == "breakeven"
 
 
+def test_protect_behind_structure_not_entry():
+    # Long, +1R, stop still below entry, and a swing low is available -> protect behind the last
+    # swing (structure), NOT at the entry price. Here the swing sits just above entry, so the
+    # structure stop even locks a small profit instead of pinning to break-even.
+    p = _pos(direction="long", stop=4445.0)  # entry 4449
+    ctx = {"atr": 2.0, "last": 4459.0, "regime": "moderate", "swing_low": 4452.0}  # +1.0R
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    assert d is not None and d["kind"] == "structure" and "structure" in d["reason"]
+    assert abs(d["stop"] - (4452.0 - 0.2 * 2.0)) < 0.01  # swing 4452 - 0.2*ATR(2) = 4451.6
+
+
+def test_protect_falls_back_to_breakeven_without_swing():
+    # Same +1R, but no swing in context -> fall back to a plain breakeven at entry (never leave a
+    # winner unprotected).
+    p = _pos(direction="long", stop=4445.0)  # entry 4449
+    ctx = {"atr": 2.0, "last": 4459.0, "regime": "moderate"}  # +1.0R, no swing_low
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    assert d is not None and d["kind"] == "breakeven" and abs(d["stop"] - 4449.0) < 0.01
+
+
 # --- partial profit-taking (scale out) ---
 
 def test_auto_decision_scales_out_at_milestone():

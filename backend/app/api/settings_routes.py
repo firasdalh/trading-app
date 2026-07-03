@@ -691,3 +691,80 @@ def hybrid_run_now(session: Session = Depends(get_session)) -> HybridView:
 
     run_hybrid(session)
     return _hybrid_view(session)
+
+
+class HybridStatsView(BaseModel):
+    since: str                # ISO start of the counting window (today, UTC)
+    scans: int                # Hybrid ticks that actually scanned the watchlist
+    candidates: int           # risk-approved setups that cleared the confidence bar (ranking pool)
+    ai_confirmed: int         # LLM review confirmed the best candidate
+    ai_rejected: int          # LLM review vetoed the best candidate
+    accept_rate: float | None  # confirmed / (confirmed + rejected) — AI acceptance, None if no reviews
+    direct_trades: int        # market orders the Hybrid auto-opened
+    armed_setups: int         # "wait for the break" conditionals the Hybrid armed
+    triggered_armed: int      # armed setups whose level broke and fired
+    skipped_low_conf: int     # real setups skipped for being below the confidence threshold
+    last_opened: str | None = None      # most recent symbol+direction the auto-pilot opened (any day)
+    last_opened_at: str | None = None   # when it opened
+
+
+@router.get("/hybrid/stats", response_model=HybridStatsView, tags=["hybrid"])
+def hybrid_stats(session: Session = Depends(get_session)) -> HybridStatsView:
+    """Today's Hybrid activity — how the auto-pilot's funnel (scan → candidates → AI review →
+    open / arm → trigger) actually played out, aggregated from the per-tick run records and the
+    hybrid-sourced conditionals. Resets at UTC midnight."""
+    from sqlalchemy import func
+
+    from app.models.db import AgentRun, ConditionalSetup
+
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    runs = session.scalars(
+        select(AgentRun).where(AgentRun.agent == "hybrid", AgentRun.created_at >= day_start)
+    ).all()
+
+    scans = candidates = ai_conf = ai_rej = direct = skipped = 0
+    for r in runs:
+        detail = r.detail or {}
+        if detail.get("opened"):
+            direct += 1
+        s = detail.get("stats") or {}
+        if s.get("reached_scan"):
+            scans += 1
+        candidates += int(s.get("candidates") or 0)
+        skipped += int(s.get("skipped_low_conf") or 0)
+        verdict = s.get("ai_review")
+        if verdict == "confirm":
+            ai_conf += 1
+        elif verdict == "veto":
+            ai_rej += 1
+
+    armed = session.scalar(
+        select(func.count()).select_from(ConditionalSetup).where(
+            ConditionalSetup.source == "hybrid", ConditionalSetup.created_at >= day_start)
+    ) or 0
+    triggered = session.scalar(
+        select(func.count()).select_from(ConditionalSetup).where(
+            ConditionalSetup.source == "hybrid", ConditionalSetup.triggered_at >= day_start)
+    ) or 0
+
+    reviews = ai_conf + ai_rej
+    accept_rate = round(ai_conf / reviews, 2) if reviews else None
+
+    # Most recent trade the auto-pilot opened, across all time (context — not limited to today).
+    last_opened = last_opened_at = None
+    for r in session.scalars(
+        select(AgentRun).where(AgentRun.agent == "hybrid")
+        .order_by(AgentRun.id.desc()).limit(200)
+    ):
+        op = (r.detail or {}).get("opened")
+        if op and op.get("symbol"):
+            last_opened = f"{op.get('symbol')} {op.get('direction') or ''}".strip()
+            last_opened_at = _iso_utc(r.created_at)
+            break
+
+    return HybridStatsView(
+        since=day_start.isoformat(), scans=scans, candidates=candidates,
+        ai_confirmed=ai_conf, ai_rejected=ai_rej, accept_rate=accept_rate, direct_trades=direct,
+        armed_setups=int(armed), triggered_armed=int(triggered), skipped_low_conf=skipped,
+        last_opened=last_opened, last_opened_at=last_opened_at,
+    )

@@ -156,6 +156,53 @@ def test_mechanical_invalidation_target_and_stop():
     assert cond._mechanical_invalidation(short, 78.0) == (None, False)
     assert cond._mechanical_invalidation(short, 77.3)[1] is True and "target" in cond._mechanical_invalidation(short, 77.3)[0]
     assert cond._mechanical_invalidation(short, 78.5)[1] is False and "stop" in cond._mechanical_invalidation(short, 78.5)[0]
+
+
+def test_trend_broken_unit():
+    # LONG is broken by a close BELOW the trend EMA; SHORT by a close ABOVE it. Too-short a series
+    # (can't compute EMA50) never invalidates.
+    up = [100.0] * 59 + [98.0]     # last well below EMA(~99.9)
+    assert cond._trend_broken("long", up) is True
+    assert cond._trend_broken("short", up) is False
+    dn = [78.0] * 59 + [79.5]      # last well above EMA(~78.05)
+    assert cond._trend_broken("short", dn) is True
+    assert cond._trend_broken("long", dn) is False
+    assert cond._trend_broken("long", [100.0] * 5) is False   # not enough data -> never invalidate
+
+
+def _stub_market_series(monkeypatch, closes):
+    """Like _stub_market, but returns a full candle window so the trend-EMA invalidation can run.
+    The live quote and the confirmed close are both the last close in the series."""
+    candles = [SimpleNamespace(close=c) for c in closes]
+    broker = SimpleNamespace(get_quote=lambda sym: SimpleNamespace(price=closes[-1]))
+    monkeypatch.setattr(cond, "get_broker_for", lambda ac, bm: broker)
+    monkeypatch.setattr(cond, "get_ohlcv_cached",
+                        lambda b, sym, tf, limit=60: SimpleNamespace(candles=candles))
+    monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr(cond, "kill_switch_active", lambda s: False)
+
+
+def test_armed_stays_armed_while_trend_intact(db_session, monkeypatch):
+    # Task 5: downtrend still intact (last close 78.3 below EMA(~79)) and the break trigger (78.2)
+    # not yet hit -> the setup must remain armed after a check pass.
+    s = _arm(db_session)  # short sell_stop, trigger 78.2
+    _stub_market_series(monkeypatch, [79.0] * 59 + [78.3])
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert s.status == "armed"
+    assert out["invalidated"] == 0 and out["triggered"] == 0
+
+
+def test_armed_invalidated_by_pretrigger_trend_break(db_session, monkeypatch):
+    # Task 5: the confirmed close (79.0) closes back ABOVE the trend EMA(~78.05) BEFORE the break
+    # trigger (78.2) fires -> the downtrend pullback became a reversal -> invalidated, not left
+    # waiting out its validity window.
+    s = _arm(db_session)  # short sell_stop, trigger 78.2
+    _stub_market_series(monkeypatch, [78.0] * 59 + [79.0])
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert s.status == "invalidated" and "trend EMA" in (s.last_note or "")
+    assert out["invalidated"] == 1 and out["triggered"] == 0
     long = SimpleNamespace(direction="long", stop_loss=99.0, take_profit=105.0)
     assert cond._mechanical_invalidation(long, 100.0) == (None, False)
     assert cond._mechanical_invalidation(long, 105.5)[1] is True

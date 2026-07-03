@@ -180,22 +180,28 @@ def evaluate_daily_pause(session: Session) -> bool:
     if not equity or equity <= 0:
         return False
 
-    # The daily-loss breaker fires on REALIZED losses (closed trades), like a pro desk —
-    # not on open-position floating P&L, which swings and recovers (open trades are managed
-    # by their stops, not this circuit breaker).
+    # The daily-loss breaker fires on the account's TOTAL day loss = realized (closed trades) PLUS
+    # open-position floating P&L, marked to market in real time. Floating losses are included so a
+    # single open position bleeding past the daily limit trips the breaker BEFORE it's realized —
+    # they no longer get a free pass just because the trade hasn't closed yet. Latches for the day
+    # once tripped (never auto-unpauses; a new UTC day resets it), standard circuit-breaker behavior:
+    # a temporary floating spike past the limit pauses NEW entries for the session, but does NOT close
+    # the open position (that stays managed by its own stop / the advisor).
     realized = realized_today(session)
-    drawdown = -realized  # positive when realized losses exceed gains today
+    floating = total_unrealized(session)      # open positions marked to market (0.0 when flat)
+    day_pnl = realized + floating
+    drawdown = -day_pnl                         # positive when combined losses exceed gains today
     limit = equity * risk.max_daily_loss
     if drawdown >= limit:
         daily.trading_paused = True
         daily.pause_reason = (
-            f"daily loss limit reached: realized {realized} "
-            f"(>= {limit:.2f} = {risk.max_daily_loss*100:.0f}% of {equity})"
+            f"daily loss limit reached: realized {realized} + floating {floating} "
+            f"= {round(day_pnl, 2)} (>= {limit:.2f} loss = {risk.max_daily_loss*100:.0f}% of {equity})"
         )
         session.add(daily)
         session.commit()
-        _log.warning("daily loss limit hit (realized) — trading paused",
-                     extra={"realized": realized, "limit": round(limit, 2)})
+        _log.warning("daily loss limit hit (realized+floating) — trading paused",
+                     extra={"realized": realized, "floating": floating, "limit": round(limit, 2)})
         return True
     return False
 

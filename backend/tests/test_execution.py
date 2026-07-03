@@ -269,6 +269,46 @@ def test_daily_pause_not_triggered_on_small_loss(db_session):
     assert daily.trading_paused is False
 
 
+def test_daily_pause_triggers_on_floating_loss_alone(db_session, monkeypatch):
+    """The failure mode Task 4 fixes: ZERO closed trades, but ONE open position with a floating loss
+    exceeding the daily limit -> the breaker must still trip (it no longer waits for realization)."""
+    from app.risk import service
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = 0.0                                   # nothing closed
+    db_session.commit()
+    monkeypatch.setattr(service, "total_unrealized", lambda s: -45.0)  # floating loss > 30 (3%)
+    assert service.evaluate_daily_pause(db_session) is True
+    db_session.refresh(daily)
+    assert daily.trading_paused is True and "floating" in (daily.pause_reason or "")
+
+
+def test_daily_pause_triggers_on_realized_plus_floating_combined(db_session, monkeypatch):
+    """Neither realized (-20) nor floating (-15) breaches the 30 limit alone, but together (-35) they
+    do -> the breaker evaluates the account's TOTAL day loss."""
+    from app.risk import service
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = -20.0
+    db_session.commit()
+    monkeypatch.setattr(service, "total_unrealized", lambda s: -15.0)
+    assert service.evaluate_daily_pause(db_session) is True
+
+
+def test_daily_pause_not_triggered_when_floating_profit_offsets_realized(db_session, monkeypatch):
+    """A realized loss under the limit stays under when open positions are in profit (net day P&L is
+    what matters) -> no false trip."""
+    from app.risk import service
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = -20.0
+    db_session.commit()
+    monkeypatch.setattr(service, "total_unrealized", lambda s: 8.0)  # net -12, under the 30 limit
+    assert service.evaluate_daily_pause(db_session) is False
+    db_session.refresh(daily)
+    assert daily.trading_paused is False
+
+
 def test_paused_account_vetoes_new_trade(db_session):
     # When paused, the risk manager must veto new entries.
     from app.risk.service import assess

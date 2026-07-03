@@ -111,3 +111,4 @@ class ConditionalStatus(StrEnum):
     REJECTED = "rejected"     # trigger hit but the re-check (double-check) declined it
     EXPIRED = "expired"       # validity window elapsed without a trigger
     CANCELLED = "cancelled"   # cancelled by the user
+    INVALIDATED = "invalidated"  # thesis broke BEFORE the trigger (price closed through the stop)

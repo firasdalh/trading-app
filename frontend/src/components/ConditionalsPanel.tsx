@@ -12,6 +12,7 @@ const STATUS_STYLE: Record<string, string> = {
   rejected: "text-bear",
   expired: "text-neutral-500",
   cancelled: "text-neutral-500",
+  invalidated: "text-bear",
 };
 
 // Armed / pending ('wait for the break') setups. On a confirmed trigger the system re-checks the

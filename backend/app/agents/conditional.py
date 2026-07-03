@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.indicators import ema
 from app.brokers.registry import get_broker_for
 from app.core.logging import get_logger
 from app.core.state import (
@@ -188,6 +189,26 @@ def _decline(session: Session, s: ConditionalSetup, why: str, *, terminal: bool)
                  extra={"symbol": s.symbol, "retries": s.retries, "cooldown_min": cd})
     session.add(s)
     return 0
+
+
+_TREND_EMA = 50   # the trend-defining EMA a pullback-resumption is riding; a close back through it
+#                   (against the side) says the pullback has become a reversal — the thesis is gone.
+
+
+def _trend_broken(direction: str, closes: list[float]) -> bool:
+    """PRE-TRIGGER structure invalidation: has a CONFIRMED close moved back through the trend-defining
+    EMA(50) against the armed side? For a long that's a close BELOW the EMA; for a short, ABOVE it —
+    i.e. the pullback the setup was waiting to resume has instead deepened into a trend break.
+
+    Keyed off the trend EMA (not the protective stop): a break order legitimately sits on the far
+    side of its stop while it waits (the stop only matters after entry), so the stop is NOT a valid
+    pre-trigger invalidation level — the EMA that defined the trend is. Returns False when there
+    isn't enough data to compute the EMA (never invalidate on missing data)."""
+    e = ema(closes, _TREND_EMA)
+    if e is None or not closes:
+        return False
+    last = closes[-1]
+    return last < e if direction == Direction.LONG.value else last > e
 
 
 def _mechanical_invalidation(s: ConditionalSetup, ref: float) -> tuple[str | None, bool]:
@@ -387,6 +408,7 @@ def check_conditional_setups(session: Session) -> dict:
 
     ks = kill_switch_active(session)
     triggered = 0
+    invalidated = 0
     for s in armed:
         # Auto-re-arm cooldown: after a declined re-check, wait ~one bar before re-checking (skip
         # the broker call entirely while cooling down).
@@ -400,18 +422,34 @@ def check_conditional_setups(session: Session) -> dict:
             log.warning("conditional quote failed", extra={"symbol": s.symbol, "error": str(exc)})
             continue
 
+        # One candle window per armed symbol/pass (cached): serves BOTH the close-confirm ref and the
+        # trend-EMA invalidation below. Enough bars for EMA(50).
+        closes: list[float] = []
+        try:
+            candles = get_ohlcv_cached(broker, s.symbol, s.timeframe, limit=60).candles
+            closes = [c.close for c in candles] if candles else []
+        except Exception:  # noqa: BLE001 - fall back to the live quote
+            closes = []
+
         ref = price
-        if s.require_close_confirm:
-            try:  # confirm on the latest candle close (avoid wick-driven false breaks)
-                candles = get_ohlcv_cached(broker, s.symbol, s.timeframe, limit=3).candles
-                if candles:
-                    ref = candles[-1].close
-            except Exception:  # noqa: BLE001 - fall back to the live quote
-                pass
+        if s.require_close_confirm and closes:  # confirm on the latest candle close (avoid wick-driven false breaks)
+            ref = closes[-1]
+
+        # PRE-TRIGGER structure invalidation: a confirmed close back through the trend EMA(50) against
+        # the armed side means the pullback we were waiting to RESUME has instead broken the trend —
+        # kill the setup now instead of waiting out its full validity window. (The trigger-time
+        # _mechanical_invalidation only runs once the break is hit; this catches the thesis breaking
+        # while still armed. The wall-clock `valid_until` above remains the time cap.)
+        if _trend_broken(s.direction, closes):
+            s.status = ConditionalStatus.INVALIDATED.value
+            s.last_note = ("invalidated — price closed back through the trend EMA(50) against the "
+                           "setup before the break; the pullback became a reversal")
+            session.add(s)
+            invalidated += 1
+            continue
 
         if not _crossed(s.order_type, ref, s.trigger_price):
-            continue  # trigger not reached yet — keep waiting (a break order sits on the far side
-            # of its stop until the break, so there is no "price reached the stop" invalidation here)
+            continue  # trigger not reached yet — keep waiting
 
         # Trigger hit.
         if ks:
@@ -425,4 +463,5 @@ def check_conditional_setups(session: Session) -> dict:
         triggered += _fire(session, s, ref)
 
     session.commit()
-    return {"checked": len(armed), "triggered": triggered, "expired": expired, "cancelled": cancelled}
+    return {"checked": len(armed), "triggered": triggered, "expired": expired,
+            "cancelled": cancelled, "invalidated": invalidated}

@@ -319,6 +319,22 @@ export interface HybridState {
   last_result: string | null;
 }
 
+// Today's Hybrid auto-pilot activity funnel (from GET /api/hybrid/stats).
+export interface HybridStats {
+  since: string;
+  scans: number;
+  candidates: number;
+  ai_confirmed: number;
+  ai_rejected: number;
+  accept_rate: number | null;
+  direct_trades: number;
+  armed_setups: number;
+  triggered_armed: number;
+  skipped_low_conf: number;
+  last_opened: string | null;
+  last_opened_at: string | null;
+}
+
 export interface OpportunityView {
   symbol: string;
   asset_class: AssetClass;

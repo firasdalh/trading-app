@@ -54,15 +54,16 @@ def get_or_create_hybrid_config(session: Session) -> HybridConfig:
     return cfg
 
 
-def _arm_from(session: Session, cfg: HybridConfig, armable: list, exclude: str | None = None) -> None:
+def _arm_from(session: Session, cfg: HybridConfig, armable: list, exclude: str | None = None) -> int:
     """Arm the strongest blocked-but-valid candidates as conditional break-entries, up to the
     max_armed cap and skipping the symbol just opened at market. Hybrid-armed setups auto-execute
-    on the trigger (after the re-check), so the gate is the double-check, not a manual click."""
+    on the trigger (after the re-check), so the gate is the double-check, not a manual click.
+    Returns how many were actually armed this call (for the Hybrid activity stats)."""
     from app.agents.conditional import active_armed, arm_conditional
 
     room = max(0, cfg.max_armed - len(active_armed(session)))
     if room <= 0:
-        return
+        return 0
     armed = 0
     for _conf, it, cond, direction in sorted(armable, key=lambda x: -x[0]):
         if armed >= room:
@@ -77,6 +78,7 @@ def _arm_from(session: Session, cfg: HybridConfig, armable: list, exclude: str |
         )
         if res is not None:
             armed += 1
+    return armed
 
 
 def run_hybrid(session: Session) -> dict:
@@ -91,13 +93,19 @@ def run_hybrid(session: Session) -> dict:
     # on every exit path via done(), excluding any symbol we opened at market this tick.
     armable: list[tuple[float, WatchItem, object, str]] = []
 
+    # Per-tick activity counters recorded in the AgentRun so the dashboard can total them for "today".
+    # reached_scan distinguishes a real scan from an early bail (kill-switch / no room).
+    stats: dict = {"reached_scan": False, "scanned": 0, "candidates": 0,
+                   "skipped_low_conf": 0, "armable": 0, "armed": 0, "ai_review": None}
+
     def done(reason: str, opened: dict | None = None) -> dict:
         if cfg.conditional_enabled and armable:
-            _arm_from(session, cfg, armable, exclude=(opened or {}).get("symbol"))
+            stats["armed"] = _arm_from(session, cfg, armable, exclude=(opened or {}).get("symbol"))
+        stats["armable"] = len(armable)
         cfg.last_result = reason
         session.add(cfg)
         session.add(AgentRun(agent="hybrid", event="tick",
-                             detail={"opened": opened, "reason": reason}))
+                             detail={"opened": opened, "reason": reason, "stats": stats}))
         session.commit()
         return {"ran": True, "opened": opened, "reason": reason}
 
@@ -128,6 +136,7 @@ def run_hybrid(session: Session) -> dict:
             )
         )
     }
+    stats["reached_scan"] = True
     candidates: list[tuple[float, WatchItem]] = []
     for it in items:
         if _norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms:
@@ -141,13 +150,19 @@ def run_hybrid(session: Session) -> dict:
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue
-        if (prop.direction.value in ("long", "short") and dec.approved
-                and prop.confidence > _effective_min_conf(prop.strategy, threshold)):
+        stats["scanned"] += 1
+        is_directional = prop.direction.value in ("long", "short")
+        eff_min = _effective_min_conf(prop.strategy, threshold)
+        if is_directional and dec.approved and prop.confidence > eff_min:
             candidates.append((prop.confidence, it))
+        elif is_directional and prop.confidence <= eff_min:
+            # A real setup that just didn't clear the confidence bar — the "Skipped (<threshold)" tally.
+            stats["skipped_low_conf"] += 1
         # A blocked-but-valid setup carries a 'wait for the break' conditional — collect it to arm.
         if prop.conditional is not None:
             cond_dir = "long" if prop.conditional.order_type.startswith("buy") else "short"
             armable.append((prop.conditional.confidence, it, prop.conditional, cond_dir))
+    stats["candidates"] = len(candidates)
 
     if not candidates:
         return done(f"no risk-approved setup above {threshold:.0%} confidence "
@@ -162,6 +177,11 @@ def run_hybrid(session: Session) -> dict:
     record = session.get(TradeProposalRecord, res.proposal_id)
     if record is None:
         return done(f"{best.symbol}: proposal vanished")
+
+    # The LLM reviewer's verdict on the single best candidate (confirm / veto) — the AI Confirmed /
+    # AI Rejected counters. Only the best gets the full LLM review each tick (quota-friendly).
+    if record.review_decision in ("confirm", "veto"):
+        stats["ai_review"] = record.review_decision
 
     # Modes B/C may have already auto-executed it inside analyze_symbol.
     if record.status == ProposalStatus.EXECUTED.value:

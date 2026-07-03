@@ -203,6 +203,7 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   hybridRun: () => request<import("../types").HybridState>("/api/hybrid/run", { method: "POST" }),
+  hybridStats: () => request<import("../types").HybridStats>("/api/hybrid/stats"),
 
   // Conditional ('armed' / pending) setups.
   conditionals: () =>

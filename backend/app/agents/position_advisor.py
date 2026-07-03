@@ -472,6 +472,18 @@ def _trail_stop(direction: str, last: float, atr: float, ctx: dict, regime: str)
     return atr_trail, "ATR"
 
 
+def _structure_stop(direction: str, ctx: dict, atr: float | None) -> float | None:
+    """The protective stop that sits just BEYOND the last swing (structure) — where the trend would
+    actually break — instead of at your (arbitrary) entry price. The market moves by structure, not
+    by where you happened to get in, so a normal pullback to entry no longer scratches the trade at
+    0. Returns None when no swing / ATR is available (caller then falls back to breakeven)."""
+    swing = (ctx or {}).get("swing_low") if direction == "long" else (ctx or {}).get("swing_high")
+    if swing is None or not atr:
+        return None
+    buf = _STRUCT_TRAIL_BUFFER_ATR * atr
+    return (swing - buf) if direction == "long" else (swing + buf)
+
+
 def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
                    already_scaled: bool = False) -> dict | None:
     """The bounded, deterministic set of actions the advisor may take autonomously — only
@@ -528,9 +540,19 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
             if _tightens(d, p.stop_loss, trail):
                 return {"action": "set_stop", "kind": "trail", "stop": round(trail, 5),
                         "reason": f"+{r:.1f}R ({regime}) — trailing the stop ({basis}) to lock gains"}
-        if r >= be_r and _stop_worse_than_entry(p):
-            return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
-                    "reason": f"reached +{r:.1f}R — moving the stop to breakeven"}
+        if r >= be_r:
+            # Protect behind the last swing (STRUCTURE), not at your entry price — the market moves
+            # by structure, so a normal pullback to entry no longer scratches the trade at 0. Only
+            # applied if it TIGHTENS (never loosens). Falls back to a plain breakeven at entry when
+            # no swing is available, so a winner is never left unprotected.
+            struct = _structure_stop(d, ctx or {}, atr)
+            if struct is not None and _tightens(d, p.stop_loss, struct):
+                return {"action": "set_stop", "kind": "structure", "stop": round(struct, 5),
+                        "reason": (f"+{r:.1f}R — protecting behind the last swing (structure), "
+                                   "not your entry")}
+            if _stop_worse_than_entry(p):
+                return {"action": "set_stop", "kind": "breakeven", "stop": round(p.entry_price, 5),
+                        "reason": f"reached +{r:.1f}R — no swing to use; moving the stop to breakeven"}
 
     # 2b) Thesis weakening while CLEARLY in profit (>= +0.5R) AND with a REAL deterioration signal
     # (meaningful counter-momentum or a change-of-character) -> tighten the stop to lock gains. Gated
@@ -674,10 +696,13 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                 ok = result.status.value not in ("error", "rejected")
                 if ok:
                     _PARTIAL_DONE.add(a.symbol)
-                    # De-risk the runner: move the remainder's stop to breakeven — but only if that
-                    # TIGHTENS it. If the stop was already trailed past entry (locked in profit),
-                    # moving it back to breakeven would LOOSEN it, so leave the better stop alone.
-                    be = round(p.entry_price, 5)
+                    # De-risk the runner: trail behind the last swing (STRUCTURE) when we can — the
+                    # market respects structure, not your entry — else fall back to breakeven. Only
+                    # if it TIGHTENS: a stop already trailed past entry (locked in profit) is left
+                    # alone rather than loosened back.
+                    struct = _structure_stop(p.direction, ctx or {}, (ctx or {}).get("atr"))
+                    be = struct if (struct is not None and _tightens(p.direction, p.stop_loss, struct)) \
+                        else round(p.entry_price, 5)
                     if _tightens(p.direction, p.stop_loss, be):
                         try:
                             be_res = broker.set_sl_tp(p.symbol, be, p.take_profit)

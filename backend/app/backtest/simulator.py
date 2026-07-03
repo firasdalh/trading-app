@@ -208,13 +208,14 @@ def _tighter(is_long: bool, cur: float, new: float) -> bool:
 
 def _exit_indicators(entry: list, j: int, macro_closes: list, macro_ts: list, t_j):
     """Per-bar indicators for the advisor-aware exit: entry-TF trend (EMA20 vs 50), MACD hist, ATR,
-    and the higher-TF (macro) trend aligned to bar j's time. Uses a 200-bar window (like the live
-    engine)."""
+    the higher-TF (macro) trend aligned to bar j's time, and the last swing low/high (structure, for
+    the structure-based protective stop). Uses a 200-bar window (like the live engine)."""
     import bisect as _b
 
     from app.agents.indicators import atr as _atr
     from app.agents.indicators import ema as _ema
     from app.agents.indicators import macd as _macd
+    from app.agents.indicators import market_structure as _ms
 
     w = entry[max(0, j - 199): j + 1]
     closes = [c.close for c in w]
@@ -223,19 +224,22 @@ def _exit_indicators(entry: list, j: int, macro_closes: list, macro_ts: list, t_
     m = _macd(closes)
     mh = m["hist"] if m else None
     a = _atr(w, 14)
+    ms = _ms(w)
+    swing_low, swing_high = ms.get("swing_low"), ms.get("swing_high")
     macro = "sideways"
     if macro_closes:
         hi = _b.bisect_right(macro_ts, t_j)
         cw = macro_closes[max(0, hi - 200): hi]
         ce20, ce50 = _ema(cw, 20), _ema(cw, 50)
         macro = "up" if (ce20 and ce50 and ce20 > ce50) else ("down" if (ce20 and ce50 and ce20 < ce50) else "sideways")
-    return trend, mh, a, macro
+    return trend, mh, a, macro, swing_low, swing_high
 
 
 def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                             bars: int = 3000, context_bars: int = 600, max_hold: int = 96,
                             cooldown: int = 3, cost_r: float = 0.0, regimes: set[str] | None = None,
-                            weaken_gate: str = "new", partial: bool = False) -> list[BTTrade]:
+                            weaken_gate: str = "new", partial: bool = False,
+                            be_mode: str = "entry") -> list[BTTrade]:
     """Like simulate_symbol, but the trade is exited the way the POSITION ADVISOR would manage it —
     a DYNAMIC stop (breakeven at +1R, trail at +1.5R, close on a confirmed trend flip, and the
     weakening->tighten) instead of the fixed entry stop. ``weaken_gate`` selects the tighten rule:
@@ -248,8 +252,8 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
     which are the same across arms.)"""
     from app.agents.pipeline import _timeframes_for
     from app.agents.position_advisor import (
-        _BREAKEVEN_R, _PARTIAL_FRACTION, _PARTIAL_R, _TRAIL_ATR_MULT, _TRAIL_R,
-        _WEAKEN_MIN_R, _WEAKEN_MOM_ATR_FRAC,
+        _BREAKEVEN_R, _PARTIAL_FRACTION, _PARTIAL_R, _STRUCT_TRAIL_BUFFER_ATR, _TRAIL_ATR_MULT,
+        _TRAIL_R, _WEAKEN_MIN_R, _WEAKEN_MOM_ATR_FRAC,
     )
 
     tfs = _timeframes_for(timeframe)
@@ -338,7 +342,8 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
                 if bar.low <= tp:
                     outcome, exit_px, exit_j = "target", tp, j; break
             close_j = bar.close
-            trend, mh, a, macro = _exit_indicators(entry, j, macro_closes, macro_ts, bar.ts)
+            trend, mh, a, macro, swing_low, swing_high = _exit_indicators(
+                entry, j, macro_closes, macro_ts, bar.ts)
             if not a:
                 continue
             profit = (close_j - entry_px) if is_long else (entry_px - close_j)
@@ -349,8 +354,15 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
                 t = (close_j - _TRAIL_ATR_MULT * a) if is_long else (close_j + _TRAIL_ATR_MULT * a)
                 if _tighter(is_long, cur_stop, t):
                     cur_stop = t
-            elif r >= _BREAKEVEN_R and _tighter(is_long, cur_stop, entry_px):  # breakeven
-                cur_stop = entry_px
+            elif r >= _BREAKEVEN_R:                     # protect: structure (last swing) or entry
+                if be_mode == "structure":
+                    sw = swing_low if is_long else swing_high
+                    cand = ((sw - _STRUCT_TRAIL_BUFFER_ATR * a) if is_long
+                            else (sw + _STRUCT_TRAIL_BUFFER_ATR * a)) if sw is not None else entry_px
+                else:
+                    cand = entry_px
+                if _tighter(is_long, cur_stop, cand):
+                    cur_stop = cand
             mom_against = mh is not None and ((is_long and mh < 0) or ((not is_long) and mh > 0))
             weak = (trend == opp and macro != opp) or (trend == "sideways") or mom_against
             if weak:

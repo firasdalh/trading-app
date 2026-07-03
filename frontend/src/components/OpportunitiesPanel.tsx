@@ -223,6 +223,7 @@ const clampInt = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo
 function HybridControl({ onOpened }: { onOpened?: () => void }) {
   const [bump, setBump] = useState(0);
   const { data: state } = usePolling(() => api.hybridState(), 15000, [bump]);
+  const { data: stats } = usePolling(() => api.hybridStats(), 20000, [bump]);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ interval: "", conf: "", cond: true, armed: "3" });
@@ -413,6 +414,80 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
           No check yet with these settings — press <span className="text-neutral-300">Run now</span> to scan immediately.
         </div>
       ))}
+
+      {stats && <HybridActivity s={stats} />}
+    </div>
+  );
+}
+
+// A compact "today's activity" funnel for the Hybrid auto-pilot: scan → candidates → AI review →
+// open / arm → trigger. All counters reset at UTC midnight (server side).
+function HybridActivity({ s }: { s: import("../types").HybridStats }) {
+  // Colour "Skipped" amber/red when the auto-pilot is passing on a large share of the real setups it
+  // saw today — a hint the confidence threshold may be too high for current conditions. Needs a small
+  // sample (≥3 real setups) before colouring, so a lone 1/1 doesn't flash red.
+  const totalSetups = s.candidates + s.skipped_low_conf;
+  const skipRatio = totalSetups >= 3 ? s.skipped_low_conf / totalSetups : 0;
+  const skipTone =
+    skipRatio >= 0.85 ? "text-bear" : skipRatio >= 0.6 ? "text-amber-300" : "text-neutral-400";
+  const cells: { label: string; value: number; tone: string; title: string }[] = [
+    { label: "Scans", value: s.scans, tone: "text-neutral-200",
+      title: "Watchlist scans the auto-pilot ran today" },
+    { label: "Candidates", value: s.candidates, tone: "text-sky-300",
+      title: "Risk-approved setups that cleared the confidence threshold (the ranking pool)" },
+    { label: "AI confirmed", value: s.ai_confirmed, tone: "text-bull",
+      title: "The best candidate's LLM review said CONFIRM" },
+    { label: "AI rejected", value: s.ai_rejected, tone: "text-bear",
+      title: "The best candidate's LLM review said VETO" },
+    { label: "Direct trades", value: s.direct_trades, tone: "text-bull",
+      title: "Market orders the Hybrid auto-opened" },
+    { label: "Armed", value: s.armed_setups, tone: "text-amber-300",
+      title: "'Wait for the break' conditionals the Hybrid armed" },
+    { label: "Triggered", value: s.triggered_armed, tone: "text-amber-200",
+      title: "Armed setups whose level broke and fired" },
+    { label: "Skipped <thr", value: s.skipped_low_conf, tone: skipTone,
+      title: "Real setups skipped for being below the confidence threshold. Amber ≥60% / red ≥85% of today's real setups skipped — the threshold may be too high for current conditions" },
+  ];
+  // Colour the acceptance rate: green = AI broadly agrees with the engine (coherent pipeline),
+  // amber = it's filtering meaningfully, red = it's vetoing most setups (engine/AI friction — look).
+  const rate = s.accept_rate;
+  const acceptTone =
+    rate == null ? "text-neutral-300"
+    : rate >= 0.66 ? "text-bull"
+    : rate >= 0.4 ? "text-amber-300"
+    : "text-bear";
+  return (
+    <div className="mt-2 rounded-md border border-neutral-800 bg-neutral-900/40 p-2">
+      <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+        Auto-pilot activity · today
+      </div>
+      <div className="grid grid-cols-4 gap-1.5">
+        {cells.map((c) => (
+          <div key={c.label} title={c.title}
+               className="rounded bg-neutral-800/60 px-2 py-1.5 text-center">
+            <div className={`text-lg font-bold tabular-nums leading-none ${c.tone}`}>{c.value}</div>
+            <div className="mt-1 text-[10px] leading-tight text-neutral-500">{c.label}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
+        <span title="Of the setups the AI graded today, the share it CONFIRMED (confirmed ÷ reviewed). Green ≥66% · amber 40–66% · red <40%">
+          AI accept:{" "}
+          <span className={`font-semibold ${acceptTone}`}>
+            {s.accept_rate == null ? "—" : `${Math.round(s.accept_rate * 100)}%`}
+          </span>
+          {s.accept_rate != null && (
+            <span className="text-neutral-600"> ({s.ai_confirmed}/{s.ai_confirmed + s.ai_rejected})</span>
+          )}
+        </span>
+        <span title="The most recent trade the auto-pilot opened">
+          Last opened:{" "}
+          <span className="font-semibold text-neutral-300">{s.last_opened ?? "—"}</span>
+          {s.last_opened_at && (
+            <span className="text-neutral-600"> · {new Date(s.last_opened_at).toLocaleString()}</span>
+          )}
+        </span>
+      </div>
     </div>
   );
 }
