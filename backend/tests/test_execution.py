@@ -309,6 +309,35 @@ def test_daily_pause_not_triggered_when_floating_profit_offsets_realized(db_sess
     assert daily.trading_paused is False
 
 
+def test_daily_pause_auto_resumes_when_floating_recovers(db_session, monkeypatch):
+    """Dynamic breaker: a pause caused only by an open floating loss auto-resumes once the float
+    recovers back within the limit (realized alone never breached)."""
+    from app.risk import service
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = 0.0
+    db_session.commit()
+    monkeypatch.setattr(service, "total_unrealized", lambda s: -45.0)   # trips on floating
+    assert service.evaluate_daily_pause(db_session) is True
+    db_session.refresh(daily); assert daily.trading_paused is True
+    monkeypatch.setattr(service, "total_unrealized", lambda s: -5.0)    # float recovers -> resume
+    assert service.evaluate_daily_pause(db_session) is False
+    db_session.refresh(daily); assert daily.trading_paused is False and daily.pause_reason is None
+
+
+def test_daily_pause_realized_breach_stays_latched_despite_floating_profit(db_session, monkeypatch):
+    """A REALIZED loss beyond the limit latches for the day: an open winner masking it must NOT
+    auto-resume trading (closed losses are locked in)."""
+    from app.risk import service
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = -35.0                                          # realized alone past 30 -> latched
+    db_session.commit()
+    monkeypatch.setattr(service, "total_unrealized", lambda s: 20.0)    # net -15, but realized is locked
+    assert service.evaluate_daily_pause(db_session) is True
+    db_session.refresh(daily); assert daily.trading_paused is True
+
+
 def test_paused_account_vetoes_new_trade(db_session):
     # When paused, the risk manager must veto new entries.
     from app.risk.service import assess

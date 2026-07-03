@@ -17,19 +17,17 @@ or is internally inconsistent. None are changed here except where a task explici
    already had a wall-clock expiry (`valid_until`, default 12h) and a *trigger-time* invalidation
    (`_mechanical_invalidation`). The real gap was **no pre-trigger price invalidation** while waiting.
    → **Resolved under Task 5** (added `_trend_broken`: close back through EMA50 against the setup).
-   Question for you: is **EMA50** the right "trend-defining EMA"? The funnel defines trend by the
-   EMA20/50/200 stack; EMA20 would over-trigger during a normal pullback (that's the setup itself),
-   so I keyed off EMA50. Confirm, or specify (e.g., EMA20/EMA200, or the swing that anchored the pullback).
+   **DECISION (confirmed): use EMA50** as the trend-defining line. (EMA20 would over-trigger during a
+   normal pullback — that IS the setup — so EMA50 is the trend backbone. No change needed.)
 
 ## Design ambiguities worth your call
 
-3. **Breaker latches vs. dynamic (Task 4).** The breaker trips and **latches for the day** once
-   realized+floating breaches the limit (never auto-unpauses; a new UTC day resets it). "In real time"
-   could instead mean *dynamic* (unpause if floating recovers). I chose latch (standard circuit-breaker
-   behavior, matches the existing "never auto-unpause" contract). A temporary floating spike past the
-   limit therefore pauses NEW entries for the rest of the session even if the position later recovers.
-   It does **not** close the open position (that stays managed by its stop/advisor). Confirm this is what
-   you want, or switch to dynamic.
+3. **Breaker latches vs. dynamic (Task 4). — DECISION: DYNAMIC (implemented).** The breaker now
+   **auto-resumes** when the loss recovers: a pause caused by open **floating** losses lifts as soon as
+   realized+floating comes back within the limit. **Exception (safety latch):** a **realized** loss
+   beyond the limit stays latched for the day — closed losses are locked in and cannot "recover", so an
+   open winner temporarily masking them must not re-open trading. A new UTC day resets everything.
+   Pausing/resuming only gates NEW entries; it never closes an open position.
 
 4. **Breaker order-time gate not floating-aware.** `evaluate_daily_pause` (called each monitor tick)
    now includes floating, and it sets `trading_paused`, which the order-time gate in

@@ -156,9 +156,17 @@ def current_equity(session: Session) -> float | None:
 
 
 def evaluate_daily_pause(session: Session) -> bool:
-    """Pause NEW trades for the day if the account's loss (realized today + floating) reaches
-    the RISK.md max-daily-loss limit. Uses broker truth, so it protects the live account no
-    matter where trades were placed. Never auto-unpauses (a new UTC day resets it).
+    """Pause NEW trades when the account's TOTAL day loss (realized closed trades + open floating
+    P&L, marked to market) reaches the RISK.md max-daily-loss limit — and AUTO-RESUME when it
+    recovers back within the limit (a DYNAMIC breaker on floating P&L). Uses broker truth so it
+    protects the live account no matter where trades were placed. A new UTC day resets everything.
+
+    Latch rule: a REALIZED loss beyond the limit latches for the day (closed losses are locked in
+    and cannot 'recover', so an open winner temporarily masking them must NOT re-open trading). A
+    pause caused only by open floating losses lifts automatically once the float recovers.
+
+    Pausing/resuming only gates NEW entries; it never closes an open position (that stays managed by
+    its own stop / the advisor).
     """
     risk = get_or_create_risk_config(session)
     # Breaker disabled (e.g. demo-account testing): never auto-pause on daily loss.
@@ -166,9 +174,6 @@ def evaluate_daily_pause(session: Session) -> bool:
         return False
 
     daily = get_or_create_daily_state(session)
-    if daily.trading_paused:
-        return True
-
     if daily.starting_equity is None:
         eq = current_equity(session)
         if eq is not None:
@@ -178,32 +183,43 @@ def evaluate_daily_pause(session: Session) -> bool:
 
     equity = daily.starting_equity
     if not equity or equity <= 0:
-        return False
+        return daily.trading_paused
 
-    # The daily-loss breaker fires on the account's TOTAL day loss = realized (closed trades) PLUS
-    # open-position floating P&L, marked to market in real time. Floating losses are included so a
-    # single open position bleeding past the daily limit trips the breaker BEFORE it's realized —
-    # they no longer get a free pass just because the trade hasn't closed yet. Latches for the day
-    # once tripped (never auto-unpauses; a new UTC day resets it), standard circuit-breaker behavior:
-    # a temporary floating spike past the limit pauses NEW entries for the session, but does NOT close
-    # the open position (that stays managed by its own stop / the advisor).
     realized = realized_today(session)
-    floating = total_unrealized(session)      # open positions marked to market (0.0 when flat)
+    floating = total_unrealized(session)        # open positions marked to market (0.0 when flat)
     day_pnl = realized + floating
-    drawdown = -day_pnl                         # positive when combined losses exceed gains today
     limit = equity * risk.max_daily_loss
-    if drawdown >= limit:
+    combined_breached = -day_pnl >= limit       # realized + floating past the limit
+    realized_latched = -realized >= limit       # closed losses past the limit -> locked for the day
+    should_pause = combined_breached or realized_latched
+
+    if should_pause and not daily.trading_paused:
         daily.trading_paused = True
         daily.pause_reason = (
+            f"daily loss limit reached: realized {realized} (>= {limit:.2f}); latched for the day"
+            if realized_latched else
             f"daily loss limit reached: realized {realized} + floating {floating} "
-            f"= {round(day_pnl, 2)} (>= {limit:.2f} loss = {risk.max_daily_loss*100:.0f}% of {equity})"
+            f"= {round(day_pnl, 2)} (>= {limit:.2f} loss = {risk.max_daily_loss*100:.0f}% of {equity}); "
+            "auto-resumes if the float recovers"
         )
         session.add(daily)
         session.commit()
-        _log.warning("daily loss limit hit (realized+floating) — trading paused",
-                     extra={"realized": realized, "floating": floating, "limit": round(limit, 2)})
+        _log.warning("daily loss limit hit — trading paused",
+                     extra={"realized": realized, "floating": floating, "limit": round(limit, 2),
+                            "realized_latched": realized_latched})
         return True
-    return False
+
+    if daily.trading_paused and not should_pause:
+        # Floating-driven pause has RECOVERED (and realized alone never breached) -> auto-resume.
+        daily.trading_paused = False
+        daily.pause_reason = None
+        session.add(daily)
+        session.commit()
+        _log.warning("daily loss recovered (realized+floating back within limit) — trading resumed",
+                     extra={"realized": realized, "floating": floating, "limit": round(limit, 2)})
+        return False
+
+    return daily.trading_paused
 
 # Per-asset-class default tradable increment used for position sizing.
 _QTY_STEP = {
