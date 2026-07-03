@@ -44,6 +44,19 @@ def get_ohlcv_cached(broker: BrokerAdapter, symbol: str, timeframe: str = "1h",
         if hit is not None and now - hit[0] < ttl:
             return hit[1]
     series = broker.get_ohlcv(symbol, timeframe, limit)
+    # Data-feed integrity (Task 10): sanity-check the fresh fetch (bad ticks / gaps / stale prices)
+    # before it can poison ATR-based sizing or structure detection. With DATA_INTEGRITY_REJECT on
+    # (default) the clearest corruption is REPAIRED (spikes clamped, invalid bars flattened) and soft
+    # issues logged; off = log-only. Never breaks a fetch.
+    try:
+        from app.core.config import get_settings
+        from app.data.integrity import log_integrity, repair_and_log
+        if get_settings().data_integrity_reject:
+            series = repair_and_log(symbol, timeframe, series)
+        else:
+            log_integrity(symbol, timeframe, series)
+    except Exception:  # noqa: BLE001 - integrity checking must never break a fetch
+        pass
     with _lock:
         _cache[key] = (time.monotonic(), series)
     return series

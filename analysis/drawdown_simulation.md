@@ -1,21 +1,21 @@
 # Task 6 — Drawdown & ruin Monte Carlo
 
-Bootstrapped from **170 backtested trades** — win rate **34.1%**, expectancy **+0.177R/trade**, avg **3.0 trades/day**. 20,000 paths x 250 trades each. Ruin = 50% peak-to-trough drawdown. Daily breaker = 3% day loss.
+Bootstrapped from **170 backtested trades** (slippage-adjusted (Task 8 realistic fills)) — win rate **34.1%**, expectancy **+0.171R/trade**, avg **3.0 trades/day**. 20,000 paths x 250 trades each. Ruin = 50% peak-to-trough drawdown. Daily breaker = 3% day loss.
 
 ## Results by risk-per-trade
 
 | risk/trade | median maxDD | 95th-pct maxDD | P(DD>=20%) | P(DD>=30%) | P(ruin 50%) | P(daily-breaker) |
 |---|---|---|---|---|---|---|
-| 0.25% | 4% | 8% | 0% | 0% | 0.0% | 0% |
+| 0.25% | 5% | 8% | 0% | 0% | 0.0% | 0% |
 | 0.50% | 9% | 16% | 1% | 0% | 0.0% | 0% |
-| 1.00% | 17% | 30% | 31% | 5% | 0.0% | 100% |
-| 1.50% | 25% | 42% | 76% | 28% | 1.3% | 100% |
-| 2.00% | 32% | 52% | 95% | 58% | 6.7% | 100% |
+| 1.00% | 17% | 30% | 34% | 5% | 0.0% | 100% |
+| 1.50% | 25% | 43% | 78% | 30% | 1.4% | 100% |
+| 2.00% | 32% | 53% | 96% | 60% | 7.5% | 100% |
 
 ## Flags
 
-- **1.50%/trade looks statistically unsafe**: P(ruin) 1.3%, 95th-pct drawdown 42%.
-- **2.00%/trade looks statistically unsafe**: P(ruin) 6.7%, 95th-pct drawdown 52%.
+- **1.50%/trade looks statistically unsafe**: P(ruin) 1.4%, 95th-pct drawdown 43%.
+- **2.00%/trade looks statistically unsafe**: P(ruin) 7.5%, 95th-pct drawdown 53%.
 
 ## Notes / assumptions
 - Compounding: each trade risks the given fraction of CURRENT equity; P&L = risk x equity x R.

@@ -23,6 +23,7 @@ import numpy as np
 
 HERE = Path(__file__).parent
 ENTRIES = HERE / "entries.json"
+SLIPPAGE = HERE / "entries_slippage.json"   # realistic (Task 8) R distribution, preferred when present
 OUT = HERE / "drawdown_simulation.md"
 
 RISK_LEVELS = [0.0025, 0.005, 0.01, 0.015, 0.02]   # 0.25% .. 2% risk per trade
@@ -45,20 +46,26 @@ def _trades_per_day(entries: list[dict]) -> float:
 
 def main():
     entries = json.loads(ENTRIES.read_text())
-    R = np.array([e["r"] for e in entries if e.get("r") is not None], dtype=float)
+    tpd = _trades_per_day(entries)
+    # Prefer the slippage-adjusted R (Task 8) so the drawdown/ruin numbers reflect realistic fills.
+    if SLIPPAGE.exists():
+        R = np.array(json.loads(SLIPPAGE.read_text()), dtype=float)
+        r_source = "slippage-adjusted (Task 8 realistic fills)"
+    else:
+        R = np.array([e["r"] for e in entries if e.get("r") is not None], dtype=float)
+        r_source = "gross (perfect fill)"
     n = len(R)
     if n < 20:
         OUT.write_text(f"# Drawdown simulation\n\nNot enough trades ({n}).\n", encoding="utf-8"); return
 
     win_rate = float(np.mean(R > 0))
     exp_r = float(np.mean(R))
-    tpd = _trades_per_day(entries)
     days_per_path = HORIZON // int(round(tpd)) if tpd >= 1 else HORIZON
     rng = np.random.default_rng(SEED)
 
     lines = ["# Task 6 — Drawdown & ruin Monte Carlo", ""]
-    lines.append(f"Bootstrapped from **{n} backtested trades** — win rate **{win_rate*100:.1f}%**, "
-                 f"expectancy **{exp_r:+.3f}R/trade**, avg **{tpd:.1f} trades/day**. "
+    lines.append(f"Bootstrapped from **{n} backtested trades** ({r_source}) — win rate "
+                 f"**{win_rate*100:.1f}%**, expectancy **{exp_r:+.3f}R/trade**, avg **{tpd:.1f} trades/day**. "
                  f"{PATHS:,} paths x {HORIZON} trades each. "
                  f"Ruin = {int(RUIN_DD*100)}% peak-to-trough drawdown. Daily breaker = {int(MAX_DAILY_LOSS*100)}% "
                  "day loss.")

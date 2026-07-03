@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     default_max_total_exposure: float = Field(0.06, description="6% of equity at risk")
     default_per_pair_cooldown_minutes: int = 30
 
+    # Data-feed integrity (Task 10): when True, the clearest corruption (non-positive / inconsistent
+    # OHLC, and single-bar spikes far beyond ATR) is REPAIRED on fetch before it reaches the funnel,
+    # so a bad tick can't blow up ATR-based sizing / fake a swing. Soft issues (gaps, stale runs) are
+    # only logged, never altered. Set DATA_INTEGRITY_REJECT=false to revert to log-only.
+    data_integrity_reject: bool = True
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

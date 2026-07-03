@@ -172,6 +172,10 @@ def analyze_symbol(
         detail={"direction": proposal.direction.value, "risk": decision.decision.value,
                 "status": record.status},
     ))
+    # Structured decision log (Task 12): the deciding gate + indicators + AI verdict for EVERY
+    # evaluation (incl. no-trade), so "why didn't it fire?" is answerable after the fact.
+    from app.agents.decision_log import record_decision
+    record_decision(session, symbol, timeframe, proposal, decision)
     session.commit()
 
     log.info("analysis complete", extra={"symbol": symbol, "proposal_id": record.id,

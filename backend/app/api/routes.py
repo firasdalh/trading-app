@@ -115,6 +115,38 @@ def resume_trading(session: Session = Depends(get_session)) -> RiskStateView:
     return read_risk_state(session)
 
 
+@router.get("/api/decisions", tags=["decisions"])
+def list_decisions(
+    symbol: str | None = None,
+    gate: str | None = None,
+    limit: int = 100,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    """Structured decision log (Task 12): every funnel evaluation incl. 'no trade', with the deciding
+    gate, indicator values, confidence and AI verdict. Answers 'why didn't it fire on this setup?'.
+    Filter by ``symbol`` and/or ``gate`` (e.g. regime_not_trending, mtf_conflict, ai_veto, approved)."""
+    from sqlalchemy import select
+
+    from app.models.db import AgentRun
+
+    limit = max(1, min(limit, 500))
+    q = select(AgentRun).where(AgentRun.agent == "decision")
+    if symbol:
+        q = q.where(AgentRun.symbol == symbol)
+    rows = session.scalars(q.order_by(AgentRun.id.desc()).limit(limit * 3 if gate else limit)).all()
+    out = []
+    for r in rows:
+        d = dict(r.detail or {})
+        if gate and d.get("gate") != gate:
+            continue
+        d["symbol"] = r.symbol
+        d["at"] = r.created_at.isoformat() if r.created_at else None
+        out.append(d)
+        if len(out) >= limit:
+            break
+    return out
+
+
 @router.post("/api/risk/preview", response_model=RiskDecision, tags=["risk"])
 def preview_risk(
     proposal: TradeProposal,
