@@ -171,6 +171,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
+  setAiReview: (enabled: boolean) =>
+    request<SettingsResponse>("/api/settings/ai-review", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
   setBrokerMap: (brokerMap: Record<string, string>) =>
     request<SettingsResponse>("/api/settings/broker-map", {
       method: "POST",

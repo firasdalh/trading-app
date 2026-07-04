@@ -126,6 +126,42 @@ def test_ai_gated_off_when_use_llm_false(monkeypatch):
     assert called["n"] == 0 and p.strategy != "ai" and p.direction == Direction.LONG
 
 
+# ---- ai_review gate: AI out of the driver's seat ----
+
+def test_ai_review_off_skips_the_veto(monkeypatch):
+    # ai_review=False: the confirm/veto reviewer is NEVER called; the deterministic LONG stands.
+    called = {"n": 0}
+    monkeypatch.setattr(orch, "llm_available", lambda: True)
+    monkeypatch.setattr(orch, "analyze", lambda **k: called.__setitem__("n", called["n"] + 1))
+    p = run_orchestrator("X", AssetClass.FOREX, "1h", _tech(), _fund(), now=NOW,
+                         use_llm=True, ai_led=False, ai_review=False)
+    assert called["n"] == 0 and p.direction == Direction.LONG and p.review_decision != "veto"
+
+
+def test_ai_review_on_can_veto(monkeypatch):
+    # ai_review=True (legacy): a veto verdict turns the deterministic LONG into NO_TRADE.
+    from app.models.enums import ReviewDecision
+    from app.models.schemas import TradeReviewLLM
+    veto = TradeReviewLLM(decision=ReviewDecision.VETO, confidence=0.2,
+                          rationale="too extended", concerns=["chasing"])
+    monkeypatch.setattr(orch, "llm_available", lambda: True)
+    monkeypatch.setattr(orch, "analyze", lambda **k: veto)
+    p = run_orchestrator("X", AssetClass.FOREX, "1h", _tech(), _fund(), now=NOW,
+                         use_llm=True, ai_led=False, ai_review=True)
+    assert p.direction == Direction.NO_TRADE and p.review_decision == "veto"
+
+
+def test_ai_review_endpoint_persists(db_session):
+    from app.api.settings_routes import AiReviewRequest, set_ai_review
+    from app.core.state import get_or_create_settings
+
+    off = set_ai_review(AiReviewRequest(enabled=False), session=db_session)
+    assert off.app.ai_review_enabled is False
+    assert get_or_create_settings(db_session).ai_review_enabled is False
+    on = set_ai_review(AiReviewRequest(enabled=True), session=db_session)
+    assert on.app.ai_review_enabled is True
+
+
 # ---- the settings toggle (the revert switch) persists ----
 
 def test_ai_led_mode_endpoint_persists(db_session):

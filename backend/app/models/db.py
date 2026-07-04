@@ -90,6 +90,13 @@ class AppSettings(Base):
     # it overrides AI-led + scalp. Toggle from the dashboard. OFF by default.
     st_band_mode: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # AI confirm/veto REVIEW of the deterministic setup. Repeatability testing showed the reasoning-
+    # model reviewer flips its verdict on ~82% of setups run-to-run (not a stable filter), and a plain
+    # confidence>=70% gate matches its win rate deterministically. So default this OFF: the AI is kept
+    # for the fundamental read (a soft bias nudge) but is OUT of the trade decision. ON restores the
+    # legacy confirm/veto (and LLM technical) behavior.
+    ai_review_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Journal "start fresh from now" marker: when set, the trade journal + stats + calibration only
     # count trades CLOSED at/after this time (the broker's full deal history is untouched — this just
     # filters the view). None = show everything. Set it to start a clean test period.

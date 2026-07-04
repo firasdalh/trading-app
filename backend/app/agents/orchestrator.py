@@ -1096,8 +1096,11 @@ def _deterministic_decision(
     vr = ind.get("vol_ratio")
     if vr is not None and vr > 1.2:
         conf += 0.1
-    if macd_hist is not None and ((direction == Direction.LONG) == (macd_hist > 0)):
-        conf += 0.05
+    # NOTE: the entry-TF "MACD agrees with direction" +0.05 bonus was REMOVED as redundant — in
+    # trend-only mode we enter WITH momentum by construction, so it was handed to nearly every setup
+    # (non-discriminating) and duplicated the trend signal. Ablation: removing it tightened the 70%
+    # gate to the genuinely-confident setups and improved expectancy (small sample; a robustness cut,
+    # not a returns play). The CROSS-timeframe MACD conflict below is kept — it carries distinct info.
     # Cross-timeframe momentum conflict: the higher-TF MACD pushing AGAINST the trade is a
     # lower-conviction signal (the XAU short was taken with 1h vs 4h MACD disagreeing).
     macro_tf = _macro_tf(technical)
@@ -1152,11 +1155,15 @@ def _deterministic_decision(
     if regime == "volatile":
         conf -= 0.1
     # Session/liquidity: lean into the liquid windows, discount thin hours (noise, wide spreads).
+    # Thin-hour entries validated as materially lower-quality (backtest: ~+0.10R vs ~+0.24R in
+    # active/normal, and it holds in- AND out-of-sample), and their real spread/slippage cost is
+    # under-modelled — so the thin discount is DOUBLED to -0.10. This is a soft filter: a strong thin
+    # setup still clears the confidence bar; a marginal one now falls below it (esp. the 70% Hybrid gate).
     session_q, _session_note = _session_quality(asset_class, symbol, now)
     if session_q == "active":
         conf += 0.05
     elif session_q == "thin":
-        conf -= 0.05
+        conf -= 0.10
     confidence = round(max(0.05, min(0.95, conf)), 2)
 
     # Carry a conditional ('wait') entry so the trade can be ARMED rather than chased — computed
@@ -1325,6 +1332,7 @@ def run_orchestrator(
     technical: TechnicalRead, fundamental: FundamentalRead,
     now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
     scalp: bool = False, ai_led: bool = False, st_band: bool = False,
+    ai_review: bool = True,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -1356,7 +1364,11 @@ def run_orchestrator(
                                        trend_only=trend_only, scalp=scalp, st_band=st_band)
 
     # SuperTrend-band is a purely mechanical strategy — no LLM confirm/veto over its signals.
-    if st_band or proposal.direction == Direction.NO_TRADE or not use_llm or not llm_available():
+    # ai_review=False takes the AI out of the trade decision entirely (the deterministic engine +
+    # confidence gate decide; the AI is kept only for the fundamental read upstream). Default per the
+    # repeatability finding that the reviewer isn't a stable filter.
+    if (st_band or proposal.direction == Direction.NO_TRADE or not use_llm or not llm_available()
+            or not ai_review):
         log.info("orchestrator decision (deterministic)",
                  extra={"symbol": symbol, "direction": proposal.direction.value,
                         "strategy": proposal.strategy})

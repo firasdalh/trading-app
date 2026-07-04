@@ -268,6 +268,24 @@ def set_st_band_mode(req: StBandModeRequest, session: Session = Depends(get_sess
     return build_settings_response(session)
 
 
+class AiReviewRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/ai-review", response_model=SettingsResponse)
+def set_ai_review(req: AiReviewRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle the AI confirm/veto REVIEW of the deterministic setup. OFF (default) takes the AI out of
+    the trade decision — the deterministic engine + confidence gate decide, and the AI is kept only
+    for the fundamental read. ON restores the legacy LLM technical + confirm/veto review. Reversible.
+    (Repeatability testing showed the reasoning-model reviewer flips its verdict on ~82% of setups
+    run-to-run, so it isn't a stable filter; a confidence>=70% gate matches it deterministically.)"""
+    settings = get_or_create_settings(session)
+    settings.ai_review_enabled = req.enabled
+    session.commit()
+    log.info("ai-review set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
 def _try_mt5_connect() -> dict:
     """Attempt an MT5 connection and return a status dict (never raises)."""
     from app.brokers.base import BrokerError

@@ -240,6 +240,7 @@ export interface SettingsResponse {
     scalp_mode: boolean;
     ai_led_mode: boolean;
     st_band_mode: boolean;
+    ai_review_enabled: boolean;
     live_confirmed_at: string | null;
   };
   risk: {

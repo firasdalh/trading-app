@@ -81,6 +81,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [scalpBusy, setScalpBusy] = useState(false);
   const [stBandBusy, setStBandBusy] = useState(false);
+  const [aiReviewBusy, setAiReviewBusy] = useState(false);
 
   const [symbols, setSymbols] = useState<string[]>([]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
@@ -89,6 +90,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const { data: brokerInfo } = usePolling(() => api.brokerInfo(assetClass), 6000, [assetClass]);
   const scalp = !!settings?.app.scalp_mode;
   const stBand = !!settings?.app.st_band_mode;
+  const aiReview = !!settings?.app.ai_review_enabled;
 
   // Load the broker's available symbols for the chosen asset class. If the current symbol
   // isn't offered (e.g. switching to forex while on AAPL), jump to the first available one.
@@ -213,6 +215,19 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setStBandBusy(false);
+    }
+  };
+
+  const toggleAiReview = async () => {
+    setAiReviewBusy(true);
+    setError(null);
+    try {
+      await api.setAiReview(!aiReview);
+      onSettingsChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAiReviewBusy(false);
     }
   };
 
@@ -371,6 +386,18 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           }`}
         >
           📈 SuperTrend {stBand ? "ON" : "OFF"}
+        </button>
+        <button
+          onClick={toggleAiReview}
+          disabled={aiReviewBusy}
+          title="AI trade review (confirm/veto). OFF (recommended): the deterministic engine + confidence gate decide, and the AI is kept only for the fundamental read. Repeatability testing showed the AI reviewer flips its verdict on ~82% of setups run-to-run, so it isn't a stable filter. ON restores the LLM technical + confirm/veto review."
+          className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+            aiReview
+              ? "border-amber-500 bg-amber-500/15 text-amber-300"
+              : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+          }`}
+        >
+          🤖 AI review {aiReview ? "ON" : "OFF (fundamentals only)"}
         </button>
         <div className="ml-auto flex items-center gap-3">
           {brokerInfo &&
