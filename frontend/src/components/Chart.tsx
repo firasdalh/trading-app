@@ -20,6 +20,39 @@ import { fmtPrice } from "../format";
 import type { AssetClass, Candle, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
+// Persist a small chart UI toggle across refreshes AND pair changes (localStorage-backed useState).
+function usePersisted<T>(key: string, initial: T) {
+  const [v, setV] = useState<T>(() => {
+    try {
+      const s = localStorage.getItem(key);
+      return s !== null ? (JSON.parse(s) as T) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(v));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }, [key, v]);
+  return [v, setV] as const;
+}
+
+// Decimals an instrument actually uses (EURUSD 5, JPY pairs 3, gold 2, indices ~1), inferred from the
+// data so the right price axis + last-value label format correctly. Lightweight-charts otherwise
+// defaults to 2 decimals, which shows "1.10" for EURUSD instead of "1.10234".
+function inferDecimals(candles: Candle[]): number {
+  const sample = candles.slice(-200).map((c) => c.close).filter((p) => Number.isFinite(p) && p > 0);
+  if (!sample.length) return 2;
+  for (let d = 0; d <= 5; d++) {
+    const m = 10 ** d;
+    if (sample.every((p) => Math.abs(p * m - Math.round(p * m)) <= 1e-6 * Math.max(1, p * m))) return d;
+  }
+  return 5;
+}
+
 export interface ArmedLevel {
   id: number;
   symbol: string;
@@ -320,12 +353,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null } | null>(null);
 
   const [legend, setLegend] = useState<Legend | null>(null);
-  const [showEma, setShowEma] = useState<Record<number, boolean>>({ 20: true, 50: true, 100: false, 200: true });
-  const [showRsi, setShowRsi] = useState(true);
-  const [showMacd, setShowMacd] = useState(true);
-  const [showSt, setShowSt] = useState(true);
-  const [showPb, setShowPb] = useState(true);
-  const [showBand, setShowBand] = useState(true);
+  const [showEma, setShowEma] = usePersisted<Record<number, boolean>>(
+    "chart.showEma", { 20: true, 50: true, 100: false, 200: true });
+  const [showRsi, setShowRsi] = usePersisted("chart.showRsi", true);
+  const [showMacd, setShowMacd] = usePersisted("chart.showMacd", true);
+  const [showSt, setShowSt] = usePersisted("chart.showSt", true);
+  const [showPb, setShowPb] = usePersisted("chart.showPb", true);
+  const [showBand, setShowBand] = usePersisted("chart.showBand", true);
 
   const toTime = (c: Candle) => Math.floor(Date.parse(c.ts) / 1000) as UTCTimestamp;
 
@@ -517,6 +551,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           time: toTime(c), open: c.open, high: c.high, low: c.low, close: c.close,
         }));
         seriesRef.current.setData(candleData);
+        // Format the right price axis + last-value label to the instrument's real precision
+        // (per pair) instead of the default 2 decimals.
+        const dec = inferDecimals(series.candles);
+        seriesRef.current.applyOptions({
+          priceFormat: { type: "price", precision: dec, minMove: 10 ** -dec },
+        });
         volumeRef.current.setData(
           series.candles.map((c): HistogramData => ({
             time: toTime(c), value: c.volume,
