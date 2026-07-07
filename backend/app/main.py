@@ -24,6 +24,7 @@ from app.api.market_routes import router as market_router
 from app.api.proposal_routes import router as proposal_router
 from app.api.routes import router
 from app.api.settings_routes import router as settings_router
+from app.api.shadow_routes import router as shadow_router
 from app.api.watchlist_routes import router as watchlist_router
 from app.api.ws import router as ws_router
 from app.core.config import get_settings
@@ -201,6 +202,7 @@ app.include_router(backtest_router)
 app.include_router(journal_router)
 app.include_router(conditional_router)
 app.include_router(watchlist_router)
+app.include_router(shadow_router)
 app.include_router(ws_router)
 
 

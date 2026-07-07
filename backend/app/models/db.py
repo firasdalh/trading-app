@@ -429,3 +429,49 @@ class AgentRun(Base):
     level: Mapped[str] = mapped_column(String(8), default="INFO")
     event: Mapped[str] = mapped_column(String(64))
     detail: Mapped[dict | None] = mapped_column(JSON)
+
+
+class ShadowDecision(Base):
+    """SHADOW SCORECARD: one row per AI decision, capturing BOTH the AI's call and the deterministic
+    engine's call on the SAME setup + entry price, so a grader can later replay the following candles
+    and score which side was right. This is the A/B proof (is the AI actually better?) and the source
+    of the AI's own track-record fed back into the decision brief. Never touches a live order."""
+
+    __tablename__ = "shadow_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    asset_class: Mapped[str] = mapped_column(String(16))
+    timeframe: Mapped[str] = mapped_column(String(16), default="1h")
+    price_at: Mapped[float] = mapped_column(Float)          # market price when the decision was made
+    atr_at: Mapped[float | None] = mapped_column(Float)     # ATR at decision (R proxy for stand-aside grading)
+    regime: Mapped[str | None] = mapped_column(String(16))
+    horizon_bars: Mapped[int] = mapped_column(Integer, default=48)  # how far forward to grade
+
+    # AI side
+    ai_action: Mapped[str] = mapped_column(String(16))     # open_long|open_short|arm_long|arm_short|stand_aside
+    ai_direction: Mapped[str | None] = mapped_column(String(8))     # long|short|None
+    ai_entry: Mapped[float | None] = mapped_column(Float)   # market for open; trigger for arm
+    ai_stop: Mapped[float | None] = mapped_column(Float)
+    ai_target: Mapped[float | None] = mapped_column(Float)
+    ai_conf: Mapped[float | None] = mapped_column(Float)
+    ai_scenario: Mapped[str | None] = mapped_column(String(120))
+
+    # Deterministic side (the same setup, its rule-based call)
+    det_direction: Mapped[str] = mapped_column(String(16))  # long|short|no_trade
+    det_entry: Mapped[float | None] = mapped_column(Float)
+    det_stop: Mapped[float | None] = mapped_column(Float)
+    det_target: Mapped[float | None] = mapped_column(Float)
+    det_conf: Mapped[float | None] = mapped_column(Float)
+
+    # Grading (filled in later by evaluate_shadows)
+    evaluated: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ai_outcome: Mapped[str | None] = mapped_column(String(16))    # win|loss|neutral|no_fill|stand_aside
+    ai_r: Mapped[float | None] = mapped_column(Float)             # realized R for the AI call
+    det_outcome: Mapped[str | None] = mapped_column(String(16))
+    det_r: Mapped[float | None] = mapped_column(Float)
+    # For a stand-aside: did a clean 2R move happen anyway (missed) — the opportunity-cost check.
+    missed_move: Mapped[str | None] = mapped_column(String(16))   # up|down|none|None
+    note: Mapped[str | None] = mapped_column(Text)

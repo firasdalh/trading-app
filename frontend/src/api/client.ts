@@ -49,6 +49,27 @@ export const api = {
       `/api/market/ohlcv?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}&timeframe=${timeframe}&limit=${limit}`,
     ),
 
+  // Plain-language "where is price + do RSI/volume/ATR confirm?" read for the current pair.
+  context: (symbol: string, assetClass: AssetClass) =>
+    request<import("../types").MarketContext>(
+      `/api/market/context?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+    ),
+
+  // AI two-scenario read (ranked + scored + why-primary). INFO only. Falls back to deterministic.
+  scenarios: (symbol: string, assetClass: AssetClass) =>
+    request<import("../types").AiScenarioRead>(
+      `/api/market/scenarios?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+    ),
+
+  // Shadow scorecard — AI vs deterministic head-to-head (auto-grades pending on GET).
+  shadowScorecard: () => request<import("../types").ShadowScorecard>("/api/shadow/scorecard"),
+
+  // Multi-timeframe support/resistance levels (1h/4h/1d) for the chart overlay.
+  levels: (symbol: string, assetClass: AssetClass) =>
+    request<{ symbol: string; price: number | null; levels: Record<string, { price: number; kind: string }[]> }>(
+      `/api/market/levels?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+    ),
+
   account: (assetClass: AssetClass) =>
     request<AccountState>(`/api/broker/account?asset_class=${assetClass}`),
   // App-opened positions (used internally for exposure).
@@ -195,8 +216,10 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   scanNow: () => request<{ scanned: number }>("/api/watchlist/scan-now", { method: "POST" }),
-  opportunities: () =>
-    request<import("../types").OpportunityView[]>("/api/watchlist/opportunities"),
+  opportunities: (timeframe?: string) =>
+    request<import("../types").OpportunityView[]>(
+      `/api/watchlist/opportunities${timeframe ? `?timeframe=${encodeURIComponent(timeframe)}` : ""}`,
+    ),
 
   hybridState: () => request<import("../types").HybridState>("/api/hybrid"),
   setHybridConfig: (cfg: {
@@ -207,7 +230,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(cfg),
     }),
-  hybridRun: () => request<import("../types").HybridState>("/api/hybrid/run", { method: "POST" }),
+  hybridRun: (timeframe?: string) =>
+    request<import("../types").HybridState>(
+      `/api/hybrid/run${timeframe ? `?timeframe=${encodeURIComponent(timeframe)}` : ""}`,
+      { method: "POST" },
+    ),
   hybridStats: () => request<import("../types").HybridStats>("/api/hybrid/stats"),
 
   // Conditional ('armed' / pending) setups.

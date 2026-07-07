@@ -183,6 +183,8 @@ class OpportunityView(BaseModel):
 def opportunities(
     deep: bool = Query(True, description="Re-judge the actionable candidates with the LLM reviewer "
                                          "so the headline setups match 'Run analysis'."),
+    timeframe: str | None = Query(None, description="Scan every pair on THIS timeframe (e.g. 15m/4h) "
+                                                    "instead of its own; blank = each pair's own."),
     session: Session = Depends(get_session),
 ) -> list[OpportunityView]:
     """Scan every enabled watchlist pair and return the setups ranked best-first — actionable &
@@ -204,15 +206,22 @@ def opportunities(
     open_syms = {p.symbol.upper() for p in live}
     cache = ScanCache(open_book=[(p.symbol, p.direction) for p in live])
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
+    tf_override = timeframe if isinstance(timeframe, str) and timeframe else None
 
-    # AI-LED scan: when the AI is the decider, it evaluates EVERY pair directly (one cheap LLM call
-    # each — on-demand only, "Scan watchlist" isn't polled) so it can surface setups the deterministic
-    # trend-only filter would reject. Otherwise the cheap deterministic engine ranks the list and the
-    # LLM only re-judges the few actionable candidates (pass 2).
+    # AI-DECIDER / AI-LED scan: when the AI is the decider, it evaluates EVERY pair directly (one LLM
+    # call each — on-demand only, "Scan watchlist" isn't polled) so it can surface setups the
+    # deterministic trend-only filter would reject. Otherwise the cheap deterministic engine ranks the
+    # list and the LLM only re-judges the few actionable candidates (pass 2).
+    #  - ai_led (legacy): the AI reads the chart itself and decides.
+    #  - ai_decides (ai_review ON): the deterministic engine is the analyst -> brief -> AI judges
+    #    (open/arm/skip). Wired inside preview_symbol; here we just make it run per-pair (use_llm=True).
     settings = get_or_create_settings(session)
     ai_led = settings.ai_led_mode and not settings.scalp_mode and llm_available()
+    ai_decides = (settings.ai_review_enabled and not settings.scalp_mode and not settings.st_band_mode
+                  and not settings.ai_led_mode and llm_available())
+    ai_active = ai_led or ai_decides
 
-    def _view(it: WatchItem, prop, dec) -> OpportunityView:
+    def _view(it: WatchItem, prop, dec, tf: str) -> OpportunityView:
         rr = None
         if prop.entry and prop.stop_loss and prop.take_profit:
             risk = abs(prop.entry - prop.stop_loss)
@@ -223,7 +232,7 @@ def opportunities(
         risk_usd = round(dec.risk_amount, 2) if dec.risk_amount else None
         reward_usd = round(risk_usd * rr, 2) if (risk_usd and rr) else None
         return OpportunityView(
-            symbol=it.symbol, asset_class=it.asset_class, timeframe=it.timeframe,
+            symbol=it.symbol, asset_class=it.asset_class, timeframe=tf,
             direction=prop.direction.value, entry=prop.entry, stop_loss=prop.stop_loss,
             take_profit=prop.take_profit, rr=rr, confidence=prop.confidence, watch=prop.watch,
             rationale=prop.rationale, risk_approved=dec.approved, risk_decision=dec.decision.value,
@@ -237,35 +246,37 @@ def opportunities(
     out: list[OpportunityView] = []
     meta: list[WatchItem] = []  # WatchItem parallel to `out`, so pass 2 can re-run a row by index
     for it in items:
+        tf = tf_override or it.timeframe   # global override, or the pair's own
         try:
-            # AI-led: deterministic reads (read_llm=False) + AI decision (use_llm=True) -> 1 AI call
+            # AI active: deterministic reads (read_llm=False) + AI decision (use_llm=True) -> 1 AI call
             # per pair, not 3. Else: fully deterministic, cheap.
-            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class), it.timeframe,
-                                       use_llm=ai_led, read_llm=False if ai_led else None, cache=cache)
+            prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class), tf,
+                                       use_llm=ai_active, read_llm=False if ai_active else None, cache=cache)
         except Exception as exc:  # noqa: BLE001
             log.warning("opportunity preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue
-        out.append(_view(it, prop, dec))
+        out.append(_view(it, prop, dec, tf))
         meta.append(it)
 
     # Pass 2 — only when NOT AI-led (AI-led already decided each pair with the LLM in pass 1). Here the
     # deterministic engine ranked the list, so re-judge the ACTIONABLE candidates with the LLM
     # reviewer, capped at the strongest _DEEP_MAX so a manual scan stays fast. A veto turns the row
     # into NO_TRADE with confidence 0, so it drops out of the actionable tier exactly like Run analysis.
-    if deep and not ai_led and llm_available():
+    if deep and not ai_active and llm_available():
         idxs = [i for i, o in enumerate(out)
                 if o.direction in ("long", "short") and o.risk_approved and not o.already_open]
         idxs.sort(key=lambda i: -out[i].confidence)
         for i in idxs[:_DEEP_MAX]:
             it = meta[i]
+            tf = tf_override or it.timeframe
             try:
                 prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                           it.timeframe, use_llm=True, cache=cache)
+                                           tf, use_llm=True, cache=cache)
             except Exception as exc:  # noqa: BLE001
                 log.warning("opportunity LLM review failed",
                             extra={"symbol": it.symbol, "error": str(exc)})
                 continue
-            out[i] = _view(it, prop, dec)
+            out[i] = _view(it, prop, dec, tf)
 
     def rank(o: OpportunityView):
         actionable = o.direction in ("long", "short")

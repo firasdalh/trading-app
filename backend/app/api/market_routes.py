@@ -54,6 +54,70 @@ def ohlcv(
     return broker.get_ohlcv(symbol, timeframe, limit)
 
 
+@router.get("/market/levels")
+def market_levels(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Support/resistance levels across timeframes (1h, 4h, 1d) so a lower-TF chart can also show the
+    stronger higher-TF levels. Levels are recent swing pivots nearest the current price. Returns
+    ``{price, levels: {tf: [{price, kind}]}}``."""
+    from app.agents.indicators import pivot_levels
+    from app.data.ohlcv_cache import get_ohlcv_cached
+
+    broker = _broker_for(asset_class, session)
+    levels: dict[str, list[dict]] = {}
+    ref: float | None = None
+    for tf in ("1h", "4h", "1d"):
+        try:
+            candles = get_ohlcv_cached(broker, symbol, tf, 200).candles
+        except Exception as exc:  # noqa: BLE001
+            log.warning("levels fetch failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
+            continue
+        if not candles or len(candles) < 10:
+            continue
+        if ref is None:
+            ref = candles[-1].close
+        levels[tf] = pivot_levels(candles, ref)
+    return {"symbol": symbol, "price": ref, "levels": levels}
+
+
+@router.get("/market/context")
+def market_context(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Plain-language 'where is price on the map + do RSI/volume/ATR confirm?' read (INFO only — it
+    does not gate trades). Reads multi-TF S/R, the regression channel, and HH/HL structure, then gives
+    a short-term + medium-term lean and a level to watch — for the user's Mode-A approve/reject call."""
+    from app.agents.context import build_context
+
+    ctx = build_context(session, symbol, asset_class)
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="market context unavailable (no data)")
+    return ctx
+
+
+@router.get("/market/scenarios")
+def market_scenarios(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    session: Session = Depends(get_session),
+) -> dict:
+    """AI SCENARIO read (INFO only): the LLM reasons out TWO ranked, scored forward scenarios anchored
+    to the deterministic map (real S/R, structure, momentum) — for the user's Mode-A call. It does NOT
+    gate trades. Degrades to the deterministic map scenarios when no LLM is configured. The probabilities
+    are the model's judgement (they vary run-to-run) — a lean, not a measurement."""
+    from app.agents.scenarios import ai_scenarios
+
+    out = ai_scenarios(session, symbol, asset_class)
+    if out is None:
+        raise HTTPException(status_code=503, detail="scenarios unavailable (no data)")
+    return out
+
+
 @router.get("/broker/account", response_model=AccountState)
 def account(
     asset_class: AssetClass = Query(AssetClass.STOCK),

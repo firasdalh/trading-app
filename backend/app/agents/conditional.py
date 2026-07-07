@@ -435,12 +435,14 @@ def check_conditional_setups(session: Session) -> dict:
         if s.require_close_confirm and closes:  # confirm on the latest candle close (avoid wick-driven false breaks)
             ref = closes[-1]
 
-        # PRE-TRIGGER structure invalidation: a confirmed close back through the trend EMA(50) against
-        # the armed side means the pullback we were waiting to RESUME has instead broken the trend —
-        # kill the setup now instead of waiting out its full validity window. (The trigger-time
-        # _mechanical_invalidation only runs once the break is hit; this catches the thesis breaking
-        # while still armed. The wall-clock `valid_until` above remains the time cap.)
-        if _trend_broken(s.direction, closes):
+        # PRE-TRIGGER structure invalidation — STOP (breakout/continuation) orders only. A confirmed
+        # close back through the trend EMA(50) against the armed side means the breakout thesis is dead,
+        # so kill it now instead of waiting out the validity window. This does NOT apply to LIMIT
+        # (pullback) orders: a buy_limit/sell_limit is armed precisely to enter INTO a dip/rally, so
+        # price sitting on the far side of the EMA is the PREMISE, not an invalidation — applying it
+        # there killed pullback arms within one monitor pass. (Limits are bounded by _mechanical_
+        # invalidation at the trigger + the wall-clock `valid_until`.)
+        if s.order_type in ("buy_stop", "sell_stop") and _trend_broken(s.direction, closes):
             s.status = ConditionalStatus.INVALIDATED.value
             s.last_note = ("invalidated — price closed back through the trend EMA(50) against the "
                            "setup before the break; the pullback became a reversal")

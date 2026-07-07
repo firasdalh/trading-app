@@ -81,8 +81,10 @@ def _arm_from(session: Session, cfg: HybridConfig, armable: list, exclude: str |
     return armed
 
 
-def run_hybrid(session: Session) -> dict:
-    """Scan + auto-open the single best qualifying setup (if any). Returns a short summary."""
+def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
+    """Scan + auto-open the single best qualifying setup (if any). Returns a short summary.
+    ``tf_override`` (from the watchlist timeframe selector on a manual 'Run now') scans + opens on
+    that timeframe instead of each pair's own; None keeps per-pair timeframes (the scheduled tick)."""
     from app.agents.scanner import expire_stale_proposals
 
     expire_stale_proposals(session)  # clear stale pendings that would otherwise block symbols
@@ -146,7 +148,7 @@ def run_hybrid(session: Session) -> dict:
             # well-calibrated. The chosen best is then re-run with the LLM reviewer below before
             # it actually opens, so the LLM judgment still gates every auto-trade.
             prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       it.timeframe, use_llm=False, cache=cache)
+                                       tf_override or it.timeframe, use_llm=False, cache=cache)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue
@@ -172,8 +174,8 @@ def run_hybrid(session: Session) -> dict:
     _, best = candidates[0]
 
     # --- 3. full analysis (LLM review can veto / lower confidence) then auto-open ---
-    res = analyze_symbol(session, best.symbol, AssetClass(best.asset_class), best.timeframe,
-                         use_llm=True)
+    res = analyze_symbol(session, best.symbol, AssetClass(best.asset_class),
+                         tf_override or best.timeframe, use_llm=True)
     record = session.get(TradeProposalRecord, res.proposal_id)
     if record is None:
         return done(f"{best.symbol}: proposal vanished")

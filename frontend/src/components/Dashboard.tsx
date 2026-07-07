@@ -49,6 +49,7 @@ import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
+import { ShadowScorecardPanel } from "./ShadowScorecardPanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
 import { RiskDashboard } from "./RiskDashboard";
@@ -75,6 +76,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [timeframe, setTimeframe] = useLocalStorage("ta.timeframe", "1h");
   const [favorites, setFavorites] = useLocalStorage<Favorite[]>("ta.favorites", []);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
+  const [scenario, setScenario] = useState<import("../types").AiScenarioRead | null>(null);
+  const [scenarioBusy, setScenarioBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
@@ -234,10 +237,19 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const runAnalysis = async () => {
     setAnalyzing(true);
     setError(null);
+    setScenario(null);
     try {
       const res = await api.analyze(symbol, assetClass, timeframe);
       setResult(res);
       setStatus(res.status);
+      // Step 4: fold in the AI two-scenario read (info only; anchored to the same map). Runs after
+      // the proposal so the panel appears immediately and the scenarios fill in when ready.
+      setScenarioBusy(true);
+      api
+        .scenarios(symbol, assetClass)
+        .then(setScenario)
+        .catch(() => setScenario(null))
+        .finally(() => setScenarioBusy(false));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -390,14 +402,14 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         <button
           onClick={toggleAiReview}
           disabled={aiReviewBusy}
-          title="AI trade review (confirm/veto). OFF (recommended): the deterministic engine + confidence gate decide, and the AI is kept only for the fundamental read. Repeatability testing showed the AI reviewer flips its verdict on ~82% of setups run-to-run, so it isn't a stable filter. ON restores the LLM technical + confirm/veto review."
+          title="AI DECIDES. ON: the deterministic engine does the full analysis (a decision brief with real levels, level strength, two scenarios, trend maturity + its own historical hit-rate) and the AI is the JUDGE — it picks the better scenario and decides open now / arm a pending order / stand aside. The deterministic Risk Manager still sizes + gates, and you approve in Mode A. Best with a non-reasoning model (gpt-4.1) at temp 0 for repeatable decisions. OFF (recommended default): the deterministic engine + 70% confidence gate decide; AI only reads fundamentals."
           className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
             aiReview
-              ? "border-amber-500 bg-amber-500/15 text-amber-300"
+              ? "border-violet-500 bg-violet-500/15 text-violet-300"
               : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
           }`}
         >
-          🤖 AI review {aiReview ? "ON" : "OFF (fundamentals only)"}
+          🤖 AI decides {aiReview ? "ON" : "OFF (deterministic)"}
         </button>
         <div className="ml-auto flex items-center gap-3">
           {brokerInfo &&
@@ -546,9 +558,13 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           onReject={reject}
           onRunAnalysis={runAnalysis}
           analyzing={analyzing}
+          scenario={scenario}
+          scenarioBusy={scenarioBusy}
         />
         <ConditionalsPanel onSelect={openPositionSymbol} />
       </div>
+
+      {aiReview && <ShadowScorecardPanel />}
 
       <WatchlistPanel
         currentSymbol={symbol}

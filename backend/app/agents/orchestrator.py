@@ -142,6 +142,16 @@ _VALUE_ENTRY_ATR = 1.0  # entry within ~1 ATR of the 20-EMA = a pullback to VALU
                         # preferred trend entry (tight risk to the swing, lots of room to target)
 _STRETCHED_ATR = 1.5    # 1.5-2.5 ATR from value = getting stretched (small anti-chase penalty);
                         # beyond _PULLBACK_ATR it's a full chase (bigger penalty) — see grading below
+# --- map-read WALL-proximity soft factor. Unlike the REMOVED channel factor, the wall penalty applies
+# ONLY when the trend is NOT strong: a strong trend legitimately breaks levels, so we don't punish it
+# for that; a weak trend running into a nearby barrier with little headroom IS a chase. A key level
+# just cleared (behind entry) on rising volume is the opposite — a confirmed break -> bonus. Validated
+# on walk-forward (analysis/map_factors.md): kept because it improved BOTH in- and out-of-sample. (The
+# volume-TREND factor tested alongside it was worse OOS and was dropped — see the NOTE at its site.)
+_WALL_NEAR_ATR = 0.75   # a barrier within this many ATR ahead (weak trend) = limited headroom -> penalty
+_WALL_BEHIND_ATR = 0.5  # a key level this recently cleared (behind entry) = a fresh breakout -> bonus
+_WALL_PENALTY = 0.06
+_WALL_BREAK_BONUS = 0.06
 
 # --- 15m SCALPING (SCMS: Structure-Confirmed Momentum Scalp) — kept deliberately PARSIMONIOUS to
 # avoid overfitting: a tiny set of robust, orthogonal conditions (trend+MTF alignment, a pullback to
@@ -1125,6 +1135,35 @@ def _deterministic_decision(
             conf -= 0.18                      # chasing far from value — strong anti-chase
         elif value_dist >= _STRETCHED_ATR:
             conf -= 0.06                      # getting stretched
+    # NOTE: a regression-channel "don't buy into the upper (resistance) band" confidence factor was
+    # tested (analysis/channel_test.md) and REMOVED — it was slightly worse overall and clearly worse
+    # OUT-OF-SAMPLE. Reason: this is a TREND-following engine, and in a real trend price legitimately
+    # RIDES and BREAKS the upper band (continuation), so penalising "near resistance" cut good trend
+    # trades. The channel is still COMPUTED (chan_pos/chan_r2) and drawn on the chart for the user's
+    # own read, but it does not gate the decision. Level-rejection logic suits range/reversal trading,
+    # not trend continuation.
+    #
+    # Map-read WALL PROXIMITY (the scorecard's 🔴 Resistance/Support item), done the RIGHT way: only a
+    # WEAK trend gets penalised for running into a nearby barrier (a strong trend breaks through — the
+    # lesson from the failed channel factor). And a key level just CLEARED behind the entry on rising
+    # volume is a confirmed break -> reward. `nearest` is the nearest level AHEAD; `levels` are all S/R.
+    if not strong and nearest is not None and atr_v and atr_v > 0 and "wall" not in disable:
+        head_atr = abs(nearest - entry) / atr_v            # headroom before the barrier
+        if head_atr < _WALL_NEAR_ATR:
+            conf -= _WALL_PENALTY                           # chasing into a wall with no break-power
+    if atr_v and atr_v > 0 and "wall" not in disable:
+        vt_break = ind.get("vol_trend")
+        behind = [lv for lv in levels if (lv < entry if direction == Direction.LONG else lv > entry)]
+        just_cleared = behind and min(abs(entry - lv) for lv in behind) <= _WALL_BEHIND_ATR * atr_v
+        if just_cleared and vt_break is not None and vt_break > 0:
+            conf += _WALL_BREAK_BONUS                       # broke a level on rising volume — continuation
+    # NOTE: a VOLUME-TREND confidence factor (expanding volume into the move = +, fading = -) was
+    # tested on walk-forward (analysis/map_factors.md) and REMOVED as a confidence input — it was
+    # WORSE both in- and out-of-sample (OOS +0.121R vs +0.144R base). Raison: this is a trend engine,
+    # and real trends routinely GRIND higher on FADING volume while volume SPIKES often mark climaxes/
+    # reversals — so volume slope is a poor conviction signal here. The `vol_trend` indicator is still
+    # computed (it powers the wall breakout bonus above and the 🗺️ Read scorecard), just not scored.
+    # The WALL-proximity factor (tested alongside) DID help both IS and OOS and is kept, above.
     rsi = ind.get("rsi14")
     if rsi is not None and ((direction == Direction.LONG and rsi >= _RSI_OB)
                             or (direction == Direction.SHORT and rsi <= _RSI_OS)):

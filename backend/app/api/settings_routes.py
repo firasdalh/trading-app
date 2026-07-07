@@ -703,11 +703,13 @@ def hybrid_set_config(req: HybridConfigRequest, session: Session = Depends(get_s
 
 
 @router.post("/hybrid/run", response_model=HybridView, tags=["hybrid"])
-def hybrid_run_now(session: Session = Depends(get_session)) -> HybridView:
-    """Run one Hybrid pass immediately (the 'Run now' button)."""
+def hybrid_run_now(timeframe: str | None = None,
+                   session: Session = Depends(get_session)) -> HybridView:
+    """Run one Hybrid pass immediately (the 'Run now' button). ``timeframe`` (from the watchlist
+    timeframe selector) scans + opens on that timeframe instead of each pair's own."""
     from app.agents.hybrid import run_hybrid
 
-    run_hybrid(session)
+    run_hybrid(session, tf_override=timeframe)
     return _hybrid_view(session)
 
 

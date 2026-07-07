@@ -16,8 +16,9 @@ import {
   WhitespaceData,
 } from "lightweight-charts";
 import { api } from "../api/client";
+import { ScenarioCard } from "./ScenarioCard";
 import { fmtPrice } from "../format";
-import type { AssetClass, Candle, PositionView, TradeProposal } from "../types";
+import type { AiScenarioRead, AssetClass, Candle, MarketContext, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
 // Persist a small chart UI toggle across refreshes AND pair changes (localStorage-backed useState).
@@ -44,13 +45,15 @@ function usePersisted<T>(key: string, initial: T) {
 // data so the right price axis + last-value label format correctly. Lightweight-charts otherwise
 // defaults to 2 decimals, which shows "1.10" for EURUSD instead of "1.10234".
 function inferDecimals(candles: Candle[]): number {
+  // Up to 8 decimals so crypto-ratio pairs (ETHBTC ~0.0280025 = 7dp) and low-priced coins format
+  // fully, while FX (5), JPY (3), metals (2) and indices (1) resolve to their own precision first.
   const sample = candles.slice(-200).map((c) => c.close).filter((p) => Number.isFinite(p) && p > 0);
   if (!sample.length) return 2;
-  for (let d = 0; d <= 5; d++) {
+  for (let d = 0; d <= 8; d++) {
     const m = 10 ** d;
     if (sample.every((p) => Math.abs(p * m - Math.round(p * m)) <= 1e-6 * Math.max(1, p * m))) return d;
   }
-  return 5;
+  return 8;
 }
 
 export interface ArmedLevel {
@@ -287,6 +290,36 @@ function pullbackSignals(candles: Candle[]): { i: number; score: number; bullish
   return out;
 }
 
+// Market STRUCTURE: label swing pivots HH / HL / LH / LL — the chart-reader's trend map (uptrend =
+// higher highs + higher lows; downtrend = lower highs + lower lows). A pivot high is a bar whose high
+// tops the `w` bars on each side (mirror for a pivot low); each swing is labelled by comparing to the
+// previous SAME-type swing. This is the same swing structure the deterministic engine scores
+// internally (market_structure / swing_high / swing_low / CHoCH), now drawn on the chart.
+type StructPoint = { i: number; price: number; high: boolean; label: "HH" | "LH" | "HL" | "LL" };
+function structureSwings(candles: Candle[], w = 3): StructPoint[] {
+  const out: StructPoint[] = [];
+  let lastHigh: number | null = null;
+  let lastLow: number | null = null;
+  for (let i = w; i < candles.length - w; i++) {
+    const h = candles[i].high;
+    const l = candles[i].low;
+    let isHigh = true;
+    let isLow = true;
+    for (let k = 1; k <= w; k++) {
+      if (candles[i - k].high >= h || candles[i + k].high > h) isHigh = false;
+      if (candles[i - k].low <= l || candles[i + k].low < l) isLow = false;
+    }
+    if (isHigh) {
+      out.push({ i, price: h, high: true, label: lastHigh !== null && h < lastHigh ? "LH" : "HH" });
+      lastHigh = h;
+    } else if (isLow) {
+      out.push({ i, price: l, high: false, label: lastLow !== null && l < lastLow ? "LL" : "HL" });
+      lastLow = l;
+    }
+  }
+  return out;
+}
+
 // The dollar P&L an open position would show AT a given price level (e.g. its SL or TP). Derived
 // from the live floating P&L per price unit — which already encodes lot size, contract size and
 // FX conversion — so it's exact in the account currency. Empty until price moves off entry (the
@@ -319,6 +352,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const stRef = useRef<ISeriesApi<"Line"> | null>(null);  // SuperTrend (ONE line, per-point colour)
   const emaHiRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of highs (upper band)
   const emaLoRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of lows (lower band)
+  const chanMidRef = useRef<ISeriesApi<"Line"> | null>(null);   // regression channel mid (trend line)
+  const chanUpRef = useRef<ISeriesApi<"Line"> | null>(null);    // upper band (dynamic resistance)
+  const chanLoRef = useRef<ISeriesApi<"Line"> | null>(null);    // lower band (dynamic support)
+  const srLinesRef = useRef<IPriceLine[]>([]);                  // multi-TF support/resistance lines
   const rsiChartRef = useRef<IChartApi | null>(null);
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdContainerRef = useRef<HTMLDivElement>(null);
@@ -360,6 +397,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [showSt, setShowSt] = usePersisted("chart.showSt", true);
   const [showPb, setShowPb] = usePersisted("chart.showPb", true);
   const [showBand, setShowBand] = usePersisted("chart.showBand", true);
+  const [showStructure, setShowStructure] = usePersisted("chart.showStructure", false);
+  const [showChannel, setShowChannel] = usePersisted("chart.showChannel", false);
+  const [showSR, setShowSR] = usePersisted<Record<string, boolean>>(
+    "chart.srByTf", { "1h": false, "4h": false, "1d": false });
+  const [ctx, setCtx] = useState<MarketContext | null>(null);
+  const [ctxBusy, setCtxBusy] = useState(false);
+  const [scen, setScen] = useState<AiScenarioRead | null>(null);
+  const [scenBusy, setScenBusy] = useState(false);
 
   const toTime = (c: Candle) => Math.floor(Date.parse(c.ts) / 1000) as UTCTimestamp;
 
@@ -414,6 +459,19 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     });
     emaLoRef.current = chart.addLineSeries({
       color: "#f97316", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    // Regression channel = the algorithmic trend line (mid) + dynamic resistance/support (bands).
+    chanMidRef.current = chart.addLineSeries({
+      color: "#a78bfa", lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    chanUpRef.current = chart.addLineSeries({
+      color: "#a78bfa", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    chanLoRef.current = chart.addLineSeries({
+      color: "#a78bfa", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
       lastValueVisible: false, crosshairMarkerVisible: false,
     });
 
@@ -567,8 +625,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         applyRsi();
         applyMacd();
         applySuperTrend(series.candles);
-        applyPullback(series.candles);
+        applyMarkers(series.candles);
         applyBand(series.candles);
+        applyChannel(series.candles);
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
@@ -597,6 +656,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         stRef.current?.setData([]);
         emaHiRef.current?.setData([]);
         emaLoRef.current?.setData([]);
+        chanMidRef.current?.setData([]);
+        chanUpRef.current?.setData([]);
+        chanLoRef.current?.setData([]);
         rsiSeriesRef.current?.setData([]);
         macdLineRef.current?.setData([]);
         macdSignalRef.current?.setData([]);
@@ -620,14 +682,19 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   }, [showSt]);
 
   useEffect(() => {
-    applyPullback(candlesRef.current);
+    applyMarkers(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showPb]);
+  }, [showPb, showStructure]);
 
   useEffect(() => {
     applyBand(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showBand]);
+
+  useEffect(() => {
+    applyChannel(candlesRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showChannel]);
 
   function applyEmas(candles: Candle[]) {
     if (!candles.length) return;
@@ -715,20 +782,40 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     line.setData(data);
   }
 
-  function applyPullback(candles: Candle[]) {
+  // Pullback arrows AND market-structure (HH/HL/LH/LL) labels share the candle series' single marker
+  // set (setMarkers replaces), so both toggles feed one sorted array.
+  function applyMarkers(candles: Candle[]) {
     const series = seriesRef.current;
     if (!series) return;
-    if (!showPb || !candles.length) {
+    if (!candles.length) {
       series.setMarkers([]);
       return;
     }
-    const markers: SeriesMarker<Time>[] = pullbackSignals(candles).map((s) => ({
-      time: toTime(candles[s.i]),
-      position: s.bullish ? "belowBar" : "aboveBar",
-      color: s.bullish ? "#26a69a" : "#ef5350",
-      shape: s.bullish ? "arrowUp" : "arrowDown",
-      text: `PB ${s.score}`,
-    }));
+    const markers: SeriesMarker<Time>[] = [];
+    if (showPb) {
+      for (const s of pullbackSignals(candles)) {
+        markers.push({
+          time: toTime(candles[s.i]),
+          position: s.bullish ? "belowBar" : "aboveBar",
+          color: s.bullish ? "#26a69a" : "#ef5350",
+          shape: s.bullish ? "arrowUp" : "arrowDown",
+          text: `PB ${s.score}`,
+        });
+      }
+    }
+    if (showStructure) {
+      for (const p of structureSwings(candles)) {
+        markers.push({
+          time: toTime(candles[p.i]),
+          position: p.high ? "aboveBar" : "belowBar",
+          color: p.label === "HH" || p.label === "HL" ? "#26a69a" : "#ef5350",
+          shape: "circle",
+          text: p.label,
+        });
+      }
+    }
+    // lightweight-charts requires markers in ascending time order.
+    markers.sort((a, b) => (a.time as number) - (b.time as number));
     series.setMarkers(markers);
   }
 
@@ -753,6 +840,109 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     hi.setData(hiData);
     lo.setData(loData);
   }
+
+  // Regression channel = the algorithmic trend line (mid) + dynamic resistance/support (bands), drawn
+  // over the last LB bars. Mirrors the backend indicators.regression_channel the engine reads.
+  function applyChannel(candles: Candle[]) {
+    const mid = chanMidRef.current, up = chanUpRef.current, lo = chanLoRef.current;
+    if (!mid || !up || !lo) return;
+    const clear = () => { mid.setData([]); up.setData([]); lo.setData([]); };
+    if (!showChannel || candles.length < 20) return clear();
+    const LB = 60, K = 2;
+    const w = candles.slice(-LB);
+    const m = w.length;
+    const ys = w.map((c) => c.close);
+    const meanX = (m - 1) / 2;
+    const meanY = ys.reduce((a, b) => a + b, 0) / m;
+    let sxx = 0, sxy = 0;
+    for (let x = 0; x < m; x++) { sxx += (x - meanX) ** 2; sxy += (x - meanX) * (ys[x] - meanY); }
+    if (sxx === 0) return clear();
+    const slope = sxy / sxx;
+    const intercept = meanY - slope * meanX;
+    let ss = 0;
+    for (let x = 0; x < m; x++) ss += (ys[x] - (intercept + slope * x)) ** 2;
+    const std = Math.sqrt(ss / m);
+    const midD: LineData[] = [], upD: LineData[] = [], loD: LineData[] = [];
+    for (let x = 0; x < m; x++) {
+      const t = toTime(w[x]);
+      const v = intercept + slope * x;
+      midD.push({ time: t, value: v });
+      upD.push({ time: t, value: v + K * std });
+      loD.push({ time: t, value: v - K * std });
+    }
+    mid.setData(midD); up.setData(upD); lo.setData(loD);
+  }
+
+  // Multi-timeframe support/resistance — horizontal lines from 1h / 4h / 1d, so a lower-TF chart also
+  // shows the STRONGER higher-TF levels. Colour + weight scale with the timeframe (1d = boldest).
+  async function applySR() {
+    const series = seriesRef.current;
+    if (!series) return;
+    for (const l of srLinesRef.current) series.removePriceLine(l);
+    srLinesRef.current = [];
+    if (!["1h", "4h", "1d"].some((tf) => showSR[tf])) return;   // nothing enabled
+    let data: Awaited<ReturnType<typeof api.levels>>;
+    try {
+      data = await api.levels(symbol, assetClass);
+    } catch {
+      return;
+    }
+    if (!seriesRef.current) return;
+    const STYLE: Record<string, { color: string; width: 1 | 2 | 3 }> = {
+      "1h": { color: "#64748b", width: 1 },  // slate — weakest
+      "4h": { color: "#f59e0b", width: 2 },  // amber
+      "1d": { color: "#ef4444", width: 3 },  // red — strongest
+    };
+    for (const tf of ["1d", "4h", "1h"]) {   // draw strongest first
+      if (!showSR[tf]) continue;
+      const st = STYLE[tf];
+      for (const lv of data.levels[tf] ?? []) {
+        srLinesRef.current.push(
+          seriesRef.current.createPriceLine({
+            price: lv.price,
+            color: st.color,
+            lineWidth: st.width,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: `${tf.toUpperCase()} ${lv.kind === "resistance" ? "R" : "S"}`,
+          }),
+        );
+      }
+    }
+  }
+
+  useEffect(() => {
+    void applySR();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, assetClass, showSR]);
+
+  // Clear the reads when switching pairs (they're pair-specific).
+  useEffect(() => {
+    setCtx(null);
+    setScen(null);
+  }, [symbol]);
+
+  const loadContext = async () => {
+    setCtxBusy(true);
+    try {
+      setCtx(await api.context(symbol, assetClass));
+    } catch {
+      setCtx(null);
+    } finally {
+      setCtxBusy(false);
+    }
+  };
+
+  const loadScenarios = async () => {
+    setScenBusy(true);
+    try {
+      setScen(await api.scenarios(symbol, assetClass));
+    } catch {
+      setScen(null);
+    } finally {
+      setScenBusy(false);
+    }
+  };
 
   // Live quote -> update the last candle.
   useEffect(() => {
@@ -1027,6 +1217,33 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           Pullback
         </button>
         <button
+          onClick={() => setShowStructure((v) => !v)}
+          className={`rounded px-2 py-0.5 text-xs ${showStructure ? "bg-neutral-700 text-sky-300" : "bg-neutral-900 text-neutral-500"}`}
+          title="Market structure: labels swing pivots HH / HL (green = bullish structure) and LH / LL (red = bearish). Higher-highs + higher-lows = uptrend; lower-highs + lower-lows = downtrend — the same swing map the engine reads."
+        >
+          Structure
+        </button>
+        <button
+          onClick={() => setShowChannel((v) => !v)}
+          className={`rounded px-2 py-0.5 text-xs ${showChannel ? "bg-neutral-700 text-violet-300" : "bg-neutral-900 text-neutral-500"}`}
+          title="Regression channel: the algorithmic diagonal trend line (mid) + dynamic resistance (upper) / support (lower) bands. Objective, reproducible version of a hand-drawn trend line/channel. Shown for your read; tested and NOT used to gate trades (it hurt a trend-following engine — in a trend, price rides & breaks the upper band)."
+        >
+          Channel
+        </button>
+        {(["1h", "4h", "1d"] as const).map((tf) => {
+          const onCls = { "1h": "text-slate-300", "4h": "text-amber-300", "1d": "text-red-300" }[tf];
+          return (
+            <button
+              key={tf}
+              onClick={() => setShowSR((s) => ({ ...s, [tf]: !s[tf] }))}
+              className={`rounded px-2 py-0.5 text-xs ${showSR[tf] ? `bg-neutral-700 ${onCls}` : "bg-neutral-900 text-neutral-500"}`}
+              title={`${tf.toUpperCase()} support/resistance — swing levels from the ${tf} chart (${{ "1h": "slate", "4h": "amber", "1d": "red — strongest" }[tf]}). R = resistance, S = support.`}
+            >
+              {tf.toUpperCase()} S/R
+            </button>
+          );
+        })}
+        <button
           onClick={() => setShowBand((v) => !v)}
           className={`rounded px-2 py-0.5 text-xs ${showBand ? "bg-neutral-700 text-cyan-300" : "bg-neutral-900 text-neutral-500"}`}
           title="EMA20 of highs / lows = a band around price. The SuperTrend Strategy enters on a candle close BEYOND this band in the SuperTrend direction."
@@ -1034,13 +1251,85 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           EMA20 H/L
         </button>
         <button
+          onClick={loadContext}
+          disabled={ctxBusy}
+          className="ml-auto rounded bg-neutral-900 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
+          title="Read: plain-language 'where is price on the map (S/R, channel, structure) + do RSI/volume/ATR confirm?' analysis for this pair. Info only — it does NOT change the engine's decision; it's for your Mode-A call."
+        >
+          {ctxBusy ? "…" : "🗺️ Read"}
+        </button>
+        <button
+          onClick={loadScenarios}
+          disabled={scenBusy}
+          className="rounded bg-neutral-900 px-2 py-0.5 text-xs text-violet-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
+          title="AI scenarios: the AI reasons out TWO ranked, scored forward scenarios (anchored to the real S/R + structure) and explains why the chosen one is more likely. Info only — it does NOT change the engine's decision."
+        >
+          {scenBusy ? "…" : "🤖 Scenarios"}
+        </button>
+        <button
           onClick={recenter}
-          className="ml-auto rounded bg-neutral-900 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700 hover:text-white"
+          className="rounded bg-neutral-900 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700 hover:text-white"
           title="Recenter — reset to the recent bars with the price axis auto-fitted"
         >
           ⊹ Recenter
         </button>
       </div>
+
+      {ctx && (
+        <div className="absolute right-2 top-10 z-30 max-h-[580px] w-[22rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 text-xs shadow-xl">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="font-semibold text-sky-300">🗺️ Price map — {ctx.symbol}</span>
+            <button onClick={() => setCtx(null)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
+          </div>
+          <div className="mb-2 rounded bg-neutral-800/60 px-2 py-1 text-center text-sm font-semibold">
+            {ctx.overall_bias}
+          </div>
+          <table className="mb-2 w-full">
+            <tbody>
+              {ctx.scorecard.map((s) => (
+                <tr key={s.factor} className="align-top">
+                  <td className="py-0.5 pr-1 text-neutral-500">{s.signal}</td>
+                  <td className="py-0.5 pr-2 font-medium text-neutral-300">{s.factor}</td>
+                  <td className="py-0.5 text-neutral-400">{s.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {ctx.scenarios.length > 0 && (
+            <div className="mb-2 space-y-1 border-t border-neutral-800 pt-1.5">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Scenarios</div>
+              {ctx.scenarios.map((s, i) => (
+                <div key={i}>
+                  <span className="font-semibold text-neutral-200">{s.prob} {s.label}</span>
+                  <span className="text-neutral-400"> — {s.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {ctx.playbook && (
+            <div className="mb-2 rounded border border-sky-800/50 bg-sky-950/30 px-2 py-1 text-sky-200">
+              <span className="font-semibold">Playbook: </span>{ctx.playbook}
+            </div>
+          )}
+          {ctx.invalidation && <div className="mb-2 text-amber-300">⚠ {ctx.invalidation}</div>}
+          <div className="border-t border-neutral-800 pt-1.5 text-[10px] text-neutral-600">
+            Info only — it does NOT change the engine's decision; it's for your Mode‑A call.
+          </div>
+        </div>
+      )}
+
+      {scen && (
+        <div className="absolute left-2 top-10 z-30 max-h-[580px] w-[23rem] overflow-y-auto rounded-lg border border-violet-800/60 bg-neutral-900/95 p-3 shadow-xl">
+          <button
+            onClick={() => setScen(null)}
+            className="absolute right-2 top-2 text-neutral-500 hover:text-neutral-200"
+            title="Close"
+          >
+            ✕
+          </button>
+          <ScenarioCard read={scen} />
+        </div>
+      )}
 
       {legend && (
         <div className="pointer-events-none absolute left-2 top-9 z-10 flex gap-2 text-xs tabular-nums">

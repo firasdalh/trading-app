@@ -209,6 +209,19 @@ def test_armed_invalidated_by_pretrigger_trend_break(db_session, monkeypatch):
     assert cond._mechanical_invalidation(long, 98.5)[1] is False
 
 
+def test_buy_limit_pullback_not_invalidated_below_ema(db_session, monkeypatch):
+    # The gold bug: a buy_limit (pullback long) is armed with price BELOW the EMA50 — that's the dip
+    # it's buying, not a trend break. The pre-trigger EMA invalidation must NOT fire for limit orders
+    # (only for stop/breakout orders). Trigger 79.0 not yet reached (price 79.5) -> stays armed.
+    s = _arm(db_session, direction="long", order_type="buy_limit", trigger_price=79.0,
+             stop_loss=77.5, take_profit=82.0)
+    _stub_market_series(monkeypatch, [100.0] * 59 + [79.5])   # last far below EMA(~99.7)
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert s.status == "armed"
+    assert out["invalidated"] == 0
+
+
 def test_trigger_fires_and_opens_on_break(db_session, monkeypatch):
     s = _arm(db_session)
     _stub_market(monkeypatch, price=78.0)  # below the 78.2 sell-stop trigger

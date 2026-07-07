@@ -320,6 +320,78 @@ export interface HybridState {
   last_result: string | null;
 }
 
+// Plain-language "where is price on the map + confirm" read (GET /api/market/context).
+export interface MarketContext {
+  symbol: string;
+  price: number;
+  timeframe: string;
+  nearest_resistance: { price: number; tf: string; kind: string } | null;
+  nearest_support: { price: number; tf: string; kind: string } | null;
+  structure: string;
+  choch: boolean;
+  channel: string | null;
+  rsi: string | null;
+  volume: string | null;
+  atr: string | null;
+  price_action: string;
+  volume_trend: string;
+  scorecard: { factor: string; signal: string; note: string }[];
+  overall_bias: string;
+  scenarios: { prob: string; label: string; text: string }[];
+  invalidation: string | null;
+  playbook: string | null;
+  short_term: string;
+  medium_term: string;
+  watch: string | null;
+  bullets: string[];
+  summary: string;
+}
+
+// AI SCENARIO read (GET /api/market/scenarios) — two ranked, scored forward scenarios. INFO only.
+export interface AiScenario {
+  label: string;
+  direction: string;      // up | down | sideways
+  prob: number;           // 0-100
+  path: string;           // trigger -> target, using real levels
+  reasoning: string;      // why this scenario
+}
+
+export interface AiScenarioRead {
+  symbol: string;
+  price: number;
+  source: "ai" | "deterministic";
+  headline: string;
+  primary: string;        // label of the more-likely scenario
+  why_primary: string;    // head-to-head: why the chosen one wins
+  scenarios: AiScenario[];
+  invalidation: string | null;
+  overall_bias: string;
+  scorecard: { factor: string; signal: string; note: string }[];
+  note: string;
+}
+
+// Shadow scorecard — AI vs deterministic head-to-head (from GET /api/shadow/scorecard).
+export interface ShadowSide {
+  decisions: number;
+  directional: number;
+  wins: number;
+  losses: number;
+  no_fill: number;
+  stand_aside: number;
+  win_rate: number | null;
+  avg_r: number | null;
+  expectancy_r: number | null;
+  stand_aside_missed: number;
+}
+
+export interface ShadowScorecard {
+  evaluated: number;
+  pending: boolean;
+  ai: ShadowSide;
+  deterministic: ShadowSide;
+  by_regime: Record<string, { ai: ShadowSide; deterministic: ShadowSide }>;
+}
+
 // Today's Hybrid auto-pilot activity funnel (from GET /api/hybrid/stats).
 export interface HybridStats {
   since: string;

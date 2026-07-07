@@ -4,7 +4,8 @@ import { fmtPrice, fmtUsd } from "../format";
 import { ArmSetupButton } from "./ArmSetupButton";
 import { RegimeBadge } from "./RegimeBadge";
 import { ReviewExplanation } from "./ReviewExplanation";
-import type { AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
+import { ScenarioCard } from "./ScenarioCard";
+import type { AiScenarioRead, AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
 
 const TF_RANK: Record<string, number> = { "1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7 };
 
@@ -33,12 +34,14 @@ interface Props {
   onReject: () => void;
   onRunAnalysis?: () => void;   // re-run analysis for the charted symbol (same as the top button)
   analyzing?: boolean;
+  scenario?: AiScenarioRead | null;   // Step 4: AI two-scenario read (info only)
+  scenarioBusy?: boolean;
 }
 
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, busy, equity, onApprove, onReject, onRunAnalysis, analyzing }: Props) {
+export function ProposalPanel({ result, status, positionOpen, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -314,6 +317,17 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
       )}
 
       <Reasoning result={result} />
+
+      {/* Step 4: AI two-scenario read (info only — does NOT gate the decision above). */}
+      {(scenario || scenarioBusy) && (
+        <div className="rounded-md border border-violet-800/40 bg-violet-950/10 p-2">
+          {scenario ? (
+            <ScenarioCard read={scenario} />
+          ) : (
+            <div className="text-xs text-violet-300/80">🤖 Reasoning out two scenarios…</div>
+          )}
+        </div>
+      )}
 
       {pending ? (
         <div className="flex gap-2">

@@ -222,6 +222,71 @@ def ema(values: list[float], period: int) -> float | None:
     return round(series[-1], 6) if series and series[-1] is not None else None
 
 
+def regression_channel(candles: list[Candle], lookback: int = 60, k: float = 2.0) -> dict | None:
+    """Linear-regression CHANNEL over the last ``lookback`` closes — an objective, reproducible stand-in
+    for a hand-drawn trend line + price channel (no subjective pivot-picking).
+
+    Fits a least-squares line to the closes; the channel is that mid-line ± ``k``× the residual std.
+    The MID line is the diagonal trend; the UPPER band is dynamic (diagonal) resistance, the LOWER band
+    dynamic support. Returns the values at the LAST bar plus:
+      - ``pos``  : where the last close sits — 0 = at the lower band (support), 1 = at the upper band
+                   (resistance), >1 = broke above, <0 = broke below.
+      - ``slope``: price per bar (sign = up/down channel).
+      - ``r2``   : fit quality 0–1 (how cleanly price is actually channelling; low = ignore it).
+    ``None`` when there isn't enough data.
+    """
+    if len(candles) < 20:
+        return None
+    w = candles[-lookback:] if len(candles) >= lookback else candles[:]
+    m = len(w)
+    ys = [c.close for c in w]
+    mean_x = (m - 1) / 2.0
+    mean_y = sum(ys) / m
+    sxx = sum((x - mean_x) ** 2 for x in range(m))
+    if sxx == 0:
+        return None
+    slope = sum((x - mean_x) * (ys[x] - mean_y) for x in range(m)) / sxx
+    intercept = mean_y - slope * mean_x
+    resid = [ys[x] - (intercept + slope * x) for x in range(m)]
+    std = (sum(r * r for r in resid) / m) ** 0.5
+    mid = intercept + slope * (m - 1)
+    upper, lower = mid + k * std, mid - k * std
+    last = ys[-1]
+    pos = (last - lower) / (upper - lower) if upper > lower else 0.5
+    syy = sum((y - mean_y) ** 2 for y in ys)
+    r2 = 1 - (sum(r * r for r in resid) / syy) if syy > 0 else 0.0
+    return {"slope": round(slope, 8), "mid": round(mid, 6), "upper": round(upper, 6),
+            "lower": round(lower, 6), "std": round(std, 6), "pos": round(pos, 3), "r2": round(r2, 3)}
+
+
+def pivot_levels(candles: list[Candle], ref: float, w: int = 3, per_side: int = 3,
+                 gap_frac: float = 0.002) -> list[dict]:
+    """Nearest swing-pivot support/resistance to ``ref``. A pivot high tops the ``w`` bars each side
+    (mirror for a low); keeps the ``per_side`` closest above (resistance) / below (support), spaced at
+    least ``gap_frac`` apart. Shared by the chart levels endpoint and the market-context read."""
+    n = len(candles)
+    highs = [candles[i].high for i in range(w, n - w)
+             if all(candles[i - k].high <= candles[i].high and candles[i + k].high <= candles[i].high
+                    for k in range(1, w + 1))]
+    lows = [candles[i].low for i in range(w, n - w)
+            if all(candles[i - k].low >= candles[i].low and candles[i + k].low >= candles[i].low
+                   for k in range(1, w + 1))]
+    gap = gap_frac * ref
+
+    def pick(vals, above: bool) -> list[float]:
+        cand = sorted((v for v in vals if (v > ref if above else v < ref)), reverse=not above)
+        kept: list[float] = []
+        for p in cand:
+            if all(abs(p - q) > gap for q in kept):
+                kept.append(p)
+            if len(kept) >= per_side:
+                break
+        return kept
+
+    return ([{"price": round(p, 8), "kind": "resistance"} for p in pick(highs, True)]
+            + [{"price": round(p, 8), "kind": "support"} for p in pick(lows, False)])
+
+
 def _rma(values: list[float], period: int) -> list[float]:
     """Wilder's smoothing (running moving average). Returns len(values)-period+1 points."""
     if len(values) < period or period <= 0:

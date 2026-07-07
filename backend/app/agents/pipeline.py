@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.agents.fundamental import run_fundamental
+from app.agents.llm import llm_available
 from app.agents.orchestrator import run_orchestrator
 from app.agents.technical import run_technical
 from app.brokers.registry import get_broker_for
@@ -59,16 +60,23 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
         except Exception as exc:  # noqa: BLE001
             log.warning("preview ohlcv failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
     review_on = settings.ai_review_enabled
-    reads = (use_llm if read_llm is None else read_llm) and review_on  # AI reads only in full-AI mode
+    # AI-DECIDER (see analyze_symbol): AI toggle ON -> deterministic analyst + AI judge (open/arm/skip).
+    ai_decides = (review_on and use_llm and llm_available()
+                  and not settings.scalp_mode and not settings.st_band_mode and not settings.ai_led_mode)
+    reads = (use_llm if read_llm is None else read_llm) and review_on and not ai_decides
     technical = run_technical(symbol, series, use_llm=reads)
     fundamental = run_fundamental(symbol, now=now, use_llm=(use_llm if read_llm is None else read_llm))
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
-                                use_llm=use_llm, ai_review=review_on,
+                                use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 scalp=settings.scalp_mode and not settings.st_band_mode,
                                 trend_only=settings.trend_only_mode and not settings.scalp_mode,
                                 ai_led=(settings.ai_led_mode and not settings.scalp_mode
                                         and not settings.st_band_mode),
                                 st_band=settings.st_band_mode)
+    if ai_decides:
+        from app.agents.ai_decider import ai_decide_trade
+        proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
+                                   technical, fundamental, now)
     decision = assess(session, proposal, cache=cache)
     return proposal, decision
 
@@ -124,15 +132,34 @@ def analyze_symbol(
     # (LLM technical + confirm/veto). (Repeatability testing showed the reviewer isn't a stable filter;
     # a deterministic confidence>=70% gate matches it.)
     review_on = settings.ai_review_enabled
-    technical = run_technical(symbol, series, use_llm=use_llm and review_on)
+    # AI-DECIDER: when the AI toggle is ON, the deterministic engine is the ANALYST (it does the full
+    # analysis -> a decision brief) and the AI is the JUDGE (picks the scenario, decides open/arm/skip;
+    # levels anchored to the brief). The Risk Manager still sizes/gates downstream. When the LLM is off
+    # or unavailable, we keep the deterministic proposal. Mutually exclusive with scalp/st_band/ai_led.
+    ai_decides = (review_on and use_llm and llm_available()
+                  and not settings.scalp_mode and not settings.st_band_mode and not settings.ai_led_mode)
+    technical = run_technical(symbol, series, use_llm=use_llm and review_on and not ai_decides)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)  # AI kept for fundamentals
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
-                                use_llm=use_llm, ai_review=review_on,
+                                use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 scalp=settings.scalp_mode and not settings.st_band_mode,
                                 trend_only=settings.trend_only_mode and not settings.scalp_mode,
                                 ai_led=(settings.ai_led_mode and not settings.scalp_mode
                                         and not settings.st_band_mode),
                                 st_band=settings.st_band_mode)
+    if ai_decides:
+        from app.agents.ai_decider import ai_decide_trade
+        det_proposal = proposal   # keep the deterministic call for the shadow scorecard
+        proposal = ai_decide_trade(session, symbol, asset_class, timeframe, det_proposal,
+                                   technical, fundamental, now)
+        # SHADOW SCORECARD: log the AI decision alongside the deterministic one on this same setup,
+        # so a grader can later score which was right (A/B proof + AI's own track record). Best-effort.
+        from app.agents.shadow import record_shadow
+        tf0 = (next((x for x in technical.timeframes if x.timeframe == timeframe),
+                    technical.timeframes[0]) if technical.timeframes else None)
+        ind0 = tf0.indicators if tf0 else {}
+        record_shadow(session, symbol, asset_class.value, timeframe, now,
+                      ind0.get("last_close"), ind0.get("atr14"), proposal, det_proposal)
 
     # 3. Persist the proposal + full reasoning bundle (audit trail).
     record = TradeProposalRecord(

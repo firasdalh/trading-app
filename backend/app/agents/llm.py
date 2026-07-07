@@ -104,11 +104,25 @@ def _gemini_analyze(model: str, api_key: str, system: str, user: str,
     return None
 
 
+# Fixed seed for NON-reasoning OpenAI models (gpt-4.1/gpt-4o): temperature=0 + seed makes the output
+# near-deterministic (OpenAI's seed is best-effort, but it turns "flips 82% of the time" into "rarely"),
+# which is what a repeatable, backtestable DECISION model needs. Reasoning models (gpt-5/o-series) reject
+# temperature and have no seed — so they can't be pinned and are NOT recommended as the decider.
+_DET_SEED = 7
+
+
+def _is_reasoning_model(model: str) -> bool:
+    name = (model or "").lower()
+    return name.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
 def _openai_analyze(model: str, api_key: str, system: str, user: str,
                     schema: type[T], max_tokens: int) -> T | None:
-    """OpenAI structured output via the chat-completions parse helper. GPT-5 models are reasoning
-    models, so the token budget covers thinking too — give generous headroom and keep reasoning
-    low for fast, cheap structured extraction (mirrors disabling Gemini's 'thinking')."""
+    """OpenAI structured output via the chat-completions parse helper.
+
+    Reasoning models (gpt-5/o-series) cover 'thinking' in the token budget — give headroom and keep
+    reasoning low. NON-reasoning models (gpt-4.1/gpt-4o) are pinned with temperature=0 + a fixed seed
+    for near-deterministic, reproducible decisions (the property the AI decider needs)."""
     client = _openai_client(api_key)
     kwargs = dict(
         model=model,
@@ -116,10 +130,17 @@ def _openai_analyze(model: str, api_key: str, system: str, user: str,
         response_format=schema,
         max_completion_tokens=max(max_tokens, 8000),
     )
-    try:  # GPT-5 accepts reasoning_effort; older models reject it — degrade gracefully.
-        resp = client.beta.chat.completions.parse(reasoning_effort="low", **kwargs)
-    except TypeError:
-        resp = client.beta.chat.completions.parse(**kwargs)
+    if _is_reasoning_model(model):
+        try:  # GPT-5 accepts reasoning_effort; degrade gracefully if a variant rejects it.
+            resp = client.beta.chat.completions.parse(reasoning_effort="low", **kwargs)
+        except TypeError:
+            resp = client.beta.chat.completions.parse(**kwargs)
+    else:
+        # Pin non-reasoning models for reproducibility. Some deployments reject seed -> degrade.
+        try:
+            resp = client.beta.chat.completions.parse(temperature=0, seed=_DET_SEED, **kwargs)
+        except TypeError:
+            resp = client.beta.chat.completions.parse(temperature=0, **kwargs)
     return resp.choices[0].message.parsed
 
 

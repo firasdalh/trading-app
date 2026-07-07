@@ -25,12 +25,28 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
   const [openingKey, setOpeningKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [listOpen, setListOpen] = useState(true); // collapse the (long) results list
+  // Global scan timeframe — "" = each pair's own TF; else scan/run every pair on this TF. Persisted.
+  const [scanTf, setScanTf] = useState<string>(() => {
+    try {
+      return localStorage.getItem("scan.timeframe") || "";
+    } catch {
+      return "";
+    }
+  });
+  const setTf = (v: string) => {
+    setScanTf(v);
+    try {
+      localStorage.setItem("scan.timeframe", v);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const scan = async () => {
     setBusy(true);
     setError(null);
     try {
-      setItems(await api.opportunities());
+      setItems(await api.opportunities(scanTf || undefined));
       setListOpen(true); // show results after a scan
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -82,16 +98,32 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
             · {actionableCount} actionable / {items.length} scanned
           </span>
         )}
-        <button
-          onClick={scan}
-          disabled={busy}
-          className="btn ml-auto bg-blue-600 text-white hover:bg-blue-500"
-        >
-          {busy ? "Scanning…" : "Scan watchlist"}
-        </button>
+        <div className="ml-auto flex items-center gap-1.5">
+          <label className="text-xs text-neutral-500" title="Scan & Run-now every pair on this timeframe (instead of each pair's own)">
+            TF
+          </label>
+          <select
+            value={scanTf}
+            onChange={(e) => setTf(e.target.value)}
+            className="rounded bg-neutral-800 px-1.5 py-1 text-xs text-neutral-100"
+            title="Timeframe the Scan watchlist + Hybrid Run-now use. 'Per-pair' = each pair's own."
+          >
+            <option value="">Per-pair</option>
+            {["15m", "30m", "1h", "4h", "1d"].map((tf) => (
+              <option key={tf} value={tf}>{tf}</option>
+            ))}
+          </select>
+          <button
+            onClick={scan}
+            disabled={busy}
+            className="btn bg-blue-600 text-white hover:bg-blue-500"
+          >
+            {busy ? "Scanning…" : "Scan watchlist"}
+          </button>
+        </div>
       </div>
 
-      <HybridControl onOpened={onOpened} />
+      <HybridControl onOpened={onOpened} timeframe={scanTf} />
 
       {error && <div className="mb-2 rounded border border-bear/40 bg-bear/10 px-2 py-1 text-xs text-bear">{error}</div>}
 
@@ -220,7 +252,7 @@ const clampInt = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo
 // Hybrid auto-pilot: one toggle, plus adjustable check interval and confidence threshold. When
 // on, every N min it opens the single best watchlist setup above the threshold if there's room —
 // all risk gates still apply.
-function HybridControl({ onOpened }: { onOpened?: () => void }) {
+function HybridControl({ onOpened, timeframe }: { onOpened?: () => void; timeframe?: string }) {
   const [bump, setBump] = useState(0);
   const { data: state } = usePolling(() => api.hybridState(), 15000, [bump]);
   const { data: stats } = usePolling(() => api.hybridStats(), 20000, [bump]);
@@ -247,7 +279,7 @@ function HybridControl({ onOpened }: { onOpened?: () => void }) {
   const runNow = async () => {
     setBusy(true);
     try {
-      await api.hybridRun();
+      await api.hybridRun(timeframe || undefined);
       refresh();
       onOpened?.();
     } finally {

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.agents.indicators import (
-    adx, atr, bollinger, ema, macd, market_structure, supertrend, volume_ratio,
+    adx, atr, bollinger, ema, macd, market_structure, regression_channel, supertrend, volume_ratio,
 )
 from app.agents.orchestrator import _deterministic_decision, _regime, _session_quality
 from app.models.enums import AssetClass, Direction, TradingBias
@@ -26,6 +26,21 @@ def _ramp(n=120, start=100.0, step=0.5, rng=2.0) -> list[Candle]:
 def _flat(n=120, price=100.0, rng=2.0) -> list[Candle]:
     return [Candle(ts=NOW + timedelta(hours=i), open=price, high=price + rng / 2,
                    low=price - rng / 2, close=price, volume=1000) for i in range(n)]
+
+
+def test_regression_channel_up_and_position():
+    c = _ramp(80, step=0.5)                       # clean up-channel
+    ch = regression_channel(c)
+    assert ch is not None
+    assert ch["slope"] > 0 and ch["r2"] > 0.8     # rising, clean fit
+    base_pos = ch["pos"]
+    # Push the last close far above the fit -> it sits at/above the upper (resistance) band.
+    hi = list(c)
+    last = hi[-1]
+    hi[-1] = Candle(ts=last.ts, open=last.open, high=last.close + 20, low=last.low,
+                    close=last.close + 15, volume=1000)
+    assert regression_channel(hi)["pos"] > base_pos and regression_channel(hi)["pos"] > 0.9
+    assert regression_channel(c[:10]) is None      # too little data
 
 
 # ---- indicator math ----
@@ -56,6 +71,29 @@ def test_macd_sign_follows_direction():
     down = macd([float(i) for i in range(80, 1, -1)])
     assert up is not None and up["macd"] > 0
     assert down is not None and down["macd"] < 0
+
+
+def _vol_trend(vols: list[float]):
+    """The vol_trend indicator for a gentle uptrend carrying the given per-bar volumes."""
+    from app.agents.technical import run_technical
+    from app.models.schemas import OHLCVSeries
+
+    out, price = [], 100.0
+    for i, v in enumerate(vols):
+        o = price
+        price += 0.2
+        out.append(Candle(ts=NOW + timedelta(hours=i), open=o, high=price + 0.5,
+                          low=o - 0.5, close=price, volume=v))
+    tr = run_technical("TEST", [OHLCVSeries(symbol="TEST", timeframe="1h", candles=out)], use_llm=False)
+    return tr.timeframes[0].indicators.get("vol_trend")
+
+
+def test_vol_trend_expanding_flat_fading():
+    # +1 when the last 3 bars' volume expands vs the prior 5, -1 when it fades, 0 when flat.
+    n = 30
+    assert _vol_trend([1000.0] * n) == 0.0
+    assert _vol_trend([1000.0] * (n - 3) + [2000.0, 2000.0, 2000.0]) == 1.0
+    assert _vol_trend([1000.0] * (n - 3) + [400.0, 400.0, 400.0]) == -1.0
 
 
 def test_supertrend_direction_and_side():
