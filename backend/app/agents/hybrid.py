@@ -131,8 +131,7 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
 
     expire_stale_proposals(session)  # clear stale pendings that would otherwise block symbols
     settings = get_or_create_settings(session)
-    ai_active = (settings.ai_review_enabled and llm_available()
-                 and not settings.scalp_mode and not settings.st_band_mode and not settings.ai_led_mode)
+    ai_active = (settings.ai_review_enabled and llm_available() and not settings.st_band_mode)
     open_syms = {_norm_symbol(p.symbol) for p in open_positions}
     # Reuse this single open-book fetch for every per-symbol risk check in the scan below (primed
     # into a ScanCache), so ranking the watchlist doesn't make one broker round-trip per symbol.

@@ -73,21 +73,9 @@ class AppSettings(Base):
     # result (same return, ~40% less drawdown). Reversible.
     trend_only_mode: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    # Scalping mode: force the 15m timeframe everywhere (charts + analysis + scanner/hybrid) and use
-    # the scalp strategy/risk profile. OFF by default — the user activates it. (Overrides trend_only
-    # while on: 15m's "moderate" regime is profitable, unlike on 1h.)
-    scalp_mode: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # AI-LED decisions: the AI Orchestrator DECIDES the trade (direction + levels + conviction) from
-    # the full read, instead of only confirming/vetoing the deterministic engine. Thin deterministic
-    # guardrails (R:R floor, extreme-regime veto, level sanity) + the Risk Manager still police it.
-    # Falls back to the deterministic engine when the LLM is off/unavailable (e.g. the scanner loop).
-    # Default ON. Toggle OFF to instantly revert to the deterministic + confirm/veto engine.
-    ai_led_mode: Mapped[bool] = mapped_column(Boolean, default=True)
-
     # SuperTrend + EMA20-band breakout strategy: a mechanical mode (long above the band in a
-    # SuperTrend uptrend / short below it in a downtrend; stop trails the SuperTrend line). When ON
-    # it overrides AI-led + scalp. Toggle from the dashboard. OFF by default.
+    # SuperTrend uptrend / short below it in a downtrend; stop trails the SuperTrend line). When ON it
+    # overrides the AI decider. Toggle from the dashboard. OFF by default.
     st_band_mode: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # AI confirm/veto REVIEW of the deterministic setup. Repeatability testing showed the reasoning-

@@ -38,7 +38,7 @@ def classify_gate(proposal: TradeProposal, risk: RiskDecision | None) -> str:
         ("volatil", "volatility"), ("whipsaw", "volatility"), ("divergence", "divergence"),
         ("no clear trend", "no_trend"), ("ema20 band", "st_band_inside"),
         ("supertrend", "st_band"), ("r:r", "thin_rr"), ("only ~", "thin_rr"),
-        ("ranging", "ranging_fade"), ("scalp", "scalp_wait"), ("pullback", "pullback_wait"),
+        ("ranging", "ranging_fade"), ("pullback", "pullback_wait"),
     ]
     for needle, tag in table:
         if needle in r:

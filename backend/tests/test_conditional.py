@@ -102,8 +102,10 @@ def _arm(session, **kw):
 def _stub_market(monkeypatch, price: float):
     broker = SimpleNamespace(get_quote=lambda sym: SimpleNamespace(price=price))
     monkeypatch.setattr(cond, "get_broker_for", lambda ac, bm: broker)
+    # 3 candles all at `price` so the lower-TF break confirmation (last 2 closes beyond the trigger)
+    # is satisfied whenever the trigger is crossed (these tests set price already past the trigger).
     monkeypatch.setattr(cond, "get_ohlcv_cached",
-                        lambda b, sym, tf, limit=3: SimpleNamespace(candles=[SimpleNamespace(close=price)]))
+                        lambda b, sym, tf, limit=3: SimpleNamespace(candles=[SimpleNamespace(close=price)] * 3))
     monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
     monkeypatch.setattr(cond, "kill_switch_active", lambda s: False)
 
@@ -182,6 +184,29 @@ def test_buy_stop_breakout_waits_for_trigger(db_session, monkeypatch):
     out = cond.check_conditional_setups(db_session)
     db_session.refresh(s)
     assert s.status == "armed" and out["invalidated"] == 0 and out["triggered"] == 0
+
+
+def test_buy_stop_fires_only_after_lower_tf_confirms(db_session, monkeypatch):
+    # buy_stop breakout: price tagged the trigger AND the last 2 (lower-TF) closes hold above it -> fires
+    s = _arm(db_session, direction="long", order_type="buy_stop", trigger_price=100.0,
+             stop_loss=98.0, take_profit=106.0)
+    _stub_market_series(monkeypatch, [99.0] * 59 + [100.5, 101.0])   # last 2 closes above the trigger
+    _stub_fire(monkeypatch)                                          # approve + execute the re-check
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert out["triggered"] == 1 and s.status == "triggered"
+
+
+def test_buy_stop_waits_when_break_not_confirmed(db_session, monkeypatch):
+    # the trigger is tagged on the last bar, but the prior bar closed BACK below it (a wick) -> the
+    # 2-candle break confirmation fails -> stays armed, doesn't open on the false break.
+    s = _arm(db_session, direction="long", order_type="buy_stop", trigger_price=100.0,
+             stop_loss=98.0, take_profit=106.0)
+    _stub_market_series(monkeypatch, [99.0] * 59 + [99.5, 100.5])    # only the last close is above
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert out["triggered"] == 0 and s.status == "armed"
+    assert "confirm the break" in (s.last_note or "")
 
 
 def test_sell_stop_breakout_waits_when_price_above_stop(db_session, monkeypatch):

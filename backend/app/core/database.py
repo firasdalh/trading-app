@@ -46,8 +46,6 @@ _SQLITE_ADDED_COLUMNS = {
     ],
     "app_settings": [
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),
-        ("scalp_mode", "BOOLEAN DEFAULT 0"),
-        ("ai_led_mode", "BOOLEAN DEFAULT 1"),
         ("st_band_mode", "BOOLEAN DEFAULT 0"),
         ("ai_review_enabled", "BOOLEAN DEFAULT 0"),
         ("journal_reset_at", "DATETIME"),

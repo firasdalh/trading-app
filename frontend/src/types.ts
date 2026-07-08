@@ -78,6 +78,9 @@ export interface AiDecisionScenario {
   prob: number;        // 0-100
   path: string;
   reasoning: string;
+  action?: string;     // open_long | arm_short | none — how the AI would trade this scenario
+  rr?: number | null;  // reward:risk of that plan (null when not computable)
+  tradeable?: boolean; // did it clear the R:R / sanity floor (the decider only picks tradeable ones)
 }
 
 export interface AiDecision {
@@ -265,8 +268,6 @@ export interface SettingsResponse {
     broker_map: Record<string, string>;
     kill_switch_engaged: boolean;
     trend_only_mode: boolean;
-    scalp_mode: boolean;
-    ai_led_mode: boolean;
     st_band_mode: boolean;
     ai_review_enabled: boolean;
     live_confirmed_at: string | null;

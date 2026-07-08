@@ -125,32 +125,6 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               Backtests: same return, ~40% less drawdown.
             </div>
           </button>
-
-          <button
-            disabled={busy}
-            onClick={() =>
-              run(() => api.setAiLedMode(!settings?.app.ai_led_mode),
-                  `AI-led decisions ${settings?.app.ai_led_mode ? "OFF" : "ON"}.`)}
-            className={`mt-2 w-full rounded-md border px-3 py-2 text-left text-sm ${
-              settings?.app.ai_led_mode
-                ? "border-blue-500 bg-blue-500/10"
-                : "border-neutral-700 hover:bg-neutral-800"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <span className="font-medium">AI-led decisions</span>
-              <span className={`text-xs font-semibold ${
-                settings?.app.ai_led_mode ? "text-bull" : "text-neutral-400"
-              }`}>
-                {settings?.app.ai_led_mode ? "ON" : "OFF"}
-              </span>
-            </div>
-            <div className="text-xs text-neutral-400">
-              The AI makes the call (direction, levels, conviction) from the full read; thin
-              guardrails + the Risk Manager still apply. OFF reverts to the deterministic engine
-              (the AI only confirms/vetoes). Note: AI-led decisions can't be backtested.
-            </div>
-          </button>
         </section>
 
         <section className="space-y-2">

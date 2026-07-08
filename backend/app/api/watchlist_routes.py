@@ -208,18 +208,13 @@ def opportunities(
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()
     tf_override = timeframe if isinstance(timeframe, str) and timeframe else None
 
-    # AI-DECIDER / AI-LED scan: when the AI is the decider, it evaluates EVERY pair directly (one LLM
-    # call each — on-demand only, "Scan watchlist" isn't polled) so it can surface setups the
+    # AI-DECIDER scan: when the "AI decides" toggle is ON, the AI evaluates EVERY pair directly (one
+    # LLM call each — on-demand only, "Scan watchlist" isn't polled) so it can surface setups the
     # deterministic trend-only filter would reject. Otherwise the cheap deterministic engine ranks the
-    # list and the LLM only re-judges the few actionable candidates (pass 2).
-    #  - ai_led (legacy): the AI reads the chart itself and decides.
-    #  - ai_decides (ai_review ON): the deterministic engine is the analyst -> brief -> AI judges
-    #    (open/arm/skip). Wired inside preview_symbol; here we just make it run per-pair (use_llm=True).
+    # list and the LLM only re-judges the few actionable candidates (pass 2). The AI decider (analyst ->
+    # brief -> AI judges open/arm/skip) is wired inside preview_symbol; here we just run it per-pair.
     settings = get_or_create_settings(session)
-    ai_led = settings.ai_led_mode and not settings.scalp_mode and llm_available()
-    ai_decides = (settings.ai_review_enabled and not settings.scalp_mode and not settings.st_band_mode
-                  and not settings.ai_led_mode and llm_available())
-    ai_active = ai_led or ai_decides
+    ai_active = (settings.ai_review_enabled and not settings.st_band_mode and llm_available())
 
     def _view(it: WatchItem, prop, dec, tf: str) -> OpportunityView:
         rr = None

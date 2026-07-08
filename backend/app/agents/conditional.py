@@ -66,6 +66,30 @@ def _crossed(order_type: str, ref: float, trigger: float) -> bool:
     return False
 
 
+# Break-confirmation: a STOP (breakout) order fires only after the break HOLDS on a lower timeframe —
+# the last _CONFIRM_BARS closed candles of _CONFIRM_TF[setup-tf] must all be beyond the trigger. This
+# filters wick-driven false breaks (price tags the level then snaps back). Limit (pullback) orders are
+# not breaks, so this doesn't apply to them.
+_CONFIRM_TF = {"1d": "1h", "4h": "1h", "1h": "15m", "30m": "5m", "15m": "5m", "5m": "1m", "1m": "1m"}
+_CONFIRM_BARS = 2
+
+
+def _break_confirmed(broker, s: ConditionalSetup) -> bool:
+    """True when the last _CONFIRM_BARS closed candles of the confirmation timeframe hold beyond the
+    trigger in the break direction. Conservative: if the lower-TF data can't be read, do NOT confirm."""
+    ltf = _CONFIRM_TF.get(s.timeframe, "15m")
+    try:
+        candles = get_ohlcv_cached(broker, s.symbol, ltf, limit=_CONFIRM_BARS + 3).candles
+    except Exception:  # noqa: BLE001
+        return False
+    if not candles or len(candles) < _CONFIRM_BARS:
+        return False
+    closes = [c.close for c in candles[-_CONFIRM_BARS:]]
+    if s.order_type == "buy_stop":
+        return all(c >= s.trigger_price for c in closes)   # break UP held
+    return all(c <= s.trigger_price for c in closes)        # sell_stop: break DOWN held
+
+
 def active_armed(session: Session) -> list[ConditionalSetup]:
     return list(session.scalars(
         select(ConditionalSetup).where(ConditionalSetup.status == ConditionalStatus.ARMED.value)
@@ -430,7 +454,16 @@ def check_conditional_setups(session: Session) -> dict:
         if not _crossed(s.order_type, ref, s.trigger_price):
             continue  # trigger not reached yet — keep waiting
 
-        # Trigger hit.
+        # BREAK CONFIRMATION (stop/breakout orders): the price tagged the trigger, but require the break
+        # to HOLD — the last 2 closed candles of a lower timeframe must both be beyond the trigger — so
+        # a wick that tags the level then snaps back does NOT fire. Limit (pullback) fills are unaffected.
+        if s.order_type in ("buy_stop", "sell_stop") and not _break_confirmed(broker, s):
+            s.last_note = (f"trigger {s.trigger_price} tagged — waiting for {_CONFIRM_BARS} "
+                           f"{_CONFIRM_TF.get(s.timeframe, '15m')} closes beyond it to confirm the break")
+            session.add(s)
+            continue
+
+        # Trigger hit + break confirmed.
         if ks:
             s.last_note = "trigger hit but kill-switch active — not opening"
             session.add(s)

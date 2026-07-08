@@ -49,6 +49,7 @@ import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
+import { QuickTradePanel } from "./QuickTradePanel";
 import { ShadowScorecardPanel } from "./ShadowScorecardPanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
@@ -82,7 +83,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [analyzing, setAnalyzing] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [scalpBusy, setScalpBusy] = useState(false);
   const [stBandBusy, setStBandBusy] = useState(false);
   const [aiReviewBusy, setAiReviewBusy] = useState(false);
 
@@ -91,7 +91,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [posBump, setPosBump] = useState(0);
   const liveQuote = useQuoteSocket(symbol, assetClass);
   const { data: brokerInfo } = usePolling(() => api.brokerInfo(assetClass), 6000, [assetClass]);
-  const scalp = !!settings?.app.scalp_mode;
   const stBand = !!settings?.app.st_band_mode;
   const aiReview = !!settings?.app.ai_review_enabled;
 
@@ -150,12 +149,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     };
   }, [symbol, assetClass, timeframe]);
 
-  // Scalping mode forces the chart + analysis to the 15m timeframe.
-  useEffect(() => {
-    if (scalp && timeframe !== "15m") setTimeframe("15m");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scalp]);
-
   const { data: account } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
   const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
   // Armed conditional setups — overlaid on the chart (trigger/SL/TP) for the charted symbol.
@@ -194,19 +187,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     const sym = result.proposal.symbol.toUpperCase();
     return positions.some((p) => p.symbol.toUpperCase() === sym);
   }, [positions, result]);
-
-  const toggleScalp = async () => {
-    setScalpBusy(true);
-    setError(null);
-    try {
-      await api.setScalpMode(!scalp);
-      onSettingsChanged?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setScalpBusy(false);
-    }
-  };
 
   const toggleStBand = async () => {
     setStBandBusy(true);
@@ -364,8 +344,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
             name="dash-timeframe"
             value={timeframe}
             onChange={(e) => setTimeframe(e.target.value)}
-            disabled={scalp}
-            title={scalp ? "Locked to 15m by Scalping Mode" : undefined}
             className="rounded bg-neutral-800 px-2 py-1.5 disabled:opacity-50"
           >
             {TIMEFRAMES.map((t) => (
@@ -376,21 +354,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           </select>
         </label>
         <button
-          onClick={toggleScalp}
-          disabled={scalpBusy}
-          title="Scalping Mode: switch the whole system (charts + analysis + scanner) to 15m with the scalp strategy"
-          className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
-            scalp
-              ? "border-amber-500 bg-amber-500/15 text-amber-300"
-              : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
-          }`}
-        >
-          ⚡ Scalping {scalp ? "ON · 15m" : "OFF"}
-        </button>
-        <button
           onClick={toggleStBand}
           disabled={stBandBusy}
-          title="SuperTrend Strategy: trade the mechanical SuperTrend + EMA20-band breakout (long on a close above the band in an uptrend / short below it in a downtrend; stop trails the SuperTrend line). Overrides AI-led + Scalp while on."
+          title="SuperTrend Strategy: trade the mechanical SuperTrend + EMA20-band breakout (long on a close above the band in an uptrend / short below it in a downtrend; stop trails the SuperTrend line). Overrides the AI decider while on."
           className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
             stBand
               ? "border-emerald-500 bg-emerald-500/15 text-emerald-300"
@@ -561,7 +527,10 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           scenario={scenario}
           scenarioBusy={scenarioBusy}
         />
-        <ConditionalsPanel onSelect={openPositionSymbol} />
+        <div className="space-y-4">
+          <QuickTradePanel symbol={symbol} assetClass={assetClass} />
+          <ConditionalsPanel onSelect={openPositionSymbol} />
+        </div>
       </div>
 
       {aiReview && <ShadowScorecardPanel />}

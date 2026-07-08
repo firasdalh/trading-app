@@ -21,7 +21,6 @@ from app.models.schemas import (
     ConditionalSuggestion,
     FundamentalRead,
     TechnicalRead,
-    TradeDecisionLLM,
     TradeProposal,
     TradeReviewLLM,
 )
@@ -62,32 +61,6 @@ In `rationale`, state the GRADE (A/B/C) and the one or two factors that drove th
 desk head explaining a call. In `concerns`, list the specific risks. Set `confidence` to your honest
 conviction (0-1) — modest for B, high for A, and you will be vetoing C.
 Return strict JSON: decision ("confirm"|"veto"), confidence (0-1), rationale, concerns[]."""
-
-_AI_DECIDE_SYSTEM = """You are a trader with 30 years on institutional desks (FX, indices, commodities,
-crypto), now RUNNING the book — you MAKE the call, you are not a rubber stamp. You decide whether to
-go LONG, go SHORT, or STAND ASIDE, and you set the entry, stop, and target yourself.
-
-You receive the full read: every timeframe's indicators (EMAs, RSI, MACD, ADX/DI, ATR), market
-structure, support/resistance, the regime, the higher-timeframe (macro) trend, and the fundamental
-lean. Treat these as INPUTS to weigh with judgment — synthesise them like a desk head, NOT as a
-mechanical checklist.
-
-How you survive (principles, not rigid rules):
-- Be selective. STAND ASIDE is a professional, encouraged answer — most of the time there is no edge.
-  Only act on setups you would risk real money on.
-- Trade WITH the dominant higher-timeframe trend and structure. Do not fight a strong macro trend.
-- Enter at VALUE (a pullback to a level / moving average), not by chasing an extended move.
-- Demand a clean reward:risk of at least 1.5R to the target before price hits opposing structure;
-  prefer ~2R+.
-- Respect momentum; avoid imminent high-impact events and illiquid, trendless tape.
-
-You MUST place a protective stop and a target on the correct side of the entry, sized to real
-structure (use ATR for distance). Assume a MARKET entry near the current price. Sizing and the hard
-risk limits are handled by a separate deterministic Risk Manager downstream — you NEVER size.
-
-Return strict JSON: action ("long"|"short"|"stand_aside"), conviction (0-1, your honest edge),
-entry, stop_loss, take_profit (price numbers; null only when standing aside), rationale (your
-desk-head reasoning), key_risks[] (what would make this trade wrong)."""
 
 
 def _now_in_stand_aside(fundamental: FundamentalRead, now: datetime) -> bool:
@@ -152,14 +125,6 @@ _WALL_NEAR_ATR = 0.75   # a barrier within this many ATR ahead (weak trend) = li
 _WALL_BEHIND_ATR = 0.5  # a key level this recently cleared (behind entry) = a fresh breakout -> bonus
 _WALL_PENALTY = 0.06
 _WALL_BREAK_BONUS = 0.06
-
-# --- 15m SCALPING (SCMS: Structure-Confirmed Momentum Scalp) — kept deliberately PARSIMONIOUS to
-# avoid overfitting: a tiny set of robust, orthogonal conditions (trend+MTF alignment, a pullback to
-# value that held, momentum confirmation) behind hard regime+session gates. No indicator soup. ---
-_SCALP_VALUE_ATR = 0.30   # "pulled back to value" = the bar tagged within 0.30xATR of the EMA20
-_SCALP_MIN_RR = 1.3       # minimum reward:risk for a scalp (a touch below swing trades; banked at 1R)
-_SCALP_STOP_MAX_ATR = 2.0 # a scalp's structural stop must be <= 2xATR — wider isn't a scalp, skip it
-_SCALP_TP_FIXED_RR = 1.5  # fallback target when there's no clean opposing level in range
 
 _TF_RANK = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7}
 
@@ -353,125 +318,6 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0, macro: str = "
         f"Mean-reversion {direction.value.upper()} (ranging regime): price tagged the {edge_kind} "
         f"{round(edge, 5)} with RSI {rsi} ({'high' if direction == Direction.SHORT else 'low'}); "
         f"fading back to the mean (EMA20 {round(mean, 5)}). Stop beyond the edge; R:R {round(rr, 2)}."
-    )
-    return base
-
-
-def _scalp_decision(base: TradeProposal, ind: dict, tf0, macro: str, regime: str,
-                    asset_class: AssetClass, symbol: str, now: datetime) -> TradeProposal:
-    """15m SCALP strategy (SCMS) — deliberately simple to resist overfitting.
-
-    The ONLY setup is a trend-pullback continuation: with the 15m trend (and not against the higher
-    timeframe), wait for a pullback that TAGGED value (the EMA20) and HELD, with momentum (MACD hist)
-    confirming the trend direction. Hard gates first: trade only in a directional regime (trending /
-    moderate — 15m's profitable buckets) and a liquid session (skip thin hours). Stop beyond the
-    pullback extreme (anti-wick floor, capped tight); target the nearest opposing structure (>= min
-    R:R) or a fixed 1.5R. Returns NO_TRADE/watch when any condition fails (which is most of the time —
-    that's the point). The live spread filter + scalp risk profile are layered on downstream."""
-    base.strategy = "scalp"
-    base.regime = regime
-    atr = ind.get("atr14")
-    price = ind.get("last_close")
-    ema20 = ind.get("ema20")
-    if not (atr and price and ema20) or atr <= 0:
-        base.rationale = "Scalp: no usable ATR/price/EMA20 — sitting out."
-        return base
-
-    # --- hard gates ---
-    if regime not in ("trending", "moderate"):
-        base.watch = True
-        base.rationale = f"Scalp: standing aside — {regime} regime (no clean 15m directional energy)."
-        return base
-    session_q, session_note = _session_quality(asset_class, symbol, now)
-    if session_q == "thin":
-        base.watch = True
-        base.rationale = f"Scalp: standing aside — thin/illiquid session ({session_note})."
-        return base
-
-    trend = _trend_from_indicators(ind)
-    ema50 = ind.get("ema50")
-    rsi, rsi_prev = ind.get("rsi14"), ind.get("rsi14_prev")
-    macd = ind.get("macd_hist")
-    last_high, last_low = ind.get("last_high"), ind.get("last_low")
-    swing_high, swing_low = ind.get("swing_high"), ind.get("swing_low")
-    band = _SCALP_VALUE_ATR * atr
-    rising = rsi is not None and rsi_prev is not None and rsi > rsi_prev   # momentum turning UP
-    falling = rsi is not None and rsi_prev is not None and rsi < rsi_prev  # momentum turning DOWN
-
-    direction = stop = risk = None
-    if trend == "up" and macro != "down" and ema50 is not None:
-        # Price pulled back into the VALUE ZONE (>= EMA50, <= just above EMA20 — trend intact, not
-        # extended) and RSI is turning back UP from the pullback (not yet overbought) — momentum
-        # resuming with the trend. A multi-bar pullback read, not a brittle single-bar wick.
-        if ema50 <= price <= ema20 + band and rising and rsi < 60:
-            direction = Direction.LONG
-            ref = swing_low if (swing_low is not None and swing_low < price) else last_low
-            stop = (ref if ref is not None else ema50) - _STRUCT_STOP_BUFFER_ATR * atr
-            risk = price - stop
-    elif trend == "down" and macro != "up" and ema50 is not None:
-        if ema20 - band <= price <= ema50 and falling and rsi > 40:
-            direction = Direction.SHORT
-            ref = swing_high if (swing_high is not None and swing_high > price) else last_high
-            stop = (ref if ref is not None else ema50) + _STRUCT_STOP_BUFFER_ATR * atr
-            risk = stop - price
-
-    if direction is None or risk is None:
-        base.watch = True
-        base.rationale = "Scalp: waiting for a pullback-to-value that holds with momentum in the 15m trend."
-        return base
-
-    # Stop sanity: never tighter than the anti-wick floor, never wider than a scalp's cap.
-    min_stop = _MIN_STOP_ATR_FRAC * atr
-    if risk < min_stop:
-        stop = price - min_stop if direction == Direction.LONG else price + min_stop
-        risk = abs(price - stop)
-    if risk <= 0 or risk > _SCALP_STOP_MAX_ATR * atr:
-        base.watch = True
-        base.rationale = (f"Scalp: invalidation stop too wide ({risk / atr:.1f}xATR > "
-                          f"{_SCALP_STOP_MAX_ATR:.0f}) — not a scalp here.")
-        return base
-
-    # Target: nearest opposing structure if it clears the min R:R (capped at _RR_MAX), else a fixed
-    # 1.5R. If a level sits closer than the min R:R, the path is blocked — skip.
-    opp = _nearest_above(tf0, ind, price) if direction == Direction.LONG else _nearest_below(tf0, ind, price)
-    if opp is not None:
-        rr_opp = (opp - price) / risk if direction == Direction.LONG else (price - opp) / risk
-        if rr_opp < _SCALP_MIN_RR:
-            base.watch = True
-            base.rationale = (f"Scalp: nearest level {round(opp, 5)} is only {rr_opp:.1f}R away "
-                              f"(< {_SCALP_MIN_RR}) — no room. Standing aside.")
-            return base
-        cap = _RR_MAX * risk
-        target = min(opp, price + cap) if direction == Direction.LONG else max(opp, price - cap)
-    else:
-        target = price + _SCALP_TP_FIXED_RR * risk if direction == Direction.LONG else price - _SCALP_TP_FIXED_RR * risk
-    reward = abs(target - price)
-    rr = reward / risk
-
-    # Confidence: base + a few orthogonal bonuses (kept small to avoid over-tuning).
-    conf = 0.5
-    if macro == trend:                       # higher timeframe in the same direction
-        conf += 0.10
-    if session_q == "active":                # prime liquidity window
-        conf += 0.10
-    if macd is not None and abs(macd) >= _MOM_ATR_FRAC * atr:  # momentum is meaningful, not noise
-        conf += 0.05
-    vol = ind.get("vol_ratio")
-    if vol is not None and vol > 1.1:        # participation behind the move
-        conf += 0.05
-    if rr >= 2.0:
-        conf += 0.05
-    confidence = round(min(0.9, conf), 2)
-
-    base.direction = direction
-    base.entry = round(price, 6)
-    base.stop_loss = round(stop, 6)
-    base.take_profit = round(target, 6)
-    base.confidence = confidence
-    base.rationale = (
-        f"Scalp {direction.value.upper()} (15m {regime}, {session_q} session): pullback to value "
-        f"(EMA20 {round(ema20, 5)}) with RSI turning ({rsi_prev}->{rsi}); entry {base.entry}, stop "
-        f"{base.stop_loss} ({risk / atr:.1f}xATR), target {base.take_profit} (R:R {round(rr, 2)})."
     )
     return base
 
@@ -797,7 +643,7 @@ def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) 
 def _deterministic_decision(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
-    trend_only: bool = False, scalp: bool = False, st_band: bool = False,
+    trend_only: bool = False, st_band: bool = False,
     disable: frozenset[str] = frozenset(),
 ) -> TradeProposal:
     # ``disable`` is a BACKTEST-ONLY filter-ablation switch (the live path never passes it): naming a
@@ -834,9 +680,6 @@ def _deterministic_decision(
     # SuperTrend-band breakout mode: a dedicated mechanical strategy replaces the swing logic.
     if st_band:
         return _supertrend_band_decision(base, ind, tf0, symbol)
-    # Scalp mode (15m): a dedicated, parsimonious scalp strategy replaces the swing logic entirely.
-    if scalp:
-        return _scalp_decision(base, ind, tf0, macro, regime, asset_class, symbol, now)
     # Trend-only mode: only trade a CLEAR trend (ADX >= 25 -> "trending"); stand aside in moderate /
     # ranging / volatile. Backtests show the trend regime is the edge while moderate+ranging are net
     # drags (same return, ~40% more drawdown when included). The live default comes from the setting.
@@ -1259,67 +1102,6 @@ def _deterministic_decision(
     return base
 
 
-def _ai_decision(
-    symbol: str, asset_class: AssetClass, timeframe: str,
-    technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
-) -> TradeProposal | None:
-    """AI-LED decision: the AI Orchestrator is the DECIDER (direction + levels + conviction), not a
-    confirm/veto vote. Returns a TradeProposal, or ``None`` when the LLM is unavailable/failed so the
-    caller can fall back to the deterministic engine. Capital-protective guardrails are applied by the
-    caller (``_apply_guardrails``); the Risk Manager remains the final authority downstream."""
-    base = TradeProposal(
-        symbol=symbol, asset_class=asset_class, timeframe=timeframe,
-        direction=Direction.NO_TRADE, confidence=0.0, strategy="ai",
-        technical=technical, fundamental=fundamental,
-    )
-    # Hard safety even in AI mode: never trade inside a flagged high-impact event window.
-    if _now_in_stand_aside(fundamental, now):
-        base.rationale = "Standing aside: inside a high-impact event window."
-        base.strategy = "stand_aside"
-        return base
-
-    tf0 = None
-    if technical.timeframes:
-        tf0 = next((x for x in technical.timeframes if x.timeframe == timeframe),
-                   technical.timeframes[0])
-    ind = tf0.indicators if tf0 else {}
-    regime = _regime(ind)
-    base.regime = regime
-    macro = _macro_trend(technical)
-    last = ind.get("last_close")
-
-    brief = (
-        f"INSTRUMENT: {symbol}  entry timeframe: {timeframe}  asset class: {asset_class.value}\n"
-        f"REGIME: {regime}  ENTRY-TF TREND: {_trend_from_indicators(ind, tf0.trend if tf0 else 'sideways')}"
-        f"  HIGHER-TF (MACRO) TREND: {macro}  STRUCTURE: {_structure_label(ind)}\n"
-        f"CURRENT PRICE: {last}  ATR(14): {ind.get('atr14')}\n\n"
-        f"TECHNICAL READ (all timeframes, indicators, support/resistance):\n"
-        f"{technical.model_dump_json(indent=2)}\n\n"
-        f"FUNDAMENTAL READ:\n{fundamental.model_dump_json(indent=2)}\n\n"
-        "Make the call now."
-    )
-    decision = analyze(system=_AI_DECIDE_SYSTEM, user=brief, schema=TradeDecisionLLM, max_tokens=2500)
-    if decision is None:
-        return None  # LLM down/failed -> caller falls back to the deterministic engine
-
-    if decision.action == "stand_aside":
-        base.strategy = "stand_aside"
-        base.rationale = f"AI stood aside: {decision.rationale}"
-        return base
-
-    base.direction = Direction.LONG if decision.action == "long" else Direction.SHORT
-    # Honest R:R for a MARKET entry: price in at the current market, not a wished-for level. Keep the
-    # AI's absolute stop/target levels; the guardrails then validate side + R:R against the real entry.
-    base.entry = last if last else decision.entry
-    base.stop_loss = decision.stop_loss
-    base.take_profit = decision.take_profit
-    base.confidence = round(decision.conviction, 2)
-    base.review_decision = "ai"
-    risks = (" | risks: " + "; ".join(decision.key_risks)) if decision.key_risks else ""
-    base.rationale = f"AI-led {base.direction.value.upper()}: {decision.rationale}{risks}"
-    return base
-
-
 def _apply_guardrails(proposal: TradeProposal, technical: TechnicalRead) -> TradeProposal:
     """Thin, capital-protective checks on an AI-led proposal — the only deterministic gates left in
     AI-led mode (the mechanical entry filters are folded into the AI's judgment). Any failure converts
@@ -1370,7 +1152,7 @@ def run_orchestrator(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead,
     now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
-    scalp: bool = False, ai_led: bool = False, st_band: bool = False,
+    st_band: bool = False,
     ai_review: bool = True,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
@@ -1381,26 +1163,14 @@ def run_orchestrator(
     3. If it proposed a trade and the LLM is enabled, the LLM reviews it as a risk-aware
        second opinion: confirm (optionally lowering confidence) or veto with reasons. It can
        never change direction/levels or raise risk. The Risk Manager remains final downstream.
+
+    (The AI as the DECIDER is a separate, richer layer — ``ai_decider.ai_decide_trade`` at the pipeline
+    level, gated by the 'AI decides' toggle. That replaced the old AI-led branch that used to live here.)
     """
     now = now or datetime.now(timezone.utc)
 
-    # AI-LED mode: the AI Orchestrator DECIDES (direction + levels + conviction), policed only by
-    # thin capital-protective guardrails. Active only when the LLM is enabled AND available — on the
-    # cheap scanner loop (use_llm=False) or any LLM failure we fall through to the deterministic
-    # engine + confirm/veto review below (the backtestable reference + safety fallback).
-    if ai_led and use_llm and llm_available() and not st_band:
-        ai = _ai_decision(symbol, asset_class, timeframe, technical, fundamental, now)
-        if ai is not None:
-            decided = _apply_guardrails(ai, technical)
-            log.info("orchestrator decision (AI-led)",
-                     extra={"symbol": symbol, "direction": decided.direction.value,
-                            "confidence": decided.confidence})
-            return decided
-        log.warning("AI-led decision unavailable; falling back to deterministic",
-                    extra={"symbol": symbol})
-
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
-                                       trend_only=trend_only, scalp=scalp, st_band=st_band)
+                                       trend_only=trend_only, st_band=st_band)
 
     # SuperTrend-band is a purely mechanical strategy — no LLM confirm/veto over its signals.
     # ai_review=False takes the AI out of the trade decision entirely (the deterministic engine +
@@ -1417,18 +1187,7 @@ def run_orchestrator(
     # The checklist depends on the STRATEGY: a ranging mean-reversion FADE must NOT be judged like a
     # trend trade (it is deliberately counter to the last leg, in a low-ADX market — those are the
     # premise, not flaws), or the reviewer would veto every fade.
-    if proposal.strategy == "scalp":
-        checklist = (
-            "This is a 15m TREND-PULLBACK SCALP: a WITH-trend entry on a pullback to value (EMA20) "
-            "that held, with momentum confirming, in a liquid session. Judge it as a SCALP, not a "
-            "swing trade: a ~1.3R+ target is acceptable (half is banked at +1R and the rest trails), "
-            "and being a quick 15m trade is the premise — do NOT veto for 'small target' or 'low "
-            "timeframe'. CONFIRM if it is with the trend at a value pullback with momentum and room to "
-            "the target. VETO only a clear flaw: against the higher-timeframe trend, no momentum, an "
-            "imminent high-impact event, or no room to the target. When unsure, confirm at lower "
-            "confidence."
-        )
-    elif proposal.strategy == "mean_reversion":
+    if proposal.strategy == "mean_reversion":
         checklist = (
             "This is a deliberate RANGING MEAN-REVERSION fade (regime=ranging). Judge it as a FADE, "
             "NOT a trend trade: being counter to the last leg and a low-ADX / no-trend market are the "

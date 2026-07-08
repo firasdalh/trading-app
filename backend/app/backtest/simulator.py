@@ -117,7 +117,7 @@ def _simulate_trade(symbol: str, candles: list, i: int, prop, *, max_hold: int,
 def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                     bars: int = 1500, context_bars: int = 600, max_hold: int = 96,
                     cooldown: int = 3, cost_r: float = 0.0,
-                    regimes: set[str] | None = None, scalp: bool = False,
+                    regimes: set[str] | None = None,
                     disable: frozenset[str] = frozenset()) -> list[BTTrade]:
     """Replay the engine bar-by-bar over ``bars`` of history and return the simulated trades.
 
@@ -175,7 +175,7 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
 
         technical = run_technical(symbol, window, use_llm=False)
         prop = _deterministic_decision(symbol, asset_class, timeframe, technical, fund, now=t_i,
-                                       scalp=scalp, disable=disable)
+                                       disable=disable)
         if not prop.is_actionable or prop.take_profit is None:
             i += 1
             continue
@@ -675,7 +675,7 @@ def _armed_outcome(symbol: str, candles: list, i: int, armed: dict, max_hold: in
 def simulate_armed_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                           bars: int = 3000, context_bars: int = 600, valid_bars: int = 16,
                           max_hold: int = 96, cooldown: int = 3, cost_r: float = 0.0,
-                          trend_only: bool = False, scalp: bool = False):
+                          trend_only: bool = False):
     """Backtest the ARMED / conditional strategy (the 'wait for the break, then fire' path).
 
     At each bar the engine may emit a conditional (break-stop / pullback-limit / resumption-stop);
@@ -747,7 +747,7 @@ def simulate_armed_symbol(broker, symbol: str, asset_class: AssetClass, timefram
 
         technical = run_technical(symbol, window, use_llm=False)
         prop = _deterministic_decision(symbol, asset_class, timeframe, technical, fund, now=t_i,
-                                       trend_only=trend_only, scalp=scalp)
+                                       trend_only=trend_only)
         c = prop.conditional
         if c is not None and c.trigger_price and c.stop_loss and c.take_profit:
             armed = {"order_type": c.order_type, "trigger": c.trigger_price, "stop": c.stop_loss,

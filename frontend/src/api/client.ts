@@ -120,6 +120,28 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ symbol, asset_class: assetClass, timeframe }),
     }),
+  // Manual quick trade — always sized + gated by the deterministic Risk Manager.
+  manualTrade: (body: {
+    symbol: string;
+    asset_class: AssetClass;
+    direction: "long" | "short";
+    stop_loss: number;
+    take_profit?: number | null;
+    entry?: number | null;
+    lots?: number | null;
+    execute?: boolean;
+  }) => request<AnalyzeResponse>("/api/proposals/manual", { method: "POST", body: JSON.stringify(body) }),
+  // Risk-size a manual ticket WITHOUT placing it — returns the max lots at the 3% cap + $ risk.
+  manualPreview: (body: {
+    symbol: string;
+    asset_class: AssetClass;
+    direction: "long" | "short";
+    stop_loss: number;
+  }) =>
+    request<{ entry: number; approved: boolean; max_lots: number; risk_amount: number; reason: string }>(
+      "/api/proposals/manual/preview",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   explainReview: (text: string, lang: "en" | "ar") =>
     request<ExplainedReview>("/api/proposals/explain", {
       method: "POST",
@@ -174,16 +196,6 @@ export const api = {
     }),
   setTrendOnly: (enabled: boolean) =>
     request<SettingsResponse>("/api/settings/trend-only", {
-      method: "POST",
-      body: JSON.stringify({ enabled }),
-    }),
-  setScalpMode: (enabled: boolean) =>
-    request<SettingsResponse>("/api/settings/scalp-mode", {
-      method: "POST",
-      body: JSON.stringify({ enabled }),
-    }),
-  setAiLedMode: (enabled: boolean) =>
-    request<SettingsResponse>("/api/settings/ai-led-mode", {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),

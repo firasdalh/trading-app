@@ -221,37 +221,6 @@ def set_trend_only(req: TrendOnlyRequest, session: Session = Depends(get_session
     return build_settings_response(session)
 
 
-class ScalpModeRequest(BaseModel):
-    enabled: bool
-
-
-@router.post("/settings/scalp-mode", response_model=SettingsResponse)
-def set_scalp_mode(req: ScalpModeRequest, session: Session = Depends(get_session)) -> SettingsResponse:
-    """Toggle scalping mode: when ON, the whole system (charts + analysis + scanner/hybrid) operates
-    on the 15m timeframe with the scalp strategy/risk profile. Reversible."""
-    settings = get_or_create_settings(session)
-    settings.scalp_mode = req.enabled
-    session.commit()
-    log.info("scalp mode set", extra={"enabled": req.enabled})
-    return build_settings_response(session)
-
-
-class AiLedModeRequest(BaseModel):
-    enabled: bool
-
-
-@router.post("/settings/ai-led-mode", response_model=SettingsResponse)
-def set_ai_led_mode(req: AiLedModeRequest, session: Session = Depends(get_session)) -> SettingsResponse:
-    """Toggle AI-led decisions: when ON, the AI Orchestrator decides the trade (direction, levels,
-    conviction) from the full read, policed by thin guardrails + the deterministic Risk Manager.
-    OFF instantly reverts to the deterministic engine + confirm/veto review. Reversible."""
-    settings = get_or_create_settings(session)
-    settings.ai_led_mode = req.enabled
-    session.commit()
-    log.info("ai-led mode set", extra={"enabled": req.enabled})
-    return build_settings_response(session)
-
-
 class StBandModeRequest(BaseModel):
     enabled: bool
 
@@ -260,7 +229,7 @@ class StBandModeRequest(BaseModel):
 def set_st_band_mode(req: StBandModeRequest, session: Session = Depends(get_session)) -> SettingsResponse:
     """Toggle the SuperTrend + EMA20-band breakout strategy: when ON, the engine trades only that
     mechanical strategy (long above the band in a SuperTrend uptrend / short below it in a downtrend;
-    stop trails the SuperTrend line). Overrides AI-led + scalp while on. Reversible."""
+    stop trails the SuperTrend line). Overrides the AI decider while on. Reversible."""
     settings = get_or_create_settings(session)
     settings.st_band_mode = req.enabled
     session.commit()

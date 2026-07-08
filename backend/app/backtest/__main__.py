@@ -47,7 +47,6 @@ def main() -> None:
     ap.add_argument("--risk-pct", type=float, default=0.01, help="per-trade risk for %%-equity DD")
     ap.add_argument("--regimes", default="", help="only trade these regimes, comma-separated "
                     "(e.g. 'trending'); default = all")
-    ap.add_argument("--scalp", action="store_true", help="use the 15m SCALP strategy (SCMS)")
     ap.add_argument("--holdout", type=float, default=0.0, help="hold out the last fraction of time as "
                     "OUT-OF-SAMPLE and report it separately (e.g. 0.3); 0 = combined only")
     args = ap.parse_args()
@@ -68,14 +67,14 @@ def main() -> None:
                 print(f"… {sym} {tf} (last {args.bars} bars)…", flush=True)
                 tr = simulate_symbol(broker, sym, AssetClass(ac), tf, bars=args.bars,
                                      max_hold=args.max_hold, cooldown=args.cooldown,
-                                     cost_r=args.cost_r, regimes=regimes, scalp=args.scalp)
+                                     cost_r=args.cost_r, regimes=regimes)
                 print(f"   {sym}: {len(tr)} trades", flush=True)
                 all_trades.extend(tr)
             except Exception as exc:  # noqa: BLE001 - one bad symbol shouldn't kill the run
                 print(f"   ! {sym} failed: {exc}", flush=True)
 
         print()
-        tag = "SCALP" if args.scalp else "deterministic engine"
+        tag = "deterministic engine"
         if args.holdout > 0:
             from app.backtest.simulator import split_by_time
             in_s, oos = split_by_time(all_trades, args.holdout)

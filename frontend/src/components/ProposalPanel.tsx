@@ -192,14 +192,23 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
         );
       })()}
 
-      {/* Risk Manager verdict — deterministic, final. For an AI ARM there is no market trade to size
-          yet (it's a pending order), so the raw NO_TRADE veto is reframed as an "armed" note. */}
-      {aiArm ? (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm">
-          <div className="font-medium text-amber-300">Pending order — not a rejection</div>
+      {/* Risk Manager verdict — deterministic, final. When the AI DECIDED not to open a market trade
+          (stand aside / arm / blocked), there's nothing to size, so we DON'T show the raw red
+          "Risk Manager: VETOED — orchestrator returned NO_TRADE" (which reads like the risk manager
+          overrode the AI). We reframe it: the AI made the call, this isn't a risk veto. */}
+      {aiNonOpen ? (
+        <div
+          className={`rounded-md border p-2 text-sm ${
+            aiArm ? "border-amber-500/40 bg-amber-500/10" : "border-neutral-700 bg-neutral-800/40"
+          }`}
+        >
+          <div className={`font-medium ${aiArm ? "text-amber-300" : "text-neutral-300"}`}>
+            {aiArm ? "Pending order — not a rejection" : "AI's call — not a risk veto"}
+          </div>
           <div className="text-neutral-400">
-            Nothing is opened now. The Risk Manager will size and approve this automatically if price
-            reaches the trigger and the setup still checks out.
+            {aiArm
+              ? "Nothing opens now. The Risk Manager sizes + approves it automatically when the trigger hits and the setup still checks out."
+              : "The AI decided not to trade, so there's nothing for the Risk Manager to size. This is the AI's call, not a risk-manager rejection."}
           </div>
         </div>
       ) : (

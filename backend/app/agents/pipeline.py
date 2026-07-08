@@ -50,8 +50,6 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
     ``use_llm`` (reads follow the decision)."""
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
-    if settings.scalp_mode:
-        timeframe = "15m"   # scalp mode forces the 15m entry timeframe
     broker = get_broker_for(asset_class, settings.broker_map)
     series: list[OHLCVSeries] = []
     for tf in _timeframes_for(timeframe):
@@ -60,18 +58,14 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
         except Exception as exc:  # noqa: BLE001
             log.warning("preview ohlcv failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
     review_on = settings.ai_review_enabled
-    # AI-DECIDER (see analyze_symbol): AI toggle ON -> deterministic analyst + AI judge (open/arm/skip).
-    ai_decides = (review_on and use_llm and llm_available()
-                  and not settings.scalp_mode and not settings.st_band_mode and not settings.ai_led_mode)
+    # AI-DECIDER (see analyze_symbol): 'AI decides' -> deterministic analyst + AI judge (open/arm/skip).
+    ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode)
     reads = (use_llm if read_llm is None else read_llm) and review_on and not ai_decides
     technical = run_technical(symbol, series, use_llm=reads)
     fundamental = run_fundamental(symbol, now=now, use_llm=(use_llm if read_llm is None else read_llm))
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
-                                scalp=settings.scalp_mode and not settings.st_band_mode,
-                                trend_only=settings.trend_only_mode and not settings.scalp_mode,
-                                ai_led=(settings.ai_led_mode and not settings.scalp_mode
-                                        and not settings.st_band_mode),
+                                trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
@@ -114,8 +108,6 @@ def analyze_symbol(
     agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
-    if settings.scalp_mode:
-        timeframe = "15m"   # scalp mode forces the 15m entry timeframe
     broker = get_broker_for(asset_class, settings.broker_map)
 
     # 1. Market data across timeframes.
@@ -132,20 +124,17 @@ def analyze_symbol(
     # (LLM technical + confirm/veto). (Repeatability testing showed the reviewer isn't a stable filter;
     # a deterministic confidence>=70% gate matches it.)
     review_on = settings.ai_review_enabled
-    # AI-DECIDER: when the AI toggle is ON, the deterministic engine is the ANALYST (it does the full
-    # analysis -> a decision brief) and the AI is the JUDGE (picks the scenario, decides open/arm/skip;
-    # levels anchored to the brief). The Risk Manager still sizes/gates downstream. When the LLM is off
-    # or unavailable, we keep the deterministic proposal. Mutually exclusive with scalp/st_band/ai_led.
-    ai_decides = (review_on and use_llm and llm_available()
-                  and not settings.scalp_mode and not settings.st_band_mode and not settings.ai_led_mode)
+    # AI-DECIDER: when the "AI decides" toggle (ai_review_enabled) is ON, the deterministic engine is
+    # the ANALYST (full analysis -> a decision brief) and the AI is the JUDGE (creates the scenarios,
+    # picks the best tradeable one, decides open/arm/skip; levels anchored to the brief). The Risk
+    # Manager still sizes/gates downstream. When the LLM is off/unavailable, we keep the deterministic
+    # proposal. Mutually exclusive with st_band.
+    ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode)
     technical = run_technical(symbol, series, use_llm=use_llm and review_on and not ai_decides)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)  # AI kept for fundamentals
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
-                                scalp=settings.scalp_mode and not settings.st_band_mode,
-                                trend_only=settings.trend_only_mode and not settings.scalp_mode,
-                                ai_led=(settings.ai_led_mode and not settings.scalp_mode
-                                        and not settings.st_band_mode),
+                                trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade

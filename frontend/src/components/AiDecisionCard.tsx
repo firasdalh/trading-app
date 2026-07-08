@@ -95,8 +95,14 @@ export function AiDecisionCard({ d }: { d: AiDecision }) {
                   <span className="font-semibold text-neutral-100">
                     {MEDAL[i] ?? "•"} {s.label} <span className="text-neutral-500">{dirArrow(s.direction)}</span>
                   </span>
-                  <span className={`font-bold tabular-nums ${chosen ? "text-violet-200" : "text-neutral-300"}`}>
-                    {s.prob}%
+                  <span className="flex items-center gap-1.5 tabular-nums">
+                    {s.rr != null && (
+                      <span className={s.tradeable ? "text-bull" : "text-neutral-500 line-through"}>
+                        {s.rr}R
+                      </span>
+                    )}
+                    {s.tradeable === false && s.rr != null && <span className="text-neutral-600">thin</span>}
+                    <span className={`font-bold ${chosen ? "text-violet-200" : "text-neutral-300"}`}>{s.prob}%</span>
                   </span>
                 </div>
                 <div className="my-1 h-1 w-full overflow-hidden rounded bg-neutral-800">
