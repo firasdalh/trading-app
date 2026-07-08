@@ -91,7 +91,7 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
           Opportunities
         </button>
         <span className="text-xs text-neutral-500">
-          ranks all pairs, then AI-reviews the actionable ones (matches Run analysis)
+          the AI decides every pair — open / arm / stand aside (matches Run analysis)
         </span>
         {items && (
           <span className="text-xs text-neutral-400">
@@ -353,12 +353,14 @@ function HybridControl({ onOpened, timeframe }: { onOpened?: () => void; timefra
       </div>
 
       <p className="mt-1 text-xs text-neutral-500">
-        Every ~{intervalMin} min, if fewer than 3 trades are open, it scans the watchlist and
+        Every ~{intervalMin} min it <span className="text-neutral-300">first checks for room</span> —
+        if 3 trades are already open it skips the scan entirely. Otherwise the{" "}
+        <span className="text-violet-300">AI decides every pair</span> (same as Run analysis) and
         auto-opens the single best setup above <span className="text-neutral-300">{confPct}%</span>{" "}
         confidence. Kill-switch, daily-loss, exposure & no-stacking limits still apply.
         {condOn && (
-          <> It also <span className="text-amber-300">arms “wait for the break”</span> setups that
-          are blocked by structure, re-checking + opening them when the level gives way.</>
+          <> It also <span className="text-amber-300">arms</span> the AI's “wait for the break”
+          setups, re-checking + opening them when the level gives way.</>
         )}
       </p>
 
@@ -466,11 +468,11 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
     { label: "Scans", value: s.scans, tone: "text-neutral-200",
       title: "Watchlist scans the auto-pilot ran today" },
     { label: "Candidates", value: s.candidates, tone: "text-sky-300",
-      title: "Risk-approved setups that cleared the confidence threshold (the ranking pool)" },
-    { label: "AI confirmed", value: s.ai_confirmed, tone: "text-bull",
-      title: "The best candidate's LLM review said CONFIRM" },
-    { label: "AI rejected", value: s.ai_rejected, tone: "text-bear",
-      title: "The best candidate's LLM review said VETO" },
+      title: "Risk-approved OPENS that cleared the confidence threshold (the ranking pool)" },
+    { label: "AI opens", value: s.ai_opens, tone: "text-bull",
+      title: "Pairs the AI decider chose to OPEN (a market direction) across today's scans" },
+    { label: "AI arms", value: s.ai_arms, tone: "text-amber-300",
+      title: "Pairs the AI decider chose to ARM (a pending break/pullback order)" },
     { label: "Direct trades", value: s.direct_trades, tone: "text-bull",
       title: "Market orders the Hybrid auto-opened" },
     { label: "Armed", value: s.armed_setups, tone: "text-amber-300",
@@ -503,13 +505,13 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
         ))}
       </div>
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
-        <span title="Of the setups the AI graded today, the share it CONFIRMED (confirmed ÷ reviewed). Green ≥66% · amber 40–66% · red <40%">
-          AI accept:{" "}
+        <span title="Of the pairs the AI decider evaluated today, the share it chose to ACT on (open or arm) ÷ scanned. Green ≥66% · amber 40–66% · red <40%">
+          AI act rate:{" "}
           <span className={`font-semibold ${acceptTone}`}>
             {s.accept_rate == null ? "—" : `${Math.round(s.accept_rate * 100)}%`}
           </span>
           {s.accept_rate != null && (
-            <span className="text-neutral-600"> ({s.ai_confirmed}/{s.ai_confirmed + s.ai_rejected})</span>
+            <span className="text-neutral-600"> ({s.ai_opens + s.ai_arms}/{s.scanned})</span>
           )}
         </span>
         <span title="The most recent trade the auto-pilot opened">

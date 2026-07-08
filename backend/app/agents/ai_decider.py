@@ -29,6 +29,8 @@ from app.models.schemas import ConditionalSuggestion, FundamentalRead, Technical
 
 log = get_logger("agents.ai_decider")
 
+_ARM_MIN_RR = 1.5   # reject an AI arm below this reward:risk (arms bypass the open-path min-R:R gate)
+
 
 class _AiScenario(BaseModel):
     label: str = Field(description="a short name YOU coin for this scenario")
@@ -280,9 +282,19 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
     chose = f"CHOSE '{decision.chosen}' ({decision.why_chosen})"
     tail = f" {decision.rationale}{risks} || Scenarios the AI built: {scen}"
 
+    # Structured decision for the UI (rendered cleanly instead of parsing the rationale text).
+    aid: dict = {
+        "action": action, "chosen": decision.chosen, "why_chosen": decision.why_chosen,
+        "summary": decision.rationale, "risks": list(decision.key_risks),
+        "conviction": round(min(0.95, max(0.05, decision.conviction)), 2),
+        "scenarios": [{"label": s.label, "direction": s.direction, "prob": s.probability,
+                       "path": s.path, "reasoning": s.reasoning} for s in decision.scenarios],
+    }
+
     if action == "stand_aside":
         base.strategy = "stand_aside"
         base.rationale = f"AI stood aside — {chose}.{tail}"
+        base.ai_decision = {**aid, "kind": "stand_aside"}
         log.info("ai decision: stand_aside", extra={"symbol": symbol, "chosen": decision.chosen})
         return base
 
@@ -295,6 +307,7 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
         if not (trig and stop and tp) or price is None:
             base.strategy = "stand_aside"
             base.rationale = f"AI wanted to ARM {direction.value} but gave incomplete levels; standing aside. {decision.rationale}"
+            base.ai_decision = {**aid, "kind": "blocked", "note": "incomplete arm levels"}
             return base
         risk = abs(trig - stop)
         # side sanity: stop/target on the correct side of the TRIGGER.
@@ -302,6 +315,7 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
         if risk <= 0 or not ok_sides:
             base.strategy = "stand_aside"
             base.rationale = f"AI ARM {direction.value} rejected (stop/target on the wrong side of the trigger). {decision.rationale}"
+            base.ai_decision = {**aid, "kind": "blocked", "note": "stop/target on the wrong side of the trigger"}
             return base
         # ATR sanity (arms don't go through _apply_guardrails): reject a hair-trigger / absurdly-wide stop,
         # which would otherwise size huge and get stopped on noise, or report a fake giant R:R.
@@ -310,10 +324,20 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
         atr = tf0.indicators.get("atr14") if tf0 else None
         if atr and (risk < 0.25 * atr or risk > 6.0 * atr):
             base.strategy = "stand_aside"
-            base.rationale = (f"AI ARM {direction.value} rejected: stop {risk:.4f} is "
-                              f"{'too tight' if risk < 0.25 * atr else 'too wide'} vs ATR {atr:.4f}. {decision.rationale}")
+            reason = f"stop {'too tight' if risk < 0.25 * atr else 'too wide'} vs ATR"
+            base.rationale = (f"AI ARM {direction.value} rejected: {reason} ({risk:.4f} vs ATR {atr:.4f}). "
+                              f"{decision.rationale}")
+            base.ai_decision = {**aid, "kind": "blocked", "note": reason}
             return base
         rr = abs(tp - trig) / risk
+        # R:R floor (arms skip _apply_guardrails' min-R:R): a thin arm like ~0.1R (huge stop, tiny
+        # target) is negative expectancy after costs — reject it rather than arm a bad trade.
+        if rr < _ARM_MIN_RR:
+            base.strategy = "stand_aside"
+            base.rationale = (f"AI ARM {direction.value} rejected: only ~{rr:.1f}R "
+                              f"(below the {_ARM_MIN_RR:.1f}R floor). {decision.rationale}")
+            base.ai_decision = {**aid, "kind": "blocked", "note": f"thin reward:risk (~{rr:.1f}R)"}
+            return base
         base.direction = Direction.NO_TRADE
         base.watch = True
         base.conditional = ConditionalSuggestion(
@@ -324,6 +348,10 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
         )
         base.rationale = (f"AI ARMED a {direction.value.upper()} {base.conditional.order_type} at "
                           f"{base.conditional.trigger_price} (~{rr:.1f}R) — {chose}.{tail}")
+        base.ai_decision = {**aid, "kind": "arm", "direction": direction.value,
+                            "order_type": base.conditional.order_type, "entry": base.conditional.trigger_price,
+                            "stop": base.conditional.stop_loss, "target": base.conditional.take_profit,
+                            "rr": round(rr, 2)}
         log.info("ai decision: arm", extra={"symbol": symbol, "dir": direction.value,
                                             "trigger": base.conditional.trigger_price})
         return base
@@ -335,7 +363,14 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
     base.take_profit = decision.take_profit
     base.confidence = round(min(0.95, max(0.05, decision.conviction)), 2)
     base.rationale = f"AI OPEN {direction.value.upper()} — {chose}.{tail}"
+    orr = (abs(base.take_profit - base.entry) / abs(base.entry - base.stop_loss)
+           if base.entry and base.stop_loss and base.take_profit and base.entry != base.stop_loss else None)
+    base.ai_decision = {**aid, "kind": "open", "direction": direction.value, "entry": base.entry,
+                        "stop": base.stop_loss, "target": base.take_profit,
+                        "rr": round(orr, 2) if orr else None}
     decided = _apply_guardrails(base, technical)   # thin capital-protective checks; may -> NO_TRADE
+    if decided.direction == Direction.NO_TRADE and decided.ai_decision:
+        decided.ai_decision = {**decided.ai_decision, "kind": "blocked", "note": "failed a capital-protective guardrail"}
     log.info("ai decision: open", extra={"symbol": symbol, "dir": direction.value,
                                          "blocked": decided.direction == Direction.NO_TRADE})
     return decided

@@ -158,16 +158,6 @@ def test_mechanical_invalidation_target_and_stop():
     assert cond._mechanical_invalidation(short, 78.5)[1] is False and "stop" in cond._mechanical_invalidation(short, 78.5)[0]
 
 
-def test_trend_broken_unit():
-    # LONG is broken by a close BELOW the trend EMA; SHORT by a close ABOVE it. Too-short a series
-    # (can't compute EMA50) never invalidates.
-    up = [100.0] * 59 + [98.0]     # last well below EMA(~99.9)
-    assert cond._trend_broken("long", up) is True
-    assert cond._trend_broken("short", up) is False
-    dn = [78.0] * 59 + [79.5]      # last well above EMA(~78.05)
-    assert cond._trend_broken("short", dn) is True
-    assert cond._trend_broken("long", dn) is False
-    assert cond._trend_broken("long", [100.0] * 5) is False   # not enough data -> never invalidate
 
 
 def _stub_market_series(monkeypatch, closes):
@@ -182,44 +172,28 @@ def _stub_market_series(monkeypatch, closes):
     monkeypatch.setattr(cond, "kill_switch_active", lambda s: False)
 
 
-def test_armed_stays_armed_while_trend_intact(db_session, monkeypatch):
-    # Task 5: downtrend still intact (last close 78.3 below EMA(~79)) and the break trigger (78.2)
-    # not yet hit -> the setup must remain armed after a check pass.
-    s = _arm(db_session)  # short sell_stop, trigger 78.2
-    _stub_market_series(monkeypatch, [79.0] * 59 + [78.3])
+def test_buy_stop_breakout_waits_for_trigger(db_session, monkeypatch):
+    # The JP225 bug: a buy_stop breakout long, price waiting BELOW the trigger (100) and far below the
+    # EMA50 — and even below its own stop (98) — must stay ARMED. A breakout order legitimately sits on
+    # the far side of its (post-entry) stop while it waits; only the TARGET or valid_until invalidate.
+    s = _arm(db_session, direction="long", order_type="buy_stop", trigger_price=100.0,
+             stop_loss=98.0, take_profit=106.0)
+    _stub_market_series(monkeypatch, [110.0] * 59 + [97.0])   # below EMA and below the stop, but < target
     out = cond.check_conditional_setups(db_session)
     db_session.refresh(s)
-    assert s.status == "armed"
-    assert out["invalidated"] == 0 and out["triggered"] == 0
+    assert s.status == "armed" and out["invalidated"] == 0 and out["triggered"] == 0
 
 
-def test_armed_invalidated_by_pretrigger_trend_break(db_session, monkeypatch):
-    # Task 5: the confirmed close (79.0) closes back ABOVE the trend EMA(~78.05) BEFORE the break
-    # trigger (78.2) fires -> the downtrend pullback became a reversal -> invalidated, not left
-    # waiting out its validity window.
-    s = _arm(db_session)  # short sell_stop, trigger 78.2
-    _stub_market_series(monkeypatch, [78.0] * 59 + [79.0])
+def test_sell_stop_breakout_waits_when_price_above_stop(db_session, monkeypatch):
+    # The USOIL bug: a sell_stop short with price ABOVE its future stop (78.4) while waiting for the
+    # break down through the trigger (78.2) must stay armed, not be invalidated for sitting past the stop.
+    s = _arm(db_session)  # short sell_stop, trigger 78.2, SL 78.4, TP 77.4
+    _stub_market_series(monkeypatch, [79.0] * 59 + [78.6])   # above the stop, above the trigger
     out = cond.check_conditional_setups(db_session)
     db_session.refresh(s)
-    assert s.status == "invalidated" and "trend EMA" in (s.last_note or "")
-    assert out["invalidated"] == 1 and out["triggered"] == 0
-    long = SimpleNamespace(direction="long", stop_loss=99.0, take_profit=105.0)
-    assert cond._mechanical_invalidation(long, 100.0) == (None, False)
-    assert cond._mechanical_invalidation(long, 105.5)[1] is True
-    assert cond._mechanical_invalidation(long, 98.5)[1] is False
+    assert s.status == "armed" and out["invalidated"] == 0 and out["triggered"] == 0
 
 
-def test_buy_limit_pullback_not_invalidated_below_ema(db_session, monkeypatch):
-    # The gold bug: a buy_limit (pullback long) is armed with price BELOW the EMA50 — that's the dip
-    # it's buying, not a trend break. The pre-trigger EMA invalidation must NOT fire for limit orders
-    # (only for stop/breakout orders). Trigger 79.0 not yet reached (price 79.5) -> stays armed.
-    s = _arm(db_session, direction="long", order_type="buy_limit", trigger_price=79.0,
-             stop_loss=77.5, take_profit=82.0)
-    _stub_market_series(monkeypatch, [100.0] * 59 + [79.5])   # last far below EMA(~99.7)
-    out = cond.check_conditional_setups(db_session)
-    db_session.refresh(s)
-    assert s.status == "armed"
-    assert out["invalidated"] == 0
 
 
 def test_trigger_fires_and_opens_on_break(db_session, monkeypatch):

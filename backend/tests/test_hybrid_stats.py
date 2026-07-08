@@ -15,18 +15,18 @@ def _tick(*, opened=None, **stats) -> AgentRun:
 def test_hybrid_stats_aggregates_today(db_session):
     now = datetime.now(timezone.utc)
 
-    # Two real scans today: one opened a direct trade + AI confirm, one AI veto.
+    # Two real scans today: one opened a direct trade, with the AI's per-pair open/arm tallies.
     db_session.add(_tick(reached_scan=True, scanned=5, candidates=2, skipped_low_conf=1,
-                         ai_review="confirm", opened={"symbol": "EURUSDm", "direction": "long"}))
+                         ai_opens=3, ai_arms=1, opened={"symbol": "EURUSDm", "direction": "long"}))
     db_session.add(_tick(reached_scan=True, scanned=4, candidates=1, skipped_low_conf=2,
-                         ai_review="veto"))
+                         ai_opens=3, ai_arms=0))
     # Early bail (kill-switch / no room) — reached_scan False, so NOT counted as a scan.
     db_session.add(_tick(reached_scan=False))
     # A non-hybrid agent run must be ignored entirely.
     db_session.add(AgentRun(agent="scanner", event="tick",
                             detail={"stats": {"reached_scan": True, "candidates": 99}}))
     # Yesterday's hybrid run must fall outside the "today" window.
-    stale = _tick(reached_scan=True, scanned=9, candidates=9, skipped_low_conf=9, ai_review="confirm")
+    stale = _tick(reached_scan=True, scanned=9, candidates=9, skipped_low_conf=9, ai_opens=9)
     stale.created_at = now - timedelta(days=1)
     db_session.add(stale)
 
@@ -47,22 +47,23 @@ def test_hybrid_stats_aggregates_today(db_session):
 
     out = hybrid_stats(db_session)
     assert out.scans == 2                 # only the two reached_scan hybrid ticks today
+    assert out.scanned == 9               # 5 + 4 pairs evaluated
     assert out.candidates == 3            # 2 + 1
     assert out.skipped_low_conf == 3      # 1 + 2
-    assert out.ai_confirmed == 1
-    assert out.ai_rejected == 1
+    assert out.ai_opens == 6              # 3 + 3
+    assert out.ai_arms == 1               # 1 + 0
     assert out.direct_trades == 1         # the one tick with an 'opened'
     assert out.armed_setups == 2          # both hybrid conditionals created today (manual excluded)
     assert out.triggered_armed == 1       # the one with triggered_at today
-    assert out.accept_rate == 0.5         # 1 confirm / (1 confirm + 1 veto)
+    assert out.accept_rate == 0.78        # (6 opens + 1 arm) / 9 scanned
     assert out.last_opened == "EURUSDm long"  # most recent hybrid run carrying an 'opened'
 
 
 def test_hybrid_stats_empty(db_session):
     out = hybrid_stats(db_session)
-    assert (out.scans, out.candidates, out.ai_confirmed, out.ai_rejected,
+    assert (out.scans, out.scanned, out.candidates, out.ai_opens, out.ai_arms,
             out.direct_trades, out.armed_setups, out.triggered_armed, out.skipped_low_conf) == \
-        (0, 0, 0, 0, 0, 0, 0, 0)
+        (0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 
 def test_run_hybrid_records_stats(db_session, monkeypatch):
@@ -100,3 +101,36 @@ def test_run_hybrid_records_stats(db_session, monkeypatch):
 
     out = hybrid_stats(db_session)
     assert out.scans == 1 and out.skipped_low_conf == 1 and out.candidates == 0
+
+
+def test_run_hybrid_skips_scan_when_book_full(db_session, monkeypatch):
+    """Room is checked FIRST: a full book (>= max_open_positions) skips the whole scan — no per-pair
+    (AI) work is done, so preview_symbol is never called."""
+    from types import SimpleNamespace
+
+    import app.agents.hybrid as hybrid
+    from app.models.db import WatchItem
+
+    db_session.add(WatchItem(symbol="EURUSDm", asset_class="forex", timeframe="1h", enabled=True))
+    cfg = hybrid.get_or_create_hybrid_config(db_session)
+    cfg.enabled = True
+    db_session.commit()
+
+    calls = {"preview": 0}
+
+    def _preview(*a, **k):
+        calls["preview"] += 1
+        raise AssertionError("preview_symbol must NOT run when the book is full")
+
+    # 3 open positions == the default max_open_positions -> no room.
+    full_book = [SimpleNamespace(symbol=s, direction="long") for s in ("AUDCADm", "USDCHFm", "GBPUSDm")]
+    monkeypatch.setattr(hybrid, "preview_symbol", _preview)
+    monkeypatch.setattr(hybrid, "live_broker_positions", lambda s: full_book)
+    monkeypatch.setattr(hybrid, "kill_switch_active", lambda s: False)
+
+    out = hybrid.run_hybrid(db_session)
+    assert calls["preview"] == 0
+    assert "no room" in (out.get("reason") or "")
+    run = db_session.query(AgentRun).filter(AgentRun.agent == "hybrid").order_by(
+        AgentRun.id.desc()).first()
+    assert (run.detail or {}).get("stats", {}).get("reached_scan") is False

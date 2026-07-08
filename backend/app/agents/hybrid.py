@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.llm import llm_available
 from app.agents.pipeline import analyze_symbol, preview_symbol
 from app.core.logging import get_logger
 from app.core.state import (
@@ -85,9 +86,6 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     """Scan + auto-open the single best qualifying setup (if any). Returns a short summary.
     ``tf_override`` (from the watchlist timeframe selector on a manual 'Run now') scans + opens on
     that timeframe instead of each pair's own; None keeps per-pair timeframes (the scheduled tick)."""
-    from app.agents.scanner import expire_stale_proposals
-
-    expire_stale_proposals(session)  # clear stale pendings that would otherwise block symbols
     cfg = get_or_create_hybrid_config(session)
     threshold = cfg.min_confidence
 
@@ -96,9 +94,10 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     armable: list[tuple[float, WatchItem, object, str]] = []
 
     # Per-tick activity counters recorded in the AgentRun so the dashboard can total them for "today".
-    # reached_scan distinguishes a real scan from an early bail (kill-switch / no room).
-    stats: dict = {"reached_scan": False, "scanned": 0, "candidates": 0,
-                   "skipped_low_conf": 0, "armable": 0, "armed": 0, "ai_review": None}
+    # reached_scan distinguishes a real scan from an early bail (kill-switch / no room). ai_opens/arms/
+    # aside tally what the AI decider chose across the scanned pairs (when the AI is the decider).
+    stats: dict = {"reached_scan": False, "scanned": 0, "candidates": 0, "skipped_low_conf": 0,
+                   "armable": 0, "armed": 0, "ai_opens": 0, "ai_arms": 0, "ai_aside": 0}
 
     def done(reason: str, opened: dict | None = None) -> dict:
         if cfg.conditional_enabled and armable:
@@ -115,7 +114,8 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     if kill_switch_active(session):
         return done("kill-switch active — no auto-open")
 
-    # --- 1. room check (open positions < max_open_positions) ---
+    # --- 1. ROOM CHECK FIRST — before ANY scan/AI work. A full book means nothing can open, so we skip
+    #        the whole (now AI-per-pair, hence costly) scan entirely — no wasted LLM calls. ---
     max_pos = get_or_create_risk_config(session).max_open_positions
     try:
         open_positions = live_broker_positions(session)
@@ -123,7 +123,16 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
         log.warning("hybrid: broker positions failed", extra={"error": str(exc)})
         return done("could not read open positions")
     if len(open_positions) >= max_pos:
-        return done(f"no room ({len(open_positions)}/{max_pos} open)")
+        return done(f"no room ({len(open_positions)}/{max_pos} open) — skipped the scan")
+
+    # There IS room — now do housekeeping and decide whether the AI is the per-pair decider (same
+    # workflow as Run analysis / Scan watchlist). Only reached once past the room gate.
+    from app.agents.scanner import expire_stale_proposals
+
+    expire_stale_proposals(session)  # clear stale pendings that would otherwise block symbols
+    settings = get_or_create_settings(session)
+    ai_active = (settings.ai_review_enabled and llm_available()
+                 and not settings.scalp_mode and not settings.st_band_mode and not settings.ai_led_mode)
     open_syms = {_norm_symbol(p.symbol) for p in open_positions}
     # Reuse this single open-book fetch for every per-symbol risk check in the scan below (primed
     # into a ScanCache), so ranking the watchlist doesn't make one broker round-trip per symbol.
@@ -144,26 +153,34 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
         if _norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms:
             continue
         try:
-            # Rank deterministically (cheap, no LLM quota) — the engine's confidence is now
-            # well-calibrated. The chosen best is then re-run with the LLM reviewer below before
-            # it actually opens, so the LLM judgment still gates every auto-trade.
+            # AI-DECIDER per pair when active (SAME workflow as Run analysis / Scan watchlist): the
+            # deterministic engine does the homework, the AI decides open/arm/skip. use_llm=False keeps
+            # it deterministic-only when the AI toggle is off (cheap). read_llm=False -> deterministic
+            # reads either way; only the decider spends an LLM call. The chosen best is re-run below
+            # before it actually opens, so every auto-trade still passes the full pipeline + Risk Manager.
             prop, dec = preview_symbol(session, it.symbol, AssetClass(it.asset_class),
-                                       tf_override or it.timeframe, use_llm=False, cache=cache)
+                                       tf_override or it.timeframe, use_llm=ai_active,
+                                       read_llm=False if ai_active else None, cache=cache)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
             continue
         stats["scanned"] += 1
         is_directional = prop.direction.value in ("long", "short")
         eff_min = _effective_min_conf(prop.strategy, threshold)
-        if is_directional and dec.approved and prop.confidence > eff_min:
-            candidates.append((prop.confidence, it))
-        elif is_directional and prop.confidence <= eff_min:
-            # A real setup that just didn't clear the confidence bar — the "Skipped (<threshold)" tally.
-            stats["skipped_low_conf"] += 1
+        if is_directional:
+            stats["ai_opens"] += 1
+            if dec.approved and prop.confidence > eff_min:
+                candidates.append((prop.confidence, it))
+            elif prop.confidence <= eff_min:
+                # A real setup that just didn't clear the confidence bar — the "Skipped (<thr)" tally.
+                stats["skipped_low_conf"] += 1
         # A blocked-but-valid setup carries a 'wait for the break' conditional — collect it to arm.
         if prop.conditional is not None:
+            stats["ai_arms"] += 1
             cond_dir = "long" if prop.conditional.order_type.startswith("buy") else "short"
             armable.append((prop.conditional.confidence, it, prop.conditional, cond_dir))
+        elif not is_directional:
+            stats["ai_aside"] += 1
     stats["candidates"] = len(candidates)
 
     if not candidates:
@@ -173,17 +190,12 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     candidates.sort(key=lambda x: -x[0])
     _, best = candidates[0]
 
-    # --- 3. full analysis (LLM review can veto / lower confidence) then auto-open ---
+    # --- 3. full analysis (the AI decider re-decides the best on its own levels) then auto-open ---
     res = analyze_symbol(session, best.symbol, AssetClass(best.asset_class),
                          tf_override or best.timeframe, use_llm=True)
     record = session.get(TradeProposalRecord, res.proposal_id)
     if record is None:
         return done(f"{best.symbol}: proposal vanished")
-
-    # The LLM reviewer's verdict on the single best candidate (confirm / veto) — the AI Confirmed /
-    # AI Rejected counters. Only the best gets the full LLM review each tick (quota-friendly).
-    if record.review_decision in ("confirm", "veto"):
-        stats["ai_review"] = record.review_decision
 
     # Modes B/C may have already auto-executed it inside analyze_symbol.
     if record.status == ProposalStatus.EXECUTED.value:

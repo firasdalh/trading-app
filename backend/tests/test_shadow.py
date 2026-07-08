@@ -111,3 +111,26 @@ def test_record_stand_aside_missed(db_session, monkeypatch):
     evaluate_shadows(db_session)
     card = scorecard(db_session)
     assert card["ai"]["stand_aside"] == 1 and card["ai"]["stand_aside_missed"] == 1
+
+
+def test_scorecard_respects_journal_reset(db_session, monkeypatch):
+    """'Start fresh' (journal reset) also resets the shadow scorecard — rows before the marker drop out."""
+    from datetime import timedelta
+
+    from app.core.state import get_or_create_settings
+
+    ai = _prop(Direction.LONG, 100.0, 98.0, 104.0)
+    det = _prop(Direction.NO_TRADE, None, None, None, conf=0.0)
+    record_shadow(db_session, "EURUSDm", "forex", "1h", NOW, 100.0, 2.0, ai, det)
+    future = [_c(0, 101, 99), _c(1, 105, 100, 104), _c(2, 106, 103, 105), _c(3, 106, 103, 105)]
+    series = OHLCVSeries(symbol="EURUSDm", timeframe="1h", candles=future)
+    monkeypatch.setattr(registry, "get_broker_for", lambda *a, **k: SimpleNamespace(name="stub"))
+    monkeypatch.setattr(ohlcv_cache, "get_ohlcv_cached", lambda *a, **k: series)
+    evaluate_shadows(db_session)
+    assert scorecard(db_session)["evaluated"] == 1        # counted before any reset
+
+    # Reset marker set AFTER the row's timestamp -> the old row is excluded.
+    get_or_create_settings(db_session).journal_reset_at = NOW + timedelta(hours=1)
+    db_session.commit()
+    card = scorecard(db_session)
+    assert card["evaluated"] == 0 and card["pending"] is False

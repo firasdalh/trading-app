@@ -716,12 +716,13 @@ def hybrid_run_now(timeframe: str | None = None,
 class HybridStatsView(BaseModel):
     since: str                # ISO start of the counting window (today, UTC)
     scans: int                # Hybrid ticks that actually scanned the watchlist
-    candidates: int           # risk-approved setups that cleared the confidence bar (ranking pool)
-    ai_confirmed: int         # LLM review confirmed the best candidate
-    ai_rejected: int          # LLM review vetoed the best candidate
-    accept_rate: float | None  # confirmed / (confirmed + rejected) — AI acceptance, None if no reviews
+    scanned: int              # total pairs the AI decider evaluated across today's scans
+    candidates: int           # risk-approved OPENS that cleared the confidence bar (ranking pool)
+    ai_opens: int             # pairs the AI decider chose to OPEN (a market direction)
+    ai_arms: int              # pairs the AI decider chose to ARM (a pending break/pullback order)
+    accept_rate: float | None  # (opens + arms) / scanned — how often the AI chose to ACT, None if no scan
     direct_trades: int        # market orders the Hybrid auto-opened
-    armed_setups: int         # "wait for the break" conditionals the Hybrid armed
+    armed_setups: int         # "wait for the break" conditionals the Hybrid actually armed
     triggered_armed: int      # armed setups whose level broke and fired
     skipped_low_conf: int     # real setups skipped for being below the confidence threshold
     last_opened: str | None = None      # most recent symbol+direction the auto-pilot opened (any day)
@@ -742,7 +743,7 @@ def hybrid_stats(session: Session = Depends(get_session)) -> HybridStatsView:
         select(AgentRun).where(AgentRun.agent == "hybrid", AgentRun.created_at >= day_start)
     ).all()
 
-    scans = candidates = ai_conf = ai_rej = direct = skipped = 0
+    scans = scanned = candidates = ai_opens = ai_arms = direct = skipped = 0
     for r in runs:
         detail = r.detail or {}
         if detail.get("opened"):
@@ -750,13 +751,11 @@ def hybrid_stats(session: Session = Depends(get_session)) -> HybridStatsView:
         s = detail.get("stats") or {}
         if s.get("reached_scan"):
             scans += 1
+        scanned += int(s.get("scanned") or 0)
         candidates += int(s.get("candidates") or 0)
         skipped += int(s.get("skipped_low_conf") or 0)
-        verdict = s.get("ai_review")
-        if verdict == "confirm":
-            ai_conf += 1
-        elif verdict == "veto":
-            ai_rej += 1
+        ai_opens += int(s.get("ai_opens") or 0)
+        ai_arms += int(s.get("ai_arms") or 0)
 
     armed = session.scalar(
         select(func.count()).select_from(ConditionalSetup).where(
@@ -767,8 +766,8 @@ def hybrid_stats(session: Session = Depends(get_session)) -> HybridStatsView:
             ConditionalSetup.source == "hybrid", ConditionalSetup.triggered_at >= day_start)
     ) or 0
 
-    reviews = ai_conf + ai_rej
-    accept_rate = round(ai_conf / reviews, 2) if reviews else None
+    # "Act rate" — of the pairs the AI decider evaluated, the share it chose to act on (open or arm).
+    accept_rate = round((ai_opens + ai_arms) / scanned, 2) if scanned else None
 
     # Most recent trade the auto-pilot opened, across all time (context — not limited to today).
     last_opened = last_opened_at = None
@@ -783,8 +782,8 @@ def hybrid_stats(session: Session = Depends(get_session)) -> HybridStatsView:
             break
 
     return HybridStatsView(
-        since=day_start.isoformat(), scans=scans, candidates=candidates,
-        ai_confirmed=ai_conf, ai_rejected=ai_rej, accept_rate=accept_rate, direct_trades=direct,
+        since=day_start.isoformat(), scans=scans, scanned=scanned, candidates=candidates,
+        ai_opens=ai_opens, ai_arms=ai_arms, accept_rate=accept_rate, direct_trades=direct,
         armed_setups=int(armed), triggered_armed=int(triggered), skipped_low_conf=skipped,
         last_opened=last_opened, last_opened_at=last_opened_at,
     )

@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { ArmSetupButton } from "./ArmSetupButton";
 import { RegimeBadge } from "./RegimeBadge";
+import { AiDecisionCard } from "./AiDecisionCard";
 import { ReviewExplanation } from "./ReviewExplanation";
 import { ScenarioCard } from "./ScenarioCard";
 import type { AiScenarioRead, AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
@@ -117,6 +118,11 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
 
   const { proposal, risk } = result;
   const noTrade = proposal.direction === "no_trade";
+  // Structured AI decision (when 🤖 AI decides). For an ARM the market proposal is NO_TRADE by design
+  // (it's a pending order), so the raw "VETOED / NO_TRADE / 0%" is misleading — we reframe below.
+  const ai = proposal.ai_decision ?? null;
+  const aiArm = ai?.kind === "arm";
+  const aiNonOpen = !!ai && ai.kind !== "open";
   const approveLots = lots ? Number(lots) : null;
   // Potential reward in $ (reward scales with risk by the same lot×point factor -> reward = risk×R).
   const rrMult =
@@ -165,7 +171,7 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
         </div>
       )}
 
-      {(() => {
+      {!aiNonOpen && (() => {
         const pct = Math.round(proposal.confidence * 100);
         const color = pct >= 70 ? "bg-bull" : pct >= 50 ? "bg-warn" : "bg-bear";
         const txt = pct >= 70 ? "text-bull" : pct >= 50 ? "text-warn" : "text-bear";
@@ -186,7 +192,17 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
         );
       })()}
 
-      {/* Risk Manager verdict — deterministic, final. */}
+      {/* Risk Manager verdict — deterministic, final. For an AI ARM there is no market trade to size
+          yet (it's a pending order), so the raw NO_TRADE veto is reframed as an "armed" note. */}
+      {aiArm ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm">
+          <div className="font-medium text-amber-300">Pending order — not a rejection</div>
+          <div className="text-neutral-400">
+            Nothing is opened now. The Risk Manager will size and approve this automatically if price
+            reaches the trigger and the setup still checks out.
+          </div>
+        </div>
+      ) : (
       <div
         className={`rounded-md border p-2 text-sm ${
           !risk.approved
@@ -219,6 +235,10 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
         </div>
         <div className="text-neutral-400">{risk.reason}</div>
       </div>
+      )}
+
+      {/* Structured AI decision — the created scenarios, the chosen one, why, action + levels. */}
+      {ai && <AiDecisionCard d={ai} />}
 
       {/* Cost, leverage, and an adjustable (3%-capped) size — what you'll spend before approving. */}
       {!noTrade && (
@@ -290,16 +310,18 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
       {!noTrade && <SetupSignals proposal={proposal} />}
 
       {/* For no-trade, the rationale is the sit-out reason. For an actionable setup the chips
-          above already cover it, so only surface the LLM reviewer's note if present. */}
-      {noTrade ? (
-        <p className="text-sm text-neutral-300">{proposal.rationale}</p>
-      ) : (
-        reviewNote(proposal.rationale) && (
-          <p className="text-xs leading-relaxed text-neutral-400">{reviewNote(proposal.rationale)}</p>
-        )
-      )}
+          above already cover it, so only surface the LLM reviewer's note if present. The structured
+          AiDecisionCard (when present) replaces the raw rationale wall entirely. */}
+      {!ai &&
+        (noTrade ? (
+          <p className="text-sm text-neutral-300">{proposal.rationale}</p>
+        ) : (
+          reviewNote(proposal.rationale) && (
+            <p className="text-xs leading-relaxed text-neutral-400">{reviewNote(proposal.rationale)}</p>
+          )
+        ))}
 
-      <ReviewExplanation rationale={proposal.rationale} />
+      {!ai && <ReviewExplanation rationale={proposal.rationale} />}
 
       {proposal.conditional && (
         <div className="rounded-md border border-amber-700/40 bg-amber-900/10 p-2">
@@ -318,8 +340,9 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
 
       <Reasoning result={result} />
 
-      {/* Step 4: AI two-scenario read (info only — does NOT gate the decision above). */}
-      {(scenario || scenarioBusy) && (
+      {/* Step 4: AI two-scenario read (info only). Hidden when the AI is the DECIDER — the
+          AiDecisionCard above already shows the scenarios that drove the decision. */}
+      {!ai && (scenario || scenarioBusy) && (
         <div className="rounded-md border border-violet-800/40 bg-violet-950/10 p-2">
           {scenario ? (
             <ScenarioCard read={scenario} />

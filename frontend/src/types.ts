@@ -71,6 +71,33 @@ export interface ConditionalSuggestion {
   reason: string;
 }
 
+// Structured AI decision (when 🤖 AI decides): the created scenarios, the chosen one, why, action.
+export interface AiDecisionScenario {
+  label: string;
+  direction: string;   // up | down | sideways
+  prob: number;        // 0-100
+  path: string;
+  reasoning: string;
+}
+
+export interface AiDecision {
+  kind: "open" | "arm" | "stand_aside" | "blocked";
+  action: string;                 // open_long | arm_long | stand_aside | ...
+  direction?: string | null;      // long | short | null
+  chosen: string;
+  why_chosen: string;
+  summary: string;
+  risks: string[];
+  conviction: number;
+  scenarios: AiDecisionScenario[];
+  order_type?: string | null;     // arm only
+  entry?: number | null;          // market for open, trigger for arm
+  stop?: number | null;
+  target?: number | null;
+  rr?: number | null;
+  note?: string | null;           // block reason, when kind === "blocked"
+}
+
 export interface TradeProposal {
   symbol: string;
   asset_class: AssetClass;
@@ -86,6 +113,7 @@ export interface TradeProposal {
   regime?: string | null;       // trending | moderate | ranging | volatile
   strategy?: string | null;     // trend | mean_reversion | stand_aside
   conditional?: ConditionalSuggestion | null;
+  ai_decision?: AiDecision | null;
   technical: TechnicalRead | null;
   fundamental: FundamentalRead | null;
 }
@@ -396,10 +424,11 @@ export interface ShadowScorecard {
 export interface HybridStats {
   since: string;
   scans: number;
+  scanned: number;
   candidates: number;
-  ai_confirmed: number;
-  ai_rejected: number;
-  accept_rate: number | null;
+  ai_opens: number;
+  ai_arms: number;
+  accept_rate: number | null;   // (opens + arms) / scanned — how often the AI chose to act
   direct_trades: number;
   armed_setups: number;
   triggered_armed: number;

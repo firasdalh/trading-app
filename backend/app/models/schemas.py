@@ -200,6 +200,10 @@ class TradeProposal(BaseModel):
     regime: str | None = None
     strategy: str | None = None
 
+    # Structured AI decision (when the AI is the decider) — the created scenarios, the chosen one, why,
+    # risks, and the action/levels — so the UI can render it cleanly instead of parsing the rationale.
+    ai_decision: dict | None = None
+
     # The full reasoning bundle that produced this proposal (for audit + UI).
     fundamental: FundamentalRead | None = None
     technical: TechnicalRead | None = None

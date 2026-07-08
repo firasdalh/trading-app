@@ -23,7 +23,6 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agents.indicators import ema
 from app.brokers.registry import get_broker_for
 from app.core.logging import get_logger
 from app.core.state import (
@@ -191,24 +190,15 @@ def _decline(session: Session, s: ConditionalSetup, why: str, *, terminal: bool)
     return 0
 
 
-_TREND_EMA = 50   # the trend-defining EMA a pullback-resumption is riding; a close back through it
-#                   (against the side) says the pullback has become a reversal — the thesis is gone.
-
-
-def _trend_broken(direction: str, closes: list[float]) -> bool:
-    """PRE-TRIGGER structure invalidation: has a CONFIRMED close moved back through the trend-defining
-    EMA(50) against the armed side? For a long that's a close BELOW the EMA; for a short, ABOVE it —
-    i.e. the pullback the setup was waiting to resume has instead deepened into a trend break.
-
-    Keyed off the trend EMA (not the protective stop): a break order legitimately sits on the far
-    side of its stop while it waits (the stop only matters after entry), so the stop is NOT a valid
-    pre-trigger invalidation level — the EMA that defined the trend is. Returns False when there
-    isn't enough data to compute the EMA (never invalidate on missing data)."""
-    e = ema(closes, _TREND_EMA)
-    if e is None or not closes:
-        return False
-    last = closes[-1]
-    return last < e if direction == Direction.LONG.value else last > e
+# NOTE: there is deliberately NO pre-trigger price-level invalidation. Earlier versions killed an armed
+# setup when a confirmed close moved back through a trend EMA(50) (Task 5) or through the setup's own
+# stop — but BOTH wrongly invalidated valid setups seconds after arming: a pending BREAKOUT order
+# legitimately sits on the far side of its (post-entry) stop while it waits, and price sits on the
+# 'wrong' side of the EMA in a range (the JP225 buy_stop / USOIL sell_stop bug). A target-based check
+# is redundant (reaching the target means the trigger was already crossed, so the trigger-time re-check
+# catches it). So an armed setup simply WAITS for its trigger, bounded by the wall-clock `valid_until`;
+# the double-check at the trigger (_mechanical_invalidation + AI review + Risk Manager) is what prevents
+# a broken idea from ever opening.
 
 
 def _mechanical_invalidation(s: ConditionalSetup, ref: float) -> tuple[str | None, bool]:
@@ -435,21 +425,8 @@ def check_conditional_setups(session: Session) -> dict:
         if s.require_close_confirm and closes:  # confirm on the latest candle close (avoid wick-driven false breaks)
             ref = closes[-1]
 
-        # PRE-TRIGGER structure invalidation — STOP (breakout/continuation) orders only. A confirmed
-        # close back through the trend EMA(50) against the armed side means the breakout thesis is dead,
-        # so kill it now instead of waiting out the validity window. This does NOT apply to LIMIT
-        # (pullback) orders: a buy_limit/sell_limit is armed precisely to enter INTO a dip/rally, so
-        # price sitting on the far side of the EMA is the PREMISE, not an invalidation — applying it
-        # there killed pullback arms within one monitor pass. (Limits are bounded by _mechanical_
-        # invalidation at the trigger + the wall-clock `valid_until`.)
-        if s.order_type in ("buy_stop", "sell_stop") and _trend_broken(s.direction, closes):
-            s.status = ConditionalStatus.INVALIDATED.value
-            s.last_note = ("invalidated — price closed back through the trend EMA(50) against the "
-                           "setup before the break; the pullback became a reversal")
-            session.add(s)
-            invalidated += 1
-            continue
-
+        # No pre-trigger price invalidation (see the NOTE above _mechanical_invalidation): an armed
+        # setup waits for its trigger, bounded by `valid_until`; the trigger-time re-check gates it.
         if not _crossed(s.order_type, ref, s.trigger_price):
             continue  # trigger not reached yet — keep waiting
 

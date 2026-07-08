@@ -122,6 +122,13 @@ def test_arm_wrong_side_stands_aside(monkeypatch):
     assert p.direction == Direction.NO_TRADE and p.conditional is None
 
 
+def test_arm_thin_rr_rejected(monkeypatch):
+    # the USOIL bug: a huge stop + tiny target (~0.3R) must be rejected, not armed (below the 1.5R floor)
+    p = _run(monkeypatch, _dec(action="arm_long", trigger_price=100.0, stop_loss=94.0, take_profit=102.0))
+    assert p.direction == Direction.NO_TRADE and p.conditional is None
+    assert "1.5R floor" in p.rationale
+
+
 def test_arm_hair_trigger_stop_rejected(monkeypatch):
     # ATR is 2.0; a 0.1-wide stop (< 0.25*ATR) is a hair-trigger -> rejected, no conditional armed
     p = _run(monkeypatch, _dec(action="arm_long", trigger_price=102.0, stop_loss=101.9, take_profit=140.0))

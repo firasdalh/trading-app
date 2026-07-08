@@ -232,11 +232,30 @@ def _agg(rows: list[ShadowDecision], side: str) -> dict:
     return out
 
 
+def _since(session: Session):
+    """The journal-reset marker: 'start fresh' resets the shadow scorecard too (rows before it are
+    excluded), so a cleared journal gives a clean AI-vs-deterministic record."""
+    from app.core.state import get_or_create_settings
+
+    return get_or_create_settings(session).journal_reset_at
+
+
+def _evaluated_rows(session: Session) -> list[ShadowDecision]:
+    conds = [ShadowDecision.evaluated.is_(True)]
+    since = _since(session)
+    if since is not None:
+        conds.append(ShadowDecision.created_at >= since)
+    return list(session.scalars(select(ShadowDecision).where(*conds)).all())
+
+
 def scorecard(session: Session) -> dict:
-    """Head-to-head AI vs deterministic over all EVALUATED shadow decisions (overall + by regime)."""
-    rows = session.scalars(select(ShadowDecision).where(ShadowDecision.evaluated.is_(True))).all()
-    pending = session.scalar(
-        select(ShadowDecision.id).where(ShadowDecision.evaluated.is_(False)).limit(1))
+    """Head-to-head AI vs deterministic over EVALUATED shadow decisions since the journal reset."""
+    rows = _evaluated_rows(session)
+    pconds = [ShadowDecision.evaluated.is_(False)]
+    since = _since(session)
+    if since is not None:
+        pconds.append(ShadowDecision.created_at >= since)
+    pending = session.scalar(select(ShadowDecision.id).where(*pconds).limit(1))
     by_regime: dict[str, dict] = {}
     for reg in sorted({(r.regime or "unknown") for r in rows}):
         sub = [r for r in rows if (r.regime or "unknown") == reg]
@@ -252,7 +271,7 @@ def scorecard(session: Session) -> dict:
 
 def shadow_note(session: Session) -> str | None:
     """One-line AI track record for the decision brief, or None when there's nothing graded yet."""
-    a = _agg(session.scalars(select(ShadowDecision).where(ShadowDecision.evaluated.is_(True))).all(), "ai")
+    a = _agg(_evaluated_rows(session), "ai")
     if not a["directional"] and not a["stand_aside"]:
         return None
     bits = []
