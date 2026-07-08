@@ -188,6 +188,13 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     return positions.some((p) => p.symbol.toUpperCase() === sym);
   }, [positions, result]);
 
+  // The armed 'wait for the break' setup for the analysed symbol, if any — so the analysis panel can
+  // say "you already have a setup armed here" instead of looking like it contradicts it.
+  const armedForResult = useMemo(() => {
+    const sym = result?.proposal.symbol.toUpperCase();
+    return sym ? armedLevels.find((c) => c.symbol.toUpperCase() === sym) ?? null : null;
+  }, [armedLevels, result]);
+
   const toggleStBand = async () => {
     setStBandBusy(true);
     setError(null);
@@ -518,6 +525,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           result={result}
           status={status}
           positionOpen={positionOpen}
+          armedSetup={armedForResult}
           busy={actionBusy}
           equity={account?.equity ?? null}
           onApprove={approve}

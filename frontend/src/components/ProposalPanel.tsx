@@ -6,7 +6,14 @@ import { RegimeBadge } from "./RegimeBadge";
 import { AiDecisionCard } from "./AiDecisionCard";
 import { ReviewExplanation } from "./ReviewExplanation";
 import { ScenarioCard } from "./ScenarioCard";
-import type { AiScenarioRead, AnalyzeResponse, TimeframeRead, TradeEconomics, TradeProposal } from "../types";
+import type {
+  AiScenarioRead,
+  AnalyzeResponse,
+  ConditionalSetupView,
+  TimeframeRead,
+  TradeEconomics,
+  TradeProposal,
+} from "../types";
 
 const TF_RANK: Record<string, number> = { "1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7 };
 
@@ -29,6 +36,7 @@ interface Props {
   // The proposal's stored status stays "executed" forever, so this is what tells the panel the
   // position has since closed.
   positionOpen?: boolean | null;
+  armedSetup?: ConditionalSetupView | null;   // an armed 'wait for the break' setup for this symbol
   busy: boolean;
   equity?: number | null;
   onApprove: (lots?: number | null) => void;
@@ -42,7 +50,7 @@ interface Props {
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy }: Props) {
+export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -162,6 +170,23 @@ export function ProposalPanel({ result, status, positionOpen, busy, equity, onAp
           )}
         </div>
       </div>
+
+      {/* Already-armed context: this analysis is a FRESH new-trade check, so a "no trade" here does
+          NOT contradict a setup that's already armed on this pair. */}
+      {armedSetup && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm">
+          <div className="font-medium text-amber-300">
+            ⏳ Already armed — {armedSetup.direction.toUpperCase()} {armedSetup.order_type.replace("_", "-")}
+            {" @ "}{fmtPrice(armedSetup.trigger_price)}
+            {armedSetup.rr != null && <span className="text-neutral-400"> · ~{armedSetup.rr}R</span>}
+          </div>
+          <div className="text-neutral-400">
+            A “wait for the break” {armedSetup.direction} is already pending on this pair. The analysis
+            below is a FRESH <em>new-trade</em> check from the current price — standing aside here is
+            expected and does NOT cancel the armed order (it fires on its own trigger).
+          </div>
+        </div>
+      )}
 
       {!noTrade && (
         <div className="grid grid-cols-3 gap-2 text-sm">

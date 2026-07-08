@@ -20,6 +20,7 @@ from app.agents.conditional import (
     cancel_conditional,
     clear_finished,
     list_conditionals,
+    reconcile_triggered,
 )
 from app.core.database import get_session
 from app.core.state import get_or_create_settings
@@ -97,6 +98,7 @@ def list_all(session: Session = Depends(get_session)) -> list[ConditionalSetupVi
     from app.models.enums import AssetClass, ConditionalStatus as CS
 
     settings = get_or_create_settings(session)
+    reconcile_triggered(session)  # sync triggered Mode-A setups to their proposal's real outcome
     quotes: dict[str, float] = {}
     out: list[ConditionalSetupView] = []
     for s in list_conditionals(session):

@@ -93,6 +93,67 @@ def test_execute_requires_approved_qty(db_session):
         execute_proposal(db_session, rec)
 
 
+# ---- stale-plan / price-drift guard ----
+
+class _DriftBroker:
+    """Fills at a fixed current price so we can drive the drift guard deterministically."""
+    is_paper = True
+    reconciles_positions = False
+
+    def __init__(self, current: float):
+        self.current = current
+        self.name = "drift"
+
+    def get_quote(self, symbol):
+        from app.models.schemas import Quote
+        return Quote(symbol=symbol, price=self.current, ts=NOW)
+
+    def submit_order(self, request):
+        from app.models.schemas import OrderResult
+        return OrderResult(broker_order_id="drift-1", status=OrderStatus.FILLED,
+                           filled_qty=request.qty, avg_fill_price=self.current, raw={})
+
+
+def _exec_with_current(db_session, monkeypatch, rec, current):
+    from app.execution import executor as ex
+    monkeypatch.setattr(ex, "get_broker_for", lambda ac, bm: _DriftBroker(current))
+    return execute_proposal(db_session, rec)
+
+
+def test_drift_guard_refuses_when_rr_breaks(db_session, monkeypatch):
+    """The USDJPYm case: a triggered arm approved late fills far above the plan, collapsing the
+    reward:risk (planned ~4R -> ~0.5R). The guard must refuse rather than open a broken trade."""
+    rec = _make_record(db_session, symbol="USDJPYm", entry=162.423, stop=162.338, tp=162.762, qty=1.43)
+    with pytest.raises(ExecutionBlocked, match="reward:risk"):
+        _exec_with_current(db_session, monkeypatch, rec, current=162.621)
+    assert db_session.scalars(select(Position)).all() == []  # nothing opened
+
+
+def test_drift_guard_refuses_when_over_risked(db_session, monkeypatch):
+    """R:R can still clear the floor while the actual stop distance balloons past what was sized —
+    the position would carry a multiple of the intended risk. Refuse."""
+    rec = _make_record(db_session, entry=100.0, stop=99.0, tp=110.0)  # planned risk 1, ~10R
+    with pytest.raises(ExecutionBlocked, match="stop distance"):
+        _exec_with_current(db_session, monkeypatch, rec, current=101.5)  # risk 2.5 > 1.25x planned
+    assert db_session.scalars(select(Position)).all() == []
+
+
+def test_drift_guard_allows_fill_at_plan(db_session, monkeypatch):
+    """A normal immediate fill (price ~ the plan) passes untouched — the guard is only for drift."""
+    rec = _make_record(db_session, entry=100.0, stop=95.0, tp=110.0)
+    result = _exec_with_current(db_session, monkeypatch, rec, current=100.02)
+    assert result.status == OrderStatus.FILLED
+    assert len(db_session.scalars(select(Position)).all()) == 1
+
+
+def test_drift_guard_allows_favorable_drift(db_session, monkeypatch):
+    """Drift in the trader's favour (a better entry) improves R:R and must never be blocked."""
+    rec = _make_record(db_session, entry=100.0, stop=95.0, tp=110.0)  # long
+    result = _exec_with_current(db_session, monkeypatch, rec, current=99.0)  # cheaper entry
+    assert result.status == OrderStatus.FILLED
+    assert len(db_session.scalars(select(Position)).all()) == 1
+
+
 # ---- live gating (unit) ----
 
 def test_live_execution_gate():

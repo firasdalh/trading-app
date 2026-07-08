@@ -413,6 +413,45 @@ def test_clear_finished_removes_only_terminal(db_session):
     assert len(remaining) == 1 and remaining[0].status == "armed"
 
 
+def _triggered_with_proposal(session, proposal_status: str):
+    """A TRIGGERED Mode-A setup still on the 'queued for your approval' note, linked to a proposal
+    in the given terminal state — the exact stale-panel situation reconcile_triggered fixes."""
+    rec = TradeProposalRecord(
+        symbol="USDJPYm", asset_class="forex", timeframe="15m", direction="long",
+        entry=162.423, stop_loss=162.338, take_profit=162.762, confidence=0.55, rationale="armed",
+        reasoning={}, status=proposal_status,
+    )
+    session.add(rec)
+    session.commit()
+    s = _arm(session, symbol="USDJPYm", asset_class="forex", timeframe="15m", direction="long",
+             order_type="buy_stop", trigger_price=162.423, stop_loss=162.338, take_profit=162.762,
+             auto_execute=False, status="triggered", result_proposal_id=rec.id,
+             last_note="break confirmed → queued for your approval")
+    return s
+
+
+def test_reconcile_triggered_marks_executed_as_opened(db_session):
+    s = _triggered_with_proposal(db_session, ProposalStatus.EXECUTED.value)
+    assert cond.reconcile_triggered(db_session) == 1
+    db_session.refresh(s)
+    assert s.status == "triggered" and s.last_note == "break confirmed → opened"
+
+
+def test_reconcile_triggered_marks_rejected_as_declined(db_session):
+    s = _triggered_with_proposal(db_session, ProposalStatus.REJECTED.value)
+    assert cond.reconcile_triggered(db_session) == 1
+    db_session.refresh(s)
+    assert s.status == "rejected" and "declined" in s.last_note
+
+
+def test_reconcile_triggered_leaves_still_pending_alone(db_session):
+    # Proposal still awaiting the user -> the panel should keep saying "queued for your approval".
+    s = _triggered_with_proposal(db_session, ProposalStatus.PENDING_APPROVAL.value)
+    assert cond.reconcile_triggered(db_session) == 0
+    db_session.refresh(s)
+    assert s.status == "triggered" and s.last_note == "break confirmed → queued for your approval"
+
+
 def test_arm_conditional_dedups_same_symbol_direction(db_session, monkeypatch):
     monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
     first = cond.arm_conditional(db_session, symbol="UKOILm", asset_class="energy", timeframe="1h",

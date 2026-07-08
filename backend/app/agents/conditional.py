@@ -105,6 +105,44 @@ def list_conditionals(session: Session, *, limit: int = 100) -> list[Conditional
     return rows
 
 
+def reconcile_triggered(session: Session) -> int:
+    """Sync TRIGGERED Mode-A setups to the terminal state of the proposal they queued.
+
+    At trigger time a Mode-A setup is marked TRIGGERED with the note "queued for your approval";
+    that note is set once and never revisited. So once the user approves (-> proposal executed) or
+    rejects it, the panel would otherwise keep claiming the setup is still waiting for approval — a
+    stale, misleading row (the USDJPYm case: one already opened, one was rejected, yet both still
+    read "queued for your approval"). Reconcile from the linked proposal:
+      executed          -> note "break confirmed → opened" (matches the auto-execute convention)
+      rejected/expired  -> the setup is REJECTED (you declined it) so it drops into "finished".
+    Only touches rows still on the pending note, so it never clobbers an already-correct state.
+    """
+    rows = session.scalars(
+        select(ConditionalSetup).where(
+            ConditionalSetup.status == ConditionalStatus.TRIGGERED.value,
+            ConditionalSetup.result_proposal_id.is_not(None),
+            ConditionalSetup.last_note == "break confirmed → queued for your approval",
+        )
+    ).all()
+    changed = 0
+    for s in rows:
+        p = session.get(TradeProposalRecord, s.result_proposal_id)
+        if not p:
+            continue
+        if p.status == ProposalStatus.EXECUTED.value:
+            s.last_note = "break confirmed → opened"
+            session.add(s)
+            changed += 1
+        elif p.status in (ProposalStatus.REJECTED.value, ProposalStatus.EXPIRED.value):
+            s.status = ConditionalStatus.REJECTED.value
+            s.last_note = "you declined the triggered setup — not opened"
+            session.add(s)
+            changed += 1
+    if changed:
+        session.commit()
+    return changed
+
+
 def clear_finished(session: Session) -> int:
     """Delete all non-armed (cancelled / rejected / expired / triggered) setups — they're terminal
     history, not active, so clearing them only tidies the panel. Returns how many were removed."""

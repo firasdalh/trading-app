@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.llm import llm_available
 from app.core.logging import get_logger
 from app.core.state import get_or_create_settings
 from app.data.ohlcv_cache import get_ohlcv_cached
@@ -170,7 +171,8 @@ def _position_context(session: Session, p) -> dict | None:
                 "last": ind.get("last_close"),
                 "regime": _regime(ind), "structure": _structure_label(ind),
                 "choch": bool(ind.get("choch")),
-                "swing_high": ind.get("swing_high"), "swing_low": ind.get("swing_low")}
+                "swing_high": ind.get("swing_high"), "swing_low": ind.get("swing_low"),
+                "_tech": tech}   # the full read, so the AI thesis re-check can reuse it (no refetch)
     except Exception:  # noqa: BLE001 - the advisor must never crash the scan/endpoint
         return None
 
@@ -233,6 +235,32 @@ def _position_thesis(session: Session, p, ctx: dict | None = None) -> dict | Non
     if ctx is None:
         ctx = _position_context(session, p)
     return _thesis_from_context(p, ctx) if ctx else None
+
+
+def _ai_thesis_review(session: Session, p, ctx: dict) -> tuple[bool, str] | None:
+    """Ask the AI whether the ORIGINAL thesis that opened this position is still valid, so exit
+    management follows the AI's read — not just deterministic momentum. Reuses the same confirm/veto
+    reviewer the armed setups use. Returns ``(still_valid, reason)`` or ``None`` when the AI decider is
+    off / the LLM is unavailable (then the deterministic thesis stands alone). Best-effort, never raises."""
+    try:
+        if not get_or_create_settings(session).ai_review_enabled or not llm_available():
+            return None
+        tech = ctx.get("_tech")
+        if tech is None:
+            return None
+        from app.agents.orchestrator import review_armed_setup
+        from app.models.enums import AssetClass, Direction
+        from app.models.schemas import TradeProposal
+
+        proposal = TradeProposal(
+            symbol=p.symbol, asset_class=AssetClass(p.asset_class), timeframe=ctx.get("tf", "1h"),
+            direction=Direction(p.direction), entry=p.entry_price, stop_loss=p.stop_loss,
+            take_profit=p.take_profit, confidence=0.6,
+            rationale=f"Holding an OPEN {p.direction} from {p.entry_price}; judge whether the thesis still holds.",
+        )
+        return review_armed_setup(proposal, tech, use_llm=True)
+    except Exception:  # noqa: BLE001 - the advisor must never crash on the AI re-check
+        return None
 
 
 def _r_multiple(session: Session, p, ctx: dict | None) -> float | None:
@@ -323,6 +351,22 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
         if ctx:
             contexts[p.symbol] = ctx
         thesis = _position_thesis(session, p, ctx)
+        # AI thesis re-check: follow the AI's read on whether the ORIGINAL decision still holds. A veto
+        # ESCALATES the thesis (at most to 'weakening' -> tighten the stop), so a single AI opinion can't
+        # market-close a trade on its own — a hard exit still needs the deterministic invalidation (both
+        # timeframes flipped) + the consecutive-read confirm gate. Only runs when the AI decider is on.
+        if thesis is not None and ctx:
+            ai_v = _ai_thesis_review(session, p, ctx)
+            if ai_v is not None:
+                ok, reason = ai_v
+                if not ok and thesis["label"] == "intact":
+                    thesis = {"label": "weakening",
+                              "note": ("Why: the AI re-checked this trade and thinks the reason you opened "
+                                       f"it is fading — {reason} Consider tightening your stop or trimming.")}
+                elif not ok and thesis["label"] == "weakening":
+                    thesis = {**thesis, "note": thesis["note"] + f" The AI agrees the thesis is slipping — {reason}"}
+                elif ok and thesis["label"] == "intact":
+                    thesis = {**thesis, "note": thesis["note"] + " The AI re-check still backs this trade."}
         r_mult = _r_multiple(session, p, ctx)
         thesis_label = thesis["label"] if thesis else "unknown"
         # Scale-out suggestion (Mode A): once a winner reaches the milestone, a pro books partial

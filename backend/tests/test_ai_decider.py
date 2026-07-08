@@ -40,10 +40,11 @@ def _dec(scenarios, rationale="desk read", risks=("news",)) -> _DecisionLLM:
     return _DecisionLLM(scenarios=list(scenarios), rationale=rationale, key_risks=list(risks))
 
 
-def _run(monkeypatch, decision, price=100.0, macro="up"):
+def _run(monkeypatch, decision, price=100.0, macro="up", facts=None):
     monkeypatch.setattr(dec, "llm_available", lambda: True)
     monkeypatch.setattr(dec, "analyze", lambda **kw: decision)
-    monkeypatch.setattr(dec, "build_decision_brief", lambda *a, **k: ("BRIEF", price))
+    # build_decision_brief returns (brief, price, facts_ctx); facts=None -> arm quality bar is graceful.
+    monkeypatch.setattr(dec, "build_decision_brief", lambda *a, **k: ("BRIEF", price, facts))
     tech = _tech(price, macro=macro)
     prop = TradeProposal(symbol="X", asset_class=AssetClass.FOREX, timeframe="1h",
                          direction=Direction.NO_TRADE, confidence=0.0, technical=tech)
@@ -150,3 +151,41 @@ def test_llm_unavailable_keeps_deterministic(monkeypatch):
                         confidence=0.72, technical=_tech(), rationale="deterministic")
     out = ai_decide_trade(None, "X", AssetClass.FOREX, "1h", det, _tech(), _fund(), NOW)
     assert out is det  # unchanged fallback
+
+
+# ---- ③ arm quality bar (unit tests on _score_scenario with facts) ----
+
+def _facts(level=102.0, tests=4, vol=1.0) -> dict:
+    return {"resistance_ladder": [{"price": level, "tests": tests}], "support_ladder": [],
+            "compression": {"vol_atr_ratio": vol}}
+
+
+def test_arm_passes_at_strong_level_2r():
+    sc = _scn(action="arm_long", trigger=102.0, stop=99.0, tp=108.0)  # 2R at a 4x-tested level
+    ev = dec._score_scenario(sc, price=100.0, atr=2.0, facts=_facts(102.0, 4, 1.0))
+    assert ev["tradeable"] and ev["rr"] == 2.0
+
+
+def test_arm_rejected_at_weak_level():
+    sc = _scn(action="arm_long", trigger=102.0, stop=99.0, tp=108.0)  # level only 1x tested
+    ev = dec._score_scenario(sc, price=100.0, atr=2.0, facts=_facts(102.0, 1, 1.0))
+    assert not ev["tradeable"] and "strong" in ev["reject"]
+
+
+def test_arm_rejected_in_loose_range():
+    sc = _scn(action="arm_long", trigger=102.0, stop=99.0, tp=108.0)  # strong level, but loose range
+    ev = dec._score_scenario(sc, price=100.0, atr=2.0, facts=_facts(102.0, 4, 1.6))
+    assert not ev["tradeable"] and "loose" in ev["reject"]
+
+
+def test_arm_needs_2r_not_1_5():
+    sc = _scn(action="arm_long", trigger=102.0, stop=99.0, tp=105.0)  # risk 3 reward 3 = 1.0R
+    ev = dec._score_scenario(sc, price=100.0, atr=2.0, facts=_facts(102.0, 4, 1.0))
+    assert not ev["tradeable"] and "R:R" in ev["reject"]
+
+
+def test_open_still_uses_1_5_floor():
+    # opens keep the lower 1.5R floor and don't need a strong level / compression
+    sc = _scn(action="open_long", stop=98.0, tp=103.5)  # risk 2 reward 3.5 = 1.75R
+    ev = dec._score_scenario(sc, price=100.0, atr=2.0, facts=_facts(102.0, 1, 1.6))
+    assert ev["tradeable"] and ev["kind"] == "open"

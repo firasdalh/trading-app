@@ -83,7 +83,10 @@ class SyntheticDataProvider(MarketDataProvider):
         return OHLCVSeries(symbol=symbol, timeframe=timeframe, candles=candles)
 
     def get_quote(self, symbol: str) -> Quote:
-        series = self.get_ohlcv(symbol, "1m", limit=2)
+        # The current quote must equal the latest candle close the analyzer sees (limit=200), not a
+        # short 1m slice — otherwise the synthetic "price" and the plan's entry diverge purely by
+        # candle index, which would false-trip the executor's price-drift guard on immediate fills.
+        series = self.get_ohlcv(symbol, "1h", limit=200)
         last = series.candles[-1]
         return Quote(symbol=symbol, price=last.close, ts=last.ts)
 

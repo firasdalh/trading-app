@@ -306,6 +306,9 @@ def approve_proposal(
     try:
         result = execute_proposal(session, row)  # sets EXECUTED + opens a position on fill
     except ExecutionBlocked as exc:
+        # Revert to pending (not stuck in APPROVED) so the state is honest — nothing opened.
+        row.status = ProposalStatus.PENDING_APPROVAL.value
+        session.commit()
         log.warning("approve blocked by safety gate", extra={"proposal_id": proposal_id, "reason": str(exc)})
         raise HTTPException(status_code=423, detail=str(exc)) from exc
     session.refresh(row)

@@ -114,6 +114,38 @@ def build_context(session: Session, symbol: str, asset_class: AssetClass) -> dic
     def _strength(n: int) -> str:
         return "strong" if n >= 4 else "moderate" if n >= 2 else "fresh/weak"
 
+    # --- ① BREAKOUT CANDIDATES: the strongest nearby level to break + the next level as target +
+    # a projected reward:risk, so the AI arms at a REAL level with real numbers instead of guessing.
+    # Stop sits just the other side of the broken level (it flips to support/resistance): ~0.6 ATR.
+    def _candidate(ladder: list[dict], up: bool) -> dict | None:
+        if len(ladder) < 2 or not atr or atr <= 0:
+            return None
+        trig, tgt = ladder[0]["price"], ladder[1]["price"]
+        stop = trig - 0.6 * atr if up else trig + 0.6 * atr
+        risk, reward = abs(trig - stop), abs(tgt - trig)
+        if risk <= 0 or reward <= 0:
+            return None
+        return {"trigger": round(trig, 6), "tests": ladder[0]["tests"], "target": round(tgt, 6),
+                "stop": round(stop, 6), "rr": round(reward / risk, 2), "strength": _strength(ladder[0]["tests"])}
+
+    breakout_up = _candidate(res_ladder, up=True)     # break UP through nearest resistance
+    breakdown = _candidate(sup_ladder, up=False)      # break DOWN through nearest support
+
+    # --- ② BREAKOUT READINESS: is the range coiled (a clean break tends to run) or loose/expanded
+    # (higher fakeout & whipsaw risk)? vol_atr_ratio = recent ATR / its 50-bar baseline. ---
+    var = ind.get("vol_atr_ratio")
+    bbw = ind.get("bb_width")
+    if var is None:
+        readiness_state = "unknown"
+    elif var <= 0.85:
+        readiness_state = "coiled — low volatility / compression (a clean break tends to follow through)"
+    elif var >= 1.4:
+        readiness_state = "loose/expanded — volatility already high (higher fakeout & whipsaw risk)"
+    else:
+        readiness_state = "normal volatility"
+    compression = {"vol_atr_ratio": round(var, 2) if var is not None else None,
+                   "bb_width": round(bbw, 6) if bbw is not None else None, "state": readiness_state}
+
     # --- structure / channel / confirmation ---
     struct = ind.get("structure")
     struct_label = ("bullish — higher highs & higher lows" if struct and struct > 0.5 else
@@ -323,6 +355,7 @@ def build_context(session: Session, symbol: str, asset_class: AssetClass) -> dic
         "symbol": symbol, "price": round(price, 8), "timeframe": "1h",
         "nearest_resistance": near_res, "nearest_support": near_sup,
         "resistance_ladder": res_ladder, "support_ladder": sup_ladder,
+        "breakout_up": breakout_up, "breakdown": breakdown, "compression": compression,
         "level_strength": {
             "resistance": (f"{_strength(res_tests)} ({res_tests}x tested)" if near_res else None),
             "support": (f"{_strength(sup_tests)} ({sup_tests}x tested)" if near_sup else None),

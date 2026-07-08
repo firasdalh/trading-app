@@ -29,7 +29,10 @@ from app.models.schemas import ConditionalSuggestion, FundamentalRead, Technical
 
 log = get_logger("agents.ai_decider")
 
-_ARM_MIN_RR = 1.5   # reject an AI arm below this reward:risk (arms bypass the open-path min-R:R gate)
+_MIN_RR = 1.5        # tradeability floor for an OPEN (market) scenario
+_ARM_MIN_RR = 2.0    # ③ ARM quality bar: an arm needs MORE room (>=2R from the break) than a market open
+_ARM_STRONG_TESTS = 3   # ③ an arm should trigger at a LEVEL tested at least this many times (strong)
+_ARM_LOOSE_VOL = 1.5    # ③ don't arm into a loose/expanded range (vol_atr_ratio at/above this = fakeout risk)
 
 
 class _AiScenario(BaseModel):
@@ -55,11 +58,12 @@ _SYSTEM = (
     "You are the desk head running the book (FX, indices, commodities, crypto). A deterministic analyst "
     "has done the HOMEWORK for you and handed you a complete FACTS brief: the multi-timeframe alignment "
     "(1h/4h/1d trend+structure), the support/resistance levels and how many times each was tested, the "
-    "level LADDER of targets each way, upcoming high-impact events with time-to-event, market structure, "
-    "regime, momentum/price-action, RSI, volume, the trend's maturity, the invalidation level, and the "
-    "engine's own mechanical read plus its historical hit-rate. These are FACTS and numbers — NOT "
-    "scenarios. Weigh higher-timeframe agreement heavily, use the ladder for realistic targets, and if a "
-    "high-impact event is imminent prefer arming/waiting over opening into it.\n"
+    "level LADDER of targets each way, ready-made BREAKOUT CANDIDATES (the strong level to break + a "
+    "projected R:R), the BREAKOUT READINESS (is the range coiled or loose?), upcoming high-impact events "
+    "with time-to-event, market structure, regime, momentum/price-action, RSI, volume, the trend's "
+    "maturity, the invalidation level, and the engine's own mechanical read plus its historical hit-rate. "
+    "These are FACTS and numbers — NOT scenarios. Weigh higher-timeframe agreement heavily, use the ladder "
+    "for realistic targets, and if a high-impact event is imminent prefer arming/waiting over opening.\n"
     "YOUR job, in order:\n"
     "  1. CREATE the two most plausible forward scenarios YOURSELF from these facts (you write them — "
     "usually one continuation and one pullback/rejection), each with a probability, a path using the "
@@ -80,7 +84,11 @@ _SYSTEM = (
     "  arm_long breakout : trigger = ABOVE resistance; stop = just BELOW that level; target = a higher level.\n"
     "  arm_long pullback : trigger = at support BELOW price; stop = BELOW support; target = a higher level.\n"
     "  arm_short breakdown: trigger = BELOW support; stop = just ABOVE that level; target = a lower level.\n"
-    "  arm_short pullback : trigger = at resistance ABOVE price; stop = ABOVE resistance; target = a lower level."
+    "  arm_short pullback : trigger = at resistance ABOVE price; stop = ABOVE resistance; target = a lower level.\n"
+    "ARM QUALITY BAR (the risk engine ENFORCES this — arms that fail it are dropped, so respect it): an "
+    "arm must have >=2R room from its trigger, its trigger must sit at a STRONG (>=3x tested) level — use "
+    "the BREAKOUT CANDIDATES in the brief — and it must NOT be into a loose/expanded range (a coiled/"
+    "compressed range is best). If no arm clears this bar, mark that scenario's action 'none'."
 )
 
 
@@ -182,11 +190,26 @@ def _norm_action(a: str | None) -> str:
     return a if a in ("open_long", "open_short", "arm_long", "arm_short") else "none"
 
 
-def _score_scenario(sc: "_AiScenario", price: float | None, atr: float | None) -> dict:
-    """Light tradeability + reward:risk for a scenario's trade plan, used to RANK the scenarios. A
-    scenario is 'tradeable' only if its action has valid, correctly-sided levels, a sane ATR stop, and
-    R:R >= the floor — so the decider can prefer a lower-probability but genuinely tradeable setup over
-    a higher-probability one that is thin. Never raises."""
+def _near_strong_level(trigger: float, atr: float | None, facts: dict | None) -> bool:
+    """Is the arm's trigger AT a real, well-tested level (③ arm quality bar)? True if a resistance/
+    support ladder level tested >= _ARM_STRONG_TESTS sits within ~0.5 ATR of the trigger. Graceful:
+    returns True when we have no ladder data to judge (never reject on missing facts)."""
+    if not facts or not atr or atr <= 0:
+        return True
+    ladders = (facts.get("resistance_ladder") or []) + (facts.get("support_ladder") or [])
+    if not ladders:
+        return True
+    tol = 0.5 * atr
+    return any(lv.get("tests", 0) >= _ARM_STRONG_TESTS and abs(lv["price"] - trigger) <= tol
+               for lv in ladders)
+
+
+def _score_scenario(sc: "_AiScenario", price: float | None, atr: float | None,
+                    facts: dict | None = None) -> dict:
+    """Tradeability + reward:risk for a scenario's trade plan, used to RANK the scenarios. Valid,
+    correctly-sided levels + a sane ATR stop are required for any trade. An OPEN needs R:R >= _MIN_RR;
+    an ARM must clear the higher ③ quality bar (R:R >= _ARM_MIN_RR, trigger at a STRONG tested level,
+    and NOT into a loose/expanded range) — fewer but sharper arms. Never raises."""
     action = _norm_action(sc.action)
     ev = {"action": action, "kind": "none", "direction": None, "entry": None,
           "stop": sc.stop_loss, "target": sc.take_profit, "rr": None, "tradeable": False, "reject": ""}
@@ -213,17 +236,34 @@ def _score_scenario(sc: "_AiScenario", price: float | None, atr: float | None) -
         return ev
     rr = abs(tp - entry) / risk
     ev["rr"] = round(rr, 2)
-    if rr < _ARM_MIN_RR:
-        ev["reject"] = f"thin R:R (~{rr:.1f}R)"
+    floor = _ARM_MIN_RR if is_arm else _MIN_RR
+    if rr < floor:
+        ev["reject"] = f"thin R:R (~{rr:.1f}R, need >={floor:.1f})"
         return ev
+    if is_arm:
+        # ③ arm quality bar: a real, strong break level + not a loose/expanded range.
+        if not _near_strong_level(entry, atr, facts):
+            ev["reject"] = "arm trigger not at a strong (>=3x tested) level"
+            return ev
+        var = (facts or {}).get("compression", {}).get("vol_atr_ratio") if facts else None
+        if var is not None and var >= _ARM_LOOSE_VOL:
+            ev["reject"] = f"loose/expanded range (vol {var:.1f}) — fakeout risk"
+            return ev
     ev["tradeable"] = True
     return ev
 
 
+def _candidate_line(c: dict | None, label: str, fmt) -> str:
+    if not c:
+        return f"{label}: n/a"
+    return (f"{label}: break {fmt(c['trigger'])} ({c['tests']}x tested, {c['strength']}) -> target "
+            f"{fmt(c['target'])}, stop {fmt(c['stop'])} -> projected ~{c['rr']}R")
+
+
 def build_decision_brief(session: Session, symbol: str, asset_class: AssetClass, timeframe: str,
                          proposal: TradeProposal, technical: TechnicalRead,
-                         fundamental: FundamentalRead, now: datetime) -> tuple[str, float | None]:
-    """Assemble the plain-text decision brief for the AI. Returns (brief, current_price)."""
+                         fundamental: FundamentalRead, now: datetime) -> tuple[str, float | None, dict | None]:
+    """Assemble the plain-text decision brief for the AI. Returns (brief, current_price, facts_ctx)."""
     from app.agents.context import _fmt, build_context
 
     tf0 = None
@@ -279,10 +319,18 @@ def build_decision_brief(session: Session, symbol: str, asset_class: AssetClass,
             f"MOMENTUM/PRICE-ACTION: {ctx.get('price_action')}   VOLUME: {ctx.get('volume_trend')}   RSI: {ctx.get('rsi')}",
             "FACTOR SCORECARD: " + "; ".join(f"{s['factor']} {s['signal']} ({s['note']})" for s in ctx.get("scorecard", [])),
             f"INVALIDATION LEVEL (flips the structural read): {ctx.get('invalidation')}",
+            "",
+            "① BREAKOUT CANDIDATES (the engine's ready-made ARM plans at real, tested levels — use these):",
+            f"  {_candidate_line(ctx.get('breakout_up'), 'BREAK UP', _fmt)}",
+            f"  {_candidate_line(ctx.get('breakdown'), 'BREAK DOWN', _fmt)}",
+            f"② BREAKOUT READINESS: {(ctx.get('compression') or {}).get('state', 'unknown')} "
+            f"(vol ratio {(ctx.get('compression') or {}).get('vol_atr_ratio')})",
         ]
     lines += ["", "Now: CREATE your two scenarios from these facts, choose the most realistic, and decide. "
-              "Use only the levels above (the ladders are your targets) — do not invent numbers."]
-    return "\n".join(lines), price
+              "Use only the levels above (the ladders are your targets) — do not invent numbers.",
+              "For an ARM, anchor the trigger to a BREAKOUT CANDIDATE above (a strong, tested level with "
+              ">=2R room); do not arm into a loose/expanded range."]
+    return "\n".join(lines), price, ctx
 
 
 def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, timeframe: str,
@@ -304,8 +352,8 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
     if not llm_available():
         return proposal  # AI down -> deterministic decides
 
-    brief, price = build_decision_brief(session, symbol, asset_class, timeframe, proposal, technical,
-                                        fundamental, now)
+    brief, price, facts = build_decision_brief(session, symbol, asset_class, timeframe, proposal,
+                                               technical, fundamental, now)
     decision = analyze(system=_SYSTEM, user=brief, schema=_DecisionLLM, max_tokens=1800)
     if decision is None:
         log.info("ai decider unavailable; keeping deterministic proposal", extra={"symbol": symbol})
@@ -315,10 +363,10 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
            if technical.timeframes else None)
     atr = tf0.indicators.get("atr14") if tf0 else None
 
-    # Score each scenario's trade plan, then the DECIDER picks the best TRADEABLE one (adequate R:R),
-    # ranked by probability — so a 45% scenario worth 5.6R beats a 55% one worth 0.7R, instead of the
-    # AI acting on the highest-probability idea even when it's untradeable.
-    scored = [(sc, _score_scenario(sc, price, atr)) for sc in decision.scenarios]
+    # Score each scenario's trade plan, then the DECIDER picks the best TRADEABLE one (adequate R:R;
+    # arms also clear the ③ quality bar), ranked by probability — so a 45% scenario worth 5.6R beats a
+    # 55% one worth 0.7R, instead of the AI acting on the highest-probability idea even when it's untradeable.
+    scored = [(sc, _score_scenario(sc, price, atr, facts)) for sc in decision.scenarios]
     aid_scen = [{"label": sc.label, "direction": sc.direction, "prob": sc.probability, "path": sc.path,
                  "reasoning": sc.reasoning, "action": ev["action"], "rr": ev["rr"],
                  "tradeable": ev["tradeable"]} for sc, ev in scored]

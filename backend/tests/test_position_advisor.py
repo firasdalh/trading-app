@@ -130,6 +130,38 @@ def test_event_keeps_headline_even_when_thesis_invalidated(monkeypatch):
     assert "winning" in a.headline.lower() and a.severity == "danger"
 
 
+# ---- AI thesis re-check: the advisor follows the AI's read on the open trade ----
+
+def _patch_ai(monkeypatch, thesis, ai_verdict):
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [_pos(pnl=8.0)])
+    monkeypatch.setattr(advisor, "get_calendar_provider", lambda: _Cal([]))
+    monkeypatch.setattr(advisor, "_position_context", lambda session, p: {"tf": "1h", "_tech": object()})
+    monkeypatch.setattr(advisor, "_position_thesis", lambda session, p, ctx=None: dict(thesis))
+    monkeypatch.setattr(advisor, "_ai_thesis_review", lambda session, p, ctx: ai_verdict)
+    monkeypatch.setattr(advisor, "_r_multiple", lambda session, p, ctx: None)
+
+
+def test_ai_review_escalates_intact_to_weakening(monkeypatch):
+    # AI vetoes an otherwise-intact thesis -> escalate to weakening (warn / tighten), not a force-close.
+    _patch_ai(monkeypatch, {"label": "intact", "note": "ok"}, (False, "1h trend rolled over."))
+    [a] = advisor.advise_positions(session=None)
+    assert a.thesis == "weakening" and a.severity == "warn"
+    assert "AI" in a.detail and "rolled over" in a.detail
+
+
+def test_ai_veto_alone_never_reaches_invalidated(monkeypatch):
+    # An AI veto on a deterministically 'weakening' thesis stays weakening (no auto-close on AI alone).
+    _patch_ai(monkeypatch, {"label": "weakening", "note": "momentum fading."}, (False, "buyers gone."))
+    [a] = advisor.advise_positions(session=None)
+    assert a.thesis == "weakening"
+
+
+def test_ai_confirm_keeps_intact_and_notes_it(monkeypatch):
+    _patch_ai(monkeypatch, {"label": "intact", "note": "trend ok."}, (True, "still valid"))
+    [a] = advisor.advise_positions(session=None)
+    assert a.thesis == "intact" and "AI re-check still backs" in a.detail
+
+
 # ---- auto-watch config + tick ----
 
 def test_run_advisor_stamps_last_run(db_session, monkeypatch):
