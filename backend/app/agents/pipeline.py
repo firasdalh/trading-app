@@ -37,7 +37,8 @@ def _timeframes_for(primary: str) -> list[str]:
 
 
 def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
-                   use_llm: bool = False, cache=None, read_llm: bool | None = None):
+                   use_llm: bool = False, cache=None, read_llm: bool | None = None,
+                   rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False):
     """Analyse a symbol and run it through the Risk Manager WITHOUT persisting or executing —
     used to rank opportunities across the watchlist. Returns (proposal, risk_decision).
 
@@ -59,14 +60,16 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
             log.warning("preview ohlcv failed", extra={"symbol": symbol, "tf": tf, "error": str(exc)})
     review_on = settings.ai_review_enabled
     # AI-DECIDER (see analyze_symbol): 'AI decides' -> deterministic analyst + AI judge (open/arm/skip).
-    ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode)
+    # RSI-Over is a mechanical scan strategy -> keep the AI out (ai_decides False) like st_band.
+    ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode and not rsi_over)
     reads = (use_llm if read_llm is None else read_llm) and review_on and not ai_decides
     technical = run_technical(symbol, series, use_llm=reads)
     fundamental = run_fundamental(symbol, now=now, use_llm=(use_llm if read_llm is None else read_llm))
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
-                                st_band=settings.st_band_mode)
+                                st_band=settings.st_band_mode, rsi_over=rsi_over,
+                                rsi_confirm=rsi_confirm, rsi_macd=rsi_macd)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
@@ -102,7 +105,7 @@ def _maybe_auto_execute(session: Session, record: TradeProposalRecord, broker) -
 
 def analyze_symbol(
     session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
-    use_llm: bool = True,
+    use_llm: bool = True, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
 ) -> AnalyzeResponse:
     """Run the full pipeline for one symbol. ``use_llm=False`` forces the deterministic
     agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
@@ -129,13 +132,14 @@ def analyze_symbol(
     # picks the best tradeable one, decides open/arm/skip; levels anchored to the brief). The Risk
     # Manager still sizes/gates downstream. When the LLM is off/unavailable, we keep the deterministic
     # proposal. Mutually exclusive with st_band.
-    ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode)
+    ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode and not rsi_over)
     technical = run_technical(symbol, series, use_llm=use_llm and review_on and not ai_decides)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)  # AI kept for fundamentals
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
-                                st_band=settings.st_band_mode)
+                                st_band=settings.st_band_mode, rsi_over=rsi_over,
+                                rsi_confirm=rsi_confirm, rsi_macd=rsi_macd)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         det_proposal = proposal   # keep the deterministic call for the shadow scorecard

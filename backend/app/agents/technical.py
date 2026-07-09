@@ -13,6 +13,7 @@ from app.agents.indicators import (
     divergence,
     ema,
     macd,
+    macd_signals,
     market_structure,
     reference_levels,
     regression_channel,
@@ -73,7 +74,7 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         indicators["recent_high"] = round(max(c.high for c in recent), 6)
         indicators["recent_low"] = round(min(c.low for c in recent), 6)
     # Trend EMAs.
-    for p in (20, 50, 200):
+    for p in (10, 20, 50, 200):  # ema10 = the RSI-Over strategy's breakout-confirmation line
         val = ema(closes, p)
         if val is not None:
             indicators[f"ema{p}"] = val
@@ -111,6 +112,12 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         indicators["macd"] = m["macd"]
         indicators["macd_signal"] = m["signal"]
         indicators["macd_hist"] = m["hist"]
+    # MACD early-turn signals for the RSI-Over pullback entry (cross + divergence; needs candles).
+    ms = macd_signals(candles)
+    if ms is not None:
+        indicators["macd_cross"] = ms["cross"]        # +1 bullish / -1 bearish / 0
+        indicators["macd_div_bull"] = ms["div_bull"]  # 1.0 = bullish divergence
+        indicators["macd_div_bear"] = ms["div_bear"]  # 1.0 = bearish divergence
     # Volatility (stop sizing) + regime.
     a = atr(candles)
     if a is not None:

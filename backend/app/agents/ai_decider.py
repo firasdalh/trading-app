@@ -16,7 +16,7 @@ When the LLM is unavailable/fails, we return the deterministic proposal unchange
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -30,7 +30,7 @@ from app.models.schemas import ConditionalSuggestion, FundamentalRead, Technical
 log = get_logger("agents.ai_decider")
 
 _MIN_RR = 1.5        # tradeability floor for an OPEN (market) scenario
-_ARM_MIN_RR = 2.0    # ③ ARM quality bar: an arm needs MORE room (>=2R from the break) than a market open
+_ARM_MIN_RR = 1.5    # ③ ARM quality bar R:R floor (same as opens; the arm bar still adds strong-level + compression)
 _ARM_STRONG_TESTS = 3   # ③ an arm should trigger at a LEVEL tested at least this many times (strong)
 _ARM_LOOSE_VOL = 1.5    # ③ don't arm into a loose/expanded range (vol_atr_ratio at/above this = fakeout risk)
 
@@ -86,9 +86,16 @@ _SYSTEM = (
     "  arm_short breakdown: trigger = BELOW support; stop = just ABOVE that level; target = a lower level.\n"
     "  arm_short pullback : trigger = at resistance ABOVE price; stop = ABOVE resistance; target = a lower level.\n"
     "ARM QUALITY BAR (the risk engine ENFORCES this — arms that fail it are dropped, so respect it): an "
-    "arm must have >=2R room from its trigger, its trigger must sit at a STRONG (>=3x tested) level — use "
+    "arm must have >=1.5R room from its trigger, its trigger must sit at a STRONG (>=3x tested) level — use "
     "the BREAKOUT CANDIDATES in the brief — and it must NOT be into a loose/expanded range (a coiled/"
-    "compressed range is best). If no arm clears this bar, mark that scenario's action 'none'."
+    "compressed range is best). If no arm clears this bar, mark that scenario's action 'none'.\n"
+    "YOUR OWN RECENT PLAN: if the brief has a 'YOUR OWN RECENT PLAN' line, that is a wait-for-the-break "
+    "setup YOU armed for this same symbol a short time ago — this is continuity, not a fresh chart. If its "
+    "break HAS confirmed, treat that as REAL supporting evidence for the matching direction and raise that "
+    "scenario's probability accordingly. But NEVER chase: if price is already through the trigger, opening "
+    "now at market is a worse R:R than the plan — prefer re-arming a pullback to a level unless the CURRENT "
+    "reward:risk still clears the bar. Do not open a duplicate of a plan that already TRIGGERED, and "
+    "remember a still-ARMED plan fires on its own (standing aside does not cancel it)."
 )
 
 
@@ -208,8 +215,8 @@ def _score_scenario(sc: "_AiScenario", price: float | None, atr: float | None,
                     facts: dict | None = None) -> dict:
     """Tradeability + reward:risk for a scenario's trade plan, used to RANK the scenarios. Valid,
     correctly-sided levels + a sane ATR stop are required for any trade. An OPEN needs R:R >= _MIN_RR;
-    an ARM must clear the higher ③ quality bar (R:R >= _ARM_MIN_RR, trigger at a STRONG tested level,
-    and NOT into a loose/expanded range) — fewer but sharper arms. Never raises."""
+    an ARM shares that R:R floor (_ARM_MIN_RR) but must ALSO clear the ③ quality bar (trigger at a STRONG
+    tested level, and NOT into a loose/expanded range) — fewer but sharper arms. Never raises."""
     action = _norm_action(sc.action)
     ev = {"action": action, "kind": "none", "direction": None, "entry": None,
           "stop": sc.stop_loss, "target": sc.take_profit, "rr": None, "tradeable": False, "reject": ""}
@@ -260,6 +267,70 @@ def _candidate_line(c: dict | None, label: str, fmt) -> str:
             f"{fmt(c['target'])}, stop {fmt(c['stop'])} -> projected ~{c['rr']}R")
 
 
+# How long a just-armed/cancelled plan is still "our plan" worth reminding the AI about.
+_RECENT_PLAN_WINDOW_MIN = 120
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _recent_plan_line(session: Session, symbol: str, price: float | None, now: datetime) -> str | None:
+    """Surface the most recent 'wait for the break' plan WE armed for THIS symbol, so the AI knows
+    it is re-reading its own setup (the arm -> cancel -> break -> Run-analysis case) instead of
+    deriving from scratch. It lets the AI COUNT a confirmed break as supporting evidence — but never
+    overrides risk: when the break is already through the trigger it flags CHASING so the AI re-arms
+    a pullback rather than opening at a worse price than the plan. Returns None when there's no
+    recent plan (so the brief is unchanged in the normal case)."""
+    if session is None:
+        return None
+    from app.models.db import ConditionalSetup
+
+    s = session.scalars(
+        select(ConditionalSetup).where(ConditionalSetup.symbol == symbol)
+        .order_by(ConditionalSetup.id.desc())
+    ).first()
+    if s is None or not s.created_at:
+        return None
+    age = now - _as_utc(s.created_at)
+    if age > timedelta(minutes=_RECENT_PLAN_WINDOW_MIN):
+        return None  # stale — not "our recent plan" anymore
+
+    mins = int(age.total_seconds() // 60)
+    ago = f"{mins}m ago" if mins < 60 else f"{mins // 60}h{mins % 60:02d}m ago"
+    rr = f"~{s.rr:.1f}R" if s.rr else "?R"
+    plan = (f"{(s.direction or '').upper()} {(s.order_type or '').replace('_', ' ')} @ {s.trigger_price} "
+            f"({rr}, SL {s.stop_loss} / TP {s.take_profit})")
+
+    # Has the break in the plan's direction already confirmed against the current price?
+    broke = None
+    if price and s.trigger_price:
+        if s.order_type == "buy_stop":       broke = price >= s.trigger_price   # long breakout
+        elif s.order_type == "sell_stop":    broke = price <= s.trigger_price   # short breakdown
+        elif s.order_type == "buy_limit":    broke = price <= s.trigger_price   # long pullback fill
+        elif s.order_type == "sell_limit":   broke = price >= s.trigger_price   # short pullback fill
+    broke_txt = ("the break HAS since confirmed (price is through the trigger)" if broke
+                 else "the break has NOT yet confirmed" if broke is not None else "status of the break unknown")
+
+    if s.status == "armed":
+        return (f"YOUR OWN RECENT PLAN: a {plan} is CURRENTLY ARMED (placed {ago}). It fires itself on "
+                f"the confirmed break and is risk-checked then — you do NOT need to open it manually, and "
+                f"standing aside here does not cancel it.")
+    if s.status == "triggered":
+        return (f"YOUR OWN RECENT PLAN: the {plan} you armed {ago} has already TRIGGERED (a position or "
+                f"proposal exists) — do NOT open a duplicate.")
+    if s.status == "cancelled":
+        chase = (" Entering NOW at market would be CHASING (worse R:R than the planned trigger): count the "
+                 "confirmed break as evidence for the matching direction, but if the CURRENT reward:risk no "
+                 "longer clears the bar, re-ARM a pullback rather than opening." if broke else "")
+        return (f"YOUR OWN RECENT PLAN: you armed a {plan} {ago} and then CANCELLED it; {broke_txt}.{chase}")
+    # rejected / expired / invalidated
+    return (f"YOUR OWN RECENT PLAN: a {plan} armed {ago} was {s.status.upper()} "
+            f"({s.last_note or 'no longer valid'}) — the plan did not hold; treat this as a fresh read.")
+
+
 def build_decision_brief(session: Session, symbol: str, asset_class: AssetClass, timeframe: str,
                          proposal: TradeProposal, technical: TechnicalRead,
                          fundamental: FundamentalRead, now: datetime) -> tuple[str, float | None, dict | None]:
@@ -277,6 +348,7 @@ def build_decision_brief(session: Session, symbol: str, asset_class: AssetClass,
     maturity = _maturity_note(ind, price)
     mtf = _mtf_line(technical)                          # ① multi-timeframe alignment
     events = _events_line(fundamental, now)             # ② upcoming high-impact events
+    recent_plan = _recent_plan_line(session, symbol, price, now)  # our own just-armed/cancelled plan
     try:                                                # AI's own graded track record (shadow scorecard)
         from app.agents.shadow import shadow_note
         shadow = shadow_note(session)
@@ -294,6 +366,10 @@ def build_decision_brief(session: Session, symbol: str, asset_class: AssetClass,
         f"INSTRUMENT: {symbol}  timeframe: {timeframe}  CURRENT PRICE: {price}  ATR(14): {ind.get('atr14')}",
         f"MULTI-TIMEFRAME ALIGNMENT: {mtf}",
         f"HIGH-IMPACT EVENTS AHEAD: {events}",
+    ]
+    if recent_plan:
+        lines += ["", recent_plan]
+    lines += [
         "",
         "ENGINE MECHANICAL READ (reference only — its rule-based direction/levels; you may agree, upgrade, arm, or stand aside):",
         f"  {eng}",
@@ -329,7 +405,7 @@ def build_decision_brief(session: Session, symbol: str, asset_class: AssetClass,
     lines += ["", "Now: CREATE your two scenarios from these facts, choose the most realistic, and decide. "
               "Use only the levels above (the ladders are your targets) — do not invent numbers.",
               "For an ARM, anchor the trigger to a BREAKOUT CANDIDATE above (a strong, tested level with "
-              ">=2R room); do not arm into a loose/expanded range."]
+              ">=1.5R room); do not arm into a loose/expanded range."]
     return "\n".join(lines), price, ctx
 
 

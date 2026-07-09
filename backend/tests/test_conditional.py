@@ -452,6 +452,53 @@ def test_reconcile_triggered_leaves_still_pending_alone(db_session):
     assert s.status == "triggered" and s.last_note == "break confirmed → queued for your approval"
 
 
+# ---- the AI's awareness of its own recently-armed/cancelled plan (feeds the decision brief) ----
+
+def test_recent_plan_armed_says_it_fires_itself(db_session):
+    from app.agents.ai_decider import _recent_plan_line
+    _arm(db_session, symbol="EURUSDm", asset_class="forex", direction="long", order_type="buy_stop",
+         trigger_price=1.10, stop_loss=1.095, take_profit=1.115, rr=3.0, status="armed")
+    line = _recent_plan_line(db_session, "EURUSDm", price=1.099, now=datetime.now(timezone.utc))
+    assert line and "CURRENTLY ARMED" in line and "does not cancel it" in line
+
+
+def test_recent_plan_cancelled_then_break_flags_chasing(db_session):
+    from app.agents.ai_decider import _recent_plan_line
+    _arm(db_session, symbol="USDJPYm", asset_class="forex", direction="long", order_type="buy_stop",
+         trigger_price=162.42, stop_loss=162.33, take_profit=162.76, rr=4.0, status="cancelled")
+    line = _recent_plan_line(db_session, "USDJPYm", price=162.62, now=datetime.now(timezone.utc))
+    assert line and "CANCELLED" in line and "CHASING" in line and "HAS since confirmed" in line
+
+
+def test_recent_plan_cancelled_before_break_has_no_chase(db_session):
+    from app.agents.ai_decider import _recent_plan_line
+    _arm(db_session, symbol="USDJPYm", asset_class="forex", direction="long", order_type="buy_stop",
+         trigger_price=162.42, stop_loss=162.33, take_profit=162.76, rr=4.0, status="cancelled")
+    line = _recent_plan_line(db_session, "USDJPYm", price=162.30, now=datetime.now(timezone.utc))
+    assert line and "CANCELLED" in line and "CHASING" not in line and "NOT yet confirmed" in line
+
+
+def test_recent_plan_triggered_warns_no_duplicate(db_session):
+    from app.agents.ai_decider import _recent_plan_line
+    _arm(db_session, symbol="HK50m", asset_class="index", direction="long", order_type="buy_stop",
+         trigger_price=24000, stop_loss=23960, take_profit=24240, rr=3.0, status="triggered")
+    line = _recent_plan_line(db_session, "HK50m", price=24010, now=datetime.now(timezone.utc))
+    assert line and "already TRIGGERED" in line and "duplicate" in line
+
+
+def test_recent_plan_none_when_stale(db_session):
+    from app.agents.ai_decider import _recent_plan_line
+    old = datetime.now(timezone.utc) - timedelta(minutes=200)
+    _arm(db_session, symbol="EURUSDm", asset_class="forex", direction="long", order_type="buy_stop",
+         trigger_price=1.10, stop_loss=1.095, take_profit=1.115, rr=3.0, status="cancelled", created_at=old)
+    assert _recent_plan_line(db_session, "EURUSDm", price=1.11, now=datetime.now(timezone.utc)) is None
+
+
+def test_recent_plan_none_when_no_setup(db_session):
+    from app.agents.ai_decider import _recent_plan_line
+    assert _recent_plan_line(db_session, "GBPUSDm", price=1.25, now=datetime.now(timezone.utc)) is None
+
+
 def test_arm_conditional_dedups_same_symbol_direction(db_session, monkeypatch):
     monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
     first = cond.arm_conditional(db_session, symbol="UKOILm", asset_class="energy", timeframe="1h",

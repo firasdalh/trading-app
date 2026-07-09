@@ -65,6 +65,12 @@ _SQLITE_ADDED_COLUMNS = {
         ("retries", "INTEGER DEFAULT 0"),
         ("desired_lots", "FLOAT"),
     ],
+    "rsi_over_config": [
+        ("macd", "BOOLEAN DEFAULT 0"),
+        ("last_scan_at", "DATETIME"),
+        ("last_scanned", "INTEGER DEFAULT 0"),
+        ("last_candidates", "TEXT"),
+    ],
 }
 
 

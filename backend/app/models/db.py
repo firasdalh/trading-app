@@ -360,6 +360,32 @@ class HybridConfig(Base):
     )
 
 
+class RsiOverConfig(Base):
+    """Singleton (id=1) for the RSI-Over auto-watch. When enabled, a scheduled tick every
+    ``interval_seconds`` re-runs the RSI-Over sweep on ``timeframe`` (EMA10 ``confirm`` on by default)
+    and stages the first pair that confirms — Mode A queues it for approval. Off by default (safety).
+    """
+
+    __tablename__ = "rsi_over_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=900)   # 15 min
+    timeframe: Mapped[str] = mapped_column(String(8), default="1h")
+    confirm: Mapped[bool] = mapped_column(Boolean, default=True)          # require the EMA10 close-through
+    macd: Mapped[bool] = mapped_column(Boolean, default=False)            # also accept a MACD cross/divergence (early)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_result: Mapped[str | None] = mapped_column(Text)
+    # Snapshot of the LAST sweep (manual or auto) so the panel restores it on refresh instead of
+    # blanking until the next scan — the near-extreme watchlist survives a reload.
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    last_candidates: Mapped[str | None] = mapped_column(Text)  # JSON {"overbought":[...],"oversold":[...]}
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class ConditionalSetup(Base):
     """An armed conditional ('pending') setup — a valid trade idea whose ENTRY waits for a price
     trigger (e.g. a break of a support cluster), rather than entering at market now.

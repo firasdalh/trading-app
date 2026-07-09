@@ -419,6 +419,60 @@ def macd(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -
     }
 
 
+def macd_signals(candles, fast: int = 12, slow: int = 26, signal: int = 9,
+                 div_lookback: int = 34) -> dict | None:
+    """MACD with the two EARLY-turn signals used by the RSI-Over pullback entry:
+      cross      : +1 = MACD line crossed ABOVE the signal on the last bar (bullish), -1 = crossed
+                   BELOW (bearish), 0 = no fresh cross.
+      div_bull   : 1.0 = bullish divergence (price made a LOWER low over the lookback but MACD made a
+                   HIGHER low), else 0.0.
+      div_bear   : 1.0 = bearish divergence (price HIGHER high, MACD LOWER high), else 0.0.
+    Needs the candle series (highs/lows) to line MACD up against price swings. None if too little data."""
+    closes = [c.close for c in candles]
+    if len(closes) < slow + signal:
+        return None
+    ef, es = _ema_full(closes, fast), _ema_full(closes, slow)
+    macd_line = [(a - b) for a, b in zip(ef, es) if a is not None and b is not None]
+    if len(macd_line) < signal + 1:
+        return None
+    sig_full = _ema_full(macd_line, signal)
+    pairs = [(m, s) for m, s in zip(macd_line, sig_full) if s is not None]
+    if len(pairs) < 2:
+        return None
+    macd_arr = [p[0] for p in pairs]
+    sig_arr = [p[1] for p in pairs]
+    n = len(macd_arr)
+
+    # fresh signal-line cross on the last bar
+    cross = 0
+    prev, cur = macd_arr[-2] - sig_arr[-2], macd_arr[-1] - sig_arr[-1]
+    if prev <= 0 < cur:
+        cross = 1
+    elif prev >= 0 > cur:
+        cross = -1
+
+    # divergence: compare price swing vs MACD at that swing, older half vs recent half of the window.
+    offset = len(candles) - n  # macd_arr[k] lines up with candles[offset + k]
+    div_bull = div_bear = 0.0
+    win = min(div_lookback, n)
+    if win >= 6:
+        idx = list(range(n - win, n))
+        half = win // 2
+        older, recent = idx[:half], idx[half:]
+        hi = lambda k: candles[offset + k].high
+        lo = lambda k: candles[offset + k].low
+        oh, rh = max(older, key=hi), max(recent, key=hi)      # price-high bars, each half
+        if hi(rh) > hi(oh) and macd_arr[rh] < macd_arr[oh]:
+            div_bear = 1.0
+        ol, rl = min(older, key=lo), min(recent, key=lo)      # price-low bars, each half
+        if lo(rl) < lo(ol) and macd_arr[rl] > macd_arr[ol]:
+            div_bull = 1.0
+
+    return {"macd": round(macd_arr[-1], 6), "signal": round(sig_arr[-1], 6),
+            "hist": round(macd_arr[-1] - sig_arr[-1], 6),
+            "cross": float(cross), "div_bull": div_bull, "div_bear": div_bear}
+
+
 def bollinger(closes: list[float], period: int = 20, mult: float = 2.0) -> dict | None:
     """Bollinger Bands (volatility regime / squeeze / mean-reversion context)."""
     if len(closes) < period:

@@ -551,3 +551,44 @@ export interface AccountState {
   daily_realized_pnl: number;
   trading_paused: boolean;
 }
+
+// A pair near an RSI extreme (from an RSI-Over sweep) — clickable to open on the chart.
+export interface RsiOverCandidate {
+  symbol: string;
+  asset_class: string;
+  rsi: number;
+  extreme: boolean;   // RSI already in the zone, only the EMA10 confirmation is missing
+}
+
+// Result of an RSI-Over sweep (POST /api/rsi-over/scan).
+export interface RsiOverScanResult {
+  ran: boolean;
+  reason: string;
+  scanned: number;
+  signals: number;
+  found: {
+    symbol: string;
+    asset_class: string;
+    timeframe: string;
+    direction: "long" | "short";
+    rsi: number | null;
+    proposal_id: number;
+    status: string;
+    approved: boolean | null;
+  } | null;
+  candidates: { overbought: RsiOverCandidate[]; oversold: RsiOverCandidate[] };
+}
+
+// RSI-Over auto-watch config (GET/POST /api/rsi-over/config).
+export interface RsiOverConfig {
+  enabled: boolean;
+  interval_seconds: number;
+  timeframe: string;
+  confirm: boolean;
+  macd: boolean;
+  last_run_at: string | null;
+  last_result: string | null;
+  last_scan_at: string | null;
+  last_scanned: number;
+  last_candidates: { overbought: RsiOverCandidate[]; oversold: RsiOverCandidate[] } | null;
+}

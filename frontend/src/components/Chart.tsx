@@ -22,11 +22,18 @@ import type { AiScenarioRead, AssetClass, Candle, MarketContext, PositionView, T
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
 // Persist a small chart UI toggle across refreshes AND pair changes (localStorage-backed useState).
-function usePersisted<T>(key: string, initial: T) {
+function usePersisted<T>(key: string, initial: T, merge = false) {
   const [v, setV] = useState<T>(() => {
     try {
       const s = localStorage.getItem(key);
-      return s !== null ? (JSON.parse(s) as T) : initial;
+      if (s === null) return initial;
+      const parsed = JSON.parse(s) as T;
+      // merge=true: overlay stored keys onto the defaults so a NEW default key (e.g. a new EMA
+      // period) appears for existing users instead of being masked by their older stored object.
+      if (merge && parsed && typeof parsed === "object" && initial && typeof initial === "object") {
+        return { ...(initial as object), ...(parsed as object) } as T;
+      }
+      return parsed;
     } catch {
       return initial;
     }
@@ -81,6 +88,7 @@ interface Props {
 }
 
 const EMA_CONFIG = [
+  { period: 10, color: "#22d3ee" },   // the RSI-Over confirmation line
   { period: 20, color: "#e879f9" },
   { period: 50, color: "#f59e0b" },
   { period: 100, color: "#eab308" },
@@ -391,7 +399,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = usePersisted<Record<number, boolean>>(
-    "chart.showEma", { 20: true, 50: true, 100: false, 200: true });
+    "chart.showEma", { 10: true, 20: true, 50: true, 100: false, 200: true }, true);
   const [showRsi, setShowRsi] = usePersisted("chart.showRsi", true);
   const [showMacd, setShowMacd] = usePersisted("chart.showMacd", true);
   const [showSt, setShowSt] = usePersisted("chart.showSt", true);

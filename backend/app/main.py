@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.backtest_routes import router as backtest_router
 from app.api.conditional_routes import router as conditional_router
+from app.api.rsi_over_routes import router as rsi_over_router
 from app.api.journal_routes import router as journal_router
 from app.api.market_routes import router as market_router
 from app.api.proposal_routes import router as proposal_router
@@ -114,6 +115,18 @@ def _hybrid_tick() -> None:
         log.warning("hybrid tick failed", extra={"error": str(exc)})
 
 
+def _rsi_over_tick() -> None:
+    """Scheduled RSI-Over auto-watch pass. Honors its own enabled flag + interval."""
+    from app.agents.rsi_over import rsi_over_tick
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            rsi_over_tick(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rsi-over tick failed", extra={"error": str(exc)})
+
+
 def _conditional_tick() -> None:
     """Watch armed conditional setups: expire stale ones, and on a confirmed trigger re-check +
     open. Its own job/session so a firing setup (which runs the full analysis) never delays the
@@ -147,8 +160,11 @@ def _register_monitor_job() -> None:
     # position monitor). Only does real work when a trigger is hit.
     sched.add_job(_conditional_tick, "interval", seconds=15, id="conditional_watch",
                   replace_existing=True, max_instances=1)
+    # Polls every 60s; the RSI-Over auto-watch enforces its own interval (default 15 min).
+    sched.add_job(_rsi_over_tick, "interval", seconds=60, id="rsi_over_watch",
+                  replace_existing=True, max_instances=1)
     log.info("position monitor (10s) + scanner (20s) + advisor (30s) + hybrid (60s) + "
-             "conditional watch (15s) scheduled")
+             "conditional watch (15s) + rsi-over watch (60s) scheduled")
 
 
 @asynccontextmanager
@@ -203,6 +219,7 @@ app.include_router(journal_router)
 app.include_router(conditional_router)
 app.include_router(watchlist_router)
 app.include_router(shadow_router)
+app.include_router(rsi_over_router)
 app.include_router(ws_router)
 
 

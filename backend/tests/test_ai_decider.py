@@ -178,14 +178,19 @@ def test_arm_rejected_in_loose_range():
     assert not ev["tradeable"] and "loose" in ev["reject"]
 
 
-def test_arm_needs_2r_not_1_5():
-    sc = _scn(action="arm_long", trigger=102.0, stop=99.0, tp=105.0)  # risk 3 reward 3 = 1.0R
-    ev = dec._score_scenario(sc, price=100.0, atr=2.0, facts=_facts(102.0, 4, 1.0))
-    assert not ev["tradeable"] and "R:R" in ev["reject"]
+def test_arm_uses_1_5r_floor():
+    # arm R:R floor lowered 2.0 -> 1.5: a 1.4R arm is rejected, a 1.5R arm at a strong level passes.
+    strong = _facts(102.0, 4, 1.0)
+    thin = _scn(action="arm_long", trigger=102.0, stop=99.0, tp=106.2)   # risk 3 reward 4.2 = 1.4R
+    ev_thin = dec._score_scenario(thin, price=100.0, atr=2.0, facts=strong)
+    assert not ev_thin["tradeable"] and "R:R" in ev_thin["reject"]
+    ok = _scn(action="arm_long", trigger=102.0, stop=99.0, tp=106.5)     # risk 3 reward 4.5 = 1.5R
+    ev_ok = dec._score_scenario(ok, price=100.0, atr=2.0, facts=strong)
+    assert ev_ok["tradeable"] and round(ev_ok["rr"], 1) == 1.5
 
 
-def test_open_still_uses_1_5_floor():
-    # opens keep the lower 1.5R floor and don't need a strong level / compression
+def test_open_uses_1_5_floor():
+    # opens use the 1.5R floor and don't need a strong level / compression (unlike arms)
     sc = _scn(action="open_long", stop=98.0, tp=103.5)  # risk 2 reward 3.5 = 1.75R
     ev = dec._score_scenario(sc, price=100.0, atr=2.0, facts=_facts(102.0, 1, 1.6))
     assert ev["tradeable"] and ev["kind"] == "open"
