@@ -237,6 +237,42 @@ def set_st_band_mode(req: StBandModeRequest, session: Session = Depends(get_sess
     return build_settings_response(session)
 
 
+class DetFilterItem(BaseModel):
+    key: str
+    label: str
+    desc: str
+
+
+class DetFiltersView(BaseModel):
+    filters: list[DetFilterItem]   # the catalog (key/label/desc)
+    disabled: list[str]            # which keys are currently OFF
+
+
+class DetFiltersRequest(BaseModel):
+    disabled: list[str]            # the keys to turn OFF (all others active)
+
+
+@router.get("/settings/det-filters", response_model=DetFiltersView, tags=["settings"])
+def get_det_filters(session: Session = Depends(get_session)) -> DetFiltersView:
+    """The deterministic entry-checklist filters + which the user has turned off."""
+    from app.agents.orchestrator import DET_FILTERS
+    s = get_or_create_settings(session)
+    return DetFiltersView(filters=[DetFilterItem(**f) for f in DET_FILTERS],
+                          disabled=list(s.disabled_filters or []))
+
+
+@router.post("/settings/det-filters", response_model=DetFiltersView, tags=["settings"])
+def set_det_filters(req: DetFiltersRequest, session: Session = Depends(get_session)) -> DetFiltersView:
+    """Turn deterministic entry filters on/off. Empty `disabled` = every filter active (tuned default).
+    Applies to the deterministic engine (Run analysis / scan / hybrid deterministic path)."""
+    from app.agents.orchestrator import DET_FILTERS, DET_FILTER_KEYS
+    s = get_or_create_settings(session)
+    s.disabled_filters = [k for k in req.disabled if k in DET_FILTER_KEYS]   # validate against the catalog
+    session.commit()
+    log.info("det-filters set", extra={"disabled": s.disabled_filters})
+    return DetFiltersView(filters=[DetFilterItem(**f) for f in DET_FILTERS], disabled=list(s.disabled_filters))
+
+
 class AiReviewRequest(BaseModel):
     enabled: bool
 

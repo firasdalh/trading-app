@@ -72,6 +72,9 @@ class AppSettings(Base):
     # trend regime is the edge while moderate/ranging are drags; ON gives the best risk-adjusted
     # result (same return, ~40% less drawdown). Reversible.
     trend_only_mode: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Deterministic entry-checklist filters the user has turned OFF (keys from orchestrator.DET_FILTERS).
+    # Empty = every filter active (current tuned behaviour). Applied to the deterministic engine only.
+    disabled_filters: Mapped[list] = mapped_column(JSON, default=list)
 
     # SuperTrend + EMA20-band breakout strategy: a mechanical mode (long above the band in a
     # SuperTrend uptrend / short below it in a downtrend; stop trails the SuperTrend line). When ON it

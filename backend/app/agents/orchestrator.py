@@ -81,7 +81,7 @@ def _last_close(technical: TechnicalRead) -> float | None:
 
 # Indicator gates for the deterministic decision.
 _ADX_MIN = 20.0       # below this the market is ranging -> stand aside
-_ADX_STRONG = 25.0
+_ADX_STRONG = 23.0    # >=23 the trend is strong enough for trend-following (per the entry checklist)
 _REGIME_VOL_EXPANSION = 1.6  # recent ATR >= 1.6x its baseline = volatility expansion (regime shift)
 _REGIME_VOL_EXTREME = 2.2    # a sharp vol blow-off WITHOUT a strong trend -> stand aside (whipsaw)
 _ATR_STOP_MULT = 1.5  # protective stop = entry +/- 1.5 * ATR (forex/metal/index/stock/energy)
@@ -127,6 +127,31 @@ _WALL_NEAR_ATR = 0.75   # a barrier within this many ATR ahead (weak trend) = li
 _WALL_BEHIND_ATR = 0.5  # a key level this recently cleared (behind entry) = a fresh breakout -> bonus
 _WALL_PENALTY = 0.06
 _WALL_BREAK_BONUS = 0.06
+
+# The deterministic ENTRY-CHECKLIST filters the user can toggle on/off (Settings -> disabled_filters
+# -> the `disable` set honoured in _deterministic_decision). All ON by default; each maps to a real
+# gate/penalty in the engine. Order = the pro's entry-quality priority (structure first, R:R last).
+DET_FILTERS = [
+    {"key": "structure", "label": "Market structure",
+     "desc": "BOS / CHoCH / higher-high-higher-low confluence — refuse a trade that fights the swing structure."},
+    {"key": "mtf", "label": "Higher-timeframe trend",
+     "desc": "Don't trade against the higher-timeframe trend (no confluence → stand aside)."},
+    {"key": "chase", "label": "Anti-chase (ATR distance)",
+     "desc": "Down-weight entries stretched far from EMA20 in ATRs — the top filter against buying the top / selling the bottom."},
+    {"key": "momentum", "label": "MACD momentum",
+     "desc": "Momentum must align; if it's rolling over, arm the pullback instead of entering into it."},
+    {"key": "rsi_extreme", "label": "RSI overextension",
+     "desc": "Don't chase into an overbought/oversold RSI — arm the pullback (unless a strong trend rides it)."},
+    {"key": "divergence", "label": "RSI divergence",
+     "desc": "Skip entries into a momentum-vs-price divergence while stretched (exhaustion)."},
+    {"key": "volatility", "label": "Volatility blow-off",
+     "desc": "Stand aside in a chaotic volatility expansion with no trend (whipsaw zone)."},
+    {"key": "wall", "label": "S/R wall + volume",
+     "desc": "Penalise chasing into a nearby S/R wall; reward a volume-backed break behind the entry."},
+    {"key": "minrr", "label": "Minimum reward:risk",
+     "desc": "Require a minimum R:R at market entry, else arm the better-priced break/pullback."},
+]
+DET_FILTER_KEYS = {f["key"] for f in DET_FILTERS}
 
 _TF_RANK = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7}
 
@@ -1122,7 +1147,7 @@ def _deterministic_decision(
     # threshold and ranks pullbacks above them in the scanner.
     value_dist = abs(entry - ema20) / atr_v if (ema20 and atr_v and atr_v > 0) else None
     at_value = value_dist is not None and value_dist <= _VALUE_ENTRY_ATR
-    if value_dist is not None:
+    if value_dist is not None and "chase" not in disable:
         if at_value:
             conf += 0.1                       # pullback to value — preferred entry
         elif value_dist >= _PULLBACK_ATR:
@@ -1305,6 +1330,7 @@ def run_orchestrator(
     now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
     st_band: bool = False, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
     rsi_div: bool = False, rsi_trend_filter: bool = True,
+    disable: frozenset[str] = frozenset(),
     ai_review: bool = True,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
@@ -1324,7 +1350,7 @@ def run_orchestrator(
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
                                        trend_only=trend_only, st_band=st_band, rsi_over=rsi_over,
                                        rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
-                                       rsi_trend_filter=rsi_trend_filter)
+                                       rsi_trend_filter=rsi_trend_filter, disable=disable)
 
     # SuperTrend-band and RSI-Over are purely mechanical strategies — no LLM confirm/veto over them.
     # ai_review=False takes the AI out of the trade decision entirely (the deterministic engine +

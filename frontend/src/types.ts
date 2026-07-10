@@ -532,6 +532,10 @@ export interface JournalStats {
   max_drawdown_r: number | null;
 }
 
+// Deterministic entry-checklist filters (toggle which the engine applies).
+export interface DetFilterItem { key: string; label: string; desc: string; }
+export interface DetFiltersView { filters: DetFilterItem[]; disabled: string[]; }
+
 // Journal breakdown: closed-trade performance grouped by source / pair / period.
 export interface GroupStat {
   label: string;

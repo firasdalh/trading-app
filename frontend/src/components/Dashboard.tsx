@@ -48,6 +48,7 @@ import { RegimeBadge } from "./RegimeBadge";
 import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { RsiOverPanel } from "./RsiOverPanel";
+import { EntryFiltersPanel } from "./EntryFiltersPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
 import { QuickTradePanel } from "./QuickTradePanel";
@@ -559,6 +560,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         onSelect={openPositionSymbol}
         onOpened={() => setPosBump((b) => b + 1)}
       />
+
+      <EntryFiltersPanel />
 
       <RsiOverPanel onStaged={() => setPosBump((b) => b + 1)} onSelect={openPositionSymbol} />
 

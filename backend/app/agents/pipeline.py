@@ -71,7 +71,8 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
                                 trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
-                                rsi_trend_filter=rsi_trend_filter)
+                                rsi_trend_filter=rsi_trend_filter,
+                                disable=frozenset(settings.disabled_filters or ()))
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
@@ -143,7 +144,8 @@ def analyze_symbol(
                                 trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
-                                rsi_trend_filter=rsi_trend_filter)
+                                rsi_trend_filter=rsi_trend_filter,
+                                disable=frozenset(settings.disabled_filters or ()))
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         det_proposal = proposal   # keep the deterministic call for the shadow scorecard

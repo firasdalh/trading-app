@@ -49,6 +49,7 @@ _SQLITE_ADDED_COLUMNS = {
         ("st_band_mode", "BOOLEAN DEFAULT 0"),
         ("ai_review_enabled", "BOOLEAN DEFAULT 0"),
         ("journal_reset_at", "DATETIME"),
+        ("disabled_filters", "TEXT"),
     ],
     "watch_items": [
         ("recommended", "BOOLEAN DEFAULT 0"),

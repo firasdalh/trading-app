@@ -315,6 +315,12 @@ export const api = {
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
   journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
   journalBreakdown: () => request<import("../types").JournalBreakdown>("/api/journal/breakdown"),
+  detFilters: () => request<import("../types").DetFiltersView>("/api/settings/det-filters"),
+  setDetFilters: (disabled: string[]) =>
+    request<import("../types").DetFiltersView>("/api/settings/det-filters", {
+      method: "POST",
+      body: JSON.stringify({ disabled }),
+    }),
 
   // RSI-Over strategy: sweep all available pairs on `timeframe` for the first RSI-extreme reversal
   // (EMA10-confirmed when `confirm`) and stage it (Mode A queues it). "" timeframe -> default 1h.

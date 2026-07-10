@@ -354,6 +354,7 @@ class AppSettingsView(BaseModel):
     trend_only_mode: bool = True
     st_band_mode: bool = False
     ai_review_enabled: bool = False
+    disabled_filters: list[str] = []
     journal_reset_at: datetime | None = None
     live_confirmed_at: datetime | None = None
 

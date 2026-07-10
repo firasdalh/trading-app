@@ -121,6 +121,35 @@ def test_orchestrator_arms_pullback_when_oversold_short_and_not_strong():
     assert "oversold" in prop.rationale.lower()
 
 
+def test_disable_rsi_extreme_filter_takes_market_instead_of_arming():
+    # Toggling a checklist filter OFF changes the LIVE deterministic decision: with rsi_extreme ON
+    # (default) an overbought moderate trend arms the pullback; with it OFF it takes the market entry.
+    from app.agents.orchestrator import _deterministic_decision
+    tech = run_technical("TEST", [_uptrend_series()])
+    ind = tech.timeframes[0].indicators
+    ind["adx"] = 22.0        # moderate (not strong) -> the rsi_extreme arm path applies
+    ind["rsi14"] = 72.0
+    ind["macd_hist"] = 0.05
+    armed = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert armed.direction == Direction.NO_TRADE and armed.watch is True   # default: arms
+    took = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW,
+                                   disable=frozenset({"rsi_extreme"}))
+    assert took.direction == Direction.LONG                                # filter off: takes market
+
+
+def test_det_filters_endpoint_persists_and_validates(db_session):
+    from app.agents.orchestrator import DET_FILTER_KEYS
+    from app.api.settings_routes import DetFiltersRequest, get_det_filters, set_det_filters
+    from app.core.state import get_or_create_settings
+
+    view = get_det_filters(session=db_session)
+    assert len(view.filters) >= 8 and view.disabled == []
+    assert all(f.key in DET_FILTER_KEYS for f in view.filters)
+    out = set_det_filters(DetFiltersRequest(disabled=["mtf", "chase", "bogus"]), session=db_session)
+    assert set(out.disabled) == {"mtf", "chase"}                           # "bogus" validated out
+    assert set(get_or_create_settings(db_session).disabled_filters) == {"mtf", "chase"}
+
+
 def test_orchestrator_rides_overbought_when_strong_trend():
     # A STRONG trend (ADX >= 25) is allowed to ride an overbought RSI and still enter at market.
     from app.agents.orchestrator import _deterministic_decision
