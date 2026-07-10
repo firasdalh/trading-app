@@ -95,8 +95,10 @@ _RR_MAX = 4.0         # cap the planned target at 4R so a far key level isn't an
 _MIN_RR_COND = 1.5    # only suggest a conditional break-entry if its R:R (from the trigger) clears this
 _MIN_RR_ENTRY = 1.5   # don't TAKE a direct market entry below this R:R — ~1:1 is negative expectancy
                       # after costs; stand aside and arm the better-priced break/pullback instead
-_RSI_OB = 75.0        # overbought / oversold caution thresholds
+_RSI_OB = 75.0        # overbought / oversold caution thresholds (confidence haircut)
 _RSI_OS = 25.0
+_RSI_TREND_OB = 70.0  # RSI zone at which a trend entry is "stretched" -> arm the pullback instead of
+_RSI_TREND_OS = 30.0  # chasing at market (UNLESS a strong trend with momentum still confirming)
 # --- ranging-market mean-reversion (fade the range edges instead of trend-trading a flat market) ---
 _MR_EDGE_ATR = 0.6    # within this many ATR of a range edge counts as "at the edge"
 _MR_STOP_ATR = 0.6    # protective stop sits this many ATR beyond the edge
