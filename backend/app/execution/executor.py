@@ -155,6 +155,7 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
             last_price=entry_price,
             risk_amount=record.risk_amount,
             confidence=record.confidence,  # kept for confidence-vs-outcome calibration
+            source=getattr(record, "source", None),  # who opened it -> journal breakdown by source
             broker=broker.name,
             broker_env=settings.broker_env,
         )

@@ -360,6 +360,7 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
         take_profit=proposal.take_profit, confidence=proposal.confidence,
         rationale=proposal.rationale, review_decision=proposal.review_decision,
         reasoning={"technical": technical.model_dump(mode="json")} if technical is not None else {},
+        source="armed",  # opened from a triggered armed/conditional break setup
         risk_decision=decision.decision.value, risk_reason=decision.reason,
         approved_qty=decision.approved_qty, risk_amount=decision.risk_amount,
         status=(ProposalStatus.PENDING_APPROVAL.value if decision.approved

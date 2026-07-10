@@ -461,6 +461,35 @@ def test_confidence_calibration_buckets(db_session):
     assert by["50-60%"].trades == 0 and by["50-60%"].win_rate is None
 
 
+def test_journal_breakdown_by_source_and_period(db_session):
+    """Closed trades group by source (who opened them) with win rate + net P&L + R, plus a daily/
+    weekly/monthly split — the comparison that shows which mechanism actually makes money."""
+    from app.api.journal_routes import breakdown
+    base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    def closed(source, pnl, i, risk=10.0, sym="EURUSDm"):
+        return Position(symbol=sym, asset_class="forex", direction="long", qty=1.0, entry_price=100.0,
+                        status=PositionStatus.CLOSED.value, realized_pnl=pnl, risk_amount=risk,
+                        source=source, closed_at=base + timedelta(days=i))
+
+    db_session.add_all([
+        closed("ai", 20.0, 0), closed("ai", -10.0, 1),   # ai: 2 trades, 1 win, net +10, +1R total
+        closed("rsi_over", 30.0, 2),                       # rsi_over: 1 win, net +30
+        closed("armed", -5.0, 3),                          # armed: 1 loss, net -5
+    ])
+    db_session.commit()
+
+    b = breakdown(session=db_session)
+    by = {g.label: g for g in b.by_source}
+    assert by["ai"].trades == 2 and by["ai"].wins == 1 and by["ai"].win_rate == 0.5
+    assert by["ai"].net_pnl == 10.0 and by["ai"].total_r == 1.0 and by["ai"].avg_r == 0.5
+    assert by["rsi_over"].net_pnl == 30.0 and by["rsi_over"].win_rate == 1.0
+    assert by["armed"].losses == 1 and by["armed"].net_pnl == -5.0
+    assert b.by_source[0].label == "rsi_over"                 # sorted by net P&L desc
+    assert len(b.daily) == 4                                  # 4 distinct days
+    assert len(b.monthly) == 1 and b.monthly[0].total.trades == 4   # all in 2026-07
+
+
 def test_journal_stats_expectancy_and_drawdown(db_session):
     """Closed trades roll up into expectancy (mean R), profit factor, and max R-drawdown."""
     from app.api.journal_routes import stats

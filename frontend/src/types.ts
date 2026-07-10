@@ -208,6 +208,7 @@ export interface PositionView {
   last_price: number | null;
   unrealized_pnl: number;
   realized_pnl: number | null;
+  source: string | null;
   cost_usd: number | null;
   closed_at: string | null;
 }
@@ -531,6 +532,30 @@ export interface JournalStats {
   max_drawdown_r: number | null;
 }
 
+// Journal breakdown: closed-trade performance grouped by source / pair / period.
+export interface GroupStat {
+  label: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  net_pnl: number;
+  total_r: number | null;
+  avg_r: number | null;
+}
+export interface PeriodBreakdown {
+  period: string;
+  total: GroupStat;
+  sources: GroupStat[];
+}
+export interface JournalBreakdown {
+  by_source: GroupStat[];
+  by_pair: GroupStat[];
+  daily: PeriodBreakdown[];
+  weekly: PeriodBreakdown[];
+  monthly: PeriodBreakdown[];
+}
+
 // Structured (and optionally Arabic) reformatting of a raw AI-review rationale.
 export interface ExplainedReview {
   decision: string;        // headline, e.g. "NO TRADE" / "ENTER SHORT"
@@ -586,6 +611,9 @@ export interface RsiOverConfig {
   timeframe: string;
   confirm: boolean;
   macd: boolean;
+  rsi_div: boolean;
+  trend_filter: boolean;
+  auto_approve: boolean;
   last_run_at: string | null;
   last_result: string | null;
   last_scan_at: string | null;

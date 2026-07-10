@@ -152,6 +152,7 @@ def manual_trade(req: ManualTradeRequest, session: Session = Depends(get_session
         symbol=req.symbol, asset_class=req.asset_class.value, timeframe="manual", direction=d.value,
         entry=proposal.entry, stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
         confidence=1.0, rationale=proposal.rationale, review_decision=None, reasoning={"manual": True},
+        source="manual",
         risk_decision=decision.decision.value, risk_reason=decision.reason,
         approved_qty=decision.approved_qty, risk_amount=decision.risk_amount,
         status=(ProposalStatus.PENDING_APPROVAL.value if decision.approved else ProposalStatus.RISK_VETOED.value),

@@ -55,7 +55,9 @@ def rsi_over_tick(session: Session) -> dict:
     cfg.last_run_at = now
     session.add(cfg)
     session.commit()
-    return run_rsi_over_scan(session, cfg.timeframe, confirm=cfg.confirm, macd=cfg.macd)
+    return run_rsi_over_scan(session, cfg.timeframe, confirm=cfg.confirm, macd=cfg.macd,
+                             rsi_div=cfg.rsi_div, trend_filter=cfg.trend_filter,
+                             auto_approve=cfg.auto_approve)
 
 # Which asset classes to sweep (the user's tradable universe: FX / metals / energy / indices / crypto).
 _SCAN_CLASSES = (AssetClass.FOREX, AssetClass.METAL, AssetClass.ENERGY, AssetClass.INDEX, AssetClass.CRYPTO)
@@ -133,11 +135,13 @@ def _closest_text(cands: dict) -> str:
 
 
 def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: bool = True,
-                      macd: bool = False) -> dict:
+                      macd: bool = False, rsi_div: bool = False, trend_filter: bool = True,
+                      auto_approve: bool = False) -> dict:
     """Sweep the available universe for the first RSI-extreme reversal the Risk Manager approves, stage
-    it (Mode A: queue for approval; Modes B/C: auto-open), and return a short summary. ``confirm`` =
-    require the EMA10 close-through (strong); ``macd`` = also accept a MACD cross/divergence (early).
-    With both, either confirms; with neither, the RSI extreme alone fires. ``timeframe`` None -> '1h'."""
+    it (Mode A: queue for approval; Modes B/C: auto-open), and return a short summary. Confirmations
+    (OR): ``confirm`` = EMA10 close-through; ``macd`` = MACD cross/divergence; ``rsi_div`` = RSI
+    divergence. ``trend_filter`` (default) refuses fading against a strong higher-TF trend.
+    ``auto_approve`` opens a found pair directly (all gates still apply). ``timeframe`` None -> '1h'."""
     tf = timeframe or "1h"
 
     def done(reason: str, found: dict | None = None, scanned: int = 0, signals: int = 0,
@@ -188,7 +192,8 @@ def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: b
         try:
             ac = AssetClass(ac_str)
             prop, dec = preview_symbol(session, symbol, ac, tf, use_llm=False, cache=cache,
-                                       rsi_over=True, rsi_confirm=confirm, rsi_macd=macd)
+                                       rsi_over=True, rsi_confirm=confirm, rsi_macd=macd,
+                                       rsi_div=rsi_div, rsi_trend_filter=trend_filter)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the sweep
             log.warning("rsi-over preview failed", extra={"symbol": symbol, "error": str(exc)})
             continue
@@ -209,15 +214,40 @@ def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: b
 
         # First tradeable signal -> persist + risk-manage + stage (Mode A queues it for approval).
         res = analyze_symbol(session, symbol, ac, tf, use_llm=False, rsi_over=True,
-                             rsi_confirm=confirm, rsi_macd=macd)
+                             rsi_confirm=confirm, rsi_macd=macd, rsi_div=rsi_div,
+                             rsi_trend_filter=trend_filter)
+        status = res.status
+        approve_note = ""
+        # Auto-approve: open the staged proposal now instead of waiting for the manual click. Every
+        # server-side gate still runs inside execute_proposal (kill-switch, live-confirmation, anti-
+        # stacking, drift guard) — it only removes the human click, exactly like Modes B/C.
+        if auto_approve and status == ProposalStatus.PENDING_APPROVAL.value:
+            from app.execution.executor import ExecutionBlocked, execute_proposal
+            rec = session.get(TradeProposalRecord, res.proposal_id)
+            if rec is not None:
+                try:
+                    execute_proposal(session, rec)
+                    session.refresh(rec)
+                    status = rec.status
+                    approve_note = " (auto-approved → opened)" if status == ProposalStatus.EXECUTED.value \
+                        else " (auto-approve: broker did not fill)"
+                except ExecutionBlocked as exc:
+                    # In hands-off auto-approve mode, a blocked open means the plan is stale (usually
+                    # the drift guard) — don't leave it sitting in Pending for a manual click; EXPIRE
+                    # it so the next sweep finds a fresh setup instead of inheriting a stale one.
+                    rec.status = ProposalStatus.EXPIRED.value
+                    session.add(rec)
+                    session.commit()
+                    status = rec.status
+                    approve_note = f" (auto-approve blocked → expired: {exc})"
         rsi_val = _rsi_of(prop, tf)
         found = {"symbol": symbol, "asset_class": ac_str, "timeframe": tf,
                  "direction": prop.direction.value, "rsi": rsi_val,
-                 "proposal_id": res.proposal_id, "status": res.status,
+                 "proposal_id": res.proposal_id, "status": status,
                  "approved": bool(res.risk.approved) if res.risk else None}
         log.warning("rsi-over found setup", extra=found)
         label = f"{symbol} {prop.direction.value.upper()}"
-        return done(f"{label} — RSI {rsi_val:.0f}" if rsi_val is not None else label,
+        return done((f"{label} — RSI {rsi_val:.0f}" if rsi_val is not None else label) + approve_note,
                     found=found, scanned=scanned, signals=signals)
 
     cands = _candidates(landscape)

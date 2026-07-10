@@ -96,6 +96,42 @@ def test_orchestrator_short_on_downtrend():
     assert prop.stop_loss and prop.stop_loss > prop.entry
 
 
+def test_orchestrator_arms_pullback_when_overbought_and_not_strong():
+    # A moderate (not strong) uptrend already overbought -> don't chase at market; arm the pullback.
+    from app.agents.orchestrator import _deterministic_decision
+    tech = run_technical("TEST", [_uptrend_series()])
+    ind = tech.timeframes[0].indicators
+    ind["adx"] = 22.0        # moderate trend (< strong 25) -> stays in the trend path
+    ind["rsi14"] = 72.0      # overbought zone (>= 70)
+    ind["macd_hist"] = 0.05  # momentum not against (avoid the separate momentum-pullback branch)
+    prop = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert prop.direction == Direction.NO_TRADE and prop.watch is True
+    assert "overbought" in prop.rationale.lower() and "pullback" in prop.rationale.lower()
+
+
+def test_orchestrator_arms_pullback_when_oversold_short_and_not_strong():
+    from app.agents.orchestrator import _deterministic_decision
+    tech = run_technical("TEST", [_downtrend_series()])
+    ind = tech.timeframes[0].indicators
+    ind["adx"] = 22.0
+    ind["rsi14"] = 28.0      # oversold zone (<= 30)
+    ind["macd_hist"] = -0.05
+    prop = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert prop.direction == Direction.NO_TRADE and prop.watch is True
+    assert "oversold" in prop.rationale.lower()
+
+
+def test_orchestrator_rides_overbought_when_strong_trend():
+    # A STRONG trend (ADX >= 25) is allowed to ride an overbought RSI and still enter at market.
+    from app.agents.orchestrator import _deterministic_decision
+    tech = run_technical("TEST", [_uptrend_series()])
+    ind = tech.timeframes[0].indicators
+    ind["adx"] = 35.0        # strong trend
+    ind["rsi14"] = 80.0      # deep overbought
+    prop = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert prop.direction == Direction.LONG  # strong trend -> market entry, not armed
+
+
 def test_fundamental_bias_nudges_confidence_not_vetoes():
     # An opposing fundamental bias is a soft macro lean now — it must NOT veto a clean technical
     # trend, only lower confidence. (Trend decides direction; bias is a confidence factor.)

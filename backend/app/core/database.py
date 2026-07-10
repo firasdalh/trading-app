@@ -55,6 +55,10 @@ _SQLITE_ADDED_COLUMNS = {
     ],
     "positions": [
         ("confidence", "FLOAT"),
+        ("source", "VARCHAR(24)"),
+    ],
+    "trade_proposals": [
+        ("source", "VARCHAR(24) DEFAULT 'analysis'"),
     ],
     "hybrid_config": [
         ("conditional_enabled", "BOOLEAN DEFAULT 1"),
@@ -67,6 +71,9 @@ _SQLITE_ADDED_COLUMNS = {
     ],
     "rsi_over_config": [
         ("macd", "BOOLEAN DEFAULT 0"),
+        ("rsi_div", "BOOLEAN DEFAULT 0"),
+        ("trend_filter", "BOOLEAN DEFAULT 1"),
+        ("auto_approve", "BOOLEAN DEFAULT 0"),
         ("last_scan_at", "DATETIME"),
         ("last_scanned", "INTEGER DEFAULT 0"),
         ("last_candidates", "TEXT"),

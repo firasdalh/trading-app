@@ -151,6 +151,7 @@ class TradeProposalRecord(Base):
     approved_qty: Mapped[float | None] = mapped_column(Float)
     risk_amount: Mapped[float | None] = mapped_column(Float)
     review_decision: Mapped[str | None] = mapped_column(String(16))  # LLM reviewer: confirm/veto
+    source: Mapped[str] = mapped_column(String(24), default="analysis")  # origin -> copied to Position at open
     watch: Mapped[bool] = mapped_column(Boolean, default=False)       # setup forming (wait for trigger)
 
     orders: Mapped[list["Order"]] = relationship(back_populates="proposal")
@@ -224,6 +225,10 @@ class Position(Base):
     # The proposal's confidence at entry — kept so closed trades can be bucketed by confidence to
     # CALIBRATE the score against real outcomes (does "70%" actually win ~70%?).
     confidence: Mapped[float | None] = mapped_column(Float)
+    # WHO opened this trade — the origin mechanism (ai / rsi_over / armed / hybrid / manual /
+    # deterministic / supertrend). Set at open time so the journal can compare win rate + P&L by
+    # source. NULL on trades opened before this was tracked.
+    source: Mapped[str | None] = mapped_column(String(24), index=True)
 
     broker: Mapped[str] = mapped_column(String(24), default="paper")
     broker_env: Mapped[str] = mapped_column(String(8), default="paper")
@@ -374,6 +379,9 @@ class RsiOverConfig(Base):
     timeframe: Mapped[str] = mapped_column(String(8), default="1h")
     confirm: Mapped[bool] = mapped_column(Boolean, default=True)          # require the EMA10 close-through
     macd: Mapped[bool] = mapped_column(Boolean, default=False)            # also accept a MACD cross/divergence (early)
+    rsi_div: Mapped[bool] = mapped_column(Boolean, default=False)         # also accept an RSI divergence (exhaustion) as a confirm
+    trend_filter: Mapped[bool] = mapped_column(Boolean, default=True)     # don't fade against a strong higher-TF trend
+    auto_approve: Mapped[bool] = mapped_column(Boolean, default=False)    # open a found pair directly (skip the manual Mode-A click; all gates still apply)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)
     # Snapshot of the LAST sweep (manual or auto) so the panel restores it on refresh instead of

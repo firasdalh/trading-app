@@ -18,10 +18,12 @@ def _base() -> TradeProposal:
                          direction=Direction.NO_TRADE, confidence=0.0)
 
 
-def _ind(rsi, ema10, last, atr=2.0, rec_hi=None, rec_lo=None, cross=0.0, div_bull=0.0, div_bear=0.0):
+def _ind(rsi, ema10, last, atr=2.0, rec_hi=None, rec_lo=None, cross=0.0, div_bull=0.0, div_bear=0.0,
+         rdiv_bull=0.0, rdiv_bear=0.0):
     return {"rsi14": rsi, "ema10": ema10, "last_close": last, "atr14": atr,
             "recent_high": rec_hi, "recent_low": rec_lo,
-            "macd_cross": cross, "macd_div_bull": div_bull, "macd_div_bear": div_bear}
+            "macd_cross": cross, "macd_div_bull": div_bull, "macd_div_bear": div_bear,
+            "div_bull": rdiv_bull, "div_bear": rdiv_bear}  # div_* = RSI divergence
 
 
 # ---- core decision ----
@@ -151,6 +153,47 @@ def test_ema10_still_fires_when_macd_absent():
     assert p.direction == Direction.SHORT and "EMA10 close" in p.rationale
 
 
+# ---- #1 trend filter (don't fade against the higher-TF trend) ----
+
+def test_trend_filter_blocks_fade_against_higher_tf_uptrend():
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)  # overbought -> would short
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=False, trend_filter=True, macro="up")
+    assert p.direction == Direction.NO_TRADE and "not fading against" in p.rationale.lower()
+
+
+def test_trend_filter_allows_fade_in_range():
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=False, trend_filter=True, macro="sideways")
+    assert p.direction == Direction.SHORT
+
+
+def test_trend_filter_off_allows_fade_against_trend():
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=False, trend_filter=False, macro="up")
+    assert p.direction == Direction.SHORT
+
+
+def test_trend_filter_blocks_long_fade_against_downtrend():
+    ind = _ind(20, ema10=99, last=100, atr=2.0, rec_lo=97)  # oversold -> would long
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=False, trend_filter=True, macro="down")
+    assert p.direction == Direction.NO_TRADE
+
+
+# ---- #4 RSI divergence confirmation ----
+
+def test_rsi_divergence_confirms_short():
+    # Overbought, price still ABOVE EMA10 (EMA10 not confirmed), but a bearish RSI divergence -> SHORT.
+    ind = _ind(80, ema10=101, last=102, atr=2.0, rec_hi=103, rdiv_bear=1.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rsi_div=True, macro="sideways")
+    assert p.direction == Direction.SHORT and "RSI divergence" in p.rationale
+
+
+def test_rsi_divergence_confirms_long():
+    ind = _ind(20, ema10=99, last=98, atr=2.0, rec_lo=97, rdiv_bull=1.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rsi_div=True, macro="sideways")
+    assert p.direction == Direction.LONG and "RSI divergence" in p.rationale
+
+
 # ---- routing through the orchestrator (mechanical, no LLM) ----
 
 def _tech(ind):
@@ -234,7 +277,7 @@ def test_auto_watch_tick_runs_and_records_when_enabled(db_session, monkeypatch):
     cfg.enabled = True
     db_session.commit()
     monkeypatch.setattr(scan_mod, "run_rsi_over_scan",
-                        lambda s, tf, confirm=True, macd=False: {"ran": True, "reason": f"tf={tf} c={confirm}", "found": None})
+                        lambda s, tf, confirm=True, **kw: {"ran": True, "reason": f"tf={tf} c={confirm}", "found": None})
     out = scan_mod.rsi_over_tick(db_session)
     assert out["ran"] and out["reason"] == "tf=1h c=True"
     db_session.refresh(cfg)
@@ -252,6 +295,83 @@ def test_auto_watch_tick_skips_within_interval(db_session, monkeypatch):
                         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or {})
     assert scan_mod.rsi_over_tick(db_session) == {"ran": False, "reason": "interval not elapsed"}
     assert calls["n"] == 0
+
+
+def test_auto_approve_executes_the_found_proposal(db_session, monkeypatch):
+    # With auto_approve, a found (pending) proposal is executed directly instead of left pending.
+    from app.models.db import TradeProposalRecord
+    from app.models.enums import ProposalStatus
+    import app.execution.executor as executor
+
+    # Start APPROVED (not pending) so the scan's anti-stacking pending-symbol filter doesn't skip BBB;
+    # analyze_symbol (mocked) is what "creates" the pending proposal the auto-approve branch executes.
+    rec = TradeProposalRecord(symbol="BBB", asset_class="forex", timeframe="1h", direction="short",
+                              entry=100.0, stop_loss=103.0, take_profit=95.0, confidence=0.7,
+                              rationale="x", reasoning={}, status=ProposalStatus.APPROVED.value)
+    db_session.add(rec)
+    db_session.commit()
+
+    monkeypatch.setattr(scan_mod, "_universe", lambda s: [("BBB", "forex")])
+    monkeypatch.setattr(scan_mod, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr(scan_mod, "kill_switch_active", lambda s: False)
+    prop = TradeProposal(symbol="BBB", asset_class=AssetClass.FOREX, timeframe="1h", direction=Direction.SHORT,
+                         confidence=0.7, technical=_tech(_ind(80, 101, 100, rec_hi=103)))
+    monkeypatch.setattr(scan_mod, "preview_symbol", lambda *a, **k: (prop, _approved(True)))
+
+    class _Res:
+        proposal_id = rec.id
+        status = ProposalStatus.PENDING_APPROVAL.value
+        risk = type("R", (), {"approved": True})()
+    monkeypatch.setattr(scan_mod, "analyze_symbol", lambda *a, **k: _Res())
+
+    calls = {"n": 0}
+    def fake_exec(session, record):
+        calls["n"] += 1
+        record.status = ProposalStatus.EXECUTED.value  # simulate a fill
+        session.add(record)
+        session.commit()
+    monkeypatch.setattr(executor, "execute_proposal", fake_exec)
+
+    out = scan_mod.run_rsi_over_scan(db_session, "1h", confirm=False, auto_approve=True)
+    assert calls["n"] == 1
+    assert out["found"]["status"] == ProposalStatus.EXECUTED.value and "opened" in out["reason"]
+
+
+def test_auto_approve_blocked_expires_the_proposal(db_session, monkeypatch):
+    # If execution is blocked (e.g. the drift guard), auto-approve EXPIRES the stale proposal instead
+    # of leaving it in Pending — so it doesn't pile up waiting for a manual click.
+    from app.models.db import TradeProposalRecord
+    from app.models.enums import ProposalStatus
+    from app.execution.executor import ExecutionBlocked
+    import app.execution.executor as executor
+
+    rec = TradeProposalRecord(symbol="BBB", asset_class="forex", timeframe="1h", direction="short",
+                              entry=100.0, stop_loss=103.0, take_profit=95.0, confidence=0.7,
+                              rationale="x", reasoning={}, status=ProposalStatus.APPROVED.value)
+    db_session.add(rec)
+    db_session.commit()
+
+    monkeypatch.setattr(scan_mod, "_universe", lambda s: [("BBB", "forex")])
+    monkeypatch.setattr(scan_mod, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr(scan_mod, "kill_switch_active", lambda s: False)
+    prop = TradeProposal(symbol="BBB", asset_class=AssetClass.FOREX, timeframe="1h", direction=Direction.SHORT,
+                         confidence=0.7, technical=_tech(_ind(80, 101, 100, rec_hi=103)))
+    monkeypatch.setattr(scan_mod, "preview_symbol", lambda *a, **k: (prop, _approved(True)))
+
+    class _Res:
+        proposal_id = rec.id
+        status = ProposalStatus.PENDING_APPROVAL.value
+        risk = type("R", (), {"approved": True})()
+    monkeypatch.setattr(scan_mod, "analyze_symbol", lambda *a, **k: _Res())
+
+    def blocked_exec(session, record):
+        raise ExecutionBlocked("price moved — R:R at the real fill is 0.6")
+    monkeypatch.setattr(executor, "execute_proposal", blocked_exec)
+
+    out = scan_mod.run_rsi_over_scan(db_session, "1h", confirm=False, auto_approve=True)
+    db_session.refresh(rec)
+    assert rec.status == ProposalStatus.EXPIRED.value
+    assert out["found"]["status"] == ProposalStatus.EXPIRED.value and "expired" in out["reason"]
 
 
 def test_scan_reports_when_signals_all_risk_blocked(db_session, monkeypatch):

@@ -138,6 +138,97 @@ def stats(session: Session = Depends(get_session)) -> JournalStats:
     )
 
 
+# --------------------------------------------------------------------------- #
+#  Breakdown: win rate / count / P&L by SOURCE (who opened it) and by PAIR,
+#  with a daily / weekly / monthly time split — so we can see which mechanism
+#  (AI, RSI-Over, armed, hybrid, manual, deterministic) actually makes money.
+# --------------------------------------------------------------------------- #
+
+class GroupStat(BaseModel):
+    label: str                 # the source, the pair symbol, or "all"
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float | None     # fraction 0-1
+    net_pnl: float             # sum of realized P&L ($)
+    total_r: float | None      # sum of R-multiples (realized_pnl / risk_amount)
+    avg_r: float | None        # mean R per trade
+
+
+class PeriodBreakdown(BaseModel):
+    period: str                # "2026-07-10" / "2026-W28" / "2026-07"
+    total: GroupStat
+    sources: list[GroupStat]   # split of that period by source
+
+
+class JournalBreakdown(BaseModel):
+    by_source: list[GroupStat]       # all-time, per source (the headline comparison)
+    by_pair: list[GroupStat]         # all-time, per pair
+    daily: list[PeriodBreakdown]
+    weekly: list[PeriodBreakdown]
+    monthly: list[PeriodBreakdown]
+
+
+def _stat(label: str, rows: list) -> GroupStat:
+    n = len(rows)
+    wins = sum(1 for r in rows if (r.realized_pnl or 0.0) > 0)
+    losses = sum(1 for r in rows if (r.realized_pnl or 0.0) < 0)
+    net = sum((r.realized_pnl or 0.0) for r in rows)
+    rs = [(r.realized_pnl or 0.0) / r.risk_amount for r in rows if r.risk_amount]
+    return GroupStat(
+        label=label, trades=n, wins=wins, losses=losses,
+        win_rate=round(wins / n, 3) if n else None,
+        net_pnl=round(net, 2),
+        total_r=round(sum(rs), 2) if rs else None,
+        avg_r=round(sum(rs) / len(rs), 2) if rs else None,
+    )
+
+
+def _group(rows: list, key) -> list[GroupStat]:
+    from collections import defaultdict
+    buckets: dict[str, list] = defaultdict(list)
+    for r in rows:
+        buckets[key(r)].append(r)
+    stats = [_stat(k, v) for k, v in buckets.items()]
+    return sorted(stats, key=lambda g: -g.net_pnl)
+
+
+def _periods(rows: list, key, limit: int) -> list[PeriodBreakdown]:
+    from collections import defaultdict
+    buckets: dict[str, list] = defaultdict(list)
+    for r in rows:
+        buckets[key(r)].append(r)
+    out: list[PeriodBreakdown] = []
+    for period in sorted(buckets.keys(), reverse=True)[:limit]:
+        prows = buckets[period]
+        out.append(PeriodBreakdown(period=period, total=_stat("all", prows),
+                                   sources=_group(prows, lambda r: r.source or "unknown")))
+    return out
+
+
+@router.get("/breakdown", response_model=JournalBreakdown)
+def breakdown(session: Session = Depends(get_session)) -> JournalBreakdown:
+    """Closed-trade performance broken down by SOURCE (who opened it) and PAIR, plus a daily/weekly/
+    monthly time split. App-tracked positions only (they carry source + risk_amount)."""
+    conds = [Position.status == PositionStatus.CLOSED.value, Position.realized_pnl.is_not(None)]
+    reset = get_or_create_settings(session).journal_reset_at
+    if reset is not None:
+        conds.append(Position.closed_at >= reset)
+    rows = [r for r in session.scalars(select(Position).where(*conds)).all() if r.closed_at is not None]
+
+    def _iso_week(r) -> str:
+        y, w, _ = r.closed_at.isocalendar()
+        return f"{y}-W{w:02d}"
+
+    return JournalBreakdown(
+        by_source=_group(rows, lambda r: r.source or "unknown"),
+        by_pair=_group(rows, lambda r: r.symbol),
+        daily=_periods(rows, lambda r: r.closed_at.strftime("%Y-%m-%d"), 60),
+        weekly=_periods(rows, _iso_week, 26),
+        monthly=_periods(rows, lambda r: r.closed_at.strftime("%Y-%m"), 24),
+    )
+
+
 class JournalResetView(BaseModel):
     journal_reset_at: datetime | None
 

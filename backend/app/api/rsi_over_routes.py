@@ -19,14 +19,19 @@ class RsiOverScanRequest(BaseModel):
     timeframe: str | None = None  # None -> 1h
     confirm: bool = True          # require the EMA10 close-through (strong confirmation)
     macd: bool = False            # also accept a MACD cross/divergence (early pullback entry)
+    rsi_div: bool = False         # also accept an RSI divergence (exhaustion tell)
+    trend_filter: bool = True     # don't fade against a strong higher-TF trend
+    auto_approve: bool = False    # open a found pair directly (skip the manual Mode-A click)
 
 
 @router.post("/scan")
 def scan(req: RsiOverScanRequest, session: Session = Depends(get_session)) -> dict:
     """Sweep all available pairs on ``timeframe`` and stage the first tradeable RSI-Over setup.
-    ``confirm`` = EMA10 close-through; ``macd`` = also accept a MACD cross/divergence (early). With
-    neither, the RSI extreme alone fires. Returns {ran, found, reason, scanned, signals, candidates}."""
-    return run_rsi_over_scan(session, req.timeframe, confirm=req.confirm, macd=req.macd)
+    Confirmations (OR): ``confirm`` EMA10, ``macd``, ``rsi_div``. ``trend_filter`` refuses fading a
+    strong higher-TF trend. ``auto_approve`` opens it directly. Returns {ran, found, reason, ...}."""
+    return run_rsi_over_scan(session, req.timeframe, confirm=req.confirm, macd=req.macd,
+                             rsi_div=req.rsi_div, trend_filter=req.trend_filter,
+                             auto_approve=req.auto_approve)
 
 
 # --- auto-watch (a timer that re-runs the sweep and stages the first pair that confirms) ---
@@ -37,6 +42,9 @@ class RsiOverConfigView(BaseModel):
     timeframe: str
     confirm: bool
     macd: bool
+    rsi_div: bool
+    trend_filter: bool
+    auto_approve: bool
     last_run_at: datetime | None
     last_result: str | None
     # Snapshot of the last sweep so the panel restores it on refresh.
@@ -51,6 +59,9 @@ class RsiOverConfigRequest(BaseModel):
     timeframe: str | None = None
     confirm: bool | None = None
     macd: bool | None = None
+    rsi_div: bool | None = None
+    trend_filter: bool | None = None
+    auto_approve: bool | None = None
 
 
 def _config_view(cfg) -> RsiOverConfigView:
@@ -60,6 +71,8 @@ def _config_view(cfg) -> RsiOverConfigView:
         cands = None
     return RsiOverConfigView(enabled=cfg.enabled, interval_seconds=cfg.interval_seconds,
                              timeframe=cfg.timeframe, confirm=cfg.confirm, macd=cfg.macd,
+                             rsi_div=cfg.rsi_div, trend_filter=cfg.trend_filter,
+                             auto_approve=cfg.auto_approve,
                              last_run_at=cfg.last_run_at, last_result=cfg.last_result,
                              last_scan_at=cfg.last_scan_at, last_scanned=cfg.last_scanned or 0,
                              last_candidates=cands)
@@ -84,6 +97,12 @@ def set_config(req: RsiOverConfigRequest, session: Session = Depends(get_session
         cfg.confirm = req.confirm
     if req.macd is not None:
         cfg.macd = req.macd
+    if req.rsi_div is not None:
+        cfg.rsi_div = req.rsi_div
+    if req.trend_filter is not None:
+        cfg.trend_filter = req.trend_filter
+    if req.auto_approve is not None:
+        cfg.auto_approve = req.auto_approve
     session.add(cfg)
     session.commit()
     return _config_view(cfg)

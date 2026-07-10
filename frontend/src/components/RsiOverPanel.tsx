@@ -5,6 +5,26 @@ import type { RsiOverCandidate, RsiOverConfig, RsiOverScanResult } from "../type
 
 const TIMEFRAMES = ["15m", "30m", "1h", "4h", "1d"];
 
+// A checkbox toggle with consistent sizing + colour, so the control row reads cleanly.
+function Toggle({ checked, onChange, label, title, tone = "neutral" }: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  title?: string;
+  tone?: "neutral" | "green" | "amber";
+}) {
+  const color = tone === "green" ? (checked ? "text-emerald-300" : "text-neutral-400")
+    : tone === "amber" ? (checked ? "text-amber-300" : "text-neutral-400")
+    : (checked ? "text-neutral-100" : "text-neutral-400");
+  return (
+    <label className={`flex cursor-pointer select-none items-center gap-1.5 text-xs ${color}`} title={title}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}
+             className="h-3.5 w-3.5 accent-violet-500" />
+      {label}
+    </label>
+  );
+}
+
 // A column of clickable near-extreme pairs. Clicking loads the pair on the chart to watch/trade it.
 function Candidates({ label, tone, items, onSelect }: {
   label: string;
@@ -12,26 +32,31 @@ function Candidates({ label, tone, items, onSelect }: {
   items?: RsiOverCandidate[];
   onSelect?: (p: { symbol: string; asset_class: string }) => void;
 }) {
-  if (!items || items.length === 0) return null;
+  const list = items ?? [];
   return (
     <div className="flex-1">
-      <div className={`mb-1 text-[10px] font-semibold uppercase ${tone === "bull" ? "text-bull" : "text-bear"}`}>
+      <div className={`mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide ${tone === "bull" ? "text-bull" : "text-bear"}`}>
         {label}
+        <span className="rounded bg-neutral-800 px-1 text-[10px] font-normal text-neutral-400">{list.length}</span>
       </div>
-      <div className="flex flex-wrap gap-1">
-        {items.map((c) => (
-          <button
-            key={c.symbol}
-            onClick={() => onSelect?.({ symbol: c.symbol, asset_class: c.asset_class })}
-            title={c.extreme ? "RSI is in the extreme zone — waiting for the turn to confirm (EMA10 / MACD). Click to watch on the chart." : "Click to watch on the chart"}
-            className={`rounded border px-1.5 py-0.5 text-xs tabular-nums hover:bg-neutral-800 ${
-              c.extreme ? "border-amber-500/60 text-amber-300" : "border-neutral-700 text-neutral-300"
-            }`}
-          >
-            {c.symbol} <span className="text-neutral-500">{c.rsi.toFixed(0)}</span>
-          </button>
-        ))}
-      </div>
+      {list.length === 0 ? (
+        <div className="text-xs text-neutral-600">—</div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {list.map((c) => (
+            <button
+              key={c.symbol}
+              onClick={() => onSelect?.({ symbol: c.symbol, asset_class: c.asset_class })}
+              title={c.extreme ? "RSI is in the extreme zone — waiting for the turn to confirm. Click to open on the chart." : "Click to open on the chart"}
+              className={`rounded-md border px-2 py-1 text-xs tabular-nums transition hover:bg-neutral-800 ${
+                c.extreme ? "border-amber-500/60 text-amber-300" : "border-neutral-700 text-neutral-200"
+              }`}
+            >
+              {c.symbol} <span className="ml-0.5 text-neutral-500">{c.rsi.toFixed(0)}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -46,6 +71,10 @@ export function RsiOverPanel({ onStaged, onSelect }: {
   const [tf, setTf] = useLocalStorage("rsiover.timeframe", "1h");
   const [confirm, setConfirm] = useLocalStorage("rsiover.confirm", true);
   const [macd, setMacd] = useLocalStorage("rsiover.macd", false);
+  const [rsiDiv, setRsiDiv] = useLocalStorage("rsiover.rsiDiv", false);
+  const [trendFilter, setTrendFilter] = useLocalStorage("rsiover.trendFilter", true);
+  const [autoApprove, setAutoApprove] = useLocalStorage("rsiover.autoApprove", false);
+  const [everyMin, setEveryMin] = useLocalStorage("rsiover.everyMin", 15);  // auto-watch interval (minutes)
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<RsiOverScanResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -79,13 +108,20 @@ export function RsiOverPanel({ onStaged, onSelect }: {
   const changeConfirm = (v: boolean) => { setConfirm(v); syncWatch({ confirm: v }); };
   const changeMacd = (v: boolean) => { setMacd(v); syncWatch({ macd: v }); };
   const changeTf = (v: string) => { setTf(v); syncWatch({ timeframe: v }); };
+  const changeEvery = (min: number) => { setEveryMin(min); syncWatch({ interval_seconds: min * 60 }); };
+  const changeRsiDiv = (v: boolean) => { setRsiDiv(v); syncWatch({ rsi_div: v }); };
+  const changeTrendFilter = (v: boolean) => { setTrendFilter(v); syncWatch({ trend_filter: v }); };
+  const changeAutoApprove = (v: boolean) => { setAutoApprove(v); syncWatch({ auto_approve: v }); };
 
   const toggleWatch = async () => {
     const next = !(watch?.enabled ?? false);
     try {
       // Watch with the panel's current TF + confirmation, every 15 min.
       const cfg = await api.setRsiOverConfig(
-        next ? { enabled: true, timeframe: tf, confirm, macd, interval_seconds: 900 } : { enabled: false },
+        next
+          ? { enabled: true, timeframe: tf, confirm, macd, rsi_div: rsiDiv, trend_filter: trendFilter,
+              auto_approve: autoApprove, interval_seconds: everyMin * 60 }
+          : { enabled: false },
       );
       setWatch(cfg);
     } catch (e) {
@@ -97,7 +133,7 @@ export function RsiOverPanel({ onStaged, onSelect }: {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.rsiOverScan(tf, confirm, macd);
+      const res = await api.rsiOverScan(tf, { confirm, macd, rsiDiv, trendFilter, autoApprove });
       setResult(res);
       if (res.found) onStaged?.();
     } catch (e) {
@@ -110,61 +146,69 @@ export function RsiOverPanel({ onStaged, onSelect }: {
   const f = result?.found;
   return (
     <div className="card">
-      <div className="mb-1 flex items-center gap-2">
-        <span className="text-sm font-semibold">📉 RSI-Over</span>
-        <span className="text-xs text-neutral-500">
-          overbought ≥72 → short · oversold ≤28 → long · confirmed by EMA10 &/or MACD
-        </span>
-        <div className="ml-auto flex items-center gap-1.5">
-          <label
-            className="flex items-center gap-1 text-xs text-neutral-400"
-            title="Strong confirmation: wait for a close through EMA10 (later, safer)."
-          >
-            <input type="checkbox" checked={confirm} onChange={(e) => changeConfirm(e.target.checked)} />
-            EMA10
-          </label>
-          <label
-            className="flex items-center gap-1 text-xs text-neutral-400"
-            title="Early entry: also accept a MACD signal-line cross or divergence (gets you into the pullback sooner). With EMA10 also on, whichever confirms first fires."
-          >
-            <input type="checkbox" checked={macd} onChange={(e) => changeMacd(e.target.checked)} />
-            MACD early
-          </label>
-          <label className="text-xs text-neutral-500" title="Timeframe the sweep analyses every pair on">
-            TF
-          </label>
-          <select
-            value={tf}
-            onChange={(e) => changeTf(e.target.value)}
-            className="rounded bg-neutral-800 px-1.5 py-1 text-xs text-neutral-100"
-          >
-            {TIMEFRAMES.map((t) => (
-              <option key={t} value={t}>{t}</option>
-            ))}
-          </select>
-          <button onClick={scan} disabled={busy} className="btn bg-violet-600 text-white hover:bg-violet-500">
-            {busy ? "Scanning…" : "Scan all pairs"}
-          </button>
-          <button
-            onClick={toggleWatch}
-            title="Auto-watch: re-run this sweep every 15 min and queue the first pair that confirms."
-            className={`btn ${watch?.enabled ? "bg-emerald-600 text-white hover:bg-emerald-500" : "bg-neutral-700 text-neutral-200 hover:bg-neutral-600"}`}
-          >
-            {watch?.enabled ? "Auto-watch ON" : "Auto-watch"}
-          </button>
+      {/* title */}
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="whitespace-nowrap text-sm font-semibold">📉 RSI-Over</span>
+        <span className="text-xs text-neutral-500">overbought ≥72 → short · oversold ≤28 → long</span>
+      </div>
+
+      {/* controls — grouped so they read cleanly and wrap gracefully */}
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Confirm by</span>
+          <div className="flex items-center gap-3 rounded-md border border-neutral-800 bg-neutral-900/40 px-2.5 py-1.5">
+            <Toggle checked={confirm} onChange={changeConfirm} label="EMA10"
+                    title="Strong confirmation: wait for a close through EMA10 (later, safer)." />
+            <Toggle checked={macd} onChange={changeMacd} label="MACD"
+                    title="Early entry: a MACD signal-line cross or divergence gets you into the pullback sooner." />
+            <Toggle checked={rsiDiv} onChange={changeRsiDiv} label="RSI div"
+                    title="Also accept an RSI divergence (price new extreme, RSI doesn't) — the exhaustion tell." />
+          </div>
+        </div>
+
+        <Toggle checked={trendFilter} onChange={changeTrendFilter} label="Trend filter" tone="green"
+                title="Don't fade AGAINST a clear higher-timeframe trend — protects against fading a runaway. Recommended ON." />
+
+        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] uppercase text-neutral-500">TF</span>
+            <select value={tf} onChange={(e) => changeTf(e.target.value)}
+                    title="Timeframe the sweep analyses every pair on"
+                    className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-100">
+              {TIMEFRAMES.map((t) => (<option key={t} value={t}>{t}</option>))}
+            </select>
+            <button onClick={scan} disabled={busy}
+                    className="btn bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-60">
+              {busy ? "Scanning…" : "Scan all pairs"}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-900/40 px-2.5 py-1.5">
+            <Toggle checked={autoApprove} onChange={changeAutoApprove} label="Auto-approve" tone="amber"
+                    title="Open a found pair DIRECTLY without your click. Every gate still applies (3% cap, kill-switch, live-confirmation, anti-stacking, drift guard)." />
+            <span className="text-[10px] uppercase text-neutral-500">every</span>
+            <select value={everyMin} onChange={(e) => changeEvery(Number(e.target.value))} title="Auto-watch interval"
+                    className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-100">
+              {[1, 2, 5, 10, 15, 30, 60].map((m) => (<option key={m} value={m}>{m < 60 ? `${m}m` : "1h"}</option>))}
+            </select>
+            <button onClick={toggleWatch}
+                    title="Auto-watch: re-run this sweep on the interval and act on the first pair that confirms."
+                    className={`btn ${watch?.enabled ? "bg-emerald-600 text-white hover:bg-emerald-500" : "bg-neutral-700 text-neutral-200 hover:bg-neutral-600"}`}>
+              {watch?.enabled ? "Auto-watch ON" : "Auto-watch"}
+            </button>
+          </div>
         </div>
       </div>
-      <p className="mb-2 text-xs text-neutral-500">
-        Sweeps all available pairs until it finds one at an RSI extreme with the turn confirmed (EMA10
-        close and/or a MACD cross/divergence), then risk-sizes it and queues it for your approval
-        (Modes B/C auto-open). Same 3% cap + all gates.
-      </p>
       {watch?.enabled && (
-        <div className="mb-2 rounded border border-emerald-700/40 bg-emerald-900/15 px-2 py-1 text-xs text-emerald-300">
+        <div className={`mb-2 rounded border px-2 py-1 text-xs ${watch.auto_approve
+          ? "border-amber-600/50 bg-amber-900/15 text-amber-300"
+          : "border-emerald-700/40 bg-emerald-900/15 text-emerald-300"}`}>
           👀 Auto-watching every {Math.round(watch.interval_seconds / 60)} min on {watch.timeframe}
           {" ("}{[watch.confirm && "EMA10", watch.macd && "MACD"].filter(Boolean).join(" or ") || "extreme only"}{")"}
-          {" "}— a proposal appears in Pending approval when a pair confirms.
-          {watch.last_result && <span className="text-emerald-400/70"> · last: {watch.last_result}</span>}
+          {watch.auto_approve
+            ? " — ⚡ AUTO-APPROVE ON: a confirmed pair is OPENED automatically (all gates still apply)."
+            : " — a proposal appears in Pending approval when a pair confirms."}
+          {watch.last_result && <span className="opacity-70"> · last: {watch.last_result}</span>}
         </div>
       )}
 
@@ -195,11 +239,11 @@ export function RsiOverPanel({ onStaged, onSelect }: {
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             <div className="text-xs text-neutral-500">
-              No confirmed setup · scanned {result.scanned}. Closest to the extremes (click to open on the chart):
+              No confirmed setup · scanned {result.scanned}. Closest to the extremes — click a pair to open it on the chart:
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Candidates label="Overbought → short" tone="bear" items={result.candidates?.overbought} onSelect={onSelect} />
               <Candidates label="Oversold → long" tone="bull" items={result.candidates?.oversold} onSelect={onSelect} />
             </div>

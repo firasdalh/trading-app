@@ -2,7 +2,21 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
-import type { CalibrationBucket, JournalStats, ReflectionReport } from "../types";
+import type { CalibrationBucket, GroupStat, JournalBreakdown, JournalStats, PeriodBreakdown, ReflectionReport } from "../types";
+
+// A friendly label + colour for each trade source (who opened it).
+const SOURCE_META: Record<string, { label: string; color: string }> = {
+  ai: { label: "AI decision", color: "text-violet-300" },
+  rsi_over: { label: "RSI-Over", color: "text-sky-300" },
+  armed: { label: "Armed break", color: "text-amber-300" },
+  hybrid: { label: "Hybrid", color: "text-emerald-300" },
+  manual: { label: "Manual", color: "text-neutral-200" },
+  deterministic: { label: "Deterministic", color: "text-blue-300" },
+  supertrend: { label: "SuperTrend", color: "text-teal-300" },
+  unknown: { label: "Unknown", color: "text-neutral-500" },
+};
+const srcLabel = (s: string) => SOURCE_META[s]?.label ?? s;
+const srcColor = (s: string) => SOURCE_META[s]?.color ?? "text-neutral-300";
 
 // Midpoint of a "70-80%" bucket label, used to judge whether the realized win rate matches the
 // confidence the engine assigned (the whole point of calibration).
@@ -28,6 +42,7 @@ export function JournalView() {
   const { data: trades } = usePolling(() => api.journalTrades(100), 8000, [bump]);
   const { data: calib } = usePolling(() => api.journalCalibration(), 10000, [bump]);
   const { data: perf } = usePolling(() => api.journalStats(), 10000, [bump]);
+  const { data: breakdown } = usePolling(() => api.journalBreakdown(), 10000, [bump]);
   const [reflection, setReflection] = useState<ReflectionReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -157,6 +172,8 @@ export function JournalView() {
 
       <PerformanceCard perf={perf} />
 
+      <BreakdownCard breakdown={breakdown} />
+
       <CalibrationCard calib={calib} />
 
       <div className="card">
@@ -189,6 +206,7 @@ export function JournalView() {
               <thead className="sticky top-0 bg-neutral-900 text-left text-xs text-neutral-400">
                 <tr>
                   <th className="py-1 pr-3">Closed</th><th className="pr-3">Symbol</th><th className="pr-3">Side</th>
+                  <th className="pr-3">Source</th>
                   <th className="pr-3 text-right">Qty</th><th className="pr-3 text-right">Entry</th>
                   <th className="pr-3 text-right">Exit</th><th className="text-right">Realized P&amp;L</th>
                 </tr>
@@ -199,6 +217,7 @@ export function JournalView() {
                     <td className="py-1 pr-3 text-neutral-400">{fmtDate(t.closed_at)}</td>
                     <td className="pr-3">{t.symbol}</td>
                     <td className={`pr-3 ${t.direction === "long" ? "text-bull" : "text-bear"}`}>{t.direction}</td>
+                    <td className={`pr-3 text-xs ${srcColor(t.source ?? "unknown")}`}>{srcLabel(t.source ?? "unknown")}</td>
                     <td className="pr-3 text-right tabular-nums">{t.qty}</td>
                     <td className="pr-3 text-right tabular-nums">{fmtPrice(t.entry_price)}</td>
                     <td className="pr-3 text-right tabular-nums">{fmtPrice(t.last_price)}</td>
@@ -211,6 +230,112 @@ export function JournalView() {
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---- Breakdown: who's making money (by source / pair / time) ----
+const pctText = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}%`);
+const rText = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}R`);
+
+function StatTable({ rows, firstCol, nameFn, nameCls }: {
+  rows: GroupStat[];
+  firstCol: string;
+  nameFn?: (l: string) => string;
+  nameCls?: (l: string) => string;
+}) {
+  return (
+    <table className="w-full whitespace-nowrap text-sm">
+      <thead className="text-left text-xs text-neutral-400">
+        <tr>
+          <th className="py-1 pr-3">{firstCol}</th>
+          <th className="pr-3 text-right">Trades</th>
+          <th className="pr-3 text-right">Win rate</th>
+          <th className="pr-3 text-right">Net P&amp;L</th>
+          <th className="pr-3 text-right">Avg R</th>
+          <th className="text-right">Total R</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((g) => (
+          <tr key={g.label} className="border-t border-neutral-800">
+            <td className={`py-1 pr-3 ${nameCls ? nameCls(g.label) : ""}`}>{nameFn ? nameFn(g.label) : g.label}</td>
+            <td className="pr-3 text-right tabular-nums">{g.trades}</td>
+            <td className="pr-3 text-right tabular-nums">
+              {pctText(g.win_rate)} <span className="text-neutral-600">({g.wins}/{g.trades})</span>
+            </td>
+            <td className={`pr-3 text-right tabular-nums ${g.net_pnl >= 0 ? "text-bull" : "text-bear"}`}>
+              {fmtUsd(g.net_pnl, { sign: true })}
+            </td>
+            <td className={`pr-3 text-right tabular-nums ${(g.avg_r ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>{rText(g.avg_r)}</td>
+            <td className={`text-right tabular-nums ${(g.total_r ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>{rText(g.total_r)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function BreakdownCard({ breakdown }: { breakdown: JournalBreakdown | null }) {
+  const [period, setPeriod] = useState<"daily" | "weekly" | "monthly">("daily");
+  if (!breakdown || breakdown.by_source.length === 0) return null;
+  const buckets: PeriodBreakdown[] = breakdown[period];
+  return (
+    <div className="card space-y-4">
+      <div className="text-sm font-semibold">Breakdown — who's making money</div>
+
+      <div>
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">By source (all-time)</div>
+        <StatTable firstCol="Source" rows={breakdown.by_source} nameFn={srcLabel} nameCls={srcColor} />
+      </div>
+
+      <div>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Over time</span>
+          <div className="flex gap-1">
+            {(["daily", "weekly", "monthly"] as const).map((p) => (
+              <button key={p} onClick={() => setPeriod(p)}
+                className={`rounded px-2 py-0.5 text-xs capitalize ${period === p ? "bg-neutral-700 text-white" : "bg-neutral-900 text-neutral-400 hover:text-neutral-200"}`}>
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+        {buckets.length === 0 ? (
+          <div className="text-xs text-neutral-500">No closed trades yet.</div>
+        ) : (
+          <div className="max-h-[24rem] space-y-2 overflow-auto pr-1">
+            {buckets.map((b) => (
+              <div key={b.period} className="rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2">
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span className="font-semibold">{b.period}</span>
+                  <span className="flex items-center gap-3 text-xs">
+                    <span className="text-neutral-400">{b.total.trades} trades · {pctText(b.total.win_rate)} win</span>
+                    <span className={b.total.net_pnl >= 0 ? "text-bull" : "text-bear"}>{fmtUsd(b.total.net_pnl, { sign: true })}</span>
+                    <span className={(b.total.total_r ?? 0) >= 0 ? "text-bull" : "text-bear"}>{rText(b.total.total_r)}</span>
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {b.sources.map((s) => (
+                    <span key={s.label} className="rounded border border-neutral-700 px-1.5 py-0.5 text-[11px] tabular-nums">
+                      <span className={srcColor(s.label)}>{srcLabel(s.label)}</span>{" "}
+                      <span className="text-neutral-500">{s.wins}/{s.trades}</span>{" "}
+                      <span className={s.net_pnl >= 0 ? "text-bull" : "text-bear"}>{fmtUsd(s.net_pnl, { sign: true })}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">By pair (all-time)</div>
+        <div className="max-h-[20rem] overflow-auto pr-1">
+          <StatTable firstCol="Pair" rows={breakdown.by_pair} />
+        </div>
       </div>
     </div>
   );

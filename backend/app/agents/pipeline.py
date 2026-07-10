@@ -38,7 +38,8 @@ def _timeframes_for(primary: str) -> list[str]:
 
 def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
                    use_llm: bool = False, cache=None, read_llm: bool | None = None,
-                   rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False):
+                   rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
+                   rsi_div: bool = False, rsi_trend_filter: bool = True):
     """Analyse a symbol and run it through the Risk Manager WITHOUT persisting or executing —
     used to rank opportunities across the watchlist. Returns (proposal, risk_decision).
 
@@ -69,7 +70,8 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
-                                rsi_confirm=rsi_confirm, rsi_macd=rsi_macd)
+                                rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
+                                rsi_trend_filter=rsi_trend_filter)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
@@ -106,6 +108,7 @@ def _maybe_auto_execute(session: Session, record: TradeProposalRecord, broker) -
 def analyze_symbol(
     session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
     use_llm: bool = True, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
+    rsi_div: bool = False, rsi_trend_filter: bool = True, source: str | None = None,
 ) -> AnalyzeResponse:
     """Run the full pipeline for one symbol. ``use_llm=False`` forces the deterministic
     agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
@@ -139,7 +142,8 @@ def analyze_symbol(
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
-                                rsi_confirm=rsi_confirm, rsi_macd=rsi_macd)
+                                rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
+                                rsi_trend_filter=rsi_trend_filter)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         det_proposal = proposal   # keep the deterministic call for the shadow scorecard
@@ -154,7 +158,11 @@ def analyze_symbol(
         record_shadow(session, symbol, asset_class.value, timeframe, now,
                       ind0.get("last_close"), ind0.get("atr14"), proposal, det_proposal)
 
-    # 3. Persist the proposal + full reasoning bundle (audit trail).
+    # 3. Persist the proposal + full reasoning bundle (audit trail). The SOURCE (who opened it) is the
+    # caller's explicit hint (hybrid/rsi_over/manual) or, failing that, derived from the active mode so
+    # the journal can compare win rate + P&L by mechanism.
+    origin = source or ("rsi_over" if rsi_over else "supertrend" if settings.st_band_mode
+                        else "ai" if ai_decides else "deterministic")
     record = TradeProposalRecord(
         symbol=symbol,
         asset_class=asset_class.value,
@@ -166,6 +174,7 @@ def analyze_symbol(
         confidence=proposal.confidence,
         rationale=proposal.rationale,
         review_decision=proposal.review_decision,
+        source=origin,
         watch=proposal.watch,
         reasoning={
             "technical": technical.model_dump(mode="json"),

@@ -314,13 +314,24 @@ export const api = {
   reflectionLatest: () => request<ReflectionReport | null>("/api/journal/reflection/latest"),
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
   journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
+  journalBreakdown: () => request<import("../types").JournalBreakdown>("/api/journal/breakdown"),
 
   // RSI-Over strategy: sweep all available pairs on `timeframe` for the first RSI-extreme reversal
   // (EMA10-confirmed when `confirm`) and stage it (Mode A queues it). "" timeframe -> default 1h.
-  rsiOverScan: (timeframe?: string, confirm = true, macd = false) =>
+  rsiOverScan: (
+    timeframe?: string,
+    opts: { confirm?: boolean; macd?: boolean; rsiDiv?: boolean; trendFilter?: boolean; autoApprove?: boolean } = {},
+  ) =>
     request<import("../types").RsiOverScanResult>("/api/rsi-over/scan", {
       method: "POST",
-      body: JSON.stringify({ timeframe: timeframe || null, confirm, macd }),
+      body: JSON.stringify({
+        timeframe: timeframe || null,
+        confirm: opts.confirm ?? true,
+        macd: opts.macd ?? false,
+        rsi_div: opts.rsiDiv ?? false,
+        trend_filter: opts.trendFilter ?? true,
+        auto_approve: opts.autoApprove ?? false,
+      }),
     }),
   rsiOverConfig: () => request<import("../types").RsiOverConfig>("/api/rsi-over/config"),
   setRsiOverConfig: (cfg: Partial<import("../types").RsiOverConfig>) =>

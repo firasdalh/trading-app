@@ -650,81 +650,97 @@ def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) 
     return base
 
 
-def _rsi_over_trigger(confirm: bool, macd: bool, ema_ok: bool,
-                      macd_ok: bool, macd_kind: str) -> str | None:
+def _rsi_over_trigger(confirm: bool, macd: bool, rsi_div: bool,
+                      ema_ok: bool, macd_ok: bool, div_ok: bool, macd_kind: str) -> str | None:
     """Which confirmation(s) fired for an RSI-Over entry, as a label — or None if not confirmed yet.
-    EMA10 is the STRONG confirm; MACD (cross or divergence) is the EARLY one. With both enabled the
-    entry fires on EITHER (whichever confirms first = the earlier pullback entry)."""
-    if not confirm and not macd:
+    EMA10 is the STRONG confirm; MACD (cross/divergence) is the EARLY one; RSI divergence is the
+    exhaustion tell. With several enabled, the entry fires on EITHER (whichever confirms first)."""
+    if not confirm and not macd and not rsi_div:
         return "RSI extreme only"
     parts = []
     if confirm and ema_ok:
         parts.append("EMA10 close")
     if macd and macd_ok:
         parts.append(f"MACD {macd_kind}")
+    if rsi_div and div_ok:
+        parts.append("RSI divergence")
     return " + ".join(parts) if parts else None
 
 
 def _rsi_over_decision(base: TradeProposal, ind: dict, tf0, symbol: str,
-                       confirm: bool = True, macd: bool = False) -> TradeProposal:
+                       confirm: bool = True, macd: bool = False, rsi_div: bool = False,
+                       trend_filter: bool = True, macro: str = "sideways") -> TradeProposal:
     """Mechanical RSI-extreme mean-reversion. RSI >= _RSI_OVER_OB (overbought) -> SHORT; RSI <=
-    _RSI_OVER_OS (oversold) -> LONG. The entry needs a confirmation of the turn:
+    _RSI_OVER_OS (oversold) -> LONG. The entry needs a confirmation of the turn (OR of the enabled):
       confirm (EMA10, default) = a close back through EMA10 — the STRONG, later confirmation;
-      macd                     = a MACD signal-line cross OR a divergence — the EARLY pullback entry.
-    With both on, EITHER confirms (the earlier one gets you in). With neither, the RSI extreme alone
-    fires. Stop sits just beyond the recent swing (± ATR buffer); target is _RSI_OVER_TP_R x the risk.
-    The deterministic Risk Manager still sizes + gates every signal."""
+      macd                     = a MACD signal-line cross OR MACD divergence — the EARLY entry;
+      rsi_div                  = an RSI divergence (price extreme, momentum not = the exhaustion tell).
+    ``trend_filter`` (default) REFUSES a fade AGAINST a clear higher-timeframe trend (``macro``) — the
+    #1 protection against fading a runaway. Stop sits just beyond the recent swing; target _RSI_OVER_TP_R
+    x the risk. The deterministic Risk Manager still sizes + gates every signal."""
     base.strategy = "rsi_over"
     r = ind.get("rsi14")
     ema10 = ind.get("ema10")
     last = ind.get("last_close")
     atr_v = ind.get("atr14") or 0.0
     rec_hi, rec_lo = ind.get("recent_high"), ind.get("recent_low")
-    cross = ind.get("macd_cross") or 0.0
-    div_bull = ind.get("macd_div_bull") or 0.0
-    div_bear = ind.get("macd_div_bear") or 0.0
+    m_cross = ind.get("macd_cross") or 0.0
+    m_div_bull, m_div_bear = ind.get("macd_div_bull") or 0.0, ind.get("macd_div_bear") or 0.0
+    r_div_bull, r_div_bear = ind.get("div_bull") or 0.0, ind.get("div_bear") or 0.0  # RSI divergence
     if r is None or last is None or (confirm and ema10 is None):
         base.rationale = ("RSI-Over: not enough data (need RSI14"
                           + (", EMA10" if confirm else "") + ", last close).")
         return base
 
-    buf = _RSI_OVER_BUF_ATR * atr_v
-    if r >= _RSI_OVER_OB:  # overbought -> expect DOWN -> SHORT
+    # --- direction from the RSI extreme ---
+    if r >= _RSI_OVER_OB:
+        direction, is_long, zone, opp = Direction.SHORT, False, "overbought", "up"
         ema_ok = ema10 is not None and last < ema10
-        macd_ok = cross == -1.0 or div_bear == 1.0
-        macd_kind = "cross" if cross == -1.0 else ("divergence" if div_bear == 1.0 else "")
-        trig = _rsi_over_trigger(confirm, macd, ema_ok, macd_ok, macd_kind)
-        if trig is None:
-            base.rationale = (f"RSI-Over: RSI {r:.0f} overbought but the turn has not confirmed yet "
-                              f"(waiting for {'EMA10 close' if confirm else ''}"
-                              f"{' or ' if confirm and macd else ''}{'a MACD cross/divergence' if macd else ''}).")
-            return base
-        direction, is_long = Direction.SHORT, False
-        stop = (rec_hi + buf) if rec_hi is not None else (last + 1.5 * atr_v)
-        if stop <= last:  # a short's stop must sit ABOVE entry
-            stop = last + 1.5 * atr_v
-        risk = stop - last
-        tp = last - _RSI_OVER_TP_R * risk
-    elif r <= _RSI_OVER_OS:  # oversold -> expect UP -> LONG
+        macd_ok = m_cross == -1.0 or m_div_bear == 1.0
+        macd_kind = "cross" if m_cross == -1.0 else ("divergence" if m_div_bear == 1.0 else "")
+        div_ok = r_div_bear == 1.0
+    elif r <= _RSI_OVER_OS:
+        direction, is_long, zone, opp = Direction.LONG, True, "oversold", "down"
         ema_ok = ema10 is not None and last > ema10
-        macd_ok = cross == 1.0 or div_bull == 1.0
-        macd_kind = "cross" if cross == 1.0 else ("divergence" if div_bull == 1.0 else "")
-        trig = _rsi_over_trigger(confirm, macd, ema_ok, macd_ok, macd_kind)
-        if trig is None:
-            base.rationale = (f"RSI-Over: RSI {r:.0f} oversold but the turn has not confirmed yet "
-                              f"(waiting for {'EMA10 close' if confirm else ''}"
-                              f"{' or ' if confirm and macd else ''}{'a MACD cross/divergence' if macd else ''}).")
-            return base
-        direction, is_long = Direction.LONG, True
-        stop = (rec_lo - buf) if rec_lo is not None else (last - 1.5 * atr_v)
-        if stop >= last:  # a long's stop must sit BELOW entry
-            stop = last - 1.5 * atr_v
-        risk = last - stop
-        tp = last + _RSI_OVER_TP_R * risk
+        macd_ok = m_cross == 1.0 or m_div_bull == 1.0
+        macd_kind = "cross" if m_cross == 1.0 else ("divergence" if m_div_bull == 1.0 else "")
+        div_ok = r_div_bull == 1.0
     else:
         base.rationale = (f"RSI-Over: RSI {r:.0f} is not in an extreme zone "
                           f"(need >= {_RSI_OVER_OB:.0f} or <= {_RSI_OVER_OS:.0f}).")
         return base
+
+    # --- #1 TREND FILTER: don't fade AGAINST a clear higher-timeframe trend (a fade into a runaway
+    # is how RSI mean-reversion blows up). Only fade WITH or neutral to the higher TF. ---
+    if trend_filter and macro == opp:
+        base.rationale = (f"RSI-Over: RSI {r:.0f} {zone}, but NOT fading against the higher-timeframe "
+                          f"{macro}trend — a {direction.value} here fights the trend (a pullback in a "
+                          f"trend, not a top/bottom). Standing aside.")
+        return base
+
+    # --- confirmation (OR of the enabled sources) ---
+    trig = _rsi_over_trigger(confirm, macd, rsi_div, ema_ok, macd_ok, div_ok, macd_kind)
+    if trig is None:
+        waits = [w for w, on in (("EMA10 close", confirm), ("a MACD cross/divergence", macd),
+                                 ("an RSI divergence", rsi_div)) if on]
+        base.rationale = (f"RSI-Over: RSI {r:.0f} {zone} but the turn has not confirmed yet "
+                          f"(waiting for {' or '.join(waits)}).")
+        return base
+
+    # --- stop just beyond the recent swing; target _RSI_OVER_TP_R x the risk ---
+    buf = _RSI_OVER_BUF_ATR * atr_v
+    if is_long:
+        stop = (rec_lo - buf) if rec_lo is not None else (last - 1.5 * atr_v)
+        if stop >= last:
+            stop = last - 1.5 * atr_v
+        risk, tp = last - stop, None
+        tp = last + _RSI_OVER_TP_R * risk
+    else:
+        stop = (rec_hi + buf) if rec_hi is not None else (last + 1.5 * atr_v)
+        if stop <= last:
+            stop = last + 1.5 * atr_v
+        risk = stop - last
+        tp = last - _RSI_OVER_TP_R * risk
 
     if risk <= 0:
         base.rationale = "RSI-Over: invalid stop distance (no room between entry and the recent swing)."
@@ -733,9 +749,8 @@ def _rsi_over_decision(base: TradeProposal, ind: dict, tf0, symbol: str,
     base.entry, base.stop_loss, base.take_profit = round(last, 6), round(stop, 6), round(tp, 6)
     base.confidence = 0.7
     base.rationale = (
-        f"RSI-Over {direction.value.upper()}: RSI {r:.0f} "
-        f"{'overbought' if not is_long else 'oversold'} — confirmed by {trig}. "
-        f"Stop beyond the recent {'high' if not is_long else 'low'} {base.stop_loss}, "
+        f"RSI-Over {direction.value.upper()}: RSI {r:.0f} {zone} — confirmed by {trig}. "
+        f"Stop beyond the recent {'low' if is_long else 'high'} {base.stop_loss}, "
         f"target {base.take_profit} ({_RSI_OVER_TP_R:.1f}R)."
     )
     return base
@@ -745,11 +760,11 @@ def _deterministic_decision(
     symbol: str, asset_class: AssetClass, timeframe: str,
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
     trend_only: bool = False, st_band: bool = False, rsi_over: bool = False,
-    rsi_confirm: bool = True, rsi_macd: bool = False,
+    rsi_confirm: bool = True, rsi_macd: bool = False, rsi_div: bool = False, rsi_trend_filter: bool = True,
     disable: frozenset[str] = frozenset(),
 ) -> TradeProposal:
     # ``disable`` is a BACKTEST-ONLY filter-ablation switch (the live path never passes it): naming a
-    # gate ("mtf", "momentum", "structure", "volatility", "divergence", "minrr") skips it, so the
+    # gate ("mtf", "momentum", "structure", "volatility", "divergence", "minrr", "rsi_extreme") skips it, so the
     # backtest can measure each filter's contribution (keep it if removing it hurts).
     base = TradeProposal(
         symbol=symbol, asset_class=asset_class, timeframe=timeframe,
@@ -782,9 +797,11 @@ def _deterministic_decision(
     # SuperTrend-band breakout mode: a dedicated mechanical strategy replaces the swing logic.
     if st_band:
         return _supertrend_band_decision(base, ind, tf0, symbol)
-    # RSI-Over mode: a dedicated mechanical RSI-extreme mean-reversion, confirmed by EMA10.
+    # RSI-Over mode: a dedicated mechanical RSI-extreme mean-reversion, confirmed by EMA10/MACD/RSI-div
+    # and (default) filtered against fading a strong higher-timeframe trend.
     if rsi_over:
-        return _rsi_over_decision(base, ind, tf0, symbol, confirm=rsi_confirm, macd=rsi_macd)
+        return _rsi_over_decision(base, ind, tf0, symbol, confirm=rsi_confirm, macd=rsi_macd,
+                                  rsi_div=rsi_div, trend_filter=rsi_trend_filter, macro=macro)
     # Trend-only mode: only trade a CLEAR trend (ADX >= 25 -> "trending"); stand aside in moderate /
     # ranging / volatile. Backtests show the trend regime is the edge while moderate+ranging are net
     # drags (same return, ~40% more drawdown when included). The live default comes from the setting.
@@ -923,6 +940,35 @@ def _deterministic_decision(
         base.rationale = (
             f"Momentum divergence against the {direction.value} with price extended (RSI {rsi}) — "
             "exhaustion risk. Waiting for momentum to realign before entering."
+        )
+        return base
+
+    # --- RSI overextension (respect the pullback): entering a trend LONG at an overbought RSI (or a
+    # SHORT at oversold) is chasing into a likely pullback. Unless it's a STRONG trend (ADX>=strong)
+    # with momentum STILL confirming — a real trend can ride an extreme — don't take the market entry;
+    # ARM a pullback-resumption so we join on the dip/bounce when the trend resumes, instead of
+    # chasing. (Ablation switch: "rsi_extreme" in `disable` skips this.) ---
+    # (Momentum meaningfully ROLLING OVER at the trend was already caught + armed above, so here it's
+    # with-or-flat; a STRONG trend riding the extreme is the only case we still let enter at market.)
+    rsi_extreme = rsi is not None and (
+        (direction == Direction.LONG and rsi >= _RSI_TREND_OB)
+        or (direction == Direction.SHORT and rsi <= _RSI_TREND_OS)
+    )
+    strong_trend = adx_v is not None and adx_v >= _ADX_STRONG
+    if rsi_extreme and not strong_trend and "rsi_extreme" not in disable:
+        base.watch = True
+        px = ind.get("last_close") or 0.0
+        base.conditional = _conditional_resumption(
+            direction, px, ind, atr_v, _key_levels(technical, tf0, px),
+            round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+        zone = "overbought" if direction == Direction.LONG else "oversold"
+        dip = "dip" if direction == Direction.LONG else "bounce"
+        armed_note = (f"Armed a {direction.value} pullback-resumption to join on the {dip}."
+                      if base.conditional is not None
+                      else f"Waiting for the {dip} (no clean break level to arm yet).")
+        base.rationale = (
+            f"{direction.value.upper()} trend but RSI {round(rsi)} is {zone} — a pullback is likely and "
+            f"the trend isn't strong-enough-with-momentum to ride it, so not chasing at market. {armed_note}"
         )
         return base
 
@@ -1258,6 +1304,7 @@ def run_orchestrator(
     technical: TechnicalRead, fundamental: FundamentalRead,
     now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
     st_band: bool = False, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
+    rsi_div: bool = False, rsi_trend_filter: bool = True,
     ai_review: bool = True,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
@@ -1276,7 +1323,8 @@ def run_orchestrator(
 
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
                                        trend_only=trend_only, st_band=st_band, rsi_over=rsi_over,
-                                       rsi_confirm=rsi_confirm, rsi_macd=rsi_macd)
+                                       rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
+                                       rsi_trend_filter=rsi_trend_filter)
 
     # SuperTrend-band and RSI-Over are purely mechanical strategies — no LLM confirm/veto over them.
     # ai_review=False takes the AI out of the trade decision entirely (the deterministic engine +

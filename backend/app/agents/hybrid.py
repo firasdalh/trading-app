@@ -191,7 +191,7 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
 
     # --- 3. full analysis (the AI decider re-decides the best on its own levels) then auto-open ---
     res = analyze_symbol(session, best.symbol, AssetClass(best.asset_class),
-                         tf_override or best.timeframe, use_llm=True)
+                         tf_override or best.timeframe, use_llm=True, source="hybrid")
     record = session.get(TradeProposalRecord, res.proposal_id)
     if record is None:
         return done(f"{best.symbol}: proposal vanished")
