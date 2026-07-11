@@ -140,6 +140,8 @@ DET_FILTERS = [
      "desc": "Down-weight entries stretched far from EMA20 in ATRs — the top filter against buying the top / selling the bottom."},
     {"key": "adx", "label": "ADX trend strength",
      "desc": "Only take trend entries when the trend is strong enough (ADX ≥ 23) — stand aside in the forming band (ADX 20–23); ranging (< 20) fades the range instead. This is Trend-only mode."},
+    {"key": "ema200", "label": "Long-term trend (EMA200)",
+     "desc": "Prefer trades on the right side of the 200-EMA (with the long-term trend); down-weight entries against it."},
     {"key": "momentum", "label": "MACD momentum",
      "desc": "Momentum must align; if it's rolling over, arm the pullback instead of entering into it."},
     {"key": "macd_rising", "label": "MACD histogram rising",
@@ -152,6 +154,8 @@ DET_FILTERS = [
      "desc": "Stand aside in a chaotic volatility expansion with no trend (whipsaw zone)."},
     {"key": "wall", "label": "S/R wall + volume",
      "desc": "Penalise chasing into a nearby S/R wall; reward a volume-backed break behind the entry."},
+    {"key": "session", "label": "Session / liquidity",
+     "desc": "Lean into the liquid trading sessions; discount thin-hour entries (wider spreads, more noise / lower quality)."},
     {"key": "minrr", "label": "Minimum reward:risk",
      "desc": "Require a minimum R:R at market entry, else arm the better-priced break/pullback."},
 ]
@@ -1123,7 +1127,7 @@ def _deterministic_decision(
         conf += 0.05 if direction == Direction.LONG else -0.05
     elif bias == TradingBias.BEARISH:
         conf += 0.05 if direction == Direction.SHORT else -0.05
-    if macro == trend:
+    if macro == trend and "mtf" not in disable:
         conf += 0.15  # higher-timeframe agrees
     if adx_v is not None and adx_v >= _ADX_STRONG:
         conf += 0.1
@@ -1143,7 +1147,7 @@ def _deterministic_decision(
         (direction == Direction.LONG and macro_macd < 0) or
         (direction == Direction.SHORT and macro_macd > 0)
     )
-    if macro_conflict:
+    if macro_conflict and "mtf" not in disable:
         conf -= 0.1
     # Entry LOCATION (anti-chase, graded): score the entry by its distance from value (EMA20) in
     # ATRs. A pullback to value is the pro's entry (reward it); the further it's stretched the more
@@ -1196,33 +1200,37 @@ def _deterministic_decision(
     # computed (it powers the wall breakout bonus above and the 🗺️ Read scorecard), just not scored.
     # The WALL-proximity factor (tested alongside) DID help both IS and OOS and is kept, above.
     rsi = ind.get("rsi14")
-    if rsi is not None and ((direction == Direction.LONG and rsi >= _RSI_OB)
-                            or (direction == Direction.SHORT and rsi <= _RSI_OS)):
+    if rsi is not None and "rsi_extreme" not in disable and (
+            (direction == Direction.LONG and rsi >= _RSI_OB)
+            or (direction == Direction.SHORT and rsi <= _RSI_OS)):
         conf -= 0.1  # entering when already stretched
+    # Long-term trend (EMA200): reward being on the right side of the 200-EMA, penalise against it.
     e200 = ind.get("ema200")
-    if e200:
+    if e200 and "ema200" not in disable:
         regime_ok = (direction == Direction.LONG and entry >= e200) or \
                     (direction == Direction.SHORT and entry <= e200)
         conf += 0.05 if regime_ok else -0.05
     # Market structure: aligned swings (HH/HL for a long, LH/LL for a short) add real conviction;
     # trading against structure or right after a change-of-character (CHoCH) subtracts it. This is
     # the chart-reader's "is price action actually confirming this?" check.
-    if struct != "range":
-        aligned = (direction == Direction.LONG and struct == "up") or (
-            direction == Direction.SHORT and struct == "down"
-        )
-        conf += 0.1 if aligned else -0.1
-    if ind.get("choch"):
-        conf -= 0.1
+    if "structure" not in disable:
+        if struct != "range":
+            aligned = (direction == Direction.LONG and struct == "up") or (
+                direction == Direction.SHORT and struct == "down"
+            )
+            conf += 0.1 if aligned else -0.1
+        if ind.get("choch"):
+            conf -= 0.1
     # RSI divergence: regular divergence AGAINST the trade is exhaustion (down-weight); hidden
     # divergence WITH the trade is continuation confirmation (up-weight).
-    if div_against:
-        conf -= 0.12
-    if div_with:
-        conf += 0.07
+    if "divergence" not in disable:
+        if div_against:
+            conf -= 0.12
+        if div_with:
+            conf += 0.07
     # Regime: a clean trend is the engine's edge; a volatile (expanding, trendless) tape is lower
     # conviction even when a setup forms.
-    if regime == "volatile":
+    if regime == "volatile" and "volatility" not in disable:
         conf -= 0.1
     # Session/liquidity: lean into the liquid windows, discount thin hours (noise, wide spreads).
     # Thin-hour entries validated as materially lower-quality (backtest: ~+0.10R vs ~+0.24R in
@@ -1230,10 +1238,11 @@ def _deterministic_decision(
     # under-modelled — so the thin discount is DOUBLED to -0.10. This is a soft filter: a strong thin
     # setup still clears the confidence bar; a marginal one now falls below it (esp. the 70% Hybrid gate).
     session_q, _session_note = _session_quality(asset_class, symbol, now)
-    if session_q == "active":
-        conf += 0.05
-    elif session_q == "thin":
-        conf -= 0.10
+    if "session" not in disable:
+        if session_q == "active":
+            conf += 0.05
+        elif session_q == "thin":
+            conf -= 0.10
     confidence = round(max(0.05, min(0.95, conf)), 2)
 
     # Carry a conditional ('wait') entry so the trade can be ARMED rather than chased — computed

@@ -86,7 +86,6 @@ export const api = {
   advisorConfig: (cfg: {
     enabled?: boolean;
     auto_execute?: boolean;
-    auto_reenter?: boolean;
     interval_seconds?: number;
   }) =>
     request<AdvisorState>("/api/positions/advisor/config", {
@@ -125,23 +124,32 @@ export const api = {
     symbol: string;
     asset_class: AssetClass;
     direction: "long" | "short";
-    stop_loss: number;
-    take_profit?: number | null;
+    stop_loss?: number | null;   // omit → auto ATR stop (Risk Manager still sizes at 3%)
+    take_profit?: number | null; // omit → default R-multiple target
     entry?: number | null;
     lots?: number | null;
+    timeframe?: string;          // timeframe the auto ATR stop is measured on
     execute?: boolean;
   }) => request<AnalyzeResponse>("/api/proposals/manual", { method: "POST", body: JSON.stringify(body) }),
-  // Risk-size a manual ticket WITHOUT placing it — returns the max lots at the 3% cap + $ risk.
+  // Risk-size a manual ticket WITHOUT placing it — returns the max lots at the 3% cap + $ risk, plus
+  // the stop/target that will be used (auto-derived when no stop is given).
   manualPreview: (body: {
     symbol: string;
     asset_class: AssetClass;
     direction: "long" | "short";
-    stop_loss: number;
+    stop_loss?: number | null;
+    timeframe?: string;
   }) =>
-    request<{ entry: number; approved: boolean; max_lots: number; risk_amount: number; reason: string }>(
-      "/api/proposals/manual/preview",
-      { method: "POST", body: JSON.stringify(body) },
-    ),
+    request<{
+      entry: number;
+      stop_loss: number;
+      take_profit: number;
+      auto_levels: boolean;
+      approved: boolean;
+      max_lots: number;
+      risk_amount: number;
+      reason: string;
+    }>("/api/proposals/manual/preview", { method: "POST", body: JSON.stringify(body) }),
   explainReview: (text: string, lang: "en" | "ar") =>
     request<ExplainedReview>("/api/proposals/explain", {
       method: "POST",

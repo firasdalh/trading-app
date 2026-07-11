@@ -1,49 +1,82 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import { fmtUsd } from "../format";
+import { fmtPrice, fmtUsd } from "../format";
 import type { AssetClass } from "../types";
 
 /**
- * Manual QUICK trade ticket. The user places a trade directly, but it ALWAYS runs through the
- * deterministic Risk Manager (sizing + 3% cap, exposure, correlation, cooldown, daily-loss breaker,
- * anti-stacking) and the execution gates (kill-switch, live-confirmation). Nothing here bypasses risk.
+ * Manual QUICK trade ticket — one click to open at market. No stop/target needed up front: the
+ * Risk Manager sizes the lots at the 3% cap off an AUTO ATR stop, and both the stop and a default
+ * target are placed on the chart as draggable bars you fine-tune after the fill. It still ALWAYS
+ * runs through the deterministic Risk Manager (sizing + 3% cap, exposure, correlation, cooldown,
+ * daily-loss breaker, anti-stacking) and the execution gates (kill-switch, live-confirmation).
+ * Nothing here bypasses risk. An "advanced" disclosure lets you type exact levels if you want.
  */
 export function QuickTradePanel({
   symbol,
   assetClass,
+  timeframe,
   onPlaced,
 }: {
   symbol: string;
   assetClass: AssetClass;
+  timeframe: string;
   onPlaced?: () => void;
 }) {
   const [dir, setDir] = useState<"long" | "short">("long");
+  const [advanced, setAdvanced] = useState(false);
   const [stop, setStop] = useState("");
   const [target, setTarget] = useState("");
   const [lots, setLots] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [maxInfo, setMaxInfo] = useState<{ lots: number; risk: number; approved: boolean; reason: string } | null>(null);
+  const [preview, setPreview] = useState<{
+    entry: number;
+    stop_loss: number;
+    take_profit: number;
+    auto_levels: boolean;
+    lots: number;
+    risk: number;
+    approved: boolean;
+    reason: string;
+  } | null>(null);
 
-  // Risk-size the ticket (no placement) so we can suggest the max lots at the 3% cap.
-  const refreshMax = async (nextDir = dir, nextStop = stop) => {
-    const sl = Number(nextStop);
-    if (!sl || sl <= 0) {
-      setMaxInfo(null);
-      return;
-    }
+  // Risk-size the ticket (no placement) so we can show the auto stop/target + max lots at the 3% cap.
+  // With no manual stop, the backend derives an ATR stop and a default target — mirror that here.
+  const refreshPreview = async (nextDir = dir, nextStop = stop) => {
+    const sl = advanced && Number(nextStop) > 0 ? Number(nextStop) : undefined;
     try {
-      const p = await api.manualPreview({ symbol, asset_class: assetClass, direction: nextDir, stop_loss: sl });
-      setMaxInfo({ lots: p.max_lots, risk: p.risk_amount, approved: p.approved, reason: p.reason });
+      const p = await api.manualPreview({
+        symbol,
+        asset_class: assetClass,
+        direction: nextDir,
+        stop_loss: sl,
+        timeframe,
+      });
+      setPreview({
+        entry: p.entry,
+        stop_loss: p.stop_loss,
+        take_profit: p.take_profit,
+        auto_levels: p.auto_levels,
+        lots: p.max_lots,
+        risk: p.risk_amount,
+        approved: p.approved,
+        reason: p.reason,
+      });
     } catch {
-      setMaxInfo(null); // wrong-side stop etc. — just hide the suggestion
+      setPreview(null); // wrong-side stop etc. — just hide the suggestion
     }
   };
 
+  // Refresh the preview whenever the pair/timeframe/direction changes (and on mount).
+  useEffect(() => {
+    void refreshPreview(dir, stop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, assetClass, timeframe, dir, advanced]);
+
   const place = async () => {
-    const sl = Number(stop);
-    if (!sl || sl <= 0) {
-      setResult({ ok: false, text: "Enter a stop-loss price (the Risk Manager sizes off it)." });
+    const sl = advanced && Number(stop) > 0 ? Number(stop) : undefined;
+    if (advanced && stop && (!sl || sl <= 0)) {
+      setResult({ ok: false, text: "Enter a valid stop price, or clear it to use the auto ATR stop." });
       return;
     }
     setBusy(true);
@@ -53,9 +86,10 @@ export function QuickTradePanel({
         symbol,
         asset_class: assetClass,
         direction: dir,
-        stop_loss: sl,
-        take_profit: target ? Number(target) : null,
+        stop_loss: sl, // omit → auto ATR stop
+        take_profit: advanced && target ? Number(target) : null, // omit → default target
         lots: lots ? Number(lots) : null,
+        timeframe,
         execute: true,
       });
       if (res.status === "executed") {
@@ -63,7 +97,7 @@ export function QuickTradePanel({
           ok: true,
           text: `Opened ${dir.toUpperCase()} ${symbol} · ${res.risk.approved_qty} lots · risk ${fmtUsd(
             res.risk.risk_amount,
-          )}`,
+          )} — drag the SL/TP bars on the chart to adjust.`,
         });
         setStop("");
         setTarget("");
@@ -88,15 +122,12 @@ export function QuickTradePanel({
     <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-3">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-sm font-semibold text-neutral-200">⚡ Quick trade — {symbol}</span>
-        <span className="text-[10px] text-neutral-500">market entry</span>
+        <span className="text-[10px] text-neutral-500">market entry · auto-sized</span>
       </div>
 
       <div className="mb-2 flex gap-2">
         <button
-          onClick={() => {
-            setDir("long");
-            void refreshMax("long");
-          }}
+          onClick={() => setDir("long")}
           className={`flex-1 rounded px-3 py-1.5 text-sm font-semibold ${
             dir === "long" ? "bg-bull/20 text-bull ring-1 ring-bull/50" : "bg-neutral-800 text-neutral-400"
           }`}
@@ -104,10 +135,7 @@ export function QuickTradePanel({
           ▲ Long
         </button>
         <button
-          onClick={() => {
-            setDir("short");
-            void refreshMax("short");
-          }}
+          onClick={() => setDir("short")}
           className={`flex-1 rounded px-3 py-1.5 text-sm font-semibold ${
             dir === "short" ? "bg-bear/20 text-bear ring-1 ring-bear/50" : "bg-neutral-800 text-neutral-400"
           }`}
@@ -116,38 +144,35 @@ export function QuickTradePanel({
         </button>
       </div>
 
-      <div className="mb-2 grid grid-cols-3 gap-2">
-        <label className="text-[10px] uppercase text-neutral-500">
-          Stop <span className="text-bear">*</span>
-          <input className={inputCls} value={stop} onChange={(e) => setStop(e.target.value)}
-                 onBlur={(e) => void refreshMax(dir, e.target.value)}
-                 inputMode="decimal" placeholder="req." />
-        </label>
-        <label className="text-[10px] uppercase text-neutral-500">
-          Target
-          <input className={inputCls} value={target} onChange={(e) => setTarget(e.target.value)}
-                 inputMode="decimal" placeholder="opt." />
-        </label>
-        <label className="text-[10px] uppercase text-neutral-500">
-          Lots
-          <input className={inputCls} value={lots} onChange={(e) => setLots(e.target.value)}
-                 inputMode="decimal" placeholder="auto" />
-        </label>
-      </div>
-
-      {maxInfo &&
-        (maxInfo.approved && maxInfo.lots > 0 ? (
-          <button
-            type="button"
-            onClick={() => setLots(String(maxInfo.lots))}
-            className="mb-2 text-xs text-neutral-400 hover:text-neutral-200"
-            title="Fill the maximum size allowed by the 3% per-trade risk cap"
-          >
-            max <span className="font-semibold text-neutral-200">{maxInfo.lots} lots</span> (3% cap) ·
-            risk {fmtUsd(maxInfo.risk)}
-          </button>
+      {/* What the one-click trade will use — auto stop/target + the 3%-capped size. */}
+      {preview &&
+        (preview.approved && preview.lots > 0 ? (
+          <div className="mb-2 rounded bg-neutral-800/60 px-2 py-1.5 text-[11px] text-neutral-400">
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+              <span>
+                {preview.auto_levels ? "Auto stop" : "Stop"}{" "}
+                <span className="tabular-nums text-bear">{fmtPrice(preview.stop_loss)}</span>
+              </span>
+              <span>
+                {preview.auto_levels ? "Auto target" : "Target"}{" "}
+                <span className="tabular-nums text-bull">{fmtPrice(preview.take_profit)}</span>
+              </span>
+              <span>
+                Size{" "}
+                <button
+                  type="button"
+                  onClick={() => setLots(String(preview.lots))}
+                  className="font-semibold text-neutral-200 underline decoration-dotted hover:text-white"
+                  title="Fill the maximum size allowed by the 3% per-trade risk cap"
+                >
+                  {preview.lots} lots
+                </button>{" "}
+                · risk {fmtUsd(preview.risk)}
+              </span>
+            </div>
+          </div>
         ) : (
-          <div className="mb-2 text-xs text-bear">Risk Manager would veto: {maxInfo.reason}</div>
+          <div className="mb-2 text-xs text-bear">Risk Manager would veto: {preview.reason}</div>
         ))}
 
       <button
@@ -160,12 +185,57 @@ export function QuickTradePanel({
         {busy ? "Placing…" : `Place ${dir === "long" ? "LONG" : "SHORT"} (risk-managed)`}
       </button>
 
+      {/* Advanced: type exact levels + size instead of the auto stop/target. */}
+      <button
+        type="button"
+        onClick={() => setAdvanced((a) => !a)}
+        className="mt-2 text-[11px] text-neutral-500 hover:text-neutral-300"
+      >
+        {advanced ? "▾ Hide manual levels" : "▸ Set levels manually"}
+      </button>
+      {advanced && (
+        <div className="mt-1.5 grid grid-cols-3 gap-2">
+          <label className="text-[10px] uppercase text-neutral-500">
+            Stop
+            <input
+              className={inputCls}
+              value={stop}
+              onChange={(e) => setStop(e.target.value)}
+              onBlur={(e) => void refreshPreview(dir, e.target.value)}
+              inputMode="decimal"
+              placeholder="auto"
+            />
+          </label>
+          <label className="text-[10px] uppercase text-neutral-500">
+            Target
+            <input
+              className={inputCls}
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              inputMode="decimal"
+              placeholder="auto"
+            />
+          </label>
+          <label className="text-[10px] uppercase text-neutral-500">
+            Lots
+            <input
+              className={inputCls}
+              value={lots}
+              onChange={(e) => setLots(e.target.value)}
+              inputMode="decimal"
+              placeholder="auto"
+            />
+          </label>
+        </div>
+      )}
+
       {result && (
         <div className={`mt-2 text-xs ${result.ok ? "text-bull" : "text-bear"}`}>{result.text}</div>
       )}
       <div className="mt-1.5 text-[10px] text-neutral-600">
-        Always sized + gated by the Risk Manager (3% cap, exposure, cooldown, daily‑loss). Kill‑switch and
-        live‑confirmation still apply. Leave Lots blank for the auto 3% size.
+        One click opens at market, auto-sized to the 3% cap off an ATR stop. Adjust the SL/TP by dragging
+        their bars on the chart after the fill. Always gated by the Risk Manager; kill‑switch and
+        live‑confirmation still apply.
       </div>
     </div>
   );

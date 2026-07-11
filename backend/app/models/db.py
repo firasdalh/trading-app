@@ -332,9 +332,6 @@ class AdvisorConfig(Base):
     # When True the advisor may autonomously act on its highest-confidence, risk-reducing
     # decisions (close an invalidated trade, lock a winner's stop to breakeven). Off by default.
     auto_execute: Mapped[bool] = mapped_column(Boolean, default=False)
-    # When True, after auto-CLOSING an invalidated trade the advisor re-runs the analysis and,
-    # if the engine + risk manager approve a fresh setup, opens it properly (sized, with SL/TP).
-    auto_reenter: Mapped[bool] = mapped_column(Boolean, default=False)
     interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(

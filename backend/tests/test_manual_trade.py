@@ -73,6 +73,36 @@ def test_manual_trade_rejects_bad_direction(db_session):
     assert ei.value.status_code == 422
 
 
+def test_manual_trade_auto_stop_when_none(db_session, monkeypatch):
+    # No stop given -> ATR stop auto-derived (below entry for a long) + a default 2R target, so the
+    # Risk Manager can still size the trade and both bars appear on the chart to drag.
+    import app.api.proposal_routes as pr
+
+    monkeypatch.setattr(pr, "_auto_stop_distance", lambda *a, **k: 0.02)  # fixed 0.02 stop distance
+    prop = pr._build_manual_proposal(_req(stop_loss=None, take_profit=None), db_session)
+    assert prop.stop_loss == round(1.10 - 0.02, 6)             # auto stop below the long entry
+    assert prop.take_profit == round(1.10 + 2.0 * 0.02, 6)     # default 2R target above entry
+
+
+def test_manual_trade_auto_stop_short(db_session, monkeypatch):
+    import app.api.proposal_routes as pr
+
+    monkeypatch.setattr(pr, "_auto_stop_distance", lambda *a, **k: 0.02)
+    prop = pr._build_manual_proposal(_req(direction="short", stop_loss=None, take_profit=None), db_session)
+    assert prop.stop_loss == round(1.10 + 0.02, 6)             # auto stop above the short entry
+    assert prop.take_profit == round(1.10 - 2.0 * 0.02, 6)     # 2R target below entry
+
+
+def test_manual_preview_reports_auto_levels(db_session, monkeypatch):
+    import app.api.proposal_routes as pr
+
+    monkeypatch.setattr(pr, "_auto_stop_distance", lambda *a, **k: 0.02)
+    monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved())
+    out = pr.manual_trade_preview(_req(stop_loss=None, take_profit=None), session=db_session)
+    assert out.auto_levels is True
+    assert out.stop_loss == round(1.10 - 0.02, 6) and out.take_profit == round(1.10 + 0.04, 6)
+
+
 def test_manual_preview_returns_max_lots_without_persisting(db_session, monkeypatch):
     from sqlalchemy import select
 

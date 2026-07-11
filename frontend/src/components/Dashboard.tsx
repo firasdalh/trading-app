@@ -538,7 +538,12 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           scenarioBusy={scenarioBusy}
         />
         <div className="space-y-4">
-          <QuickTradePanel symbol={symbol} assetClass={assetClass} />
+          <QuickTradePanel
+            symbol={symbol}
+            assetClass={assetClass}
+            timeframe={timeframe}
+            onPlaced={() => setPosBump((b) => b + 1)}
+          />
           <ConditionalsPanel onSelect={openPositionSymbol} />
         </div>
       </div>

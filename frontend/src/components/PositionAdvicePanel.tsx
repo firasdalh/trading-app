@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { fmtUsd } from "../format";
 import type { AdvisorState, PositionAdvice } from "../types";
 import { actionText, ago } from "./advisorFormat";
 
@@ -8,10 +9,12 @@ interface Props {
   refreshSignal?: number;
 }
 
-const TONE: Record<PositionAdvice["severity"], { box: string; chip: string; label: string }> = {
-  danger: { box: "border-bear/50 bg-bear/10", chip: "bg-bear/20 text-bear", label: "Act now" },
-  warn: { box: "border-warn/40 bg-warn/10", chip: "bg-warn/20 text-warn", label: "Decide" },
-  info: { box: "border-neutral-800 bg-neutral-900/40", chip: "bg-neutral-800 text-neutral-300", label: "OK" },
+type Severity = PositionAdvice["severity"];
+
+const TONE: Record<Severity, { box: string; chip: string; accent: string; label: string }> = {
+  danger: { box: "border-bear/40 bg-bear/5", chip: "bg-bear/20 text-bear", accent: "border-l-bear", label: "Act now" },
+  warn: { box: "border-warn/30 bg-warn/5", chip: "bg-warn/20 text-warn", accent: "border-l-warn", label: "Decide" },
+  info: { box: "border-neutral-800 bg-neutral-900/40", chip: "bg-neutral-800 text-neutral-300", accent: "border-l-neutral-600", label: "OK" },
 };
 
 const THESIS: Record<PositionAdvice["thesis"], { text: string; cls: string }> = {
@@ -92,27 +95,6 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
     }
   };
 
-  const autoReenter = state?.auto_reenter ?? false;
-
-  const toggleAutoReenter = async () => {
-    if (!autoReenter) {
-      const ok = window.confirm(
-        "Enable AUTO RE-ENTER?\n\nAfter the advisor closes a trade whose thesis broke, it will " +
-          "re-run the full analysis and — only if the engine AND risk manager approve a fresh " +
-          "setup — open a new position in that direction, properly sized with stop-loss & " +
-          "take-profit.\n\nIt never forces a trade (stays flat if there's no valid setup), and " +
-          "respects the kill switch / live confirmation. Requires Auto-execute. Proceed?",
-      );
-      if (!ok) return;
-    }
-    setBusy(true);
-    try {
-      setState(await api.advisorConfig({ auto_reenter: !autoReenter }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const saveInterval = async () => {
     const secs = Math.min(3600, Math.max(30, Number(intervalInput) || 300));
     setBusy(true);
@@ -125,13 +107,33 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
 
   const advice = state?.advice ?? [];
   const order = { danger: 0, warn: 1, info: 2 } as const;
-  const sorted = [...advice].sort((a, b) => order[a.severity] - order[b.severity]);
+  const sorted = useMemo(
+    () => [...advice].sort((a, b) => order[a.severity] - order[b.severity]),
+    [advice],
+  );
+  // At-a-glance summary across the advised positions.
+  const counts = useMemo(() => {
+    const c: Record<Severity, number> = { danger: 0, warn: 0, info: 0 };
+    for (const a of advice) c[a.severity] += 1;
+    return c;
+  }, [advice]);
+  const netPnl = useMemo(() => advice.reduce((s, a) => s + a.unrealized_pnl, 0), [advice]);
 
   return (
     <div className="card">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="card-title">Position advisor</span>
-        <span className="text-xs text-neutral-500">last check {ago(state?.last_run_at ?? null)}</span>
+        {/* Live watch indicator */}
+        <span
+          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+            enabled ? "bg-bull/15 text-bull" : "bg-neutral-800 text-neutral-500"
+          }`}
+          title={enabled ? "Auto-watch is on — re-checks on the interval" : "Auto-watch is off"}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${enabled ? "animate-pulse bg-bull" : "bg-neutral-600"}`} />
+          {enabled ? "watching" : "manual"}
+        </span>
+        <span className="text-xs text-neutral-500">· last check {ago(state?.last_run_at ?? null)}</span>
         <div className="ml-auto flex items-center gap-2">
           <label className="flex items-center gap-1 text-xs text-neutral-400">
             every
@@ -167,25 +169,34 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
           >
             Auto-execute {autoExecute ? "ON" : "OFF"}
           </button>
-          <button
-            onClick={toggleAutoReenter}
-            disabled={busy || !autoExecute}
-            className={`btn text-xs ${
-              autoReenter ? "bg-brand-600/30 text-brand-400 hover:bg-brand-600/40" : "bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
-            } ${!autoExecute ? "opacity-50" : ""}`}
-            title="After closing an invalidated trade, re-analyze and open a fresh, properly-sized setup (requires Auto-execute)"
-          >
-            Auto re-enter {autoReenter ? "ON" : "OFF"}
-          </button>
-          <button
-            onClick={() => load(true)}
-            disabled={busy}
-            className="btn btn-primary"
-          >
+          <button onClick={() => load(true)} disabled={busy} className="btn btn-primary">
             {busy ? "Checking…" : "Run now"}
           </button>
         </div>
       </div>
+
+      {/* Summary strip — severity counts + net floating P&L across advised positions. */}
+      {advice.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-neutral-800/70 pb-3 text-xs">
+          {(["danger", "warn", "info"] as const).map((sev) => (
+            <span
+              key={sev}
+              className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-medium ${
+                counts[sev] > 0 ? TONE[sev].chip : "bg-neutral-800/40 text-neutral-600"
+              }`}
+            >
+              <span className="tabular-nums font-bold">{counts[sev]}</span>
+              {TONE[sev].label}
+            </span>
+          ))}
+          <span className="ml-auto text-neutral-400">
+            {advice.length} position{advice.length === 1 ? "" : "s"} · net{" "}
+            <span className={`font-semibold tabular-nums ${netPnl >= 0 ? "text-bull" : "text-bear"}`}>
+              {fmtUsd(netPnl, { sign: true })}
+            </span>
+          </span>
+        </div>
+      )}
 
       {autoExecute && (
         <div className="mb-2 rounded border border-bear/40 bg-bear/10 px-2 py-1 text-[11px] text-bear">
@@ -217,8 +228,12 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
       )}
 
       {advice.length === 0 ? (
-        <div className="text-sm text-neutral-500">
-          No open positions to advise on. {state?.last_run_at ? "" : "Run a check to evaluate."}
+        <div className="flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-neutral-800 py-8 text-center">
+          <span className="text-2xl opacity-40">🛡️</span>
+          <div className="text-sm text-neutral-400">No open positions to advise on</div>
+          <div className="text-xs text-neutral-600">
+            {state?.last_run_at ? "The advisor will report here once a trade is open." : "Run a check to evaluate."}
+          </div>
         </div>
       ) : (
         <div className="space-y-2">
@@ -226,10 +241,20 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
             const tone = TONE[a.severity];
             const th = THESIS[a.thesis];
             return (
-              <div key={`${a.symbol}-${a.direction}`} className={`rounded-md border px-3 py-2 ${tone.box}`}>
-                <div className="flex items-center gap-2">
+              <div
+                key={`${a.symbol}-${a.direction}`}
+                className={`rounded-md border border-l-4 px-3 py-2 ${tone.box} ${tone.accent}`}
+              >
+                <div className="flex flex-wrap items-center gap-2">
                   <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${tone.chip}`}>
                     {tone.label}
+                  </span>
+                  <span
+                    className={`rounded px-1 py-0.5 text-[10px] font-bold uppercase ${
+                      a.direction === "long" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+                    }`}
+                  >
+                    {a.direction === "long" ? "▲" : "▼"} {a.symbol}
                   </span>
                   <span className="text-sm font-medium">{a.headline}</span>
                   <span className={`text-[10px] font-semibold uppercase ${th.cls}`}>{th.text}</span>
@@ -245,12 +270,11 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
                     </span>
                   )}
                   <span
-                    className={`ml-auto text-xs tabular-nums ${
+                    className={`ml-auto text-xs font-semibold tabular-nums ${
                       a.unrealized_pnl >= 0 ? "text-bull" : "text-bear"
                     }`}
                   >
-                    {a.unrealized_pnl >= 0 ? "+" : ""}
-                    {a.unrealized_pnl.toFixed(2)}
+                    {fmtUsd(a.unrealized_pnl, { sign: true })}
                   </span>
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-neutral-300">{a.detail}</p>

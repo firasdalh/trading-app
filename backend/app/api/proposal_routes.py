@@ -37,11 +37,45 @@ class ManualTradeRequest(BaseModel):
     symbol: str = Field(min_length=1)
     asset_class: AssetClass = AssetClass.FOREX
     direction: str                                  # "long" | "short"
-    stop_loss: float = Field(gt=0)                  # required — the Risk Manager sizes off entry-to-stop
-    take_profit: float | None = Field(None, gt=0)   # optional
+    stop_loss: float | None = Field(None, gt=0)     # optional — if omitted, an ATR stop is auto-derived
+    take_profit: float | None = Field(None, gt=0)   # optional — if omitted, a default R-multiple target
     entry: float | None = Field(None, gt=0)         # default: current market
     lots: float | None = Field(None, gt=0)          # default: the Risk Manager's 3%-capped size
+    timeframe: str = "1h"                            # timeframe the auto ATR stop is measured on
     execute: bool = True                            # True = open now if approved; False = queue for approval
+
+
+# When the user places a QUICK trade with no stop, the Risk Manager still needs a stop to size off,
+# so we auto-derive one from volatility: stop = entry ∓ (mult × ATR14) on the trade's timeframe, and a
+# default target at TARGET_R × the stop distance. Both are placed on the chart as draggable bars the
+# user adjusts after the fill — the whole point of "quick" is not typing prices up front.
+_DEFAULT_STOP_ATR_MULT = 1.5
+_DEFAULT_TARGET_R = 2.0
+_FALLBACK_STOP_PCT = 0.005   # if ATR is unavailable (thin history), fall back to 0.5% of price
+
+
+def _auto_stop_distance(session: Session, symbol: str, asset_class: AssetClass,
+                        timeframe: str, entry: float) -> float:
+    """ATR-based stop distance for a manual ticket with no user stop (see _DEFAULT_STOP_ATR_MULT)."""
+    from app.agents.indicators import atr
+    from app.brokers.registry import get_broker_for
+    from app.core.state import get_or_create_settings
+    from app.data.ohlcv_cache import get_ohlcv_cached
+
+    dist = 0.0
+    try:
+        settings = get_or_create_settings(session)
+        broker = get_broker_for(asset_class, settings.broker_map)
+        series = get_ohlcv_cached(broker, symbol, timeframe or "1h", limit=200)
+        a = atr(series.candles, 14)
+        if a and a > 0:
+            dist = _DEFAULT_STOP_ATR_MULT * a
+    except Exception as exc:  # noqa: BLE001 — ATR is best-effort; fall back to a % of price
+        log.warning("auto-stop ATR failed; using %% fallback",
+                    extra={"symbol": symbol, "error": str(exc)})
+    if dist <= 0:
+        dist = _FALLBACK_STOP_PCT * entry
+    return dist
 
 
 class ExplainRequest(BaseModel):
@@ -71,6 +105,9 @@ def analyze(request: AnalyzeRequest, session: Session = Depends(get_session)) ->
 
 class ManualPreviewResponse(BaseModel):
     entry: float          # the market entry the ticket would use
+    stop_loss: float      # the stop that will be used (user's, or the auto ATR stop)
+    take_profit: float    # the target that will be used (user's, or the default R-multiple)
+    auto_levels: bool     # True when the stop/target were auto-derived (no user stop given)
     approved: bool
     max_lots: float       # the Risk Manager's 3%-capped size (the "max" the ticket can suggest)
     risk_amount: float    # $ risked at that size
@@ -101,22 +138,38 @@ def _build_manual_proposal(req: "ManualTradeRequest", session: Session):
     if not entry or entry <= 0:
         raise HTTPException(status_code=422, detail="no valid entry price")
 
-    # Side sanity: stop on the losing side, target on the winning side.
-    if d == Direction.LONG and not req.stop_loss < entry:
-        raise HTTPException(status_code=422, detail="for a LONG the stop must be BELOW the entry")
-    if d == Direction.SHORT and not req.stop_loss > entry:
-        raise HTTPException(status_code=422, detail="for a SHORT the stop must be ABOVE the entry")
-    if req.take_profit is not None:
-        if d == Direction.LONG and not req.take_profit > entry:
-            raise HTTPException(status_code=422, detail="for a LONG the target must be ABOVE the entry")
-        if d == Direction.SHORT and not req.take_profit < entry:
-            raise HTTPException(status_code=422, detail="for a SHORT the target must be BELOW the entry")
+    # Stop: use the user's if given (side-checked), else auto-derive one from ATR so the Risk Manager
+    # can still size at the 3% cap. The auto stop is always on the correct side by construction.
+    auto_stop = req.stop_loss is None
+    if auto_stop:
+        dist = _auto_stop_distance(session, req.symbol, req.asset_class, req.timeframe, entry)
+        stop_loss = entry - dist if d == Direction.LONG else entry + dist
+    else:
+        stop_loss = req.stop_loss
+        if d == Direction.LONG and not stop_loss < entry:
+            raise HTTPException(status_code=422, detail="for a LONG the stop must be BELOW the entry")
+        if d == Direction.SHORT and not stop_loss > entry:
+            raise HTTPException(status_code=422, detail="for a SHORT the stop must be ABOVE the entry")
 
+    # Target: use the user's if given (side-checked), else a default R-multiple so a TP bar appears on
+    # the chart for the user to drag. Both auto levels are just starting points, adjustable after fill.
+    if req.take_profit is not None:
+        take_profit = req.take_profit
+        if d == Direction.LONG and not take_profit > entry:
+            raise HTTPException(status_code=422, detail="for a LONG the target must be ABOVE the entry")
+        if d == Direction.SHORT and not take_profit < entry:
+            raise HTTPException(status_code=422, detail="for a SHORT the target must be BELOW the entry")
+    else:
+        risk = abs(entry - stop_loss)
+        take_profit = (entry + _DEFAULT_TARGET_R * risk if d == Direction.LONG
+                       else entry - _DEFAULT_TARGET_R * risk)
+
+    rationale = ("Manual quick trade (risk-managed); auto ATR stop + default target — adjust on the chart."
+                 if auto_stop else "Manual quick trade (risk-managed).")
     return TradeProposal(
         symbol=req.symbol, asset_class=req.asset_class, timeframe="manual", direction=d,
-        entry=round(entry, 6), stop_loss=round(req.stop_loss, 6),
-        take_profit=(round(req.take_profit, 6) if req.take_profit is not None else None),
-        confidence=1.0, rationale="Manual quick trade (risk-managed).", strategy="manual",
+        entry=round(entry, 6), stop_loss=round(stop_loss, 6), take_profit=round(take_profit, 6),
+        confidence=1.0, rationale=rationale, strategy="manual",
     )
 
 
@@ -129,7 +182,8 @@ def manual_trade_preview(req: ManualTradeRequest, session: Session = Depends(get
     proposal = _build_manual_proposal(req, session)
     decision = assess(session, proposal)
     return ManualPreviewResponse(
-        entry=proposal.entry, approved=decision.approved,
+        entry=proposal.entry, stop_loss=proposal.stop_loss, take_profit=proposal.take_profit or 0.0,
+        auto_levels=req.stop_loss is None, approved=decision.approved,
         max_lots=round(decision.approved_qty or 0.0, 2),
         risk_amount=round(decision.risk_amount or 0.0, 2), reason=decision.reason,
     )

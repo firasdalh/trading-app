@@ -412,49 +412,10 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
 def get_or_create_advisor_config(session: Session) -> AdvisorConfig:
     cfg = session.get(AdvisorConfig, 1)
     if cfg is None:
-        cfg = AdvisorConfig(id=1, enabled=False, auto_execute=False, auto_reenter=False,
-                            interval_seconds=300)
+        cfg = AdvisorConfig(id=1, enabled=False, auto_execute=False, interval_seconds=300)
         session.add(cfg)
         session.commit()
     return cfg
-
-
-def _maybe_reenter(session: Session, symbol: str, asset_class: str) -> dict:
-    """After auto-closing an invalidated trade, re-run the FULL analysis and — only if the
-    deterministic engine + risk manager approve a fresh setup — open it properly (risk-sized,
-    with SL/TP attached by the executor). Never forces a trade; stays flat otherwise."""
-    from app.agents.pipeline import analyze_symbol
-    from app.execution.executor import ExecutionBlocked, execute_proposal
-    from app.models.enums import AssetClass, Direction, ProposalStatus
-
-    tf = _planned_timeframe(session, symbol)
-    try:
-        res = analyze_symbol(session, symbol, AssetClass(asset_class), tf, use_llm=False)
-    except Exception as exc:  # noqa: BLE001
-        return {"symbol": symbol, "action": "reenter", "kind": "open", "ok": False,
-                "reason": f"re-analysis failed: {exc}"}
-
-    prop = res.proposal
-    if prop.direction not in (Direction.LONG, Direction.SHORT) or not res.risk.approved:
-        return {"symbol": symbol, "action": "reenter_skip", "kind": "open", "ok": False,
-                "reason": f"no fresh setup ({prop.direction.value} / risk {res.risk.decision.value})"}
-
-    record = session.get(TradeProposalRecord, res.proposal_id)
-    detail = (f"opened {prop.direction.value} @ {prop.entry} "
-              f"(SL {prop.stop_loss} / TP {prop.take_profit})")
-    # Modes B/C may have already auto-executed it inside analyze_symbol.
-    if record and record.status == ProposalStatus.EXECUTED.value:
-        return {"symbol": symbol, "action": "reenter", "kind": "open", "ok": True,
-                "reason": detail, "stop": prop.stop_loss}
-    try:
-        execute_proposal(session, record)
-        session.commit()
-        ok = record.status == ProposalStatus.EXECUTED.value
-        return {"symbol": symbol, "action": "reenter", "kind": "open", "ok": ok,
-                "reason": detail if ok else "order did not fill", "stop": prop.stop_loss}
-    except ExecutionBlocked as exc:
-        return {"symbol": symbol, "action": "reenter_blocked", "kind": "open", "ok": False,
-                "reason": str(exc)}
 
 
 def _stop_worse_than_entry(p) -> bool:
@@ -805,12 +766,6 @@ def run_advisor(session: Session) -> dict:
     cfg.last_run_at = datetime.now(timezone.utc)
 
     actions = _auto_execute(session, advice, contexts) if cfg.auto_execute else []
-
-    # After closing an invalidated trade, optionally re-analyse and open a fresh, properly-sized
-    # setup in whatever direction the engine now supports (opt-in, separate toggle).
-    if cfg.auto_execute and cfg.auto_reenter:
-        for a in [x for x in list(actions) if x.get("action") == "close" and x.get("ok")]:
-            actions.append(_maybe_reenter(session, a["symbol"], a.get("asset_class", "forex")))
 
     actionable = [a for a in advice if a.severity in ("warn", "danger")]
     for a in actionable:

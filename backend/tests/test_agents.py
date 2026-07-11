@@ -160,6 +160,22 @@ def test_macd_histogram_rising_lifts_confidence_vs_fading():
     assert off_r.confidence == off_f.confidence   # filter off -> histogram slope no longer scored
 
 
+def test_ema200_filter_gates_its_confidence_factor():
+    # A newly-exposed filter: with ema200 ON, being on the right side of the 200-EMA adds confidence;
+    # disabling the filter removes that contribution entirely.
+    from app.agents.orchestrator import _deterministic_decision
+    tech = run_technical("TEST", [_uptrend_series()])
+    ind = tech.timeframes[0].indicators
+    ind["adx"] = 22.0        # moderate -> market entry, confidence not clamped
+    ind["rsi14"] = 55.0
+    ind["ema200"] = 90.0     # entry (~140) is above EMA200 -> with the long-term trend -> +0.05
+    on = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    off = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW,
+                                  disable=frozenset({"ema200"}))
+    assert on.direction == Direction.LONG and off.direction == Direction.LONG
+    assert on.confidence > off.confidence     # the EMA200 bonus is dropped when the filter is off
+
+
 def test_adx_filter_maps_to_trend_only_mode(db_session):
     # The "adx" panel filter is a proxy for trend_only_mode (the existing ADX-strength gate).
     from app.api.settings_routes import DetFiltersRequest, get_det_filters, set_det_filters
