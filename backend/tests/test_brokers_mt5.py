@@ -34,6 +34,8 @@ class FakeMt5:
         return True
 
     def symbol_info(self, sym):
+        if "/" in sym:  # real MT5/Exness symbols have no separator -> a generic name misses here
+            return None
         return SimpleNamespace(trade_contract_size=100000.0, volume_step=0.01,
                                volume_min=0.01, volume_max=100.0, filling_mode=self.SYMBOL_FILLING_FOK)
 

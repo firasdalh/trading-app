@@ -152,3 +152,38 @@ def test_alpaca_submit_order_maps_status(monkeypatch):
     assert res.broker_order_id == "abc-123"
     assert res.filled_qty == 10
     assert res.avg_fill_price == 101.5
+
+
+# ---- MT5 symbol resolution (exact-name-first; the US30_x10m fix) ----
+
+class _FakeMt5:
+    def __init__(self, names):
+        self._names = set(names)
+        self.selected = []
+
+    def symbol_info(self, name):
+        return object() if name in self._names else None
+
+    def symbols_get(self):
+        return [type("S", (), {"name": n})() for n in self._names]
+
+    def symbol_select(self, name, on):
+        self.selected.append(name)
+        return True
+
+
+def test_mt5_resolve_symbol_prefers_exact_name():
+    from app.brokers.base import BrokerError
+    from app.brokers.mt5_adapter import Mt5BrokerAdapter
+
+    a = Mt5BrokerAdapter.__new__(Mt5BrokerAdapter)   # bypass the terminal-connecting __init__
+    a._mt5 = _FakeMt5(["US30_x10m", "EURUSDm", "XAUUSD.z"])
+    # 1) exact broker name with "_" resolves (was mangled to US30X10M -> not found)
+    assert a._resolve_symbol("US30_x10m") == "US30_x10m"
+    # 2) a dotted broker name resolves exactly too
+    assert a._resolve_symbol("XAUUSD.z") == "XAUUSD.z"
+    # 3) a generic name still normalizes + suffix-matches (EUR/USD -> EURUSDm)
+    assert a._resolve_symbol("EUR/USD") == "EURUSDm"
+    # 4) truly unknown still raises
+    with pytest.raises(BrokerError):
+        a._resolve_symbol("NOPEUSD")

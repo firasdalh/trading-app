@@ -73,11 +73,11 @@ def test_mean_reversion_fades_support_when_rejected_and_oversold():
     assert out.stop_loss < 99.7 and out.take_profit == 102.0
 
 
-def test_mean_reversion_fades_bollinger_band_touch():
-    # No structural resistance nearby, but the bar tagged the UPPER Bollinger band and closed back
+def test_mean_reversion_fades_price_channel_band():
+    # No structural resistance nearby, but the bar tagged the UPPER price-channel band and closed back
     # inside with RSI in the (looser) fade band -> short the rejection to the mean.
     ind = {"atr14": 1.0, "rsi14": 68.0, "rsi14_prev": 70.0, "last_close": 100.0,
-           "last_high": 101.2, "ema20": 98.0, "bb_upper": 101.0}
+           "last_high": 101.2, "ema20": 98.0, "chan_upper": 101.0}
     out = _mean_reversion_decision(_base(), ind, _tf())  # no structural levels at all
     assert out.direction == Direction.SHORT
     assert out.take_profit == 98.0 and out.stop_loss > 101.0

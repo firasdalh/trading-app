@@ -159,33 +159,40 @@ class Mt5BrokerAdapter(BrokerAdapter):
         return getattr(self._mt5, attr)
 
     def _resolve_symbol(self, symbol: str) -> str:
-        """Map a generic symbol to the broker's actual name and select it in Market Watch.
+        """Map a symbol to the broker's actual name and select it in Market Watch.
 
-        Exness (and other MT5 brokers) sometimes suffix symbols (EURUSDm, XAUUSD.z, ...), so
-        if the exact name isn't found we search the broker's symbol list for the closest base
-        match. Results are cached per adapter.
+        Order matters: try the EXACT name first — ``list_symbols()`` returns real broker names
+        (e.g. ``US30_x10m``, ``XAUUSD.z``) that ``normalize_symbol`` would MANGLE by stripping
+        ``_`` / ``-``. Only when the exact name misses do we normalize a generic user symbol
+        (EUR/USD -> EURUSD) and search the broker list for the closest suffixed match. Cached per
+        adapter, keyed by the input symbol.
         """
-        sym = normalize_symbol(symbol)
         cache = getattr(self, "_symbol_cache", None)
         if cache is None:
             cache = {}
             self._symbol_cache = cache
-        if sym in cache:
-            return cache[sym]
+        if symbol in cache:
+            return cache[symbol]
 
-        name = sym if self._mt5.symbol_info(sym) is not None else None
+        name = None
+        if self._mt5.symbol_info(symbol) is not None:          # 1) exact broker name — wins
+            name = symbol
+        else:
+            sym = normalize_symbol(symbol)                     # 2) generic name -> normalized
+            if self._mt5.symbol_info(sym) is not None:
+                name = sym
+            else:                                              # 3) closest suffixed/base match
+                all_syms = self._mt5.symbols_get() or []
+                candidates = [
+                    s.name for s in all_syms
+                    if s.name.upper().replace(".", "").replace("-", "").replace("_", "").startswith(sym)
+                ]
+                if candidates:
+                    name = sorted(candidates, key=len)[0]      # closest to the base name
         if name is None:
-            all_syms = self._mt5.symbols_get() or []
-            candidates = [
-                s.name for s in all_syms
-                if s.name.upper().replace(".", "").replace("-", "").startswith(sym)
-            ]
-            if candidates:
-                name = sorted(candidates, key=len)[0]  # closest to the base name
-        if name is None:
-            raise BrokerError(f"symbol {sym} not found on this MT5 account")
+            raise BrokerError(f"symbol {symbol} not found on this MT5 account")
         self._mt5.symbol_select(name, True)
-        cache[sym] = name
+        cache[symbol] = name
         return name
 
     def _symbol_info(self, symbol: str):

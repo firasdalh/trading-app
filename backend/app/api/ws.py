@@ -40,19 +40,23 @@ async def quotes_ws(websocket: WebSocket) -> None:
 
     try:
         while True:
+            # Build the payload separately from the send: a BROKER error becomes an "error" message
+            # (socket stays alive), but the SEND itself is done once — a client disconnect during the
+            # send raises WebSocketDisconnect and unwinds to the clean handler below (no double-send,
+            # which was the "Cannot call send once a close message has been sent" RuntimeError).
             try:
                 quote = broker.get_quote(symbol)
-                await websocket.send_json({
-                    "type": "quote",
-                    "symbol": quote.symbol,
-                    "price": quote.price,
-                    "ts": quote.ts.isoformat(),
-                })
-            except Exception as exc:  # noqa: BLE001 - keep the socket alive on transient errors
-                await websocket.send_json({"type": "error", "message": str(exc)})
+                payload = {"type": "quote", "symbol": quote.symbol,
+                           "price": quote.price, "ts": quote.ts.isoformat()}
+            except Exception as exc:  # noqa: BLE001 - transient broker/data error; keep streaming
+                payload = {"type": "error", "message": str(exc)}
+            await websocket.send_json(payload)
             await asyncio.sleep(_INTERVAL_SECONDS)
     except WebSocketDisconnect:
         log.info("quotes ws disconnected", extra={"symbol": symbol})
     except Exception as exc:  # noqa: BLE001
         log.warning("quotes ws closed on error", extra={"symbol": symbol, "error": str(exc)})
-        await websocket.close()
+        try:
+            await websocket.close()
+        except Exception:  # noqa: BLE001 - already closing/closed; nothing to do
+            pass

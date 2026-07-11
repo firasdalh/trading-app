@@ -274,42 +274,43 @@ def _mean_reversion_decision(base: TradeProposal, ind: dict, tf0, macro: str = "
     last_high = ind.get("last_high")
     last_low = ind.get("last_low")
     rsi_prev = ind.get("rsi14_prev")
-    bb_up = ind.get("bb_upper")
-    bb_lo = ind.get("bb_lower")
+    chan_up = ind.get("chan_upper")
+    chan_lo = ind.get("chan_lower")
 
     # The range EDGE the bar TAGGED then closed back inside (a rejection) — read TWO ways a pro reads
-    # "price reached the edge of the range": a structural level (pivot S/R or swing) OR the Bollinger
-    # band. Either one, with RSI in the (looser-than-trend) fade band, qualifies a fade to the mean.
+    # "price reached the edge of the range": a structural level (pivot S/R or swing) OR the PRICE
+    # CHANNEL band (the regression channel's dynamic support/resistance). Either one, with RSI in the
+    # (looser-than-trend) fade band, qualifies a fade to the mean.
     up_edges: list[float] = []
     if res is not None and (res - price) <= near and last_high is not None and last_high >= res:
         up_edges.append(res)
-    if bb_up is not None and last_high is not None and last_high >= bb_up and price < bb_up:
-        up_edges.append(bb_up)
+    if chan_up is not None and last_high is not None and last_high >= chan_up and price < chan_up:
+        up_edges.append(chan_up)
     dn_edges: list[float] = []
     if sup is not None and (price - sup) <= near and last_low is not None and last_low <= sup:
         dn_edges.append(sup)
-    if bb_lo is not None and last_low is not None and last_low <= bb_lo and price > bb_lo:
-        dn_edges.append(bb_lo)
+    if chan_lo is not None and last_low is not None and last_low <= chan_lo and price > chan_lo:
+        dn_edges.append(chan_lo)
 
     direction = stop = target = edge = None
     edge_kind = ""
     if up_edges and rsi is not None and rsi >= _MR_RSI_OB and mean < price:
         direction = Direction.SHORT
         edge = max(up_edges)
-        edge_kind = "resistance" if edge == res else "upper Bollinger band"
+        edge_kind = "resistance" if edge == res else "upper channel band"
         stop = max(edge, last_high) + _MR_STOP_ATR * atr
         target = mean                       # revert to the mean
         risk, reward = stop - price, price - target
     elif dn_edges and rsi is not None and rsi <= _MR_RSI_OS and mean > price:
         direction = Direction.LONG
         edge = min(dn_edges)
-        edge_kind = "support" if edge == sup else "lower Bollinger band"
+        edge_kind = "support" if edge == sup else "lower channel band"
         stop = min(edge, last_low) - _MR_STOP_ATR * atr
         target = mean
         risk, reward = price - stop, target - price
     else:
         base.rationale = ("Ranging — waiting for a rejection at a range edge (a structural level or "
-                          "the Bollinger band) with RSI in the fade band, before fading to the mean. "
+                          "the price channel) with RSI in the fade band, before fading to the mean. "
                           "No confirmed rejection yet.")
         return base
 

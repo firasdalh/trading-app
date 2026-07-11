@@ -130,9 +130,8 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
             indicators["vol_atr_ratio"] = round(a / a_base, 3)
     bb = bollinger(closes)
     if bb is not None:
-        indicators["bb_upper"] = bb["upper"]
-        indicators["bb_mid"] = bb["mid"]
-        indicators["bb_lower"] = bb["lower"]
+        # Only bb_width is used now (the compression / squeeze read); the range-fade edges moved to
+        # the regression price channel (chan_upper/chan_lower), so the BB bands are no longer stored.
         indicators["bb_width"] = bb["width"]
     # Trend strength (the chop gate).
     adx_v = adx(candles)
