@@ -178,7 +178,7 @@ export function RsiOverPanel({ onStaged, onSelect }: {
               {TIMEFRAMES.map((t) => (<option key={t} value={t}>{t}</option>))}
             </select>
             <button onClick={scan} disabled={busy}
-                    className="btn bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-60">
+                    className="btn btn-primary disabled:opacity-60">
               {busy ? "Scanning…" : "Scan all pairs"}
             </button>
           </div>

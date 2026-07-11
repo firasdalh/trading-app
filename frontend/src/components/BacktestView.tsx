@@ -69,7 +69,7 @@ export function BacktestView() {
         <Field label="Starting equity">
           <input name="bt-equity" type="number" value={equity} min={1} onChange={(e) => setEquity(Number(e.target.value))} className="w-32 rounded bg-neutral-800 px-2 py-1.5" />
         </Field>
-        <button onClick={run} disabled={busy} className="btn bg-blue-600 text-white hover:bg-blue-500">
+        <button onClick={run} disabled={busy} className="btn btn-primary">
           {busy ? "Running…" : "Run backtest"}
         </button>
       </div>

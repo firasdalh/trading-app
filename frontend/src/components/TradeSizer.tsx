@@ -121,7 +121,7 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
           <button
             onClick={save}
             disabled={busy}
-            className="btn ml-auto bg-blue-600/80 text-xs text-white hover:bg-blue-600"
+            className="btn ml-auto bg-brand-600/80 text-xs text-white hover:bg-brand-600"
             title="Use this lot when the setup fires"
           >
             {saved ? "Saved ✓" : "Save lot"}

@@ -1187,12 +1187,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   return (
     <div className="relative">
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-1.5">
         {EMA_CONFIG.map(({ period, color }) => (
           <button
             key={period}
             onClick={() => setShowEma((s) => ({ ...s, [period]: !s[period] }))}
-            className={`rounded px-2 py-0.5 text-xs ${showEma[period] ? "bg-neutral-700 text-white" : "bg-neutral-900 text-neutral-500"}`}
+            className={`rounded-md px-2 py-0.5 text-xs transition ${showEma[period] ? "bg-neutral-700 text-white" : "text-neutral-500 hover:bg-neutral-800/60"}`}
             style={showEma[period] ? { color } : undefined}
           >
             EMA {period}
@@ -1200,40 +1200,40 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         ))}
         <button
           onClick={() => setShowRsi((v) => !v)}
-          className={`rounded px-2 py-0.5 text-xs ${showRsi ? "bg-neutral-700 text-purple-300" : "bg-neutral-900 text-neutral-500"}`}
+          className={`rounded-md px-2 py-0.5 text-xs transition ${showRsi ? "bg-neutral-700 text-purple-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
         >
           RSI
         </button>
         <button
           onClick={() => setShowMacd((v) => !v)}
-          className={`rounded px-2 py-0.5 text-xs ${showMacd ? "bg-neutral-700 text-blue-300" : "bg-neutral-900 text-neutral-500"}`}
+          className={`rounded-md px-2 py-0.5 text-xs transition ${showMacd ? "bg-neutral-700 text-blue-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
         >
           MACD
         </button>
         <button
           onClick={() => setShowSt((v) => !v)}
-          className={`rounded px-2 py-0.5 text-xs ${showSt ? "bg-neutral-700 text-emerald-300" : "bg-neutral-900 text-neutral-500"}`}
+          className={`rounded-md px-2 py-0.5 text-xs transition ${showSt ? "bg-neutral-700 text-emerald-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
           title="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red band = downtrend (resistance)"
         >
           SuperTrend
         </button>
         <button
           onClick={() => setShowPb((v) => !v)}
-          className={`rounded px-2 py-0.5 text-xs ${showPb ? "bg-neutral-700 text-amber-300" : "bg-neutral-900 text-neutral-500"}`}
+          className={`rounded-md px-2 py-0.5 text-xs transition ${showPb ? "bg-neutral-700 text-amber-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
           title="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70."
         >
           Pullback
         </button>
         <button
           onClick={() => setShowStructure((v) => !v)}
-          className={`rounded px-2 py-0.5 text-xs ${showStructure ? "bg-neutral-700 text-sky-300" : "bg-neutral-900 text-neutral-500"}`}
+          className={`rounded-md px-2 py-0.5 text-xs transition ${showStructure ? "bg-neutral-700 text-sky-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
           title="Market structure: labels swing pivots HH / HL (green = bullish structure) and LH / LL (red = bearish). Higher-highs + higher-lows = uptrend; lower-highs + lower-lows = downtrend — the same swing map the engine reads."
         >
           Structure
         </button>
         <button
           onClick={() => setShowChannel((v) => !v)}
-          className={`rounded px-2 py-0.5 text-xs ${showChannel ? "bg-neutral-700 text-violet-300" : "bg-neutral-900 text-neutral-500"}`}
+          className={`rounded-md px-2 py-0.5 text-xs transition ${showChannel ? "bg-neutral-700 text-violet-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
           title="Regression channel: the algorithmic diagonal trend line (mid) + dynamic resistance (upper) / support (lower) bands. Objective, reproducible version of a hand-drawn trend line/channel. Shown for your read; tested and NOT used to gate trades (it hurt a trend-following engine — in a trend, price rides & breaks the upper band)."
         >
           Channel
@@ -1244,7 +1244,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             <button
               key={tf}
               onClick={() => setShowSR((s) => ({ ...s, [tf]: !s[tf] }))}
-              className={`rounded px-2 py-0.5 text-xs ${showSR[tf] ? `bg-neutral-700 ${onCls}` : "bg-neutral-900 text-neutral-500"}`}
+              className={`rounded-md px-2 py-0.5 text-xs transition ${showSR[tf] ? `bg-neutral-700 ${onCls}` : "text-neutral-500 hover:bg-neutral-800/60"}`}
               title={`${tf.toUpperCase()} support/resistance — swing levels from the ${tf} chart (${{ "1h": "slate", "4h": "amber", "1d": "red — strongest" }[tf]}). R = resistance, S = support.`}
             >
               {tf.toUpperCase()} S/R
@@ -1253,7 +1253,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         })}
         <button
           onClick={() => setShowBand((v) => !v)}
-          className={`rounded px-2 py-0.5 text-xs ${showBand ? "bg-neutral-700 text-cyan-300" : "bg-neutral-900 text-neutral-500"}`}
+          className={`rounded-md px-2 py-0.5 text-xs transition ${showBand ? "bg-neutral-700 text-cyan-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
           title="EMA20 of highs / lows = a band around price. The SuperTrend Strategy enters on a candle close BEYOND this band in the SuperTrend direction."
         >
           EMA20 H/L
@@ -1261,7 +1261,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         <button
           onClick={loadContext}
           disabled={ctxBusy}
-          className="ml-auto rounded bg-neutral-900 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
+          className="ml-auto rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
           title="Read: plain-language 'where is price on the map (S/R, channel, structure) + do RSI/volume/ATR confirm?' analysis for this pair. Info only — it does NOT change the engine's decision; it's for your Mode-A call."
         >
           {ctxBusy ? "…" : "🗺️ Read"}
@@ -1269,14 +1269,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         <button
           onClick={loadScenarios}
           disabled={scenBusy}
-          className="rounded bg-neutral-900 px-2 py-0.5 text-xs text-violet-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
+          className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-violet-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
           title="AI scenarios: the AI reasons out TWO ranked, scored forward scenarios (anchored to the real S/R + structure) and explains why the chosen one is more likely. Info only — it does NOT change the engine's decision."
         >
           {scenBusy ? "…" : "🤖 Scenarios"}
         </button>
         <button
           onClick={recenter}
-          className="rounded bg-neutral-900 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700 hover:text-white"
+          className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700 hover:text-white"
           title="Recenter — reset to the recent bars with the price axis auto-fitted"
         >
           ⊹ Recenter

@@ -469,7 +469,7 @@ def macd_signals(candles, fast: int = 12, slow: int = 26, signal: int = 9,
             div_bull = 1.0
 
     return {"macd": round(macd_arr[-1], 6), "signal": round(sig_arr[-1], 6),
-            "hist": round(macd_arr[-1] - sig_arr[-1], 6),
+            "hist": round(cur, 6), "hist_prev": round(prev, 6),   # prev bar's histogram -> "is it expanding?"
             "cross": float(cross), "div_bull": div_bull, "div_bear": div_bear}
 
 

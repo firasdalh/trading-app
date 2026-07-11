@@ -120,11 +120,11 @@ export function ArmSetupButton({ symbol, assetClass, timeframe, conditional, onA
           <div className="mb-2 flex items-center gap-2">
             <div className="flex overflow-hidden rounded border border-neutral-700 text-xs">
               <button onClick={() => setLang("en")}
-                      className={`px-2 py-0.5 ${lang === "en" ? "bg-blue-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
+                      className={`px-2 py-0.5 ${lang === "en" ? "bg-brand-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
                 EN
               </button>
               <button onClick={() => setLang("ar")}
-                      className={`px-2 py-0.5 ${lang === "ar" ? "bg-blue-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
+                      className={`px-2 py-0.5 ${lang === "ar" ? "bg-brand-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
                 عربي
               </button>
             </div>

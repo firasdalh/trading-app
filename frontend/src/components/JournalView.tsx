@@ -117,7 +117,7 @@ export function JournalView() {
               </span>
             )}
           </button>
-          <button onClick={runReflect} disabled={busy} className="btn bg-blue-600 text-white hover:bg-blue-500">
+          <button onClick={runReflect} disabled={busy} className="btn btn-primary">
             {busy ? "Reflecting…" : "Run reflection"}
           </button>
         </div>

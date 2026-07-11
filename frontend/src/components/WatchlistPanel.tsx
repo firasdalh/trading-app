@@ -101,7 +101,7 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
                 <span
                   key={it.id}
                   className={`flex items-center gap-2 rounded px-2 py-1 text-sm ${
-                    active ? "bg-blue-600 text-white" : "bg-neutral-800"
+                    active ? "bg-brand-600 text-white" : "bg-neutral-800"
                   }${it.recommended && !active ? " ring-1 ring-amber-500/50" : ""}`}
                 >
                   {it.recommended && (

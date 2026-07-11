@@ -137,6 +137,41 @@ def test_disable_rsi_extreme_filter_takes_market_instead_of_arming():
     assert took.direction == Direction.LONG                                # filter off: takes market
 
 
+def test_macd_histogram_rising_lifts_confidence_vs_fading():
+    # The new "MACD histogram rising" filter: an expanding histogram (momentum building) confers more
+    # confidence than a fading one; toggling it off removes the difference.
+    from app.agents.orchestrator import _deterministic_decision
+
+    def prop(hist, hist_prev, disable=frozenset()):
+        tech = run_technical("TEST", [_uptrend_series()])
+        ind = tech.timeframes[0].indicators
+        ind["adx"] = 22.0        # moderate -> market entry, confidence not maxed at the cap
+        ind["rsi14"] = 55.0      # not extreme -> no pullback arm
+        ind["macd_hist"] = hist
+        ind["macd_hist_prev"] = hist_prev
+        return _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW,
+                                       disable=disable)
+
+    rising, fading = prop(0.5, 0.2), prop(0.2, 0.5)
+    assert rising.direction == Direction.LONG and fading.direction == Direction.LONG
+    assert rising.confidence > fading.confidence
+    off_r = prop(0.5, 0.2, disable=frozenset({"macd_rising"}))
+    off_f = prop(0.2, 0.5, disable=frozenset({"macd_rising"}))
+    assert off_r.confidence == off_f.confidence   # filter off -> histogram slope no longer scored
+
+
+def test_adx_filter_maps_to_trend_only_mode(db_session):
+    # The "adx" panel filter is a proxy for trend_only_mode (the existing ADX-strength gate).
+    from app.api.settings_routes import DetFiltersRequest, get_det_filters, set_det_filters
+    from app.core.state import get_or_create_settings
+
+    assert "adx" not in get_det_filters(session=db_session).disabled       # trend-only on by default
+    out = set_det_filters(DetFiltersRequest(disabled=["adx"]), session=db_session)
+    assert "adx" in out.disabled and get_or_create_settings(db_session).trend_only_mode is False
+    out2 = set_det_filters(DetFiltersRequest(disabled=[]), session=db_session)
+    assert "adx" not in out2.disabled and get_or_create_settings(db_session).trend_only_mode is True
+
+
 def test_det_filters_endpoint_persists_and_validates(db_session):
     from app.agents.orchestrator import DET_FILTER_KEYS
     from app.api.settings_routes import DetFiltersRequest, get_det_filters, set_det_filters

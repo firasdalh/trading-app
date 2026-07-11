@@ -116,7 +116,7 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
           <button
             onClick={scan}
             disabled={busy}
-            className="btn bg-blue-600 text-white hover:bg-blue-500"
+            className="btn btn-primary"
           >
             {busy ? "Scanning…" : "Scan watchlist"}
           </button>
@@ -178,7 +178,7 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                     </span>
                   )}
                   {best && (
-                    <span className="rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
+                    <span className="rounded bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
                       best
                     </span>
                   )}
@@ -498,9 +498,9 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
       <div className="grid grid-cols-4 gap-1.5">
         {cells.map((c) => (
           <div key={c.label} title={c.title}
-               className="rounded bg-neutral-800/60 px-2 py-1.5 text-center">
-            <div className={`text-lg font-bold tabular-nums leading-none ${c.tone}`}>{c.value}</div>
-            <div className="mt-1 text-[10px] leading-tight text-neutral-500">{c.label}</div>
+               className="rounded-lg border border-neutral-800 bg-neutral-800/40 px-2 py-2 text-center">
+            <div className={`text-xl font-semibold tabular-nums leading-none ${c.tone}`}>{c.value}</div>
+            <div className="mt-1 text-[10px] uppercase tracking-wide leading-tight text-neutral-500">{c.label}</div>
           </div>
         ))}
       </div>

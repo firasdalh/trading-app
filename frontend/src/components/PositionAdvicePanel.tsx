@@ -130,7 +130,7 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
   return (
     <div className="card">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="text-sm font-semibold">Position advisor</span>
+        <span className="card-title">Position advisor</span>
         <span className="text-xs text-neutral-500">last check {ago(state?.last_run_at ?? null)}</span>
         <div className="ml-auto flex items-center gap-2">
           <label className="flex items-center gap-1 text-xs text-neutral-400">
@@ -143,7 +143,7 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
               onBlur={saveInterval}
               onKeyDown={(e) => e.key === "Enter" && saveInterval()}
               inputMode="numeric"
-              className="w-14 rounded bg-neutral-800 px-1.5 py-1 text-center tabular-nums"
+              className="field w-14 px-1.5 py-1 text-center tabular-nums"
             />
             s
           </label>
@@ -171,7 +171,7 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
             onClick={toggleAutoReenter}
             disabled={busy || !autoExecute}
             className={`btn text-xs ${
-              autoReenter ? "bg-blue-600/30 text-blue-300 hover:bg-blue-600/40" : "bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
+              autoReenter ? "bg-brand-600/30 text-brand-400 hover:bg-brand-600/40" : "bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
             } ${!autoExecute ? "opacity-50" : ""}`}
             title="After closing an invalidated trade, re-analyze and open a fresh, properly-sized setup (requires Auto-execute)"
           >
@@ -180,7 +180,7 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
           <button
             onClick={() => load(true)}
             disabled={busy}
-            className="btn bg-blue-600 text-white hover:bg-blue-500"
+            className="btn btn-primary"
           >
             {busy ? "Checking…" : "Run now"}
           </button>

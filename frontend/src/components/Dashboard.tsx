@@ -338,7 +338,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
             name="dash-asset-class"
             value={assetClass}
             onChange={(e) => setAssetClass(e.target.value as AssetClass)}
-            className="rounded bg-neutral-800 px-2 py-1.5"
+            className="field"
           >
             {ASSET_CLASSES.map((a) => (
               <option key={a} value={a}>
@@ -353,7 +353,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
             name="dash-timeframe"
             value={timeframe}
             onChange={(e) => setTimeframe(e.target.value)}
-            className="rounded bg-neutral-800 px-2 py-1.5 disabled:opacity-50"
+            className="field disabled:opacity-50"
           >
             {TIMEFRAMES.map((t) => (
               <option key={t} value={t}>
@@ -416,7 +416,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           <button
             onClick={runAnalysis}
             disabled={analyzing}
-            className="btn bg-blue-600 text-white hover:bg-blue-500"
+            className="btn btn-primary"
           >
             {analyzing ? "Analyzing…" : "Run analysis"}
           </button>
@@ -432,7 +432,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
               <span
                 key={`${f.assetClass}-${f.symbol}`}
                 className={`group flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
-                  active ? "bg-blue-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                  active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
                 }`}
               >
                 <button onClick={() => openFavorite(f)} title={`${f.symbol} · ${f.assetClass}`}>
@@ -478,7 +478,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
                     onClick={() => openPositionSymbol(p)}
                     title={`Switch chart to ${p.symbol} (${p.direction})`}
                     className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs ${
-                      active ? "bg-blue-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                      active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
                     }`}
                   >
                     <span className={p.direction === "long" ? "text-bull" : "text-bear"}>
@@ -556,6 +556,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         }}
       />
 
+      <div className="section-label pt-1">Automation &amp; scanners</div>
+
       <OpportunitiesPanel
         onSelect={openPositionSymbol}
         onOpened={() => setPosBump((b) => b + 1)}
@@ -569,6 +571,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         onSelect={openPositionSymbol}
         onChanged={() => setPosBump((b) => b + 1)}
       />
+
+      <div className="section-label pt-1">Positions &amp; risk</div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">

@@ -97,7 +97,7 @@ export function ConditionalsPanel({ onSelect }: {
               </span>
               <span className={`text-[10px] font-bold uppercase ${STATUS_STYLE[s.status] ?? ""}`}>{s.status}</span>
               {s.source === "hybrid" && (
-                <span className="rounded bg-blue-600/30 px-1 py-0.5 text-[10px] text-blue-200">hybrid</span>
+                <span className="rounded bg-brand-600/30 px-1 py-0.5 text-[10px] text-blue-200">hybrid</span>
               )}
               <span className="text-[10px] text-neutral-500" title={`armed ${localTime(s.created_at)}`}>
                 armed {ago(s.created_at)}

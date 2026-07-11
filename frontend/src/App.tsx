@@ -33,23 +33,23 @@ export default function App() {
       )}
       {error && (
         <div className="mx-auto max-w-7xl px-4 pt-4">
-          <div className="rounded-md border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">
+          <div className="rounded-lg border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">
             Cannot reach backend: {error}. Is the API running on :8000?
           </div>
         </div>
       )}
-      <nav className="mx-auto flex max-w-7xl gap-1 px-4 pt-3">
-        {(["dashboard", "backtest", "journal"] as View[]).map((v) => (
-          <button
-            key={v}
-            onClick={() => setView(v)}
-            className={`btn capitalize ${
-              view === v ? "bg-neutral-700 text-white" : "text-neutral-400 hover:text-white"
-            }`}
-          >
-            {v}
-          </button>
-        ))}
+      <nav className="mx-auto max-w-7xl px-4 pt-3">
+        <div className="inline-flex gap-1 rounded-lg border border-neutral-800 bg-neutral-900/60 p-1 shadow-card">
+          {(["dashboard", "backtest", "journal"] as View[]).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              className={`btn capitalize ${view === v ? "btn-primary" : "btn-ghost"}`}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
       </nav>
 
       {view === "dashboard" && <Dashboard settings={settings} onSettingsChanged={refresh} />}

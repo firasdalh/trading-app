@@ -118,6 +118,7 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         indicators["macd_cross"] = ms["cross"]        # +1 bullish / -1 bearish / 0
         indicators["macd_div_bull"] = ms["div_bull"]  # 1.0 = bullish divergence
         indicators["macd_div_bear"] = ms["div_bear"]  # 1.0 = bearish divergence
+        indicators["macd_hist_prev"] = ms["hist_prev"]  # previous bar's histogram (is momentum expanding?)
     # Volatility (stop sizing) + regime.
     a = atr(candles)
     if a is not None:

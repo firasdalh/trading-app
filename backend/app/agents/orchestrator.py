@@ -138,8 +138,12 @@ DET_FILTERS = [
      "desc": "Don't trade against the higher-timeframe trend (no confluence → stand aside)."},
     {"key": "chase", "label": "Anti-chase (ATR distance)",
      "desc": "Down-weight entries stretched far from EMA20 in ATRs — the top filter against buying the top / selling the bottom."},
+    {"key": "adx", "label": "ADX trend strength",
+     "desc": "Only take trend entries when the trend is strong enough (ADX ≥ 23) — stand aside in the forming band (ADX 20–23); ranging (< 20) fades the range instead. This is Trend-only mode."},
     {"key": "momentum", "label": "MACD momentum",
      "desc": "Momentum must align; if it's rolling over, arm the pullback instead of entering into it."},
+    {"key": "macd_rising", "label": "MACD histogram rising",
+     "desc": "Prefer entries where the MACD histogram is EXPANDING (growing bars) in the trade direction; down-weight a fading histogram even if still aligned."},
     {"key": "rsi_extreme", "label": "RSI overextension",
      "desc": "Don't chase into an overbought/oversold RSI — arm the pullback (unless a strong trend rides it)."},
     {"key": "divergence", "label": "RSI divergence",
@@ -1154,6 +1158,13 @@ def _deterministic_decision(
             conf -= 0.18                      # chasing far from value — strong anti-chase
         elif value_dist >= _STRETCHED_ATR:
             conf -= 0.06                      # getting stretched
+    # MACD histogram EXPANDING vs FADING (the checklist's "growing bars"): a histogram rising in the
+    # trade direction = momentum still building (reward); shrinking = momentum fading even if still
+    # aligned (down-weight). Soft factor, toggle "macd_rising".
+    macd_hist_prev = ind.get("macd_hist_prev")
+    if macd_hist is not None and macd_hist_prev is not None and "macd_rising" not in disable:
+        rising = (macd_hist > macd_hist_prev) if direction == Direction.LONG else (macd_hist < macd_hist_prev)
+        conf += 0.05 if rising else -0.06
     # NOTE: a regression-channel "don't buy into the upper (resistance) band" confidence factor was
     # tested (analysis/channel_test.md) and REMOVED — it was slightly worse overall and clearly worse
     # OUT-OF-SAMPLE. Reason: this is a TREND-following engine, and in a real trend price legitimately

@@ -69,20 +69,20 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
   return (
     <div className="card space-y-3">
       <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold">Risk Dashboard</div>
+        <div className="card-title">Risk Dashboard</div>
         {risk?.trading_paused && (
           <div className="flex items-center gap-2">
-            <span className="rounded bg-bear px-2 py-0.5 text-xs font-bold text-white">
-              TRADING PAUSED
+            <span className="rounded-md bg-bear px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-white">
+              Trading paused
             </span>
             <button
               type="button"
               disabled={busy}
               onClick={resume}
               title="Clear today's daily-loss pause and allow new trades again."
-              className="rounded bg-neutral-700 px-2 py-0.5 text-xs font-semibold text-neutral-100 hover:bg-neutral-600 disabled:opacity-50"
+              className="btn btn-subtle px-2 py-0.5 text-xs"
             >
-              Resume trading
+              Resume
             </button>
           </div>
         )}
@@ -147,13 +147,16 @@ function Meter({ label, pct }: { label?: string; pct: number }) {
   return (
     <div>
       {label && (
-        <div className="mb-1 flex justify-between text-xs text-neutral-400">
-          <span>{label}</span>
-          <span>{Math.round(pct * 100)}%</span>
+        <div className="mb-1 flex justify-between text-xs">
+          <span className="text-neutral-400">{label}</span>
+          <span className="tabular-nums text-neutral-300">{Math.round(pct * 100)}%</span>
         </div>
       )}
-      <div className="h-2 rounded bg-neutral-800">
-        <div className={`h-2 rounded ${color}`} style={{ width: `${Math.round(pct * 100)}%` }} />
+      <div className="h-1.5 overflow-hidden rounded-full bg-neutral-800">
+        <div
+          className={`h-full rounded-full ${color} transition-all duration-500`}
+          style={{ width: `${Math.round(pct * 100)}%` }}
+        />
       </div>
     </div>
   );
@@ -204,9 +207,9 @@ function KV({
   title?: string;
 }) {
   return (
-    <div className="rounded bg-neutral-800/60 p-2" title={title}>
-      <div className="text-xs text-neutral-400">{label}</div>
-      <div className={`tabular-nums ${valueClass ?? ""}`}>{value}</div>
+    <div className="rounded-lg border border-neutral-800 bg-neutral-800/40 px-2.5 py-1.5" title={title}>
+      <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-500">{label}</div>
+      <div className={`text-sm font-semibold tabular-nums ${valueClass ?? "text-neutral-100"}`}>{value}</div>
     </div>
   );
 }

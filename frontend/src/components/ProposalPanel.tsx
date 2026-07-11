@@ -115,7 +115,7 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
           <button
             onClick={onRunAnalysis}
             disabled={analyzing}
-            className="btn bg-blue-600 text-white hover:bg-blue-500"
+            className="btn btn-primary"
           >
             {analyzing ? "Analyzing…" : "Run analysis"}
           </button>
@@ -162,7 +162,7 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
             <button
               onClick={onRunAnalysis}
               disabled={analyzing}
-              className="btn bg-blue-600 text-white hover:bg-blue-500"
+              className="btn btn-primary"
               title="Re-run analysis for the charted symbol"
             >
               {analyzing ? "Analyzing…" : "Run analysis"}

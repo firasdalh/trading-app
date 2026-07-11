@@ -312,7 +312,7 @@ function LlmSection() {
         />
       </div>
       <div className="mt-2">
-        <button onClick={save} disabled={busy} className="btn bg-blue-600 text-white hover:bg-blue-500">
+        <button onClick={save} disabled={busy} className="btn btn-primary">
           {busy ? "Saving…" : "Save & test"}
         </button>
       </div>
@@ -422,7 +422,7 @@ function Mt5Section({ onChanged }: { onChanged: () => void }) {
         />
       </div>
       <div className="mt-2 flex gap-2">
-        <button onClick={connect} disabled={busy} className="btn bg-blue-600 text-white hover:bg-blue-500">
+        <button onClick={connect} disabled={busy} className="btn btn-primary">
           {busy ? "Connecting…" : "Connect MT5"}
         </button>
         <button onClick={refreshStatus} disabled={busy} className="btn bg-neutral-700 text-white hover:bg-neutral-600">

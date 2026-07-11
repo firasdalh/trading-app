@@ -6,16 +6,94 @@
   color-scheme: dark;
 }
 
-body {
-  @apply bg-neutral-950 text-neutral-100 antialiased;
-  margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-neutral-950 text-neutral-100 antialiased;
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    /* subtle depth: a faint indigo glow at the top so the flat dark UI reads with more dimension */
+    background-image: radial-gradient(1100px 520px at 50% -8%, rgba(99, 102, 241, 0.07), transparent 60%);
+    background-attachment: fixed;
+  }
+
+  /* numeric alignment everywhere it matters */
+  table,
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background: rgba(99, 102, 241, 0.32);
+  }
+
+  /* quieter, thinner scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme(colors.neutral.700) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-neutral-700/80;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    @apply bg-neutral-600;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
-.card {
-  @apply rounded-lg border border-neutral-800 bg-neutral-900/60 p-4;
-}
+@layer components {
+  /* Surfaces */
+  .card {
+    @apply rounded-xl border border-neutral-800/80 bg-neutral-900/50 p-4 shadow-card;
+  }
+  .card-title {
+    @apply text-sm font-semibold text-neutral-100;
+  }
+  /* Small uppercase label used to group sections (adds rhythm/hierarchy to the page) */
+  .section-label {
+    @apply mb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-neutral-500;
+  }
+  .section-label::after {
+    content: "";
+    @apply h-px flex-1 bg-neutral-800;
+  }
 
-.btn {
-  @apply rounded-md px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed;
+  /* Buttons — one base + semantic variants so accents stop being ad-hoc across components */
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium
+           transition disabled:cursor-not-allowed disabled:opacity-40
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50;
+  }
+  .btn-primary {
+    @apply bg-brand-600 text-white hover:bg-brand-500;
+  }
+  .btn-subtle {
+    @apply bg-neutral-800 text-neutral-200 hover:bg-neutral-700;
+  }
+  .btn-ghost {
+    @apply text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100;
+  }
+  .btn-success {
+    @apply bg-emerald-600 text-white hover:bg-emerald-500;
+  }
+  .btn-danger {
+    @apply bg-bear text-white hover:brightness-110;
+  }
+
+  /* Inline controls */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-md border border-neutral-700 bg-neutral-800/40 px-2 py-0.5 text-xs;
+  }
+  .field {
+    @apply rounded-md border border-neutral-700 bg-neutral-800 px-2 py-1 text-sm text-neutral-100
+           focus:outline-none focus:ring-2 focus:ring-brand-500/40;
+  }
 }

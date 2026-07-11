@@ -33,40 +33,40 @@ export function Header({ settings, onKillSwitchChange, onOpenSettings }: Props) 
 
   return (
     <div className="sticky top-0 z-20">
-      <header className="flex items-center justify-between border-b border-neutral-800 bg-neutral-900 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <span className="text-lg font-semibold">AI Trading Desk</span>
-          <span
-            className={`rounded px-2 py-0.5 text-xs font-bold uppercase ${
-              isLive ? "bg-bear text-white" : "bg-bull text-white"
-            }`}
-          >
-            {isLive ? "LIVE" : "PAPER"}
-          </span>
-          <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300">
-            {modeLabel(mode)}
-          </span>
-        </div>
+      <header className="border-b border-neutral-800 bg-neutral-900/80 backdrop-blur supports-[backdrop-filter]:bg-neutral-900/60">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-2.5">
+          <div className="flex items-center gap-2.5">
+            <span className="grid h-6 w-6 place-items-center rounded-md bg-brand-600 text-[11px] font-bold text-white shadow-card">
+              AI
+            </span>
+            <span className="text-base font-semibold tracking-tight">Trading Desk</span>
+            <span
+              className={`rounded-md px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                isLive ? "bg-bear text-white" : "bg-bull/15 text-bull ring-1 ring-inset ring-bull/30"
+              }`}
+            >
+              {isLive ? "LIVE" : "PAPER"}
+            </span>
+            <span className="hidden rounded-md bg-neutral-800 px-2 py-0.5 text-[11px] text-neutral-400 sm:inline">
+              {modeLabel(mode)}
+            </span>
+          </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onOpenSettings}
-            className="btn border border-neutral-700 bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
-          >
-            Settings
-          </button>
-          <button
-            onClick={toggleKill}
-            disabled={busy || envKill}
-            title={envKill ? "Env KILL_SWITCH is on — cannot clear from UI" : ""}
-            className={`btn border ${
-              effectiveKill
-                ? "border-bear bg-bear/20 text-bear"
-                : "border-neutral-700 bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
-            }`}
-          >
-            {effectiveKill ? "● KILL-SWITCH ENGAGED — click to release" : "Kill-switch"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={onOpenSettings} className="btn btn-subtle">
+              Settings
+            </button>
+            <button
+              onClick={toggleKill}
+              disabled={busy || envKill}
+              title={envKill ? "Env KILL_SWITCH is on — cannot clear from UI" : ""}
+              className={`btn ${
+                effectiveKill ? "border border-bear bg-bear/20 text-bear" : "btn-subtle"
+              }`}
+            >
+              {effectiveKill ? "● Kill-switch engaged — release" : "Kill-switch"}
+            </button>
+          </div>
         </div>
       </header>
 
