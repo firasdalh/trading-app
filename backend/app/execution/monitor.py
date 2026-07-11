@@ -179,6 +179,63 @@ def _reconcile_closed_at_broker(session: Session, settings, open_positions: list
     return reconciled
 
 
+def _aware(dt):
+    """SQLite drops tzinfo; treat naive timestamps as UTC so we can compare against broker (aware)."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def fill_realized_pnl_from_broker(session: Session, positions: list[Position]) -> int:
+    """Recover realized P&L + exit price for CLOSED app rows that never booked it (closed broker-side
+    / in the terminal, so the monitor only reconciled them to CLOSED without a $ result). Pulled from
+    the broker's OWN deal history (broker truth), matched to each row by normalized symbol + direction
+    + entry price (±0.5%) + nearest close time, one broker trade per row.
+
+    Journal-only: this fills the row's ``realized_pnl``/``last_price`` for the stats + by-source
+    breakdown. It does NOT book into the daily-loss state (that already comes from broker truth), so
+    it can never double-count. Returns the number of rows filled.
+    """
+    from app.risk.service import _norm_symbol, broker_closed_trades
+
+    targets = [p for p in positions
+               if p.realized_pnl is None and p.status == PositionStatus.CLOSED.value]
+    if not targets:
+        return 0
+    broker_trades = broker_closed_trades(session)  # list[PositionView] | None (respects journal reset)
+    if not broker_trades:
+        return 0
+
+    used: set[int] = set()
+    filled = 0
+    for p in sorted(targets, key=lambda x: _aware(x.closed_at) or datetime.min.replace(tzinfo=timezone.utc)):
+        best_i, best_key = None, None
+        for i, bt in enumerate(broker_trades):
+            if i in used or bt.direction != p.direction:
+                continue
+            if _norm_symbol(bt.symbol) != _norm_symbol(p.symbol):
+                continue
+            pe = abs(p.entry_price or 0.0)
+            rel = abs((bt.entry_price or 0.0) - (p.entry_price or 0.0)) / max(pe, 1e-9)
+            if rel > 0.005:   # >0.5% entry gap -> not the same trade
+                continue
+            bc, pc = _aware(bt.closed_at), _aware(p.closed_at)
+            dt = abs((bc - pc).total_seconds()) if (bc and pc) else 1e12
+            key = (rel, dt)
+            if best_key is None or key < best_key:
+                best_key, best_i = key, i
+        if best_i is not None:
+            bt = broker_trades[best_i]
+            p.realized_pnl = bt.realized_pnl
+            if bt.last_price:
+                p.last_price = bt.last_price
+            p.unrealized_pnl = 0.0
+            used.add(best_i)
+            session.add(p)
+            filled += 1
+    return filled
+
+
 def monitor_positions(session: Session) -> dict:
     """One monitoring pass over all open positions. Returns a small summary dict."""
     settings = get_or_create_settings(session)
@@ -188,8 +245,20 @@ def monitor_positions(session: Session) -> dict:
 
     # Reconcile first: drop positions the broker no longer holds (closed in the terminal /
     # broker-side) so we neither price nor manage phantoms, and they stop blocking new trades.
+    pre_ids = {p.id for p in open_positions}
     if _reconcile_closed_at_broker(session, settings, open_positions):
         session.commit()
+        # Those just reconciled to CLOSED closed broker-side, so they carry no $ result — recover it
+        # from broker deal history now so they show up in the stats + by-source breakdown (journal-only).
+        just_closed = session.scalars(
+            select(Position).where(Position.id.in_(pre_ids),
+                                   Position.status == PositionStatus.CLOSED.value)
+        ).all()
+        try:
+            if fill_realized_pnl_from_broker(session, just_closed):
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — P&L recovery is best-effort, never break monitoring
+            log.warning("reconciled P&L backfill failed", extra={"error": str(exc)})
         open_positions = session.scalars(
             select(Position).where(Position.status == PositionStatus.OPEN.value)
         ).all()

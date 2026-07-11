@@ -24,6 +24,7 @@ export function QuickTradePanel({
 }) {
   const [dir, setDir] = useState<"long" | "short">("long");
   const [advanced, setAdvanced] = useState(false);
+  const [editingLots, setEditingLots] = useState(false);
   const [stop, setStop] = useState("");
   const [target, setTarget] = useState("");
   const [lots, setLots] = useState("");
@@ -118,6 +119,14 @@ export function QuickTradePanel({
   const inputCls =
     "w-full rounded bg-neutral-800 px-2 py-1.5 text-sm tabular-nums text-neutral-100 placeholder:text-neutral-600";
 
+  // Effective size + its risk. A custom lot overrides the auto 3%-cap size; the Risk Manager clamps
+  // anything above the cap, so the displayed risk tops out at the cap risk and we flag when it will.
+  const customLots = lots && Number(lots) > 0 ? Number(lots) : null;
+  const effLots = customLots ?? preview?.lots ?? 0;
+  const cappedLots = preview ? Math.min(effLots, preview.lots) : effLots;
+  const effRisk = preview && preview.lots > 0 ? (preview.risk * cappedLots) / preview.lots : preview?.risk ?? 0;
+  const overCap = preview ? effLots > preview.lots + 1e-9 : false;
+
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-3">
       <div className="mb-2 flex items-center justify-between">
@@ -157,17 +166,52 @@ export function QuickTradePanel({
                 {preview.auto_levels ? "Auto target" : "Target"}{" "}
                 <span className="tabular-nums text-bull">{fmtPrice(preview.take_profit)}</span>
               </span>
-              <span>
+              <span className="flex items-center gap-1">
                 Size{" "}
+                {editingLots ? (
+                  <input
+                    autoFocus
+                    value={lots}
+                    onChange={(e) => setLots(e.target.value)}
+                    onBlur={() => setEditingLots(false)}
+                    onKeyDown={(e) => e.key === "Enter" && setEditingLots(false)}
+                    inputMode="decimal"
+                    placeholder={String(preview.lots)}
+                    className="w-16 rounded bg-neutral-700 px-1.5 py-0.5 text-center text-[11px] tabular-nums text-neutral-100"
+                  />
+                ) : (
+                  <span className="font-semibold tabular-nums text-neutral-200">
+                    {Number(effLots.toFixed(2))} lots
+                  </span>
+                )}
                 <button
                   type="button"
-                  onClick={() => setLots(String(preview.lots))}
-                  className="font-semibold text-neutral-200 underline decoration-dotted hover:text-white"
-                  title="Fill the maximum size allowed by the 3% per-trade risk cap"
+                  onClick={() => setEditingLots((v) => !v)}
+                  className="rounded px-1 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100"
+                  title="Edit the lot size (the Risk Manager still clamps it to the 3% cap)"
                 >
-                  {preview.lots} lots
-                </button>{" "}
-                · risk {fmtUsd(preview.risk)}
+                  ✎
+                </button>
+                {customLots != null && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLots("");
+                      setEditingLots(false);
+                    }}
+                    className="text-[10px] text-neutral-500 hover:text-neutral-300"
+                    title="Reset to the auto 3%-cap size"
+                  >
+                    (auto {preview.lots})
+                  </button>
+                )}{" "}
+                · risk{" "}
+                <span className={overCap ? "text-warn" : undefined}>{fmtUsd(effRisk)}</span>
+                {overCap && (
+                  <span className="text-[10px] text-warn" title="Above the 3% per-trade cap — the Risk Manager will clamp it down to this max">
+                    · caps at {preview.lots}
+                  </span>
+                )}
               </span>
             </div>
           </div>
@@ -194,7 +238,7 @@ export function QuickTradePanel({
         {advanced ? "▾ Hide manual levels" : "▸ Set levels manually"}
       </button>
       {advanced && (
-        <div className="mt-1.5 grid grid-cols-3 gap-2">
+        <div className="mt-1.5 grid grid-cols-2 gap-2">
           <label className="text-[10px] uppercase text-neutral-500">
             Stop
             <input
@@ -212,16 +256,6 @@ export function QuickTradePanel({
               className={inputCls}
               value={target}
               onChange={(e) => setTarget(e.target.value)}
-              inputMode="decimal"
-              placeholder="auto"
-            />
-          </label>
-          <label className="text-[10px] uppercase text-neutral-500">
-            Lots
-            <input
-              className={inputCls}
-              value={lots}
-              onChange={(e) => setLots(e.target.value)}
               inputMode="decimal"
               placeholder="auto"
             />

@@ -28,11 +28,17 @@ matching the schema (summary, patterns, lessons)."""
 
 
 def _closed_positions(session: Session, limit: int = 200) -> list[Position]:
+    # Only trades with a booked $ result count: a NULL realized_pnl (closed broker-side before the
+    # P&L was recovered) is NOT a break-even — counting it would dilute the win rate. Respect the
+    # journal reset too, so reflection matches the stats/breakdown windows.
+    from app.core.state import get_or_create_settings
+
+    conds = [Position.status == PositionStatus.CLOSED.value, Position.realized_pnl.is_not(None)]
+    reset = get_or_create_settings(session).journal_reset_at
+    if reset is not None:
+        conds.append(Position.closed_at >= reset)
     return list(session.scalars(
-        select(Position)
-        .where(Position.status == PositionStatus.CLOSED.value)
-        .order_by(Position.closed_at.desc())
-        .limit(limit)
+        select(Position).where(*conds).order_by(Position.closed_at.desc()).limit(limit)
     ).all())
 
 

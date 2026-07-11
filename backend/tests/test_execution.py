@@ -294,6 +294,100 @@ def test_reconcile_skips_on_broker_outage(db_session, monkeypatch):
     assert pos.status == PositionStatus.OPEN.value
 
 
+# ---- journal repair: recover realized P&L from broker deal history ----
+
+def _closed_bt(symbol, direction, entry, exit_, pnl, closed_at):
+    from app.models.schemas import PositionView
+    return PositionView(id=999, symbol=symbol, asset_class="metal", direction=direction, qty=0.01,
+                        entry_price=entry, status="closed", last_price=exit_, unrealized_pnl=0.0,
+                        realized_pnl=pnl, closed_at=closed_at)
+
+
+def test_fill_realized_pnl_matches_by_symbol_dir_entry(db_session, monkeypatch):
+    """A closed app row that never booked a $ result (closed broker-side) gets its realized P&L +
+    exit recovered from the matching broker deal-history trade."""
+    import app.risk.service as risk_service
+    from app.execution import monitor as monitor_mod
+
+    p = Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
+                 entry_price=2000.0, status=PositionStatus.CLOSED.value, last_price=2000.0,
+                 realized_pnl=None, risk_amount=50.0,
+                 closed_at=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc))
+    db_session.add(p)
+    db_session.commit()
+
+    bt = _closed_bt("XAUUSDm", "short", 2000.3, 1990.0, 42.5,
+                    datetime(2026, 7, 10, 12, 1, tzinfo=timezone.utc))  # entry within 0.5%
+    monkeypatch.setattr(risk_service, "broker_closed_trades", lambda s: [bt])
+
+    assert monitor_mod.fill_realized_pnl_from_broker(db_session, [p]) == 1
+    db_session.commit()   # the helper leaves committing to the caller
+    db_session.refresh(p)
+    assert p.realized_pnl == 42.5 and p.last_price == 1990.0
+
+
+def test_fill_realized_pnl_skips_wrong_side_or_far_entry(db_session, monkeypatch):
+    """Never mis-attribute: a broker trade on the wrong side or with a far entry is not a match."""
+    import app.risk.service as risk_service
+    from app.execution import monitor as monitor_mod
+
+    p = Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
+                 entry_price=2000.0, status=PositionStatus.CLOSED.value, last_price=2000.0,
+                 realized_pnl=None, risk_amount=50.0,
+                 closed_at=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc))
+    db_session.add(p)
+    db_session.commit()
+
+    wrong_dir = _closed_bt("XAUUSDm", "long", 2000.0, 2010.0, 99.0,
+                           datetime(2026, 7, 10, 12, 1, tzinfo=timezone.utc))
+    far_entry = _closed_bt("XAUUSDm", "short", 2100.0, 2090.0, 55.0,   # 5% away
+                           datetime(2026, 7, 10, 12, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr(risk_service, "broker_closed_trades", lambda s: [wrong_dir, far_entry])
+
+    assert monitor_mod.fill_realized_pnl_from_broker(db_session, [p]) == 0
+    db_session.refresh(p)
+    assert p.realized_pnl is None
+
+
+def test_attribute_sources_tags_broker_trades_from_app_rows(db_session):
+    """Broker deal-history rows (no source) get their source from the matching app position; a
+    broker trade with no app match stays external ('Unknown')."""
+    from app.api.journal_routes import _attribute_sources
+
+    p = Position(symbol="ETHUSDm", asset_class="crypto", direction="long", qty=4.6, entry_price=1802.5,
+                 status=PositionStatus.CLOSED.value, last_price=1814.5, realized_pnl=55.0, source="manual",
+                 closed_at=datetime(2026, 7, 11, 18, 35, tzinfo=timezone.utc))
+    db_session.add(p)
+    db_session.commit()
+
+    matched = _closed_bt("ETHUSDm", "long", 1802.52, 1814.51, 55.27,
+                         datetime(2026, 7, 11, 18, 35, 10, tzinfo=timezone.utc))
+    external = _closed_bt("GBPUSDm", "short", 1.27, 1.26, 40.0,
+                          datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc))
+    _attribute_sources(db_session, [matched, external])
+    assert matched.source == "manual"      # tagged from the app row
+    assert external.source is None          # no app row -> genuinely external, stays Unknown
+
+
+def test_journal_backfill_labels_legacy_source(db_session, monkeypatch):
+    """The /backfill endpoint labels legacy NULL-source rows 'analysis' (so they stop showing as
+    'Unknown'), independent of whether broker history is available for P&L recovery."""
+    import app.risk.service as risk_service
+    from app.api.journal_routes import backfill
+
+    p = Position(symbol="EURUSDm", asset_class="forex", direction="long", qty=1.0, entry_price=1.1,
+                 status=PositionStatus.CLOSED.value, last_price=1.1, source=None, realized_pnl=5.0,
+                 closed_at=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc))
+    db_session.add(p)
+    db_session.commit()
+
+    monkeypatch.setattr(risk_service, "broker_closed_trades", lambda s: None)  # no broker history
+    out = backfill(session=db_session)
+    assert out.sources_labelled == 1
+    db_session.refresh(p)
+    assert p.source == "analysis"
+
+
 # ---- flatten ----
 
 def test_close_one_books_pnl(db_session):

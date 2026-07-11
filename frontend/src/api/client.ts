@@ -319,6 +319,10 @@ export const api = {
   restoreJournal: () =>
     request<{ journal_reset_at: string | null }>("/api/journal/reset", { method: "DELETE" }),
   reflect: () => request<ReflectionReport>("/api/journal/reflect", { method: "POST" }),
+  backfillJournal: () =>
+    request<{ sources_labelled: number; pnl_recovered: number }>("/api/journal/backfill", {
+      method: "POST",
+    }),
   reflectionLatest: () => request<ReflectionReport | null>("/api/journal/reflection/latest"),
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
   journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),

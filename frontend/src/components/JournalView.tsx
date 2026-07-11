@@ -12,6 +12,7 @@ const SOURCE_META: Record<string, { label: string; color: string }> = {
   hybrid: { label: "Hybrid", color: "text-emerald-300" },
   manual: { label: "Manual", color: "text-neutral-200" },
   deterministic: { label: "Deterministic", color: "text-blue-300" },
+  analysis: { label: "Analysis (legacy)", color: "text-indigo-300" },
   supertrend: { label: "SuperTrend", color: "text-teal-300" },
   unknown: { label: "Unknown", color: "text-neutral-500" },
 };
@@ -71,6 +72,23 @@ export function JournalView() {
     try {
       await api.restoreJournal();
       setBump((b) => b + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const repairJournal = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.backfillJournal();
+      setBump((b) => b + 1);
+      setError(
+        `Repaired: labelled ${r.sources_labelled} legacy source${r.sources_labelled === 1 ? "" : "s"}, ` +
+          `recovered P&L for ${r.pnl_recovered} closed trade${r.pnl_recovered === 1 ? "" : "s"}.`,
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -180,6 +198,14 @@ export function JournalView() {
         <div className="mb-2 flex items-center justify-between gap-2">
           <span className="text-sm font-semibold">Closed trades ({trades?.length ?? 0})</span>
           <div className="flex items-center gap-3">
+            <button
+              onClick={repairJournal}
+              disabled={busy}
+              className="text-xs text-neutral-500 hover:text-brand-400"
+              title="Repair app-tracked rows: label legacy 'Unknown' trades and recover missing P&L from broker history (for the by-source stats). Non-destructive."
+            >
+              Repair ⟳
+            </button>
             <button
               onClick={restoreJournal}
               disabled={busy}

@@ -58,17 +58,58 @@ def calibration(session: Session = Depends(get_session)) -> list[CalibrationBuck
     return out
 
 
+def _attribute_sources(session: Session, broker_trades: list[PositionView]) -> None:
+    """The broker's deal history has no 'source' (it doesn't know who opened a trade), so every row
+    would read 'Unknown'. Attribute each broker trade to the app's own closed Position (which DOES
+    carry the source) by normalized symbol + direction + entry (±0.5%) + nearest close time, one app
+    row per broker trade. A broker trade left with no match is genuinely external — a trade opened
+    directly in the MT5/Exness terminal — and correctly stays 'Unknown'."""
+    from app.risk.service import _norm_symbol
+
+    def _aware(dt):
+        if dt is None:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    rows = session.scalars(
+        select(Position).where(Position.status == PositionStatus.CLOSED.value,
+                               Position.source.is_not(None))
+    ).all()
+    used: set[int] = set()
+    for bt in broker_trades:
+        best_i, best_key = None, None
+        for i, p in enumerate(rows):
+            if i in used or p.direction != bt.direction:
+                continue
+            if _norm_symbol(p.symbol) != _norm_symbol(bt.symbol):
+                continue
+            be = abs(bt.entry_price or 0.0)
+            rel = abs((p.entry_price or 0.0) - (bt.entry_price or 0.0)) / max(be, 1e-9)
+            if rel > 0.005:
+                continue
+            pc, bc = _aware(p.closed_at), _aware(bt.closed_at)
+            dt = abs((pc - bc).total_seconds()) if (pc and bc) else 1e12
+            key = (rel, dt)
+            if best_key is None or key < best_key:
+                best_key, best_i = key, i
+        if best_i is not None:
+            bt.source = rows[best_i].source
+            used.add(best_i)
+
+
 @router.get("/trades", response_model=list[PositionView])
 def closed_trades(
     limit: int = Query(100, ge=1, le=500),
     session: Session = Depends(get_session),
 ) -> list[PositionView]:
     """Closed-trade log. Prefers the broker's own deal history (MT5) so entry/exit/P&L/date
-    match the Exness journal exactly; falls back to app-tracked closed positions otherwise."""
+    match the Exness journal exactly; falls back to app-tracked closed positions otherwise.
+    The broker rows are attributed a source by matching back to the app's own positions."""
     from app.risk.service import broker_closed_trades
 
     broker_trades = broker_closed_trades(session)  # already respects the journal reset marker
     if broker_trades is not None:
+        _attribute_sources(session, broker_trades)
         return broker_trades[:limit]
 
     conds = [Position.status == PositionStatus.CLOSED.value]
@@ -251,6 +292,45 @@ def clear_journal_reset(session: Session = Depends(get_session)) -> JournalReset
     settings.journal_reset_at = None
     session.commit()
     return JournalResetView(journal_reset_at=None)
+
+
+class BackfillResult(BaseModel):
+    sources_labelled: int   # legacy positions whose NULL source was set (no longer "Unknown")
+    pnl_recovered: int      # closed positions whose realized P&L was recovered from broker history
+
+
+@router.post("/backfill", response_model=BackfillResult)
+def backfill(session: Session = Depends(get_session)) -> BackfillResult:
+    """Repair the journal's app-tracked rows:
+
+    1. SOURCE — positions opened before source-tracking existed carry a NULL source and show as
+       'Unknown'. They were all opened via the deterministic analysis pipeline (their proposal
+       records recorded ``source='analysis'``), so we label them 'analysis'. NOT broker/terminal
+       trades — the app only ever rows a position it opened itself.
+    2. P&L — closed rows that closed broker-side never booked a $ result, so the stats + by-source
+       breakdown dropped them. We recover realized P&L + exit from the broker's own deal history.
+
+    Idempotent: only fills rows that are still missing the data.
+    """
+    from app.execution.monitor import fill_realized_pnl_from_broker
+
+    # 1. Source: legacy NULL -> "analysis" (the recorded source of the analysis pipeline).
+    legacy = session.scalars(select(Position).where(Position.source.is_(None))).all()
+    for p in legacy:
+        p.source = "analysis"
+        session.add(p)
+    if legacy:
+        session.commit()
+
+    # 2. P&L: recover for every closed app row still missing it (bounded by the broker's history).
+    closed_missing = session.scalars(
+        select(Position).where(Position.status == PositionStatus.CLOSED.value,
+                               Position.realized_pnl.is_(None))
+    ).all()
+    recovered = fill_realized_pnl_from_broker(session, closed_missing)
+    if recovered:
+        session.commit()
+    return BackfillResult(sources_labelled=len(legacy), pnl_recovered=recovered)
 
 
 @router.post("/reflect", response_model=ReflectionReport)
