@@ -135,7 +135,19 @@ DET_FILTERS = [
     {"key": "structure", "label": "Market structure",
      "desc": "BOS / CHoCH / higher-high-higher-low confluence — refuse a trade that fights the swing structure."},
     {"key": "mtf", "label": "Higher-timeframe trend",
-     "desc": "Don't trade against the higher-timeframe trend (no confluence → stand aside)."},
+     "desc": "Trade WITH the immediate higher timeframe (15m→1h, 1h→4h, 4h→1d); don't fight the next TF up (no confluence → stand aside)."},
+    {"key": "htf_level", "label": "Higher-TF S/R levels",
+     "desc": "Respect major 4h/1d support/resistance — don't enter straight into a big-timeframe level (stand aside / wait for the break or pullback)."},
+    {"key": "htf_pullback", "label": "Higher-TF pullback (buy the dip)",
+     "desc": "When your timeframe pulls back against a clear higher-TF trend and RSI is exhausted AND confirmed (at a support/resistance or an RSI divergence), ARM a resumption in the higher-TF direction (buy the dip / sell the rally) instead of standing aside."},
+    {"key": "range_breakout", "label": "Range breakout",
+     "desc": "In a ranging market, when price closes beyond the range top/bottom WITH the higher-TF trend and a volume / decisive-close confirmation, trade the breakout (measured-move target, stop back inside) instead of only fading the edges."},
+    {"key": "ema_pullback", "label": "EMA20 pullback",
+     "desc": "In a trend, take the continuation when price pulls back to the EMA20 (dynamic support/resistance) and closes back on the trend side — a tight-stopped entry off the moving average."},
+    {"key": "failed_break", "label": "Failed-break reversal",
+     "desc": "In a range, fade a FALSE breakout (a liquidity sweep beyond the range that closes back inside — a bull/bear trap) back toward the mean, stop beyond the sweep. Not against a clear higher-TF trend."},
+    {"key": "alignment", "label": "Trend alignment (A+ boost)",
+     "desc": "Grade each trend trade by how clearly the direction stacks up (all timeframes + strength + momentum). A fully-aligned 'A+' trend gets a small confidence bump so the clearest setups rank up and the Hybrid prioritises them."},
     {"key": "chase", "label": "Anti-chase (ATR distance)",
      "desc": "Down-weight entries stretched far from EMA20 in ATRs — the top filter against buying the top / selling the bottom."},
     {"key": "adx", "label": "ADX trend strength",
@@ -200,6 +212,278 @@ def _macro_trend(technical: TechnicalRead) -> str:
     if best is None:
         return "sideways"
     return _trend_from_indicators(best.indicators, best.trend)
+
+
+# --- Laddered higher-timeframe context ---------------------------------------------------------- #
+# The trend engine trades WITH the IMMEDIATE higher timeframe (15m→1h, 1h→4h, 4h→1d) instead of
+# demanding alignment with the single highest TF. The big timeframes (4h/1d) are then respected as
+# LEVELS (major S/R you don't trade straight into), not as a hard trend veto. This is looser than the
+# old "must agree with the daily" rule — the range-fade / RSI-Over paths KEEP the daily filter
+# (``_macro_trend``), which is the one the backtest proved plugs the "fading the daily" leak.
+_HTF_LEVEL_ATR = 1.0        # a big-TF level within this many ATRs of entry is "in the way"
+
+
+def _higher_tf(technical: TechnicalRead, entry_tf: str):
+    """The smallest loaded timeframe strictly HIGHER than the entry TF (its immediate context)."""
+    er = _TF_RANK.get(entry_tf, 0)
+    best, best_rank = None, 10**9
+    for tf in technical.timeframes:
+        r = _TF_RANK.get(tf.timeframe, 0)
+        if er < r < best_rank:
+            best, best_rank = tf, r
+    return best
+
+
+def _higher_trend(technical: TechnicalRead, entry_tf: str) -> tuple[str, str]:
+    """(trend, tf_name) of the immediate higher timeframe; ('sideways', '') if none is loaded."""
+    hi = _higher_tf(technical, entry_tf)
+    if hi is None:
+        return "sideways", ""
+    return _trend_from_indicators(hi.indicators, hi.trend), hi.timeframe
+
+
+def _big_tf_levels(technical: TechnicalRead, entry_tf: str) -> list[float]:
+    """Major S/R from the BIG timeframes above the entry (4h/1d): their nearest pivot support/
+    resistance plus prior day/week highs/lows — the levels a desk won't trade straight into."""
+    floor_rank = max(_TF_RANK.get(entry_tf, 0) + 1, _TF_RANK["4h"])
+    out: list[float] = []
+    for tf in technical.timeframes:
+        if _TF_RANK.get(tf.timeframe, 0) < floor_rank:
+            continue
+        out += list(tf.support_levels[:2]) + list(tf.resistance_levels[:2])
+        for k in ("prior_day_high", "prior_day_low", "prior_week_high", "prior_week_low"):
+            v = tf.indicators.get(k)
+            if v:
+                out.append(v)
+    return [x for x in out if x and x > 0]
+
+
+def _opposing_big_tf_level(direction: Direction, entry: float, atr: float | None,
+                           levels: list[float]) -> float | None:
+    """A big-TF level sitting in the trade's path within ~1 ATR — overhead resistance for a LONG,
+    support just below for a SHORT. Returns the nearest such level (to explain), else None."""
+    if not entry or not atr or atr <= 0 or not levels:
+        return None
+    reach = _HTF_LEVEL_ATR * atr
+    if direction == Direction.LONG:
+        ahead = [lv for lv in levels if entry < lv <= entry + reach]
+        return min(ahead) if ahead else None
+    behind = [lv for lv in levels if entry - reach <= lv < entry]
+    return max(behind) if behind else None
+
+
+# --- 'Buy the dip / sell the rally' — pullback entry in the HIGHER-TF trend direction ------------ #
+# When the entry TF pulls back AGAINST a clear higher-TF trend and the pullback is exhausted, arm a
+# resumption in the higher-TF direction. SAFE: it ARMS a break (waits for the turn), never market-
+# enters the falling/rising move. Requires RSI in the pullback zone AND a confirmation (the dip is at
+# a support / rally at a resistance, or an RSI divergence).
+_RSI_PULLBACK_LONG = 40.0    # a dip in an uptrend must reach ≤ this (oversold-ish) to arm a buy
+_RSI_PULLBACK_SHORT = 60.0   # a rally in a downtrend must reach ≥ this (overbought-ish) to arm a sell
+
+
+def _nearest_level_within(price: float, levels: list[float], atr: float | None, mult: float = 1.0):
+    """Nearest level within ``mult`` ATRs of price (a support a dip can bounce off / a resistance a
+    rally can reject at), else None."""
+    if not price or not atr or atr <= 0 or not levels:
+        return None
+    reach = mult * atr
+    near = [lv for lv in levels if lv and abs(lv - price) <= reach]
+    return min(near, key=lambda lv: abs(lv - price)) if near else None
+
+
+def _htf_pullback_arm(base: "TradeProposal", resume_dir: Direction, ind: dict, tf0,
+                      technical: "TechnicalRead", atr_v, rsi, px: float, htf_name: str, disable):
+    """Arm a buy-the-dip / sell-the-rally resumption in the higher-TF direction, or None if the
+    pullback doesn't qualify (caller then stands aside). Gated by RSI exhaustion + a confirmation
+    (S/R bounce level OR RSI divergence). It arms a break in the trend direction — never a market
+    entry into the countertrend move."""
+    if "htf_pullback" in disable or rsi is None:
+        return None
+    is_long = resume_dir == Direction.LONG
+    if not (rsi <= _RSI_PULLBACK_LONG if is_long else rsi >= _RSI_PULLBACK_SHORT):
+        return None  # pullback not exhausted enough
+
+    # Confirmation — at least one of: the dip is at a support / rally at a resistance, or a divergence.
+    confirms: list[str] = []
+    levels = list((tf0.support_levels if is_long else tf0.resistance_levels) if tf0 else [])
+    near = _nearest_level_within(px, levels, atr_v)
+    if near is not None:
+        confirms.append(f"at {'support' if is_long else 'resistance'} ~{round(near, 6)}")
+    div = (ind.get("div_bull") if is_long else ind.get("div_bear")) or 0.0
+    if div == 1.0 and "divergence" not in disable:
+        confirms.append("RSI divergence")
+    if not confirms:
+        return None  # a dip with no bounce level and no divergence — don't arm
+
+    base.watch = True
+    base.strategy = "htf_pullback"
+    conf = round(min(0.7, 0.45 + 0.25 * technical.confidence), 2)
+    base.conditional = _conditional_resumption(resume_dir, px, ind, atr_v,
+                                               _key_levels(technical, tf0, px), conf)
+    trend_word = "uptrend" if is_long else "downtrend"
+    zone = "oversold" if is_long else "overbought"
+    brk = "up" if is_long else "down"
+    tail = (f"arming a {resume_dir.value} on a break back {brk} to join the trend."
+            if base.conditional is not None
+            else f"waiting for a clean break back {brk} to arm a {resume_dir.value} (no arm level yet).")
+    base.rationale = (f"Higher-TF pullback: price pulled back into the {htf_name} {trend_word}, RSI "
+                      f"{rsi:.0f} ({zone}), confirmed {' + '.join(confirms)} — {tail}")
+    return base
+
+
+# --- Range breakout — the counterpart to the range fade (regime == ranging) --------------------- #
+_BREAKOUT_VOL = 1.2          # a break with volume >= 1.2x average is real, not a drift
+_BREAKOUT_DECISIVE_ATR = 0.3  # ...or a decisive close >= 0.3 ATR beyond the range (if volume is absent)
+_EMA_PULLBACK_ATR = 0.4      # the pullback low is "at" the EMA when within this many ATRs of it
+
+
+def _range_breakout_decision(base: TradeProposal, ind: dict, tf0, htf_trend: str, disable) -> TradeProposal | None:
+    """When a range RESOLVES — price closes beyond the prior range top/bottom, WITH the higher-TF
+    trend (not against it) and a volume or decisive-close confirmation — trade the breakout with a
+    measured-move target and a stop back inside the range. The counterpart to the range fade; returns
+    None if there's no clean break (caller then falls through to mean-reversion)."""
+    if "range_breakout" in disable:
+        return None
+    hi, lo = ind.get("prior_high"), ind.get("prior_low")
+    last, atr = ind.get("last_close"), ind.get("atr14")
+    if not (hi and lo and last and atr and atr > 0) or hi <= lo:
+        return None
+    if (hi - lo) < atr:          # too tight to be a tradeable range (noise)
+        return None
+    buf = 0.1 * atr
+    height = hi - lo
+    vol = ind.get("vol_ratio") or 0.0
+    up_ok = last > hi + buf and htf_trend != "down" and (vol >= _BREAKOUT_VOL or last > hi + _BREAKOUT_DECISIVE_ATR * atr)
+    dn_ok = last < lo - buf and htf_trend != "up" and (vol >= _BREAKOUT_VOL or last < lo - _BREAKOUT_DECISIVE_ATR * atr)
+    if up_ok:
+        direction, entry, stop = Direction.LONG, last, round(hi - buf, 6)
+        risk = entry - stop
+        tp = round(entry + min(height, _RR_MAX * risk), 6)
+        edge, lvl = "top", hi
+    elif dn_ok:
+        direction, entry, stop = Direction.SHORT, last, round(lo + buf, 6)
+        risk = stop - entry
+        tp = round(entry - min(height, _RR_MAX * risk), 6)
+        edge, lvl = "bottom", lo
+    else:
+        return None
+    if risk <= 0 or abs(tp - entry) / risk < _MIN_RR_ENTRY:
+        return None
+    base.direction = direction
+    base.entry, base.stop_loss, base.take_profit = round(entry, 6), stop, tp
+    base.strategy = "range_breakout"
+    base.confidence = 0.6
+    conf_txt = f"volume {vol:.1f}x" if vol >= _BREAKOUT_VOL else "a decisive close"
+    base.rationale = (f"Range breakout {direction.value.upper()}: closed beyond the range {edge} "
+                      f"(~{round(lvl, 6)}) with {conf_txt} — measured-move target {base.take_profit}, "
+                      f"stop back inside the range at {stop}.")
+    return base
+
+
+def _ema_pullback_decision(base: TradeProposal, ind: dict, direction: Direction, disable) -> TradeProposal | None:
+    """A textbook trend-continuation entry: in a trend, price pulls back to the rising/falling EMA20
+    (dynamic support/resistance) and closes back on the trend side. Enters with a TIGHT stop beyond
+    the pullback extreme (better R:R than a mid-move entry). Returns None if it isn't at the EMA."""
+    if "ema_pullback" in disable:
+        return None
+    ema = ind.get("ema20")
+    last, lo, hi, atr = ind.get("last_close"), ind.get("last_low"), ind.get("last_high"), ind.get("atr14")
+    if not (ema and last and atr and atr > 0):
+        return None
+    near = _EMA_PULLBACK_ATR * atr
+    if direction == Direction.LONG:
+        # dipped to/through the rising EMA and closed back above it (a bounce off dynamic support).
+        if lo is None or not (lo <= ema + near and last > ema):
+            return None
+        entry = last
+        stop = round(min(lo, ema) - 0.1 * atr, 6)
+        risk = entry - stop
+        tp = round(entry + _RR * risk, 6)
+    else:
+        if hi is None or not (hi >= ema - near and last < ema):
+            return None
+        entry = last
+        stop = round(max(hi, ema) + 0.1 * atr, 6)
+        risk = stop - entry
+        tp = round(entry - _RR * risk, 6)
+    if risk <= 0 or abs(tp - entry) / risk < _MIN_RR_ENTRY:
+        return None
+    base.direction = direction
+    base.entry, base.stop_loss, base.take_profit = round(entry, 6), stop, tp
+    base.strategy = "ema_pullback"
+    base.confidence = 0.62
+    side = "support" if direction == Direction.LONG else "resistance"
+    base.rationale = (f"EMA20 pullback {direction.value.upper()}: price pulled back to the EMA20 "
+                      f"(~{round(ema, 6)}) as dynamic {side} and closed back on the trend side — "
+                      f"entering the continuation, stop {stop} beyond the pullback ({_RR:.0f}R target).")
+    return base
+
+
+def _failed_break_decision(base: TradeProposal, ind: dict, htf_trend: str, disable) -> TradeProposal | None:
+    """Fade a FALSE breakout (liquidity sweep / stop-run): price pokes BEYOND the prior range then
+    closes back inside — a bull/bear trap. Fade it back toward the range mean, stop beyond the sweep
+    extreme. This is the FADE side that the backtest shows carries the edge (most range breaks fail).
+    Refused against a clear immediate-higher-TF trend (don't fade a real trend break). None if no trap."""
+    if "failed_break" in disable:
+        return None
+    hi, lo = ind.get("prior_high"), ind.get("prior_low")
+    last, last_hi, last_lo, atr = ind.get("last_close"), ind.get("last_high"), ind.get("last_low"), ind.get("atr14")
+    rsi = ind.get("rsi14")
+    if not (hi and lo and last and last_hi and last_lo and atr and atr > 0) or hi <= lo:
+        return None
+    buf = 0.1 * atr
+    mid = (hi + lo) / 2.0
+    if last_hi > hi and last < hi - buf and htf_trend != "up":
+        # swept above the range top then closed back inside = bull trap -> fade SHORT toward the mean
+        direction, entry, stop, tp, swept, edge, trap = (
+            Direction.SHORT, last, round(last_hi + buf, 6), round(mid, 6), hi, "top", "bull trap")
+        risk = stop - entry
+    elif last_lo < lo and last > lo + buf and htf_trend != "down":
+        # swept below the range bottom then closed back inside = bear trap -> fade LONG toward the mean
+        direction, entry, stop, tp, swept, edge, trap = (
+            Direction.LONG, last, round(last_lo - buf, 6), round(mid, 6), lo, "bottom", "bear trap")
+        risk = entry - stop
+    else:
+        return None
+    if risk <= 0 or abs(tp - entry) / risk < _MIN_RR_ENTRY:
+        return None
+    base.direction = direction
+    base.entry, base.stop_loss, base.take_profit = round(entry, 6), stop, tp
+    base.strategy = "failed_break"
+    base.confidence = 0.6
+    rsi_txt = f", RSI {rsi:.0f}" if rsi is not None else ""
+    base.rationale = (f"Failed break {direction.value.upper()} ({trap}): price swept the range {edge} "
+                      f"(~{round(swept, 6)}) then closed back inside{rsi_txt} — fading the trap back toward "
+                      f"the range mean {tp}, stop beyond the sweep at {stop}.")
+    return base
+
+
+# --- Trend alignment: how CLEARLY the direction stacks up (the "A+ / high-conviction" grade) ----- #
+_ALIGN_AP = 0.85       # score at/above this = "A+" fully-aligned trend (everything points one way)
+_ALIGN_A = 0.70        # ...A-grade
+_ALIGN_BONUS = 0.08    # modest confidence bump when a trend is fully aligned (leans the desk in)
+
+
+def _trend_alignment(technical: TechnicalRead, ind: dict, direction: Direction) -> float:
+    """How clearly the direction stacks up, 0..1: timeframe agreement (dominant) + trend strength
+    (ADX) + long-term-trend side (EMA200) + momentum expanding. 1.0 = every timeframe and signal
+    points the same way — the clearest 'price is going up (or down)'. Exposed for the A+ badge +
+    a small confidence bonus + backtest segmentation. NOT a new trade — just grades the trend trades."""
+    want = "up" if direction == Direction.LONG else "down"
+    tfs = technical.timeframes or []
+    if not tfs:
+        return 0.0
+    agree = sum(1 for tf in tfs if _trend_from_indicators(tf.indicators, tf.trend) == want)
+    tf_frac = agree / len(tfs)                                    # all TFs aligned = the core signal
+    adx = ind.get("adx") or 0.0
+    strong = 1.0 if adx >= _ADX_STRONG else max(0.0, adx / _ADX_STRONG)
+    e200, last = ind.get("ema200"), ind.get("last_close")
+    on_side = 1.0 if (e200 and last and ((direction == Direction.LONG) == (last > e200))) else 0.0
+    h, hp = ind.get("macd_hist"), ind.get("macd_hist_prev")
+    mom = 0.0
+    if h is not None and ((h > 0) == (direction == Direction.LONG)):  # momentum with the trade
+        mom = 1.0 if (hp is not None and abs(h) >= abs(hp)) else 0.6  # 1.0 if expanding, else aligned
+    return round(0.45 * tf_frac + 0.25 * strong + 0.15 * on_side + 0.15 * mom, 2)
 
 
 def _regime(ind: dict) -> str:
@@ -819,7 +1103,9 @@ def _deterministic_decision(
                    technical.timeframes[0])
     ind = tf0.indicators if tf0 else {}
     trend = _trend_from_indicators(ind, tf0.trend if tf0 else "sideways")  # from computed EMAs
-    macro = _macro_trend(technical)                                       # higher-timeframe context
+    macro = _macro_trend(technical)                                       # highest-TF context (fades)
+    htf_trend, htf_name = _higher_trend(technical, timeframe)             # IMMEDIATE higher TF (laddered)
+    big_levels = _big_tf_levels(technical, timeframe)
     bias = fundamental.bias
 
     # --- regime FIRST (the senior-trader read): pick the strategy the regime permits ---
@@ -845,9 +1131,15 @@ def _deterministic_decision(
         base.rationale = (f"Trend-only mode: standing aside — regime is {regime}, not a clear "
                           f"(ADX≥{_ADX_STRONG:.0f}) trend. {policy['note']}")
         return base
-    # Ranging (no trend): fade the range edges back to the mean instead of trend-trading a flat tape.
-    # Pass the higher-TF trend so a fade against a daily trend (a pullback, not a range) is refused.
+    # Ranging: first check for a BREAKOUT (the range resolving out with the higher-TF trend + volume);
+    # else fade the range edges back to the mean. Together they cover both range outcomes.
     if regime == "ranging":
+        brk = _range_breakout_decision(base, ind, tf0, htf_trend, disable)
+        if brk is not None:
+            return brk
+        fail = _failed_break_decision(base, ind, htf_trend, disable)
+        if fail is not None:
+            return fail
         return _mean_reversion_decision(base, ind, tf0, macro)
     # Low ADX but flagged volatile (a vol expansion without a trend) — whipsaw; stand aside.
     if adx_v is not None and adx_v < _ADX_MIN:
@@ -864,11 +1156,24 @@ def _deterministic_decision(
     # Counter-momentum only blocks entry if it's MEANINGFUL (>= 10% of ATR) — trivial noise is
     # ignored so we don't sit out forever on a flat histogram.
     mom_thresh = _MOM_ATR_FRAC * atr_v if atr_v else 0.0
+    # LADDERED higher-TF context (htf_trend / big_levels computed above): the gate uses the IMMEDIATE
+    # higher timeframe (15m→1h, 1h→4h, 4h→1d); the big TFs (4h/1d) are respected as LEVELS below.
+    px = ind.get("last_close") or 0.0
     # The TREND (technical) decides direction. The fundamental bias is a soft macro lean — the
     # fundamental agent self-rates ~0.3 ("not a primary signal"), so it only NUDGES confidence
-    # below; it must not veto a clean technical trend. Direction is still gated by the higher-
-    # timeframe trend (don't fight the macro) and the momentum-pullback wait.
+    # below; it must not veto a clean technical trend. Direction is still gated by the immediate
+    # higher-timeframe trend (don't fight the next TF up) + the big-TF levels + the momentum wait.
     if trend == "up":
+        # Higher-TF DOWN + entry-TF rallied up = a rally in the bigger downtrend. Try to SELL the
+        # rally (arm a short in the higher-TF direction, confirmed by S/R or RSI divergence); if it
+        # doesn't qualify, stand aside — don't buy into / against the higher TF.
+        if htf_trend == "down" and "mtf" not in disable:
+            pull = _htf_pullback_arm(base, Direction.SHORT, ind, tf0, technical, atr_v, rsi, px, htf_name, disable)
+            if pull is not None:
+                return pull
+            base.rationale = (f"No confluence: the next-higher timeframe ({htf_name}) is DOWN — "
+                              "not buying into it.")
+            return base
         if macd_hist is not None and macd_hist < -mom_thresh and "momentum" not in disable:
             # Trend up but momentum meaningfully down = pullback. Arm a resumption break instead of
             # just waiting, so it fires when momentum turns back up.
@@ -885,11 +1190,25 @@ def _deterministic_decision(
                 f"−DI {mdi} > +DI {pdi}). {armed_note}"
             )
             return base
-        if macro == "down" and "mtf" not in disable:
-            base.rationale = "No confluence: higher-timeframe trend is DOWN — not buying into it."
+        lvl = _opposing_big_tf_level(Direction.LONG, px, atr_v, big_levels)
+        if lvl is not None and "htf_level" not in disable:
+            base.watch = True
+            base.rationale = (f"Respecting a higher-timeframe level: major resistance ~{round(lvl, 6)} "
+                              f"just overhead (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
+                              "cleaner pullback before buying into it.")
             return base
         direction = Direction.LONG
     elif trend == "down":
+        # Higher-TF UP + entry-TF dipped down = a dip in the bigger uptrend. Try to BUY the dip (arm
+        # a long in the higher-TF direction, confirmed by S/R or RSI divergence); if it doesn't
+        # qualify, stand aside — don't sell into / against the higher TF.
+        if htf_trend == "up" and "mtf" not in disable:
+            pull = _htf_pullback_arm(base, Direction.LONG, ind, tf0, technical, atr_v, rsi, px, htf_name, disable)
+            if pull is not None:
+                return pull
+            base.rationale = (f"No confluence: the next-higher timeframe ({htf_name}) is UP — "
+                              "not selling into it.")
+            return base
         if macd_hist is not None and macd_hist > mom_thresh and "momentum" not in disable:
             base.watch = True
             px = ind.get("last_close") or 0.0
@@ -904,8 +1223,12 @@ def _deterministic_decision(
                 f"+DI {pdi} > −DI {mdi}). {armed_note}"
             )
             return base
-        if macro == "up" and "mtf" not in disable:
-            base.rationale = "No confluence: higher-timeframe trend is UP — not selling into it."
+        lvl = _opposing_big_tf_level(Direction.SHORT, px, atr_v, big_levels)
+        if lvl is not None and "htf_level" not in disable:
+            base.watch = True
+            base.rationale = (f"Respecting a higher-timeframe level: major support ~{round(lvl, 6)} "
+                              f"just below (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
+                              "cleaner pullback before selling into it.")
             return base
         direction = Direction.SHORT
     else:
@@ -944,6 +1267,19 @@ def _deterministic_decision(
             "settles."
         )
         return base
+
+    # Trend ALIGNMENT grade (the "A+ / clear direction" score) — how cleanly every TF + signal stacks.
+    align = _trend_alignment(technical, ind, direction)
+    base.alignment = align
+
+    # EMA20 pullback: if price is bouncing off the EMA20 (a textbook continuation entry), take it with
+    # a tight stop beyond the pullback rather than the generic mid-move entry. Falls through otherwise.
+    ema_pb = _ema_pullback_decision(base, ind, direction, disable)
+    if ema_pb is not None:
+        ema_pb.alignment = align
+        if align >= _ALIGN_AP and "alignment" not in disable:
+            ema_pb.confidence = round(min(0.95, ema_pb.confidence + _ALIGN_BONUS), 2)  # fully aligned — lean in
+        return ema_pb
 
     entry = ind.get("last_close") or _last_close(technical)
     if entry is None or entry <= 0:
@@ -1243,6 +1579,11 @@ def _deterministic_decision(
             conf += 0.05
         elif session_q == "thin":
             conf -= 0.10
+    # Trend ALIGNMENT: a fully-stacked trend (every TF + strength + momentum agree) is the clearest,
+    # highest-conviction direction — lean in. (The base factors only check the single highest TF, so
+    # full multi-TF agreement is extra edge.) Modest bonus so it ranks A+ setups up without inflating.
+    if align >= _ALIGN_AP and "alignment" not in disable:
+        conf += _ALIGN_BONUS
     confidence = round(max(0.05, min(0.95, conf)), 2)
 
     # Carry a conditional ('wait') entry so the trade can be ARMED rather than chased — computed

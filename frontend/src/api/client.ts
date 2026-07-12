@@ -334,6 +334,25 @@ export const api = {
       body: JSON.stringify({ disabled }),
     }),
 
+  // Per-pair AI auto-trader: toggle a pair, tune params, run a pass. Paper-only; all gates apply.
+  autoTrade: () => request<import("../types").AutoTradeView>("/api/auto-trade"),
+  autoTradePair: (symbol: string, assetClass: AssetClass, on: boolean, timeframe: string) =>
+    request<import("../types").AutoTradeView>("/api/auto-trade/pair", {
+      method: "POST",
+      body: JSON.stringify({ symbol, asset_class: assetClass, on, timeframe }),
+    }),
+  autoTradeConfig: (cfg: {
+    enabled?: boolean;
+    interval_seconds?: number;
+    min_confidence?: number;
+    cooldown_minutes?: number;
+  }) =>
+    request<import("../types").AutoTradeView>("/api/auto-trade/config", {
+      method: "POST",
+      body: JSON.stringify(cfg),
+    }),
+  autoTradeRun: () => request<{ ran: boolean; opened: number; results: unknown[] }>("/api/auto-trade/run", { method: "POST" }),
+
   // RSI-Over strategy: sweep all available pairs on `timeframe` for the first RSI-extreme reversal
   // (EMA10-confirmed when `confirm`) and stage it (Mode A queues it). "" timeframe -> default 1h.
   rsiOverScan: (

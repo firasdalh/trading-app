@@ -10,6 +10,11 @@ const STRATEGY_LABEL: Record<string, string> = {
   trend: "trend",
   mean_reversion: "fade",
   stand_aside: "aside",
+  htf_pullback: "buy the dip",
+  range_breakout: "breakout",
+  ema_pullback: "EMA pullback",
+  failed_break: "trap fade",
+  supertrend_band: "supertrend",
 };
 
 export function RegimeBadge({

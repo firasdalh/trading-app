@@ -91,8 +91,9 @@ def test_arm_long_pullback_is_buy_limit(monkeypatch):
 
 
 def test_arm_short_breakdown_is_sell_stop(monkeypatch):
+    # macro DOWN so the short is WITH the higher-TF trend (aligned), then it arms a sell_stop.
     p = _run(monkeypatch, _dec([_scn("Brk", "down", 60, "arm_short", trigger=98.0, stop=101.0, tp=92.0),
-                                _scn("X", "up", 40, "none")]))
+                                _scn("X", "up", 40, "none")]), macro="down")
     assert p.conditional is not None and p.conditional.order_type == "sell_stop"
 
 
@@ -128,12 +129,39 @@ def test_wrong_side_arm_is_not_armed(monkeypatch):
 
 # ---- the two new behaviours ----
 
-def test_picks_better_rr_over_higher_probability(monkeypatch):
-    # the USDCHF case: a 55% open_long worth ~0.17R (thin) loses to a 45% arm_short worth 3R.
+def test_refuses_counter_trend_even_with_better_rr(monkeypatch):
+    # CLARITY over R:R (user rule): a 45% counter-trend arm_short with a clean ~3R is REFUSED because
+    # the higher-TF (1d) is UP; the aligned long is thin/untradeable -> STAND ASIDE, don't fade the
+    # trend for reward:risk. (The exact ETHUSDm case from the screenshot.)
     p = _run(monkeypatch, _dec([_scn("Continuation", "up", 55, "open_long", stop=97.0, tp=100.5),
                                 _scn("Pullback", "down", 45, "arm_short", trigger=99.0, stop=101.0, tp=93.0)]))
-    assert p.conditional is not None and p.conditional.order_type == "sell_stop"
-    assert p.ai_decision["chosen"] == "Pullback"
+    assert p.direction == Direction.NO_TRADE and p.conditional is None
+    assert p.strategy == "stand_aside" and "counter-trend" in p.rationale.lower()
+
+
+def test_pullback_hint_flags_buy_the_dip(monkeypatch):
+    # 4h EMA trend UP but structure LH/LL (pulling back) -> hint the AI to BUY THE DIP, not short.
+    from app.agents.ai_decider import _pullback_hint
+    tech = _tech(macro="up")
+    tech.timeframes[1].timeframe = "4h"  # the higher TF (immediate above 1h)
+    tech.timeframes[1].indicators.update({"ema20": 100.0, "ema50": 98.0, "ema200": 95.0, "structure": -1.0})
+    h = _pullback_hint(tech, "1h")
+    assert "BUY-THE-DIP" in h and "4h" in h
+
+
+def test_pullback_hint_empty_when_structure_aligns(monkeypatch):
+    from app.agents.ai_decider import _pullback_hint
+    tech = _tech(macro="up")
+    tech.timeframes[1].timeframe = "4h"
+    tech.timeframes[1].indicators.update({"ema20": 100.0, "ema50": 98.0, "ema200": 95.0, "structure": 1.0})
+    assert _pullback_hint(tech, "1h") == ""
+
+
+def test_aligned_scenario_is_chosen_over_counter_trend(monkeypatch):
+    # macro UP: the aligned long (with the trend) is taken even though a counter-trend short exists.
+    p = _run(monkeypatch, _dec([_scn("Cont", "up", 55, "open_long", stop=97.0, tp=106.0),
+                                _scn("Fade", "down", 45, "arm_short", trigger=99.0, stop=101.0, tp=93.0)]))
+    assert p.direction == Direction.LONG and p.ai_decision["chosen"] == "Cont"
 
 
 def test_falls_back_to_next_scenario_when_top_open_blocked(monkeypatch):

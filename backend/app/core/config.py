@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     default_max_daily_loss: float = Field(0.03, description="3% of equity")
     default_max_total_exposure: float = Field(0.06, description="6% of equity at risk")
     default_per_pair_cooldown_minutes: int = 30
+    default_loss_cooldown_minutes: int = 180
 
     # Data-feed integrity (Task 10): when True, the clearest corruption (non-positive / inconsistent
     # OHLC, and single-bar spikes far beyond ATR) is REPAIRED on fetch before it reaches the funnel,

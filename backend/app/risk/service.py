@@ -239,6 +239,7 @@ def build_limits(session: Session) -> RiskLimits:
         max_daily_loss=rc.max_daily_loss,
         max_total_exposure=rc.max_total_exposure,
         per_pair_cooldown_minutes=rc.per_pair_cooldown_minutes,
+        loss_cooldown_minutes=rc.loss_cooldown_minutes,
         risk_per_trade_ceiling=cfg.risk_per_trade_ceiling,
         daily_loss_breaker_enabled=rc.daily_loss_breaker_enabled,
     )
@@ -402,6 +403,7 @@ def assess(
     proposal: TradeProposal,
     override_risk_fraction: float | None = None,
     cache: ScanCache | None = None,
+    override_cooldown_minutes: int | None = None,
 ) -> RiskDecision:
     """Run a proposal through the deterministic Risk Manager against live state.
 
@@ -409,12 +411,17 @@ def assess(
     manager, so a user-chosen size can never exceed the hard per-trade cap. ``cache`` (a
     ``ScanCache``) memoizes the broker open book + account for a multi-symbol scan; omit it for
     single-symbol assessments and the real open path so they always read fresh broker truth.
+    ``override_cooldown_minutes`` lets the per-pair AI auto-trader use its own (shorter) re-entry
+    cooldown for both the per-pair AND loss cooldown, without changing the global RISK.md defaults.
     """
     from app.risk.correlation import correlated_concentration
 
     settings = get_or_create_settings(session)
     broker = get_broker_for(proposal.asset_class, settings.broker_map)
     limits = build_limits(session)
+    if override_cooldown_minutes is not None:
+        limits = limits.model_copy(update={"per_pair_cooldown_minutes": override_cooldown_minutes,
+                                           "loss_cooldown_minutes": override_cooldown_minutes})
     account = build_account_state(session, broker, cache=cache)
     # Open book from broker truth (so manual/terminal trades count too). Used for BOTH the
     # anti-stacking and correlated-concentration checks, which keeps the preview consistent with

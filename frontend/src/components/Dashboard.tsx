@@ -52,6 +52,7 @@ import { EntryFiltersPanel } from "./EntryFiltersPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
 import { QuickTradePanel } from "./QuickTradePanel";
+import { AutoTradePanel } from "./AutoTradePanel";
 import { ShadowScorecardPanel } from "./ShadowScorecardPanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
@@ -544,6 +545,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
             timeframe={timeframe}
             onPlaced={() => setPosBump((b) => b + 1)}
           />
+          <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} />
           <ConditionalsPanel onSelect={openPositionSymbol} />
         </div>
       </div>

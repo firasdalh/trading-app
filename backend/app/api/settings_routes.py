@@ -68,6 +68,7 @@ class RiskUpdateRequest(BaseModel):
     max_daily_loss: float | None = None
     max_total_exposure: float | None = None
     per_pair_cooldown_minutes: int | None = None
+    loss_cooldown_minutes: int | None = None
     # Master on/off for the daily-loss circuit breaker (demo-account testing convenience).
     daily_loss_breaker_enabled: bool | None = None
 
@@ -188,6 +189,13 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
         if req.per_pair_cooldown_minutes < 0:
             raise HTTPException(status_code=400, detail="per_pair_cooldown_minutes must be >= 0")
         risk.per_pair_cooldown_minutes = req.per_pair_cooldown_minutes
+    if req.loss_cooldown_minutes is not None:
+        if req.loss_cooldown_minutes < 0:
+            raise HTTPException(status_code=400, detail="loss_cooldown_minutes must be >= 0")
+        # Shortening this weakens the RISK.md "one stop becomes three" guard — log it (loud on live).
+        log.warning("loss_cooldown_minutes changed", extra={"from": risk.loss_cooldown_minutes,
+                                                            "to": req.loss_cooldown_minutes})
+        risk.loss_cooldown_minutes = req.loss_cooldown_minutes
 
     if req.daily_loss_breaker_enabled is not None:
         risk.daily_loss_breaker_enabled = req.daily_loss_breaker_enabled

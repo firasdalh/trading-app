@@ -113,6 +113,9 @@ class RiskConfig(Base):
     max_daily_loss: Mapped[float] = mapped_column(Float, default=0.03)
     max_total_exposure: Mapped[float] = mapped_column(Float, default=0.06)
     per_pair_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    # After a STOP-OUT, stand down on the SAME symbol+direction for this long (a longer guard than the
+    # per-pair cooldown) — re-entering a just-failed setup is how one stop becomes three (RISK.md).
+    loss_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=180)
     # Master switch for the max-daily-loss circuit breaker. ON by default (RISK.md). May be
     # turned OFF for testing on a demo account; when off, the daily-loss auto-pause and veto
     # are skipped. Disabling it removes a real-money protection, so the UI warns loudly and
@@ -360,6 +363,31 @@ class HybridConfig(Base):
     max_armed: Mapped[int] = mapped_column(Integer, default=3)            # cap on live armed setups
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)  # short note from the last tick
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AutoTradeConfig(Base):
+    """Singleton (id=1) for PER-PAIR AI auto-trading. When a pair is in ``pairs`` and ``enabled`` is
+    on, a scheduled tick (every ``interval_seconds``) runs the AI analysis on it and, when the pair is
+    FLAT and past the per-pair ``cooldown_minutes``, auto-opens a setup whose confidence clears
+    ``min_confidence`` — following the scenario's levels. The monitor rides it to TP/SL; the next tick
+    re-enters. PAPER-ONLY, and every risk gate (3% cap, exposure, daily-loss, kill-switch) still
+    applies. Off by default (safety)."""
+
+    __tablename__ = "auto_trade_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # master; per-pair on/off is `pairs`
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=900)   # re-check cadence (15 min)
+    min_confidence: Mapped[float] = mapped_column(Float, default=0.60)    # open at >= 60% conviction
+    min_rr: Mapped[float] = mapped_column(Float, default=1.2)             # reward:risk floor (< 1.5 = looser)
+    min_profit_usd: Mapped[float] = mapped_column(Float, default=20.0)    # skip if < this $ to the target
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=5)     # re-entry wait after a close
+    pairs: Mapped[list] = mapped_column(JSON, default=list)  # [{"symbol","asset_class"}] auto-traded
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_result: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

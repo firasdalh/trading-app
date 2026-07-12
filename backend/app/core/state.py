@@ -49,6 +49,7 @@ def get_or_create_risk_config(session: Session) -> RiskConfig:
             max_daily_loss=cfg.default_max_daily_loss,
             max_total_exposure=cfg.default_max_total_exposure,
             per_pair_cooldown_minutes=cfg.default_per_pair_cooldown_minutes,
+            loss_cooldown_minutes=cfg.default_loss_cooldown_minutes,
         )
         session.add(risk)
         session.commit()

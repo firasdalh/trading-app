@@ -101,6 +101,23 @@ export interface AiDecision {
   note?: string | null;           // block reason, when kind === "blocked"
 }
 
+export interface AutoTradePair {
+  symbol: string;
+  asset_class: string;
+  timeframe?: string;
+}
+export interface AutoTradeView {
+  enabled: boolean;
+  interval_seconds: number;
+  min_confidence: number;
+  min_rr: number;
+  min_profit_usd: number;
+  cooldown_minutes: number;
+  pairs: AutoTradePair[];
+  last_run_at: string | null;
+  last_result: string | null;
+}
+
 export interface TradeProposal {
   symbol: string;
   asset_class: AssetClass;
@@ -115,6 +132,7 @@ export interface TradeProposal {
   review_decision: string | null;
   regime?: string | null;       // trending | moderate | ranging | volatile
   strategy?: string | null;     // trend | mean_reversion | stand_aside
+  alignment?: number | null;    // 0..1 trend-alignment grade (~0.85+ = A+ fully-aligned)
   conditional?: ConditionalSuggestion | null;
   ai_decision?: AiDecision | null;
   technical: TechnicalRead | null;
@@ -278,6 +296,7 @@ export interface SettingsResponse {
     max_daily_loss: number;
     max_total_exposure: number;
     per_pair_cooldown_minutes: number;
+    loss_cooldown_minutes: number;
     daily_loss_breaker_enabled: boolean;
   };
   env_kill_switch: boolean;

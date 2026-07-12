@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.auto_trade_routes import router as auto_trade_router
 from app.api.backtest_routes import router as backtest_router
 from app.api.conditional_routes import router as conditional_router
 from app.api.rsi_over_routes import router as rsi_over_router
@@ -127,6 +128,18 @@ def _rsi_over_tick() -> None:
         log.warning("rsi-over tick failed", extra={"error": str(exc)})
 
 
+def _auto_trade_tick() -> None:
+    """Scheduled per-pair AI auto-trader pass. Honors its own enabled flag + interval (default 15m)."""
+    from app.agents.auto_trade import auto_trade_tick
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            auto_trade_tick(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto-trade tick failed", extra={"error": str(exc)})
+
+
 def _conditional_tick() -> None:
     """Watch armed conditional setups: expire stale ones, and on a confirmed trigger re-check +
     open. Its own job/session so a firing setup (which runs the full analysis) never delays the
@@ -162,6 +175,9 @@ def _register_monitor_job() -> None:
                   replace_existing=True, max_instances=1)
     # Polls every 60s; the RSI-Over auto-watch enforces its own interval (default 15 min).
     sched.add_job(_rsi_over_tick, "interval", seconds=60, id="rsi_over_watch",
+                  replace_existing=True, max_instances=1)
+    # Polls every 60s; the per-pair AI auto-trader enforces its own interval (default 15 min).
+    sched.add_job(_auto_trade_tick, "interval", seconds=60, id="auto_trade",
                   replace_existing=True, max_instances=1)
     log.info("position monitor (10s) + scanner (20s) + advisor (30s) + hybrid (60s) + "
              "conditional watch (15s) + rsi-over watch (60s) scheduled")
@@ -220,6 +236,7 @@ app.include_router(conditional_router)
 app.include_router(watchlist_router)
 app.include_router(shadow_router)
 app.include_router(rsi_over_router)
+app.include_router(auto_trade_router)
 app.include_router(ws_router)
 
 

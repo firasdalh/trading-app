@@ -23,6 +23,16 @@ function trendTone(trend?: string): string {
   return "text-neutral-300";
 }
 
+// The IMMEDIATE higher timeframe loaded above the entry TF (15m→1h, 1h→4h, 4h→1d) — the one the
+// engine's trend gate now compares against. Falls back to the highest loaded TF if none is above.
+function immediateHigher(tfs: TimeframeRead[], entryTf: string): TimeframeRead | undefined {
+  const er = TF_RANK[entryTf] ?? 0;
+  const above = tfs
+    .filter((t) => (TF_RANK[t.timeframe] ?? 0) > er)
+    .sort((a, b) => (TF_RANK[a.timeframe] ?? 0) - (TF_RANK[b.timeframe] ?? 0));
+  return above[0] ?? [...tfs].sort((a, b) => (TF_RANK[b.timeframe] ?? 0) - (TF_RANK[a.timeframe] ?? 0))[0];
+}
+
 // Extract just the LLM reviewer's note from a rationale (the chips cover the rest).
 function reviewNote(rationale: string): string {
   const i = rationale.indexOf("AI review");
@@ -154,10 +164,11 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
           )}
           <span className="text-xs text-neutral-400">{proposal.timeframe}</span>
           {proposal.regime && <RegimeBadge regime={proposal.regime} strategy={proposal.strategy} />}
+          <AlignmentBadge alignment={proposal.alignment} />
         </div>
         <div className="flex items-center gap-2">
           <ReviewBadge decision={proposal.review_decision} />
-          <StatusBadge status={status} positionOpen={positionOpen} />
+          <StatusBadge status={status} positionOpen={positionOpen} standAside={noTrade && !proposal.watch} />
           {onRunAnalysis && (
             <button
               onClick={onRunAnalysis}
@@ -196,7 +207,7 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
         </div>
       )}
 
-      {!aiNonOpen && (() => {
+      {!aiNonOpen && !noTrade && (() => {
         const pct = Math.round(proposal.confidence * 100);
         const color = pct >= 70 ? "bg-bull" : pct >= 50 ? "bg-warn" : "bg-bear";
         const txt = pct >= 70 ? "text-bull" : pct >= 50 ? "text-warn" : "text-bear";
@@ -236,6 +247,8 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
               : "The AI decided not to trade, so there's nothing for the Risk Manager to size. This is the AI's call, not a risk-manager rejection."}
           </div>
         </div>
+      ) : noTrade ? (
+        <StandAsideCard proposal={proposal} />
       ) : (
       <div
         className={`rounded-md border p-2 text-sm ${
@@ -341,19 +354,16 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
         </div>
       )}
 
-      {!noTrade && <SetupSignals proposal={proposal} />}
+      {/* Market read behind the decision — shown for an actionable setup ("Why this setup") AND for a
+          stand-aside ("What the analysis saw"), so a no-trade isn't just a bare one-liner. */}
+      <SetupSignals proposal={proposal} standAside={noTrade} />
 
-      {/* For no-trade, the rationale is the sit-out reason. For an actionable setup the chips
-          above already cover it, so only surface the LLM reviewer's note if present. The structured
+      {/* For an actionable setup the chips above already cover it, so only surface the LLM reviewer's
+          note if present (the no-trade rationale now lives in the StandAsideCard). The structured
           AiDecisionCard (when present) replaces the raw rationale wall entirely. */}
-      {!ai &&
-        (noTrade ? (
-          <p className="text-sm text-neutral-300">{proposal.rationale}</p>
-        ) : (
-          reviewNote(proposal.rationale) && (
-            <p className="text-xs leading-relaxed text-neutral-400">{reviewNote(proposal.rationale)}</p>
-          )
-        ))}
+      {!ai && !noTrade && reviewNote(proposal.rationale) && (
+        <p className="text-xs leading-relaxed text-neutral-400">{reviewNote(proposal.rationale)}</p>
+      )}
 
       {!ai && <ReviewExplanation rationale={proposal.rationale} />}
 
@@ -374,9 +384,9 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
 
       <Reasoning result={result} />
 
-      {/* Step 4: AI two-scenario read (info only). Hidden when the AI is the DECIDER — the
-          AiDecisionCard above already shows the scenarios that drove the decision. */}
-      {!ai && (scenario || scenarioBusy) && (
+      {/* AI two-scenario read (the clean "what's likely + the levels + invalidation" analysis). Shown
+          ALSO when the AI is the DECIDER, so you always see the scenario read the decision follows. */}
+      {(scenario || scenarioBusy) && (
         <div className="rounded-md border border-violet-800/40 bg-violet-950/10 p-2">
           {scenario ? (
             <ScenarioCard read={scenario} />
@@ -424,49 +434,209 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
   );
 }
 
-function SetupSignals({ proposal }: { proposal: TradeProposal }) {
+// Plain-English card shown when the engine returns NO_TRADE (or "watching"). It reframes the raw
+// "Risk Manager: VETOED / 0%" — which reads like a risk rejection — into what actually happened: the
+// analysis engine chose to stand aside. Shows the engine's reason + a couple of derived "why" points.
+function StandAsideCard({ proposal }: { proposal: TradeProposal }) {
+  const watching = proposal.watch;
+  const tfs = proposal.technical?.timeframes ?? [];
+  const entryTf = tfs.find((t) => t.timeframe === proposal.timeframe) ?? tfs[0];
+  const macro = tfs.length ? immediateHigher(tfs, proposal.timeframe) : undefined;
+  const adx = entryTf?.indicators?.["adx"];
+
+  // An armed pullback (buy-the-dip) is WATCHING with a conditional — the entry-TF counter-move is the
+  // setup, not a conflict, so skip the "they disagree" framing (the rationale explains it).
+  const armed = !!proposal.conditional;
+
+  // Best-effort supporting points derived from the read — each only appears when the data supports it.
+  const points: string[] = [];
+  if (
+    !armed && entryTf && macro && entryTf.trend !== macro.trend &&
+    entryTf.trend !== "sideways" && macro.trend !== "sideways"
+  ) {
+    points.push(
+      `Your timeframe (${entryTf.timeframe}) is ${entryTf.trend.toUpperCase()} but the bigger-picture ` +
+        `${macro.timeframe} is ${macro.trend.toUpperCase()} — they disagree, so there's no confluence to trade with.`,
+    );
+  }
+  if (typeof adx === "number" && adx < 20) {
+    points.push(
+      `Trend strength is weak (ADX ${adx.toFixed(0)}, under 20) — choppy conditions where entries often ` +
+        `chop out, so the engine waits for a cleaner, stronger move.`,
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-neutral-700 bg-neutral-800/40 p-3 text-sm">
+      <div className="flex items-center gap-2">
+        <span className="text-base">{watching ? "👀" : "✋"}</span>
+        <span className="font-semibold text-neutral-200">
+          {watching ? "Watching — setup still forming" : "No trade — the engine stood aside"}
+        </span>
+      </div>
+
+      {/* The engine's own reason (plain language). */}
+      <p className="mt-1.5 leading-relaxed text-neutral-100">{proposal.rationale}</p>
+
+      {points.length > 0 && (
+        <ul className="mt-2 space-y-1 text-neutral-300">
+          {points.map((p, i) => (
+            <li key={i} className="flex gap-1.5">
+              <span className="text-neutral-500">•</span>
+              <span>{p}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Reframe it: a stand-aside is the engine's call, not a risk-limit rejection. */}
+      <div className="mt-2 rounded bg-neutral-900/50 px-2.5 py-2 text-xs leading-relaxed text-neutral-400">
+        <span className="font-medium text-neutral-300">What this means:</span> this is the analysis
+        engine's own decision from the current read — <span className="text-neutral-300">not</span> a
+        Risk-Manager rejection and not an error. The engine only opens a trade when the pieces line up:
+        a setup on your timeframe, agreement with the higher-timeframe trend, enough trend strength and
+        momentum, and a worthwhile reward-to-risk. When they don't, it stands aside instead of forcing a
+        low-quality trade. There's simply no setup to size right now — re-run analysis later, or wait
+        for the setup to form.
+      </div>
+    </div>
+  );
+}
+
+function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; standAside?: boolean }) {
   const tech = proposal.technical;
   if (!tech || !tech.timeframes.length) return null;
 
-  const entryTf = tech.timeframes[0];
+  const entryTf = tech.timeframes.find((t) => t.timeframe === proposal.timeframe) ?? tech.timeframes[0];
   const ind = entryTf?.indicators ?? {};
-  const macro = [...tech.timeframes].sort(
-    (a, b) => (TF_RANK[b.timeframe] ?? 0) - (TF_RANK[a.timeframe] ?? 0),
-  )[0];
+  // The higher-TF row shows the IMMEDIATE higher timeframe — the one the engine's trend gate uses.
+  const macro = immediateHigher(tech.timeframes, proposal.timeframe);
 
-  const adx = ind["adx"];
-  const macdH = ind["macd_hist"];
-  const rsi = ind["rsi14"];
+  const adx = ind["adx"] as number | undefined;
+  const macdH = ind["macd_hist"] as number | undefined;
+  const rsi = ind["rsi14"] as number | undefined;
   const e = proposal.entry;
   const s = proposal.stop_loss;
   const t = proposal.take_profit;
   const rr = e != null && s != null && t != null && e !== s ? Math.abs(t - e) / Math.abs(e - s) : null;
 
-  const adxLabel =
-    adx == null ? "—" : `${adx.toFixed(0)} ${adx >= 25 ? "(strong)" : adx < 20 ? "(weak)" : "(moderate)"}`;
-  const macdLabel =
-    macdH == null ? "—" : `${macdH > 0 ? "bullish" : "bearish"} (${macdH.toFixed(3)})`;
+  // The direction the engine was weighing. Priority: a live proposal → an ARMED conditional's
+  // direction (a buy-the-dip pullback arms a LONG even though the entry-TF is down) → the entry-TF
+  // trend. Each factor is scored FOR/AGAINST that direction, so the read reflects the real trade.
+  const ot = proposal.conditional?.order_type ?? "";
+  const armedDir: "long" | "short" | null = ot.startsWith("buy") ? "long" : ot.startsWith("sell") ? "short" : null;
+  const dir: "long" | "short" | null =
+    proposal.direction === "long" || proposal.direction === "short"
+      ? proposal.direction
+      : armedDir ?? (entryTf?.trend === "up" ? "long" : entryTf?.trend === "down" ? "short" : null);
+  const dirWord = dir ?? "trade";
+  const actionWord = dir === "long" ? "buying" : dir === "short" ? "selling" : "trading";
+  const htf = macro?.trend;
 
-  const rows: { label: string; value: string; tone?: string }[] = [
-    { label: "Entry-TF trend", value: (entryTf?.trend ?? "—").toUpperCase(), tone: trendTone(entryTf?.trend) },
-    { label: `Higher-TF (${macro?.timeframe ?? "—"})`, value: (macro?.trend ?? "—").toUpperCase(), tone: trendTone(macro?.trend) },
-    { label: "Trend strength (ADX)", value: adxLabel },
-    { label: "Momentum (MACD)", value: macdLabel, tone: macdH == null ? undefined : macdH > 0 ? "text-bull" : "text-bear" },
-    { label: "RSI (14)", value: rsi == null ? "—" : rsi.toFixed(1) },
-    { label: "Fundamental bias", value: (proposal.fundamental?.bias ?? "—").toUpperCase() },
-    { label: "Reward : Risk", value: rr == null ? "—" : `${rr.toFixed(2)} : 1`, tone: rr != null && rr >= 2 ? "text-bull" : undefined },
+  type V = "good" | "bad" | "neutral";
+  const macdDir = macdH == null ? null : macdH > 0 ? "long" : "short";
+  const biasStr = proposal.fundamental?.bias;
+  const biasDir = biasStr === "bullish" ? "long" : biasStr === "bearish" ? "short" : null;
+  const htfAgree = !!(dir && htf && (dir === "long" ? htf === "up" : htf === "down"));
+  // htf "against" only counts as a con for a MARKET trade; for an armed pullback the entry-TF
+  // counter-move IS the setup, not a conflict — the higher TF is what we're joining.
+  const htfAgainst = !!(dir && htf && !armedDir && (dir === "long" ? htf === "down" : htf === "up"));
+  // Chasing (buying high / selling low) is a con; entering at a favorable extreme (buy the dip /
+  // sell the rally) is a pro.
+  const rsiBad = rsi != null && dir != null && ((dir === "short" && rsi <= 30) || (dir === "long" && rsi >= 70));
+  const rsiGood = rsi != null && dir != null && ((dir === "long" && rsi <= 35) || (dir === "short" && rsi >= 65));
+
+  const factors: { label: string; value: string; tone?: string; verdict: V; note: string }[] = [
+    {
+      label: "Entry-TF trend",
+      value: (entryTf?.trend ?? "—").toUpperCase(),
+      tone: trendTone(entryTf?.trend),
+      verdict: dir ? "neutral" : "bad",
+      note: dir
+        ? `Your ${proposal.timeframe} points ${(entryTf?.trend ?? "").toUpperCase()} — the ${dirWord} the engine weighed.`
+        : "No clear trend on your timeframe — nothing to trade.",
+    },
+    {
+      label: `Higher-TF trend (${macro?.timeframe ?? "—"})`,
+      value: (htf ?? "—").toUpperCase(),
+      tone: trendTone(htf),
+      verdict: htfAgainst ? "bad" : htfAgree ? "good" : "neutral",
+      note: htfAgainst
+        ? `The ${macro?.timeframe} is ${(htf ?? "").toUpperCase()} — against a ${dirWord}. No confluence: this is the blocker.`
+        : htfAgree
+          ? `Agrees with the ${dirWord} — confluence.`
+          : "Sideways — neither helps nor blocks.",
+    },
+    {
+      label: "Trend strength (ADX)",
+      value: adx == null ? "—" : `${adx.toFixed(0)} ${adx >= 25 ? "(strong)" : adx < 20 ? "(weak)" : "(moderate)"}`,
+      verdict: adx == null ? "neutral" : adx >= 25 ? "good" : adx < 20 ? "bad" : "neutral",
+      note: adx == null ? "" : adx >= 25 ? "Strong trend — worth trading." : adx < 20 ? "Weak / choppy — trend entries fail here." : "Moderate — trend still forming.",
+    },
+    {
+      label: "Momentum (MACD)",
+      value: macdH == null ? "—" : `${macdH > 0 ? "bullish" : "bearish"} (${macdH.toFixed(3)})`,
+      tone: macdH == null ? undefined : macdH > 0 ? "text-bull" : "text-bear",
+      verdict: macdDir && dir ? (macdDir === dir ? "good" : "bad") : "neutral",
+      note: macdDir && dir ? (macdDir === dir ? `Momentum backs the ${dirWord}.` : `Momentum runs against the ${dirWord}.`) : "",
+    },
+    {
+      label: "RSI (14)",
+      value: rsi == null ? "—" : rsi.toFixed(1),
+      tone: rsiBad ? "text-bear" : rsiGood ? "text-bull" : undefined,
+      verdict: rsiBad ? "bad" : rsiGood ? "good" : "neutral",
+      note: rsiBad
+        ? `${rsi!.toFixed(0)} is ${dir === "short" ? "oversold" : "overbought"} — ${actionWord} into an exhausted move (chasing).`
+        : rsiGood
+          ? `${rsi!.toFixed(0)} is ${dir === "long" ? "a dip — buying low (value)" : "a rally — selling high (value)"}.`
+          : rsi == null ? "" : "In a normal range — room to move.",
+    },
+    {
+      label: "Fundamental bias",
+      value: (biasStr ?? "—").toUpperCase(),
+      verdict: biasDir && dir ? (biasDir === dir ? "good" : "bad") : "neutral",
+      note: biasDir && dir ? (biasDir === dir ? `Leans with the ${dirWord}.` : `Leans against the ${dirWord}.`) : "Neutral — no lean either way.",
+    },
+    // Reward:Risk only exists for an actionable setup (a stand-aside has no levels yet).
+    ...(standAside
+      ? []
+      : [{
+          label: "Reward : Risk",
+          value: rr == null ? "—" : `${rr.toFixed(2)} : 1`,
+          tone: rr != null && rr >= 2 ? "text-bull" : undefined,
+          verdict: (rr == null ? "neutral" : rr >= 1.5 ? "good" : "bad") as V,
+          note: rr == null ? "" : rr >= 1.5 ? "Worthwhile payoff for the risk." : "Too thin — reward doesn't justify the risk.",
+        }]),
   ];
+
+  const goods = factors.filter((f) => f.verdict === "good").length;
+  const bads = factors.filter((f) => f.verdict === "bad").length;
+  const V_ICON: Record<V, string> = { good: "✓", bad: "✗", neutral: "•" };
+  const V_TONE: Record<V, string> = { good: "text-bull", bad: "text-bear", neutral: "text-neutral-600" };
 
   return (
     <div className="rounded-md border border-neutral-800 p-3">
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400">
-        Why this setup
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+          {standAside ? "What the analysis saw" : "Why this setup"}
+        </span>
+        <span className="text-[10px] tabular-nums">
+          <span className="text-bull">{goods} for</span>
+          <span className="text-neutral-600"> · </span>
+          <span className="text-bear">{bads} against</span>
+        </span>
       </div>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-        {rows.map((r) => (
-          <div key={r.label} className="flex items-center justify-between gap-2">
-            <span className="text-neutral-400">{r.label}</span>
-            <span className={`tabular-nums ${r.tone ?? "text-neutral-200"}`}>{r.value}</span>
+      <div className="space-y-1.5">
+        {factors.map((f) => (
+          <div key={f.label} className="flex gap-2 text-sm">
+            <span className={`mt-0.5 w-3 shrink-0 text-center font-bold ${V_TONE[f.verdict]}`}>{V_ICON[f.verdict]}</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-neutral-300">{f.label}</span>
+                <span className={`shrink-0 tabular-nums ${f.tone ?? "text-neutral-200"}`}>{f.value}</span>
+              </div>
+              {f.note && <div className="text-[11px] leading-snug text-neutral-500">{f.note}</div>}
+            </div>
           </div>
         ))}
       </div>
@@ -609,6 +779,26 @@ function DirectionBadge({ direction }: { direction: string }) {
   );
 }
 
+// Trend-alignment grade — how clearly the direction stacks up across TFs + strength + momentum.
+// A+ (≥0.85) = the clearest "price is going up/down"; the highest-conviction setups to lean into.
+function AlignmentBadge({ alignment }: { alignment?: number | null }) {
+  if (alignment == null) return null;
+  const grade = alignment >= 0.85 ? "A+" : alignment >= 0.7 ? "A" : alignment >= 0.5 ? "B" : "C";
+  const cls =
+    grade === "A+" ? "bg-bull/25 text-bull ring-1 ring-bull/40"
+    : grade === "A" ? "bg-bull/15 text-bull"
+    : grade === "B" ? "bg-neutral-700 text-neutral-300"
+    : "bg-neutral-800 text-neutral-500";
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${cls}`}
+      title={`Trend alignment ${(alignment * 100).toFixed(0)}% (${grade}) — how clearly every timeframe + strength + momentum stack the same way. A+ = the clearest, highest-conviction direction.`}
+    >
+      {grade === "A+" ? "★ A+" : grade} align
+    </span>
+  );
+}
+
 function ReviewBadge({ decision }: { decision: string | null }) {
   if (!decision) return null;
   const confirmed = decision === "confirm";
@@ -624,10 +814,16 @@ function ReviewBadge({ decision }: { decision: string | null }) {
   );
 }
 
-function StatusBadge({ status, positionOpen }: { status: string | null; positionOpen?: boolean | null }) {
+function StatusBadge({ status, positionOpen, standAside }: { status: string | null; positionOpen?: boolean | null; standAside?: boolean }) {
   if (!status) return null;
-  // An executed proposal whose position has since closed should read "closed", not "executed".
-  const label = status === "executed" && positionOpen === false ? "closed" : status;
+  // A stand-aside proposal is stored as "risk_vetoed" (nothing to size), which misreads as a risk
+  // rejection — show "no trade" instead. An executed proposal whose position has since closed reads
+  // "closed", not "executed".
+  const label = standAside
+    ? "no trade"
+    : status === "executed" && positionOpen === false
+      ? "closed"
+      : status;
   return (
     <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300">{label}</span>
   );

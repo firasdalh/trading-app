@@ -118,7 +118,8 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
                     bars: int = 1500, context_bars: int = 600, max_hold: int = 96,
                     cooldown: int = 3, cost_r: float = 0.0,
                     regimes: set[str] | None = None,
-                    disable: frozenset[str] = frozenset()) -> list[BTTrade]:
+                    disable: frozenset[str] = frozenset(),
+                    min_align: float = 0.0) -> list[BTTrade]:
     """Replay the engine bar-by-bar over ``bars`` of history and return the simulated trades.
 
     At each entry-timeframe bar the engine is given the last 200 bars of EACH timeframe ending at
@@ -178,6 +179,9 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
                                        disable=disable)
         if not prop.is_actionable or prop.take_profit is None:
             i += 1
+            continue
+        if min_align > 0.0 and (prop.alignment or 0.0) < min_align:
+            i += 1  # segmentation: only trade setups at/above this alignment grade
             continue
         if regimes is not None and prop.regime not in regimes:
             i += 1   # stand aside in regimes we're not trading (e.g. trade trending only)

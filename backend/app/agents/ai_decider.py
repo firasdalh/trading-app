@@ -73,18 +73,31 @@ _SYSTEM = (
     "not tradeable), plus stop_loss and take_profit anchored to real structure. Aim for >=2R to the "
     "target before opposing structure; if a scenario's only entry is thin (target too close, or into a "
     "wall), mark its action 'none' HONESTLY rather than forcing a bad trade.\n"
-    "IMPORTANT: you do NOT pick the winner. The desk's deterministic risk engine picks the scenario with "
-    "the best TRADEABLE reward:risk — so a 45% scenario with a clean 2R+ setup is chosen over a 55% one "
-    "that is only ~0.7R. Make each plan realistic; that is how you get traded.\n"
+    "IMPORTANT: you do NOT pick the winner. The desk picks the CLEAREST tradeable scenario — the one "
+    "ALIGNED with the higher-timeframe trend — NOT the one with the best reward:risk. Reward:risk only "
+    "breaks ties between EQUALLY-aligned setups; it NEVER justifies trading against the dominant trend. A "
+    "counter-trend setup with a clean 2R is REFUSED when the higher timeframes are trending the other way — "
+    "the desk stands aside rather than fade a clear trend for R:R. So make the ALIGNED plan realistic; that "
+    "is the one that gets traded.\n"
     "Rules: use ONLY the price levels in the brief — NEVER invent numbers. Stop and target on the correct "
     "side, sane stop distance (roughly 0.5-3x ATR) — not a hair-trigger. Prefer ARM over chasing into a "
-    "nearby wall. Do NOT fight a strong higher-timeframe trend. Standing aside (both actions 'none') is a "
+    "nearby wall. Do NOT fight a clear higher-timeframe trend (its R:R does not matter). Standing aside (both actions 'none') is a "
     "professional answer. You NEVER size the trade — a separate deterministic Risk Manager does that.\n"
     "ARM level placement (get this right):\n"
     "  arm_long breakout : trigger = ABOVE resistance; stop = just BELOW that level; target = a higher level.\n"
     "  arm_long pullback : trigger = at support BELOW price; stop = BELOW support; target = a higher level.\n"
     "  arm_short breakdown: trigger = BELOW support; stop = just ABOVE that level; target = a lower level.\n"
     "  arm_short pullback : trigger = at resistance ABOVE price; stop = ABOVE resistance; target = a lower level.\n"
+    "FOLLOW THE TREND at the named level (this is the desk's bread-and-butter): in a clear higher-TF "
+    "UPtrend, a pullback to the next SUPPORT is a BUY-THE-DIP — arm_long AT that support (do NOT read it "
+    "as a breakdown short); in a clear DOWNtrend, a rally to the next RESISTANCE is a SELL-THE-RALLY — "
+    "arm_short AT that resistance. Whenever your scenario says 'pulls back to support X then continues up' "
+    "(or 'rallies to resistance X then continues down'), the trade plan is to ARM at that exact level X in "
+    "the trend's direction — plan the entry at the next support (long) / resistance (short) you name.\n"
+    "PULLBACK vs REVERSAL: when a higher timeframe's MOVING-AVERAGE trend is UP but its recent SWINGS are "
+    "down (lower-highs/lows), that is a PULLBACK inside an uptrend, NOT a reversal — the play is to BUY THE "
+    "DIP (arm a long at the next support), never to short into the up-trend on the weak swings. Mirror for a "
+    "downtrend rally (sell the rally at resistance). Weigh the moving-average trend over the recent swings.\n"
     "ARM QUALITY BAR (the risk engine ENFORCES this — arms that fail it are dropped, so respect it): an "
     "arm must have >=1.5R room from its trigger, its trigger must sit at a STRONG (>=3x tested) level — use "
     "the BREAKOUT CANDIDATES in the brief — and it must NOT be into a loose/expanded range (a coiled/"
@@ -147,6 +160,29 @@ def _maturity_note(ind: dict, entry: float | None) -> str:
         loc = "at value" if d <= 1.0 else "stretched" if d >= 2.5 else "getting extended"
         bits.append(f"{d:.1f} ATR from EMA20 value ({loc})")
     return "; ".join(bits) if bits else "n/a"
+
+
+def _pullback_hint(technical: TechnicalRead, timeframe: str) -> str:
+    """Detect the 'EMA trend up but price pulling back' state on the immediate higher TF (rising EMAs
+    + lower-highs/lows structure = a PULLBACK, not a reversal) and tell the AI to BUY THE DIP (arm a
+    long at support), not lean short. Mirror for a downtrend rally. Empty when it doesn't apply."""
+    from app.agents.orchestrator import _higher_tf, _trend_from_indicators
+
+    hi = _higher_tf(technical, timeframe)
+    if hi is None:
+        return ""
+    ema_trend = _trend_from_indicators(hi.indicators, hi.trend)   # the moving-average (dominant) trend
+    struct = hi.indicators.get("structure")                       # +1 HH/HL, -1 LH/LL, 0 range
+    if ema_trend == "up" and struct is not None and struct < -0.5:
+        return (f"PULLBACK-IN-UPTREND: the {hi.timeframe} EMA trend is UP but its swing structure is "
+                f"pulling back (LH/LL). This is a BUY-THE-DIP, NOT a reversal — favor a LONG armed at the "
+                f"next SUPPORT (buy the pullback), and do NOT lean short into the {hi.timeframe} uptrend "
+                f"just because the recent swings are down.")
+    if ema_trend == "down" and struct is not None and struct > 0.5:
+        return (f"RALLY-IN-DOWNTREND: the {hi.timeframe} EMA trend is DOWN but its swing structure is "
+                f"pushing up (HH/HL). This is a SELL-THE-RALLY, NOT a reversal — favor a SHORT armed at "
+                f"the next RESISTANCE, and do NOT lean long into the {hi.timeframe} downtrend.")
+    return ""
 
 
 def _mtf_line(technical: TechnicalRead) -> str:
@@ -212,7 +248,7 @@ def _near_strong_level(trigger: float, atr: float | None, facts: dict | None) ->
 
 
 def _score_scenario(sc: "_AiScenario", price: float | None, atr: float | None,
-                    facts: dict | None = None) -> dict:
+                    facts: dict | None = None, min_rr: float | None = None) -> dict:
     """Tradeability + reward:risk for a scenario's trade plan, used to RANK the scenarios. Valid,
     correctly-sided levels + a sane ATR stop are required for any trade. An OPEN needs R:R >= _MIN_RR;
     an ARM shares that R:R floor (_ARM_MIN_RR) but must ALSO clear the ③ quality bar (trigger at a STRONG
@@ -243,7 +279,7 @@ def _score_scenario(sc: "_AiScenario", price: float | None, atr: float | None,
         return ev
     rr = abs(tp - entry) / risk
     ev["rr"] = round(rr, 2)
-    floor = _ARM_MIN_RR if is_arm else _MIN_RR
+    floor = min_rr if min_rr is not None else (_ARM_MIN_RR if is_arm else _MIN_RR)
     if rr < floor:
         ev["reject"] = f"thin R:R (~{rr:.1f}R, need >={floor:.1f})"
         return ev
@@ -411,7 +447,7 @@ def build_decision_brief(session: Session, symbol: str, asset_class: AssetClass,
 
 def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, timeframe: str,
                     proposal: TradeProposal, technical: TechnicalRead, fundamental: FundamentalRead,
-                    now: datetime) -> TradeProposal:
+                    now: datetime, min_rr: float | None = None) -> TradeProposal:
     """Let the AI decide from the deterministic brief. Returns a (possibly new) TradeProposal.
 
     Falls back to the deterministic ``proposal`` unchanged when the LLM is unavailable/failed."""
@@ -430,6 +466,18 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
 
     brief, price, facts = build_decision_brief(session, symbol, asset_class, timeframe, proposal,
                                                technical, fundamental, now)
+    # Pullback-in-trend detector: when the higher-TF EMA trend is up but price is pulling back (or the
+    # mirror), steer the AI to BUY THE DIP at support / SELL THE RALLY at resistance instead of leaning
+    # counter-trend on the recent swings (the BTCUSD 4h case).
+    hint = _pullback_hint(technical, timeframe)
+    if hint:
+        brief += "\n\n" + hint
+    # A caller-supplied floor (the per-pair auto-trader's Min R:R) overrides the prompt's 1.5R so the
+    # AI doesn't self-censor 1.2R-ish setups as 'none' — the scorer uses the same floor.
+    if min_rr is not None and min_rr < 1.5:
+        brief += (f"\n\nFLOOR OVERRIDE for THIS decision: the minimum tradeable reward:risk is "
+                  f"{min_rr:.1f}R (NOT 1.5R). Treat any open/arm plan with >= {min_rr:.1f}R as tradeable — "
+                  f"do NOT mark a {min_rr:.1f}R-or-better setup 'none' just for reward:risk.")
     decision = analyze(system=_SYSTEM, user=brief, schema=_DecisionLLM, max_tokens=1800)
     if decision is None:
         log.info("ai decider unavailable; keeping deterministic proposal", extra={"symbol": symbol})
@@ -442,7 +490,7 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
     # Score each scenario's trade plan, then the DECIDER picks the best TRADEABLE one (adequate R:R;
     # arms also clear the ③ quality bar), ranked by probability — so a 45% scenario worth 5.6R beats a
     # 55% one worth 0.7R, instead of the AI acting on the highest-probability idea even when it's untradeable.
-    scored = [(sc, _score_scenario(sc, price, atr, facts)) for sc in decision.scenarios]
+    scored = [(sc, _score_scenario(sc, price, atr, facts, min_rr=min_rr)) for sc in decision.scenarios]
     aid_scen = [{"label": sc.label, "direction": sc.direction, "prob": sc.probability, "path": sc.path,
                  "reasoning": sc.reasoning, "action": ev["action"], "rr": ev["rr"],
                  "tradeable": ev["tradeable"]} for sc, ev in scored]
@@ -456,21 +504,44 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
                              fundamental=fundamental, regime=proposal.regime, review_decision="ai",
                              strategy="ai")
 
-    ranked = sorted([(sc, ev) for sc, ev in scored if ev["tradeable"]],
+    # CLARITY over reward:risk (the desk's rule): trade the CLEAREST scenario, not the one with the
+    # best R:R. A tradeable setup that FIGHTS a clear immediate-higher-timeframe trend is refused —
+    # we don't arm a counter-trend short into a 1h/4h uptrend just because its R:R is cleaner. If the
+    # only tradeable scenarios fight the dominant trend, STAND ASIDE. (Same laddered discipline as the
+    # deterministic engine.)
+    from app.agents.orchestrator import _higher_trend
+    htf_trend, htf_name = _higher_trend(technical, timeframe)
+    clear_htf = htf_trend in ("up", "down")
+
+    def _aligned(ev) -> bool:
+        if not clear_htf:
+            return True   # no clear higher-TF trend -> nothing to fight
+        return (ev["direction"] == "long") == (htf_trend == "up")
+
+    tradeable = [(sc, ev) for sc, ev in scored if ev["tradeable"]]
+    # Prefer alignment first, THEN probability, THEN R:R — the clearest wins, R:R only breaks ties.
+    ranked = sorted([x for x in tradeable if _aligned(x[1])],
                     key=lambda x: (x[0].probability, x[1]["rr"] or 0), reverse=True)
 
     if not ranked:
         best = max(decision.scenarios, key=lambda s: s.probability, default=None)
-        why = "; ".join(f"{sc.label} ({ev['reject']})" for sc, ev in scored if ev["action"] != "none") \
-            or "no tradeable setup"
+        counter_only = bool(tradeable) and clear_htf   # setups existed but all fought the trend
+        if counter_only:
+            why = (f"only counter-trend setups were tradeable — not fighting the {htf_name} "
+                   f"{htf_trend}trend for reward:risk")
+            why_chosen = f"clearest read is {htf_trend}; the tradeable setups fought it — standing aside"
+        else:
+            why = "; ".join(f"{sc.label} ({ev['reject']})" for sc, ev in scored if ev["action"] != "none") \
+                or "no tradeable setup"
+            why_chosen = "no scenario cleared the reward:risk floor"
         base = _mk_base()
         base.strategy = "stand_aside"
-        base.rationale = f"AI stood aside — no tradeable scenario ({why}). {decision.rationale}{risk_tail}"
+        base.rationale = f"AI stood aside — {why}. {decision.rationale}{risk_tail}"
         base.ai_decision = {**aid_base, "kind": "stand_aside", "action": "stand_aside",
                             "chosen": best.label if best else "",
-                            "why_chosen": "no scenario cleared the reward:risk floor",
+                            "why_chosen": why_chosen,
                             "conviction": round((best.probability / 100) if best else 0.0, 2)}
-        log.info("ai decision: stand_aside (nothing tradeable)", extra={"symbol": symbol})
+        log.info("ai decision: stand_aside", extra={"symbol": symbol, "counter_only": counter_only})
         return base
 
     # Act on the best tradeable scenario; if an OPEN is blocked by a guardrail, fall back to the next.
@@ -478,7 +549,9 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
         conv = round(min(0.95, max(0.05, sc.probability / 100)), 2)
         direction = Direction.LONG if ev["direction"] == "long" else Direction.SHORT
         chose = f"CHOSE '{sc.label}' ({sc.probability}%, ~{ev['rr']}R)"
-        why_chosen = f"best tradeable reward:risk (~{ev['rr']}R at {sc.probability}% probability)"
+        why_chosen = (f"clearest read — with the {htf_name} {htf_trend}trend (~{ev['rr']}R at {sc.probability}%)"
+                      if clear_htf else
+                      f"clearest tradeable setup (~{ev['rr']}R at {sc.probability}% probability)")
         tail = f" {decision.rationale}{risk_tail}"
         aid_common = {**aid_base, "chosen": sc.label, "why_chosen": why_chosen, "conviction": conv,
                       "direction": direction.value, "rr": ev["rr"]}

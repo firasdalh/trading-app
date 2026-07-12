@@ -42,6 +42,11 @@ _SQLITE_ADDED_COLUMNS = {
     ],
     "risk_config": [
         ("daily_loss_breaker_enabled", "BOOLEAN DEFAULT 1"),
+        ("loss_cooldown_minutes", "INTEGER DEFAULT 180"),
+    ],
+    "auto_trade_config": [
+        ("min_rr", "FLOAT DEFAULT 1.2"),
+        ("min_profit_usd", "FLOAT DEFAULT 20.0"),
     ],
     "app_settings": [
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),

@@ -218,13 +218,260 @@ def _multi_tf(primary_trend, macro_trend, *, resistance=120.0, support=90.0, ent
 
 
 def test_mtf_blocks_long_against_higher_tf_downtrend():
+    # entry 1h up, and the only-higher TF (1d) is down -> the immediate-higher gate blocks the long.
     p = _deterministic_decision("X", AssetClass.FOREX, "1h", _multi_tf("up", "down"), _fund(), now=NOW)
-    assert p.direction == Direction.NO_TRADE and "higher-timeframe" in p.rationale.lower()
+    assert p.direction == Direction.NO_TRADE and "no confluence" in p.rationale.lower()
 
 
 def test_mtf_allows_long_when_higher_tf_agrees():
     p = _deterministic_decision("X", AssetClass.FOREX, "1h", _multi_tf("up", "up"), _fund(), now=NOW)
     assert p.direction == Direction.LONG
+
+
+def _ladder_tf(entry_trend, h1_trend, d1_trend, *, entry=100.0, adx=30.0, d1_res=None, d1_sup=None):
+    """Three-rung ladder: 15m (entry) → 1h → 1d, so the immediate-higher gate uses the 1h and the
+    1d only contributes its S/R (big-TF levels)."""
+    ind = {"last_close": entry, "atr14": 2.0, "adx": adx,
+           "macd_hist": 1.0 if entry_trend == "up" else -1.0}
+    return TechnicalRead(symbol="X", overall_trend=entry_trend, confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="15m", trend=entry_trend, indicators=ind,
+                      support_levels=[90.0], resistance_levels=[130.0]),
+        TimeframeRead(timeframe="1h", trend=h1_trend, indicators={},
+                      support_levels=[], resistance_levels=[]),
+        TimeframeRead(timeframe="1d", trend=d1_trend, indicators={},
+                      support_levels=[d1_sup] if d1_sup else [],
+                      resistance_levels=[d1_res] if d1_res else []),
+    ])
+
+
+def test_ladder_allows_long_when_immediate_higher_agrees_even_if_daily_down():
+    # 15m up + 1h up, but the DAILY is down. The OLD "must agree with the daily" rule blocked this;
+    # the laddered rule trades WITH the immediate higher timeframe (the 1h).
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _ladder_tf("up", "up", "down"), _fund(), now=NOW)
+    assert p.direction == Direction.LONG
+
+
+def test_ladder_blocks_long_when_immediate_higher_disagrees():
+    # 15m up but the immediate higher (1h) is down -> blocked, whatever the daily does.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _ladder_tf("up", "down", "up"), _fund(), now=NOW)
+    assert p.direction == Direction.NO_TRADE and "next-higher" in p.rationale.lower()
+
+
+def test_ladder_respects_big_tf_level_overhead():
+    # 15m up + 1h up (would trade), but a DAILY resistance sits ~0.5 ATR overhead -> stand aside/watch.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _ladder_tf("up", "up", "up", entry=100.0, d1_res=101.0), _fund(), now=NOW)
+    assert p.direction == Direction.NO_TRADE and "higher-timeframe level" in p.rationale.lower()
+    assert p.watch is True
+
+
+def _pullback_tf(entry_trend, h1_trend, *, rsi, entry=100.0, adx=30.0, support=None, resistance=None,
+                 div_bull=0.0, div_bear=0.0):
+    """15m (entry) pulling back against a clear 1h trend, with RSI + optional S/R + divergence."""
+    ind = {"last_close": entry, "atr14": 2.0, "adx": adx, "rsi14": rsi,
+           "macd_hist": -1.0 if entry_trend == "down" else 1.0,
+           "swing_high": entry + 6.0, "swing_low": entry - 6.0,
+           "div_bull": div_bull, "div_bear": div_bear}
+    return TechnicalRead(symbol="X", overall_trend=entry_trend, confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="15m", trend=entry_trend, indicators=ind,
+                      support_levels=[support] if support else [],
+                      resistance_levels=[resistance] if resistance else []),
+        TimeframeRead(timeframe="1h", trend=h1_trend, indicators={}),
+        TimeframeRead(timeframe="1d", trend=h1_trend, indicators={}),
+    ])
+
+
+def test_htf_pullback_arms_long_dip_at_support():
+    # 15m DOWN into an UP 1h, RSI oversold, dip sitting at a support -> arm a buy-the-dip LONG.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _pullback_tf("down", "up", rsi=25.0, support=99.0), _fund(), now=NOW)
+    assert p.direction == Direction.NO_TRADE and p.watch is True and p.strategy == "htf_pullback"
+    assert "pullback" in p.rationale.lower() and "support" in p.rationale.lower()
+
+
+def test_htf_pullback_arms_long_on_divergence():
+    # No support nearby, but a bullish RSI divergence confirms the exhausted dip -> arm the long.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _pullback_tf("down", "up", rsi=25.0, div_bull=1.0), _fund(), now=NOW)
+    assert p.strategy == "htf_pullback" and "divergence" in p.rationale.lower()
+
+
+def test_htf_pullback_arms_short_rally_at_resistance():
+    # 15m UP into a DOWN 1h, RSI overbought, rally at a resistance -> arm a sell-the-rally SHORT.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _pullback_tf("up", "down", rsi=75.0, resistance=101.0), _fund(), now=NOW)
+    assert p.strategy == "htf_pullback" and "resistance" in p.rationale.lower()
+
+
+def test_htf_pullback_shallow_rsi_stands_aside():
+    # Dip against an up 1h but RSI isn't exhausted (55) -> no arm, stand aside (don't fight the 1h).
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _pullback_tf("down", "up", rsi=55.0, support=99.0), _fund(), now=NOW)
+    assert p.direction == Direction.NO_TRADE and p.strategy != "htf_pullback"
+    assert "no confluence" in p.rationale.lower()
+
+
+def test_htf_pullback_no_confirmation_stands_aside():
+    # RSI oversold but NO support near and NO divergence -> unconfirmed dip, don't arm.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _pullback_tf("down", "up", rsi=25.0), _fund(), now=NOW)
+    assert p.strategy != "htf_pullback" and "no confluence" in p.rationale.lower()
+
+
+def test_htf_pullback_disabled_reverts_to_block():
+    # With the toggle off, a confirmed dip still just stands aside (old behaviour).
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _pullback_tf("down", "up", rsi=25.0, support=99.0), _fund(), now=NOW,
+                                disable=frozenset({"htf_pullback"}))
+    assert p.strategy != "htf_pullback" and "no confluence" in p.rationale.lower()
+
+
+def _range_tf(*, entry, prior_hi, prior_lo, htf="up", adx=15.0, vol=1.5, atr=2.0):
+    """A RANGING market (adx<20) with a prior range [prior_lo, prior_hi] the current close may break."""
+    ind = {"last_close": entry, "atr14": atr, "adx": adx, "vol_ratio": vol,
+           "prior_high": prior_hi, "prior_low": prior_lo, "rsi14": 50.0,
+           "ema20": (prior_hi + prior_lo) / 2, "last_high": entry, "last_low": entry}
+    return TechnicalRead(symbol="X", overall_trend="sideways", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="15m", trend="sideways", indicators=ind,
+                      support_levels=[prior_lo], resistance_levels=[prior_hi]),
+        TimeframeRead(timeframe="1h", trend=htf, indicators={}),
+    ])
+
+
+def test_range_breakout_long():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _range_tf(entry=105.0, prior_hi=100.0, prior_lo=90.0, htf="up"), _fund(), now=NOW)
+    assert p.direction == Direction.LONG and p.strategy == "range_breakout"
+    assert "breakout" in p.rationale.lower() and p.take_profit > p.entry > p.stop_loss
+
+
+def test_range_breakout_short():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _range_tf(entry=85.0, prior_hi=100.0, prior_lo=90.0, htf="down"), _fund(), now=NOW)
+    assert p.direction == Direction.SHORT and p.strategy == "range_breakout"
+
+
+def test_range_breakout_needs_confirmation():
+    # A weak poke just past the top (no volume, not a decisive close) -> no breakout; falls to fade.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _range_tf(entry=100.4, prior_hi=100.0, prior_lo=90.0, htf="up", vol=1.0), _fund(), now=NOW)
+    assert p.strategy != "range_breakout"
+
+
+def test_range_breakout_not_against_higher_tf():
+    # A bull break but the 1h is DOWN -> don't trade the breakout against the higher TF.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _range_tf(entry=105.0, prior_hi=100.0, prior_lo=90.0, htf="down"), _fund(), now=NOW)
+    assert p.strategy != "range_breakout"
+
+
+def test_range_breakout_disabled():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m",
+                                _range_tf(entry=105.0, prior_hi=100.0, prior_lo=90.0, htf="up"), _fund(), now=NOW,
+                                disable=frozenset({"range_breakout"}))
+    assert p.strategy != "range_breakout"
+
+
+def _ema_pb_tf(direction="long", *, adx=30.0, at_ema=True):
+    """A TRENDING market with price at (or away from) the EMA20 for a continuation-bounce entry."""
+    if direction == "long":
+        lo = 99.7 if at_ema else 105.0
+        ind = {"last_close": 100.5, "last_low": lo, "last_high": 100.6, "atr14": 2.0, "adx": adx,
+               "ema20": 100.0, "ema50": 98.0, "ema200": 95.0, "macd_hist": 0.5, "rsi14": 55.0, "structure": 1.0}
+        e_trend, htf = "up", "up"
+    else:
+        hi = 100.3 if at_ema else 95.0
+        ind = {"last_close": 99.5, "last_high": hi, "last_low": 99.4, "atr14": 2.0, "adx": adx,
+               "ema20": 100.0, "ema50": 102.0, "ema200": 105.0, "macd_hist": -0.5, "rsi14": 45.0, "structure": -1.0}
+        e_trend, htf = "down", "down"
+    return TechnicalRead(symbol="X", overall_trend=e_trend, confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="15m", trend=e_trend, indicators=ind, support_levels=[], resistance_levels=[]),
+        TimeframeRead(timeframe="1h", trend=htf, indicators={"structure": 1.0 if direction == "long" else -1.0}),
+    ])
+
+
+def test_ema_pullback_long_bounce():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _ema_pb_tf("long"), _fund(), now=NOW)
+    assert p.direction == Direction.LONG and p.strategy == "ema_pullback"
+    assert "ema20 pullback" in p.rationale.lower() and p.stop_loss < p.entry < p.take_profit
+
+
+def test_ema_pullback_short_bounce():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _ema_pb_tf("short"), _fund(), now=NOW)
+    assert p.direction == Direction.SHORT and p.strategy == "ema_pullback"
+
+
+def test_ema_pullback_not_at_ema_falls_through():
+    # Price extended far above the EMA -> not an EMA bounce; falls through to the generic trend entry.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _ema_pb_tf("long", at_ema=False), _fund(), now=NOW)
+    assert p.direction == Direction.LONG and p.strategy != "ema_pullback"
+
+
+def _failed_break_tf(*, trap="bull", htf="sideways", adx=15.0, atr=2.0):
+    """A RANGING market where the current bar SWEEPS beyond the prior range then closes back inside."""
+    if trap == "bull":   # swept above the top, closed back inside -> fade SHORT
+        ind = {"last_close": 99.0, "last_high": 100.6, "last_low": 98.5, "atr14": atr, "adx": adx,
+               "prior_high": 100.0, "prior_low": 80.0, "rsi14": 65.0, "ema20": 90.0}
+    else:                # swept below the bottom, closed back inside -> fade LONG
+        ind = {"last_close": 81.0, "last_high": 81.5, "last_low": 79.4, "atr14": atr, "adx": adx,
+               "prior_high": 100.0, "prior_low": 80.0, "rsi14": 35.0, "ema20": 90.0}
+    return TechnicalRead(symbol="X", overall_trend="sideways", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="15m", trend="sideways", indicators=ind,
+                      support_levels=[80.0], resistance_levels=[100.0]),
+        TimeframeRead(timeframe="1h", trend=htf, indicators={}),
+    ])
+
+
+def test_failed_break_short_bull_trap():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _failed_break_tf(trap="bull"), _fund(), now=NOW)
+    assert p.direction == Direction.SHORT and p.strategy == "failed_break"
+    assert "trap" in p.rationale.lower() and p.stop_loss > p.entry > p.take_profit
+
+
+def test_failed_break_long_bear_trap():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _failed_break_tf(trap="bear"), _fund(), now=NOW)
+    assert p.direction == Direction.LONG and p.strategy == "failed_break"
+
+
+def test_failed_break_not_against_higher_tf():
+    # A bull-trap short, but the 1h is UP -> don't fade a break against a clear higher-TF trend.
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _failed_break_tf(trap="bull", htf="up"), _fund(), now=NOW)
+    assert p.strategy != "failed_break"
+
+
+def test_failed_break_disabled():
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _failed_break_tf(trap="bull"), _fund(), now=NOW,
+                                disable=frozenset({"failed_break"}))
+    assert p.strategy != "failed_break"
+
+
+def test_trend_alignment_full_stack_is_ap():
+    from app.agents.orchestrator import _trend_alignment
+    ind = {"adx": 30.0, "ema200": 90.0, "last_close": 100.0, "macd_hist": 1.0, "macd_hist_prev": 0.5}
+    tech = TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="15m", trend="up", indicators=ind),
+        TimeframeRead(timeframe="1h", trend="up", indicators={}),
+        TimeframeRead(timeframe="4h", trend="up", indicators={}),
+        TimeframeRead(timeframe="1d", trend="up", indicators={}),
+    ])
+    assert _trend_alignment(tech, ind, Direction.LONG) >= 0.9   # everything stacks -> A+
+
+
+def test_trend_alignment_mixed_is_low():
+    from app.agents.orchestrator import _trend_alignment
+    ind = {"adx": 15.0, "ema200": 110.0, "last_close": 100.0, "macd_hist": -0.5, "macd_hist_prev": -0.2}
+    tech = TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="15m", trend="up", indicators=ind),
+        TimeframeRead(timeframe="1h", trend="down", indicators={}),
+        TimeframeRead(timeframe="1d", trend="down", indicators={}),
+    ])
+    assert _trend_alignment(tech, ind, Direction.LONG) < 0.5    # TFs disagree, weak, wrong side
+
+
+def test_trend_trade_carries_alignment():
+    # A trend proposal exposes the alignment grade (used for the A+ badge + confidence bonus).
+    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _ema_pb_tf("long"), _fund(), now=NOW)
+    assert p.alignment is not None and p.alignment >= 0.85
 
 
 def test_target_capped_at_resistance():

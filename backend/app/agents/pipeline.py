@@ -28,8 +28,9 @@ from app.risk.service import assess
 
 log = get_logger("agents.pipeline")
 
-# Primary timeframe plus context timeframes; deduped, primary first.
-_CONTEXT_TIMEFRAMES = ("1h", "1d")
+# Primary timeframe plus context timeframes; deduped, primary first. 4h is included so the engine can
+# ladder through adjacent TFs (15m→1h→4h→1d) and respect the big-TF (4h/1d) support/resistance.
+_CONTEXT_TIMEFRAMES = ("1h", "4h", "1d")
 
 
 def _timeframes_for(primary: str) -> list[str]:
@@ -110,6 +111,8 @@ def analyze_symbol(
     session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
     use_llm: bool = True, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
     rsi_div: bool = False, rsi_trend_filter: bool = True, source: str | None = None,
+    cooldown_override: int | None = None, force_ai_decide: bool = False,
+    min_rr: float | None = None,
 ) -> AnalyzeResponse:
     """Run the full pipeline for one symbol. ``use_llm=False`` forces the deterministic
     agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
@@ -136,8 +139,11 @@ def analyze_symbol(
     # picks the best tradeable one, decides open/arm/skip; levels anchored to the brief). The Risk
     # Manager still sizes/gates downstream. When the LLM is off/unavailable, we keep the deterministic
     # proposal. Mutually exclusive with st_band.
-    ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode and not rsi_over)
-    technical = run_technical(symbol, series, use_llm=use_llm and review_on and not ai_decides)
+    # ``force_ai_decide`` (the per-pair AI auto-trader) turns on the decider for THIS call regardless
+    # of the global toggle — that feature is AI-driven by definition (follows the scenario read).
+    ai_decides = ((review_on or force_ai_decide) and use_llm and llm_available()
+                  and not settings.st_band_mode and not rsi_over)
+    technical = run_technical(symbol, series, use_llm=use_llm and (review_on or force_ai_decide) and not ai_decides)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)  # AI kept for fundamentals
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
@@ -150,7 +156,7 @@ def analyze_symbol(
         from app.agents.ai_decider import ai_decide_trade
         det_proposal = proposal   # keep the deterministic call for the shadow scorecard
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, det_proposal,
-                                   technical, fundamental, now)
+                                   technical, fundamental, now, min_rr=min_rr)
         # SHADOW SCORECARD: log the AI decision alongside the deterministic one on this same setup,
         # so a grader can later score which was right (A/B proof + AI's own track record). Best-effort.
         from app.agents.shadow import record_shadow
@@ -188,7 +194,7 @@ def analyze_symbol(
     session.commit()
 
     # 4. Deterministic Risk Manager.
-    decision = assess(session, proposal)
+    decision = assess(session, proposal, override_cooldown_minutes=cooldown_override)
     record.risk_decision = decision.decision.value
     record.risk_reason = decision.reason
     record.approved_qty = decision.approved_qty

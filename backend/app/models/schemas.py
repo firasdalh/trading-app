@@ -184,6 +184,9 @@ class TradeProposal(BaseModel):
     # "what are we doing and why" is explicit and visible rather than buried in the rationale.
     regime: str | None = None
     strategy: str | None = None
+    # Trend-alignment score 0..1 (how clearly the direction stacks up across TFs + strength +
+    # momentum). ~0.85+ = an "A+" fully-aligned trend (the clearest up/down). None = not a trend trade.
+    alignment: float | None = None
 
     # Structured AI decision (when the AI is the decider) — the created scenarios, the chosen one, why,
     # risks, and the action/levels — so the UI can render it cleanly instead of parsing the rationale.
@@ -341,6 +344,7 @@ class RiskConfigView(BaseModel):
     max_daily_loss: float
     max_total_exposure: float
     per_pair_cooldown_minutes: int
+    loss_cooldown_minutes: int = 180
     daily_loss_breaker_enabled: bool = True
 
 

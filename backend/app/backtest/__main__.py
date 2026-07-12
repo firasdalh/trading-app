@@ -49,8 +49,13 @@ def main() -> None:
                     "(e.g. 'trending'); default = all")
     ap.add_argument("--holdout", type=float, default=0.0, help="hold out the last fraction of time as "
                     "OUT-OF-SAMPLE and report it separately (e.g. 0.3); 0 = combined only")
+    ap.add_argument("--disable", default="", help="ablate filters/setups, comma-separated "
+                    "(e.g. 'range_breakout,ema_pullback') — measure a setup's contribution")
+    ap.add_argument("--min-align", type=float, default=0.0, help="only trade setups with trend "
+                    "alignment >= this (e.g. 0.85 = A+ only) — segment high- vs low-conviction trends")
     args = ap.parse_args()
     regimes = {r.strip() for r in args.regimes.split(",") if r.strip()} or None
+    disable = frozenset(d.strip() for d in args.disable.split(",") if d.strip())
 
     session = SessionLocal()
     try:
@@ -67,7 +72,8 @@ def main() -> None:
                 print(f"… {sym} {tf} (last {args.bars} bars)…", flush=True)
                 tr = simulate_symbol(broker, sym, AssetClass(ac), tf, bars=args.bars,
                                      max_hold=args.max_hold, cooldown=args.cooldown,
-                                     cost_r=args.cost_r, regimes=regimes)
+                                     cost_r=args.cost_r, regimes=regimes, disable=disable,
+                                     min_align=args.min_align)
                 print(f"   {sym}: {len(tr)} trades", flush=True)
                 all_trades.extend(tr)
             except Exception as exc:  # noqa: BLE001 - one bad symbol shouldn't kill the run

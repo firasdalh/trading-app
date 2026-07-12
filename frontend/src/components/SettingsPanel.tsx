@@ -198,7 +198,8 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               <div>Max positions: {settings.risk.max_open_positions}</div>
               <div>Max daily loss: {(settings.risk.max_daily_loss * 100).toFixed(1)}%</div>
               <div>Max exposure: {(settings.risk.max_total_exposure * 100).toFixed(1)}%</div>
-              <div>Cooldown: {settings.risk.per_pair_cooldown_minutes}m</div>
+              <div>Per-pair cooldown: {settings.risk.per_pair_cooldown_minutes}m</div>
+              <div>Loss cooldown: {settings.risk.loss_cooldown_minutes}m</div>
             </div>
           )}
         </section>

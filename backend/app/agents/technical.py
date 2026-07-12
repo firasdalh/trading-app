@@ -73,6 +73,12 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         recent = candles[-_RECLAIM_LOOKBACK:]
         indicators["recent_high"] = round(max(c.high for c in recent), 6)
         indicators["recent_low"] = round(min(c.low for c in recent), 6)
+        # The range formed by the bars BEFORE the current one — so the current close can BREAK it
+        # (used by the range-breakout setup; recent_high/low include the current bar and can't be broken).
+        if len(candles) > _RECLAIM_LOOKBACK + 1:
+            prior = candles[-_RECLAIM_LOOKBACK - 1:-1]
+            indicators["prior_high"] = round(max(c.high for c in prior), 6)
+            indicators["prior_low"] = round(min(c.low for c in prior), 6)
     # Trend EMAs.
     for p in (10, 20, 50, 200):  # ema10 = the RSI-Over strategy's breakout-confirmation line
         val = ema(closes, p)
