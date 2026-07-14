@@ -545,6 +545,8 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
   // sell the rally) is a pro.
   const rsiBad = rsi != null && dir != null && ((dir === "short" && rsi <= 30) || (dir === "long" && rsi >= 70));
   const rsiGood = rsi != null && dir != null && ((dir === "long" && rsi <= 35) || (dir === "short" && rsi >= 65));
+  // Absolute RSI zone — always reported, even with no trade direction (fixes "76 = normal range").
+  const rsiZone = rsi == null ? null : rsi >= 70 ? "overbought" : rsi <= 30 ? "oversold" : "normal";
 
   const factors: { label: string; value: string; tone?: string; verdict: V; note: string }[] = [
     {
@@ -583,13 +585,17 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
     {
       label: "RSI (14)",
       value: rsi == null ? "—" : rsi.toFixed(1),
-      tone: rsiBad ? "text-bear" : rsiGood ? "text-bull" : undefined,
+      tone: rsiBad ? "text-bear" : rsiGood ? "text-bull"
+        : rsiZone === "overbought" || rsiZone === "oversold" ? "text-warn" : undefined,
       verdict: rsiBad ? "bad" : rsiGood ? "good" : "neutral",
       note: rsiBad
         ? `${rsi!.toFixed(0)} is ${dir === "short" ? "oversold" : "overbought"} — ${actionWord} into an exhausted move (chasing).`
         : rsiGood
           ? `${rsi!.toFixed(0)} is ${dir === "long" ? "a dip — buying low (value)" : "a rally — selling high (value)"}.`
-          : rsi == null ? "" : "In a normal range — room to move.",
+          : rsi == null ? ""
+            : rsiZone === "overbought" ? `${rsi!.toFixed(0)} is overbought (>70) — stretched; a pullback is likely.`
+              : rsiZone === "oversold" ? `${rsi!.toFixed(0)} is oversold (<30) — stretched; a bounce is likely.`
+                : "In a normal range — room to move.",
     },
     {
       label: "Fundamental bias",
