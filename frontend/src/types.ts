@@ -431,6 +431,8 @@ export interface AiScenarioRead {
   why_primary: string;    // head-to-head: why the chosen one wins
   scenarios: AiScenario[];
   invalidation: string | null;
+  nearest_support?: number | null;      // the exact S/R levels the AI cites (for one-click plotting)
+  nearest_resistance?: number | null;
   overall_bias: string;
   scorecard: { factor: string; signal: string; note: string }[];
   note: string;

@@ -12,8 +12,13 @@ function dirArrow(d: string): string {
  * Renders the AI two-scenario read (ranked + scored + why-primary). INFO only.
  * Used both in the chart's floating 🤖 panel and inline in the Run-analysis result.
  */
-export function ScenarioCard({ read }: { read: AiScenarioRead }) {
+export function ScenarioCard({ read, onShowLevels, levelsShown }: {
+  read: AiScenarioRead;
+  onShowLevels?: () => void;   // when provided (chart context), shows a one-click "plot the AI's levels" button
+  levelsShown?: boolean;
+}) {
   const isAi = read.source === "ai";
+  const hasLevels = read.nearest_support != null || read.nearest_resistance != null;
   return (
     <div className="text-xs">
       <div className="mb-1.5 flex items-center gap-2">
@@ -74,6 +79,22 @@ export function ScenarioCard({ read }: { read: AiScenarioRead }) {
       )}
 
       {read.invalidation && <div className="mt-2 text-amber-300">⚠ Invalidation: {read.invalidation}</div>}
+
+      {onShowLevels && hasLevels && (
+        <button
+          onClick={onShowLevels}
+          className={`mt-2 w-full rounded-md border px-2 py-1.5 text-[11px] font-medium ${
+            levelsShown
+              ? "border-violet-500 bg-violet-500/20 text-violet-100"
+              : "border-neutral-700 bg-neutral-800/60 text-neutral-200 hover:bg-neutral-700"
+          }`}
+          title="Draw the AI's cited support/resistance as bold labelled lines on the chart"
+        >
+          📍 {levelsShown ? "Hide" : "Show"} these levels on the chart
+          {read.nearest_support != null && <span className="ml-1 text-emerald-300">S {read.nearest_support}</span>}
+          {read.nearest_resistance != null && <span className="ml-1 text-amber-300">R {read.nearest_resistance}</span>}
+        </button>
+      )}
 
       <div className="mt-2 border-t border-neutral-800 pt-1.5 text-[10px] text-neutral-600">
         {read.note} Info only — it does NOT change the engine's decision.

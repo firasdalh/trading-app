@@ -85,6 +85,11 @@ interface Props {
   onSetSlTp?: (sl: number | null, tp: number | null) => void;
   // Commit a dragged trigger/SL/TP for an armed setup (only the changed level is sent).
   onSetArmedLevels?: (id: number, levels: { trigger_price?: number; stop_loss?: number; take_profit?: number }) => void;
+  // The AI scenario's cited S/R to plot on the chart — lifted to the Dashboard so BOTH the floating
+  // scenario card AND the Run-analysis scenario card toggle the same lines. null = hidden.
+  scenLevels?: { support: number | null; resistance: number | null } | null;
+  scenLevelsShown?: boolean;
+  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null } | null) => void;
 }
 
 const EMA_CONFIG = [
@@ -350,7 +355,7 @@ function LineSwatch({ dash }: { dash: string }) {
   );
 }
 
-export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels }: Props) {
+export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, scenLevelsShown, onToggleScenLevels }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -376,6 +381,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
   const armedLinesRef = useRef<IPriceLine[]>([]);
+  const scenLinesRef = useRef<IPriceLine[]>([]);   // the AI scenario's cited S/R, plotted on request
   // Drag-to-adjust price lines (position SL/TP + armed trigger/SL/TP). The overlay effects register
   // a DragHandle per draggable line; the (once-attached) mouse handlers read them from refs so they
   // never need re-binding. `validate` keeps a level on the correct side; `commit` persists on drop.
@@ -987,6 +993,25 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     add(proposal.take_profit, "#26a69a", "Target");
   }, [proposal, positions, symbol]);
 
+  // AI-scenario S/R overlay — the exact levels the AI cites, plotted as BOLD labelled lines on request
+  // (the "Show these levels" button in the scenario card), so the zones in the AI's text are obvious
+  // on the chart. Distinct from the thin technical 1H/4H/1D S/R lines.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    scenLinesRef.current.forEach((l) => series.removePriceLine(l));
+    scenLinesRef.current = [];
+    if (!scenLevels) return;
+    const add = (price: number | null | undefined, color: string, title: string) => {
+      if (price == null) return;
+      scenLinesRef.current.push(
+        series.createPriceLine({ price, color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title }),
+      );
+    };
+    add(scenLevels.resistance, "#f59e0b", "🤖 AI R");   // amber resistance
+    add(scenLevels.support, "#26a69a", "🤖 AI S");      // teal support
+  }, [scenLevels]);
+
   // Open-position overlay (solid lines) — drawn from live broker positions for THIS symbol,
   // so an open trade's entry/SL/TP stays on the chart regardless of the current proposal.
   useEffect(() => {
@@ -1335,7 +1360,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           >
             ✕
           </button>
-          <ScenarioCard read={scen} />
+          <ScenarioCard read={scen} levelsShown={scenLevelsShown}
+                        onShowLevels={() => onToggleScenLevels?.(
+                          scen ? { support: scen.nearest_support ?? null, resistance: scen.nearest_resistance ?? null } : null)} />
         </div>
       )}
 

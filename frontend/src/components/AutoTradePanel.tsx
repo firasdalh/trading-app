@@ -29,10 +29,12 @@ export function AutoTradePanel({
   symbol,
   assetClass,
   timeframe,
+  onSelect,
 }: {
   symbol: string;
   assetClass: AssetClass;
   timeframe: string;
+  onSelect?: (p: { symbol: string; asset_class: string }) => void;
 }) {
   const [cfg, setCfg] = useState<AutoTradeView | null>(null);
   const [busy, setBusy] = useState(false);
@@ -199,14 +201,16 @@ export function AutoTradePanel({
         <div className="mt-2 flex flex-wrap items-center gap-1 text-[11px]">
           <span className="text-neutral-500">Auto-trading:</span>
           {enabledPairs.map((p) => (
-            <span
+            <button
               key={p.symbol}
-              className={`rounded px-1.5 py-0.5 ${
+              onClick={() => onSelect?.({ symbol: p.symbol, asset_class: p.asset_class })}
+              title={`Load ${p.symbol} on the chart`}
+              className={`rounded px-1.5 py-0.5 hover:ring-1 hover:ring-neutral-500 ${
                 p.symbol.toUpperCase() === symbol.toUpperCase() ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-300"
               }`}
             >
               {p.symbol}
-            </span>
+            </button>
           ))}
           <button onClick={runNow} disabled={busy} className="ml-auto text-[11px] text-brand-400 hover:text-brand-300">
             Run now ↻

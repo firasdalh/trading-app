@@ -82,6 +82,11 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [scenario, setScenario] = useState<import("../types").AiScenarioRead | null>(null);
   const [scenarioBusy, setScenarioBusy] = useState(false);
+  // The AI scenario's S/R lines pinned on the chart — one shared state so BOTH scenario cards (the
+  // chart's floating one + the Run-analysis one) toggle the same lines. null = hidden.
+  const [scenLevels, setScenLevels] = useState<{ support: number | null; resistance: number | null } | null>(null);
+  const toggleScenLevels = (lv: { support: number | null; resistance: number | null } | null) =>
+    setScenLevels((prev) => (prev ? null : lv));
   const [status, setStatus] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
@@ -228,6 +233,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     setAnalyzing(true);
     setError(null);
     setScenario(null);
+    setScenLevels(null);   // clear pinned scenario lines from the previous read
     try {
       const res = await api.analyze(symbol, assetClass, timeframe);
       setResult(res);
@@ -516,6 +522,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
               setError(e instanceof Error ? e.message : String(e));
             }
           }}
+          scenLevels={scenLevels}
+          scenLevelsShown={!!scenLevels}
+          onToggleScenLevels={toggleScenLevels}
         />
         <p className="mt-2 text-xs text-neutral-500">
           Backtest and paper results do not guarantee live results.
@@ -537,6 +546,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           analyzing={analyzing}
           scenario={scenario}
           scenarioBusy={scenarioBusy}
+          scenLevelsShown={!!scenLevels}
+          onToggleScenLevels={toggleScenLevels}
         />
         <div className="space-y-4">
           <QuickTradePanel
@@ -545,7 +556,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
             timeframe={timeframe}
             onPlaced={() => setPosBump((b) => b + 1)}
           />
-          <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} />
+          <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} onSelect={openPositionSymbol} />
           <ConditionalsPanel onSelect={openPositionSymbol} />
         </div>
       </div>

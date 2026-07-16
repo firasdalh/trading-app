@@ -56,12 +56,15 @@ interface Props {
   analyzing?: boolean;
   scenario?: AiScenarioRead | null;   // Step 4: AI two-scenario read (info only)
   scenarioBusy?: boolean;
+  // Toggle the AI scenario's cited S/R lines on the chart (shared with the chart's own scenario card).
+  scenLevelsShown?: boolean;
+  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null } | null) => void;
 }
 
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy }: Props) {
+export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, scenLevelsShown, onToggleScenLevels }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -395,7 +398,12 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
       {(scenario || scenarioBusy) && (
         <div className="rounded-md border border-violet-800/40 bg-violet-950/10 p-2">
           {scenario ? (
-            <ScenarioCard read={scenario} />
+            <ScenarioCard read={scenario} levelsShown={scenLevelsShown}
+              onShowLevels={onToggleScenLevels
+                ? () => onToggleScenLevels(scenario
+                    ? { support: scenario.nearest_support ?? null, resistance: scenario.nearest_resistance ?? null }
+                    : null)
+                : undefined} />
           ) : (
             <div className="text-xs text-violet-300/80">🤖 Reasoning out two scenarios…</div>
           )}

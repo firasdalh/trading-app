@@ -115,6 +115,8 @@ def _deterministic_fallback(ctx: dict) -> dict:
         "symbol": ctx["symbol"], "price": ctx["price"], "source": "deterministic",
         "headline": ctx.get("overall_bias", ""), "primary": out[0]["label"] if out else "", "why_primary": why,
         "scenarios": out, "invalidation": ctx.get("invalidation"),
+        "nearest_support": (ctx.get("nearest_support") or {}).get("price"),
+        "nearest_resistance": (ctx.get("nearest_resistance") or {}).get("price"),
         "overall_bias": ctx.get("overall_bias"), "scorecard": ctx.get("scorecard", []),
         "note": "No AI model configured — showing the deterministic map scenarios.",
     }
@@ -171,6 +173,9 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
         "symbol": symbol, "price": ctx["price"], "source": "ai",
         "headline": read.headline, "primary": primary, "why_primary": read.why_primary,
         "scenarios": scen, "invalidation": read.invalidation or ctx.get("invalidation"),
+        # The exact S/R levels the AI reasoned over (it was fed these) — so the UI can plot them.
+        "nearest_support": (ctx.get("nearest_support") or {}).get("price"),
+        "nearest_resistance": (ctx.get("nearest_resistance") or {}).get("price"),
         "overall_bias": ctx.get("overall_bias"), "scorecard": ctx.get("scorecard", []),
         "note": "AI judgement — probabilities are a lean, not a measurement, and will vary run-to-run.",
     }
