@@ -245,6 +245,25 @@ def set_st_band_mode(req: StBandModeRequest, session: Session = Depends(get_sess
     return build_settings_response(session)
 
 
+class AiMomentumReadRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/ai-momentum-read", response_model=SettingsResponse)
+def set_ai_momentum_read(req: AiMomentumReadRequest,
+                         session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle the AI momentum CLASSIFIER: when ON, at the ambiguous-momentum forks (MACD rolling over
+    / RSI stretched) the AI classifies WHY momentum disagrees (healthy_pullback / weak_momentum /
+    probable_reversal + evidence + confidence) and the deterministic engine decides enter/wait/reject/
+    arm from it. The AI only labels — it never decides direction/levels or overrides. OFF reverts to
+    the fixed 'arm the pullback and wait' rule. Reversible."""
+    settings = get_or_create_settings(session)
+    settings.ai_momentum_read = req.enabled
+    session.commit()
+    log.info("ai momentum-read set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
 class DetFilterItem(BaseModel):
     key: str
     label: str

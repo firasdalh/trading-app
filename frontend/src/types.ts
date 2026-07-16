@@ -116,6 +116,18 @@ export interface AutoTradeView {
   pairs: AutoTradePair[];
   last_run_at: string | null;
   last_result: string | null;
+  last_results?: AutoTradeResult[];
+}
+
+// One pair's outcome from the last auto-trade pass (symbol + what happened + why).
+export interface AutoTradeResult {
+  symbol: string;
+  opened?: string;       // "long" | "short" when it opened
+  confidence?: number;
+  skipped?: string;      // the reason it stood aside
+  blocked?: string;      // execution blocked reason
+  error?: string;
+  note?: string;         // extra context (e.g. the scenario target / $ potential)
 }
 
 export interface TradeProposal {
@@ -135,6 +147,8 @@ export interface TradeProposal {
   alignment?: number | null;    // 0..1 trend-alignment grade (~0.85+ = A+ fully-aligned)
   conditional?: ConditionalSuggestion | null;
   ai_decision?: AiDecision | null;
+  // AI momentum classification at an ambiguous-momentum fork (set only when it ran).
+  momentum_read?: { category: string; evidence: string; confidence: number } | null;
   technical: TechnicalRead | null;
   fundamental: FundamentalRead | null;
 }
@@ -173,6 +187,7 @@ export interface AnalyzeResponse {
   status: string;
   proposal: TradeProposal;
   risk: RiskDecision;
+  analyzed_at?: string | null;   // when this analysis ran
 }
 
 export interface TradeEconomics {
@@ -244,6 +259,8 @@ export interface PositionAdvice {
   event_label: string | null;
   minutes_to_event: number | null;
   events_soon?: string | null;
+  opened_at?: string | null;   // when the position was opened
+  source?: string | null;      // who opened it (manual / rsi_over / armed / hybrid / auto_trade / …)
 }
 
 export interface AdvisorAction {
@@ -287,6 +304,7 @@ export interface SettingsResponse {
     kill_switch_engaged: boolean;
     trend_only_mode: boolean;
     st_band_mode: boolean;
+    ai_momentum_read: boolean;
     ai_review_enabled: boolean;
     live_confirmed_at: string | null;
   };

@@ -3,21 +3,7 @@ import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import type { CalibrationBucket, GroupStat, JournalBreakdown, JournalStats, PeriodBreakdown, ReflectionReport } from "../types";
-
-// A friendly label + colour for each trade source (who opened it).
-const SOURCE_META: Record<string, { label: string; color: string }> = {
-  ai: { label: "AI decision", color: "text-violet-300" },
-  rsi_over: { label: "RSI-Over", color: "text-sky-300" },
-  armed: { label: "Armed break", color: "text-amber-300" },
-  hybrid: { label: "Hybrid", color: "text-emerald-300" },
-  manual: { label: "Manual", color: "text-neutral-200" },
-  deterministic: { label: "Deterministic", color: "text-blue-300" },
-  analysis: { label: "Analysis (legacy)", color: "text-indigo-300" },
-  supertrend: { label: "SuperTrend", color: "text-teal-300" },
-  unknown: { label: "Unknown", color: "text-neutral-500" },
-};
-const srcLabel = (s: string) => SOURCE_META[s]?.label ?? s;
-const srcColor = (s: string) => SOURCE_META[s]?.color ?? "text-neutral-300";
+import { srcLabel, srcColor } from "./sourceMeta";
 
 // Midpoint of a "70-80%" bucket label, used to judge whether the realized win rate matches the
 // confidence the engine assigned (the whole point of calibration).

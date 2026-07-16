@@ -1,15 +1,20 @@
-"""Per-pair AI auto-trader.
+"""Per-pair AI auto-trader (quick-win, market-only — it NEVER arms).
 
 For each pair the user toggles ON, a scheduled tick (every ``interval_seconds``, default 15 min)
-runs the AI analysis and, when the pair is FLAT and past the short per-pair ``cooldown_minutes``
-(default 5), auto-opens a setup whose confidence clears ``min_confidence`` (default 60%) — following
-the scenario's own levels. The monitor rides it to TP/SL; the next tick re-enters. It "learns" only
-in the honest sense that the AI's decision brief already carries this pair's recent win/loss record
-(calibration + the shadow scorecard), so its probabilities adjust from what actually happened.
+OPENS a market trade following the AI's recommendation — never a pending "armed" order. Order:
+  1. ROOM gate — if the book is already full (open positions >= ``max_open_positions``, default 3),
+     do nothing (checked before any LLM work).
+  2. When the pair is FLAT and past the short per-pair ``cooldown_minutes`` (default 5):
+     (a) if the AI DECIDER returns a decisive directional trade (risk-approved, conf >= min), open it;
+     (b) else follow the AI's PRIMARY forward SCENARIO — open its immediate next move NOW at market
+         toward the named level (support for a down-move, resistance for an up-move), a quick win.
+The monitor rides it to TP/SL; the next tick re-enters. It "learns" only in the honest sense that the
+AI's brief already carries this pair's recent win/loss record (calibration + the shadow scorecard).
 
 PAPER-ONLY (a live broker needs the typed live-confirmation, which auto-open can't supply, so it's
-skipped there). EVERY risk gate still applies via the deterministic Risk Manager + the executor
-(3% cap, exposure, correlation, daily-loss breaker, anti-stacking, kill-switch).
+skipped there). EVERY setup clears ``min_rr`` + the $ floor and is sized/gated by the deterministic
+Risk Manager + the executor (3% cap, exposure, correlation, daily-loss breaker, anti-stacking,
+kill-switch).
 """
 from __future__ import annotations
 
@@ -26,6 +31,11 @@ from app.models.db import AgentRun, AutoTradeConfig, Position, TradeProposalReco
 from app.models.enums import AssetClass, PositionStatus, ProposalStatus
 
 log = get_logger("agents.auto_trade")
+
+# The auto-trader takes the AI's next move at MARKET (quick-win) — it no longer fades a level with a
+# pending order, so the old fade gates are gone. Two guards remain on the scenario open:
+_MOM_THRU_ATR = 0.10       # skip if momentum > this * ATR is driving AGAINST the intended move
+_SCEN_STOP_ATR = 1.0       # fallback stop distance (in ATR) when there's no opposite level to anchor to
 
 
 def get_or_create_auto_trade_config(session: Session) -> AutoTradeConfig:
@@ -55,9 +65,12 @@ def set_pair(session: Session, symbol: str, asset_class: str, on: bool,
     return cfg
 
 
+def _open_positions(session: Session) -> list[Position]:
+    return list(session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all())
+
+
 def _has_open_position(session: Session, symbol: str) -> bool:
-    rows = session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
-    return any(_norm(p.symbol) == _norm(symbol) for p in rows)
+    return any(_norm(p.symbol) == _norm(symbol) for p in _open_positions(session))
 
 
 def _closed_within(session: Session, symbol: str, minutes: int) -> bool:
@@ -98,13 +111,22 @@ def _open_market(session: Session, prop, dec):
     return record if record.status == ProposalStatus.EXECUTED.value else None
 
 
-def _dip_or_open(session: Session, symbol: str, ac: str, tf: str, technical, cfg: AutoTradeConfig):
-    """Follow the read: go WITH the higher-TF trend toward the next S/R. OPEN NOW at market if there's
-    already >= min_profit_usd (and >= min_rr) of room from the current price to that target; otherwise
-    ARM a limit at the dip/rally level for a better entry. Skips entirely if even the level entry can't
-    clear the $ floor. Trend-gated + risk-gated (Risk Manager sizes it, so $ profit = risk_amount * R:R)."""
-    from app.agents.conditional import arm_conditional
-    from app.agents.orchestrator import _higher_trend
+def _nearest_levels(technical, price: float) -> tuple[float | None, float | None]:
+    """Nearest support BELOW and nearest resistance ABOVE the current price, across all timeframes on
+    the read (so the scenario's cited HTF level — e.g. a 1D support — is available as a target)."""
+    sups = [s for x in technical.timeframes for s in (x.support_levels or []) if s < price]
+    ress = [r for x in technical.timeframes for r in (x.resistance_levels or []) if r > price]
+    return (max(sups) if sups else None, min(ress) if ress else None)
+
+
+def _open_scenario_move(session: Session, symbol: str, ac: str, tf: str, technical, cfg: AutoTradeConfig):
+    """Follow the AI's PRIMARY forward scenario: OPEN a market trade NOW in the scenario's immediate
+    direction toward its named target (nearest support for a down-move, nearest resistance for an
+    up-move). It never arms — the auto-trader takes the next move as a quick win. The stop anchors to
+    the opposite level (the structure the move is leaving), falling back to ~1xATR. Risk Manager sizes
+    it (so $ profit = risk_amount * R:R); skips if momentum is driving AGAINST the move, if the primary
+    scenario has no clear up/down lean above ``min_confidence``, or if the R:R / $ floors don't clear."""
+    from app.agents.scenarios import ai_scenarios
     from app.models.enums import Direction
     from app.models.schemas import TradeProposal
     from app.risk.service import assess
@@ -113,65 +135,62 @@ def _dip_or_open(session: Session, symbol: str, ac: str, tf: str, technical, cfg
         return None
     tf0 = next((x for x in technical.timeframes if x.timeframe == tf), technical.timeframes[0])
     ind = tf0.indicators or {}
-    price, atr = ind.get("last_close"), ind.get("atr14")
+    price, atr, macd_hist = ind.get("last_close"), ind.get("atr14"), ind.get("macd_hist")
     if not price or not atr or atr <= 0:
         return None
-    htf_trend, htf_name = _higher_trend(technical, tf)
-    sup = tf0.support_levels[0] if tf0.support_levels else None
-    res = tf0.resistance_levels[0] if tf0.resistance_levels else None
-    buf = 0.5 * atr
 
-    if htf_trend == "up" and sup and res and sup < price < res:
-        direction, stop, target, level = Direction.LONG, round(sup - buf, 6), res, sup
-        order_type, kind = "buy_limit", "buy the dip at support"
-    elif htf_trend == "down" and sup and res and sup < price < res:
-        direction, stop, target, level = Direction.SHORT, round(res + buf, 6), sup, res
-        order_type, kind = "sell_limit", "sell the rally at resistance"
-    else:
+    scen = ai_scenarios(session, symbol, AssetClass(ac))
+    if not scen or not scen.get("scenarios"):
+        return None
+    primary = scen["scenarios"][0]
+    sdir = str(primary.get("direction") or "").lower()
+    conf = (primary.get("prob") or 0) / 100.0
+    if sdir not in ("up", "down") or conf < cfg.min_confidence:
         return None
 
-    def _plan(entry: float):
-        """Build + size a plan at ``entry``; return (proposal, decision, rr, $potential) if it clears
-        the R:R floor AND the $ minimum (enough room to the target), else None."""
-        risk = (entry - stop) if direction == Direction.LONG else (stop - entry)
-        reward = (target - entry) if direction == Direction.LONG else (entry - target)
-        if risk <= 0 or reward <= 0:
-            return None
-        rr = reward / risk
-        if rr < cfg.min_rr:
-            return None
-        prop = TradeProposal(symbol=symbol, asset_class=AssetClass(ac), timeframe=tf, direction=direction,
-                             entry=round(entry, 6), stop_loss=stop, take_profit=round(target, 6),
-                             confidence=0.6, rationale=f"Auto-trade: {kind} (~{rr:.1f}R).", strategy="auto_trade")
-        dec = assess(session, prop, override_cooldown_minutes=cfg.cooldown_minutes)
-        if not dec.approved or not dec.risk_amount:
-            return None
-        potential = dec.risk_amount * rr           # $ gained at the target (linear in the sized qty)
-        if potential < cfg.min_profit_usd:
-            return None
-        return prop, dec, rr, potential
+    sup, res = _nearest_levels(technical, price)
+    buf = 0.5 * atr
+    if sdir == "down":
+        if not sup:
+            return None                                        # no support below to move toward
+        direction, target = Direction.SHORT, sup
+        stop = round((res + buf) if res else (price + _SCEN_STOP_ATR * atr), 6)
+    else:  # up
+        if not res:
+            return None                                        # no resistance above to move toward
+        direction, target = Direction.LONG, res
+        stop = round((sup - buf) if sup else (price - _SCEN_STOP_ATR * atr), 6)
 
-    # 1) OPEN NOW at market if there's already enough room from the current price (why wait for a dip).
-    now = _plan(price)
-    if now is not None:
-        prop, dec, rr, potential = now
-        if _open_market(session, prop, dec) is not None:
-            log.warning("auto-trade opened (room now)", extra={"symbol": symbol, "dir": direction.value})
-            return {"symbol": symbol, "opened": direction.value, "note": f"~${potential:.0f} to {round(target, 6)}"}
-    # 2) else ARM a limit at the dip/rally level for a better entry.
-    at_level = _plan(level)
-    if at_level is not None:
-        prop, dec, rr, potential = at_level
-        armed = arm_conditional(
-            session, symbol=symbol, asset_class=ac, timeframe=tf, direction=direction.value,
-            order_type=order_type, trigger_price=round(level, 6), stop_loss=stop, take_profit=round(target, 6),
-            confidence=0.6, rr=round(rr, 2),
-            rationale=f"Auto-trade: {kind} — with the {htf_name} {htf_trend}trend (~${potential:.0f} to the range edge).",
-            source="auto_trade", auto_execute=True, require_close_confirm=False,
-        )
-        if armed is not None:
-            log.warning("auto-trade dip-armed", extra={"symbol": symbol, "dir": direction.value, "trigger": level})
-            return {"symbol": symbol, "armed": f"{direction.value} @ {round(level, 6)} ({kind}, ~${potential:.0f})"}
+    # Don't take the move if momentum is still driving AGAINST it (it may not reach the target / reverse).
+    mom = _MOM_THRU_ATR * atr
+    if macd_hist is not None and ((direction == Direction.LONG and macd_hist < -mom)
+                                  or (direction == Direction.SHORT and macd_hist > mom)):
+        return None
+
+    risk = (price - stop) if direction == Direction.LONG else (stop - price)
+    reward = (target - price) if direction == Direction.LONG else (price - target)
+    if risk <= 0 or reward <= 0:
+        return None
+    rr = reward / risk
+    if rr < cfg.min_rr:
+        return None
+    prop = TradeProposal(symbol=symbol, asset_class=AssetClass(ac), timeframe=tf, direction=direction,
+                         entry=round(price, 6), stop_loss=stop, take_profit=round(target, 6),
+                         confidence=round(conf, 2),
+                         rationale=f"Auto-trade: AI scenario '{primary.get('label', '')}' "
+                                   f"({primary.get('prob')}%) — {sdir} to {round(target, 6)} (~{rr:.1f}R).",
+                         strategy="auto_trade")
+    dec = assess(session, prop, override_cooldown_minutes=cfg.cooldown_minutes)
+    if not dec.approved or not dec.risk_amount:
+        return None
+    potential = dec.risk_amount * rr               # $ gained at the target (linear in the sized qty)
+    if potential < cfg.min_profit_usd:
+        return None
+    if _open_market(session, prop, dec) is not None:
+        log.warning("auto-trade opened (scenario)",
+                    extra={"symbol": symbol, "dir": direction.value, "target": round(target, 6)})
+        return {"symbol": symbol, "opened": direction.value,
+                "note": f"AI {sdir} scenario → {round(target, 6)} (~${potential:.0f})"}
     return None
 
 
@@ -181,8 +200,15 @@ def _auto_trade_symbol(session: Session, cfg: AutoTradeConfig, pair: dict) -> di
     ac = pair.get("asset_class", "forex")
     tf = pair.get("timeframe", "1h")
 
-    if _has_open_position(session, symbol):
+    open_now = _open_positions(session)
+    if any(_norm(p.symbol) == _norm(symbol) for p in open_now):
         return {"symbol": symbol, "skipped": "position open — riding it"}
+    # ROOM gate: never fire if the book is already full (respects the RISK.md max_open_positions).
+    from app.core.state import get_or_create_risk_config
+
+    max_pos = get_or_create_risk_config(session).max_open_positions
+    if len(open_now) >= max_pos:
+        return {"symbol": symbol, "skipped": f"no room ({len(open_now)}/{max_pos} positions open)"}
     if _closed_within(session, symbol, cfg.cooldown_minutes):
         return {"symbol": symbol, "skipped": f"cooldown (<{cfg.cooldown_minutes}m since last close)"}
 
@@ -230,31 +256,11 @@ def _auto_trade_symbol(session: Session, cfg: AutoTradeConfig, pair: dict) -> di
         log.warning("auto-trade opened", extra={"symbol": symbol, "direction": record.direction})
         return {"symbol": symbol, "opened": record.direction, "confidence": record.confidence}
 
-    # (b) An ARM — the AI wants to WAIT for the break/retest at a named level (buy the dip at support /
-    # sell the rally at resistance). Place the pending order; the conditional watcher fires it on the
-    # trigger, so the auto-trader follows the scenario's levels instead of forcing a market entry.
-    cond = prop.conditional
-    if cond is not None and cond.confidence >= cfg.min_confidence:
-        from app.agents.conditional import arm_conditional
-
-        direction = "long" if str(cond.order_type).startswith("buy") else "short"
-        armed = arm_conditional(
-            session, symbol=symbol, asset_class=ac, timeframe=tf, direction=direction,
-            order_type=cond.order_type, trigger_price=cond.trigger_price, stop_loss=cond.stop_loss,
-            take_profit=cond.take_profit, confidence=cond.confidence, rr=cond.rr,
-            rationale=cond.reason, source="auto_trade", auto_execute=True,
-        )
-        if armed is not None:
-            log.warning("auto-trade armed", extra={"symbol": symbol, "dir": direction,
-                                                   "trigger": cond.trigger_price})
-            return {"symbol": symbol, "armed": f"{direction} @ {cond.trigger_price}"}
-        return {"symbol": symbol, "skipped": "arm already active / blocked"}
-
-    # (c) The decider stood aside — follow the read like the user does manually: go with the higher-TF
-    # trend toward the next S/R — OPEN NOW if there's enough room ($ floor), else arm the dip/rally.
-    dip = _dip_or_open(session, symbol, ac, tf, prop.technical, cfg)
-    if dip is not None:
-        return dip
+    # (b) The decider didn't hand us a decisive market trade (it armed or stood aside). We DON'T arm —
+    # instead follow the AI's PRIMARY forward scenario and OPEN its next move NOW at market (quick win).
+    scen = _open_scenario_move(session, symbol, ac, tf, prop.technical, cfg)
+    if scen is not None:
+        return scen
 
     return {"symbol": symbol, "skipped": f"no setup ({prop.direction.value}, {prop.confidence:.0%})"}
 
@@ -264,14 +270,12 @@ def run_auto_trade(session: Session) -> dict:
     cfg = get_or_create_auto_trade_config(session)
     results = [_auto_trade_symbol(session, cfg, p) for p in (cfg.pairs or [])]
     opened = [r for r in results if r.get("opened")]
-    armed = [r for r in results if r.get("armed")]
     cfg.last_run_at = datetime.now(timezone.utc)
-    acted = ([f"{r['symbol']} {r['opened']}" for r in opened]
-             + [f"{r['symbol']} armed {r['armed']}" for r in armed])
+    acted = [f"{r['symbol']} {r['opened']}" for r in opened]
     cfg.last_result = "; ".join(acted) if acted else f"no action ({len(results)} pairs checked)"
+    cfg.last_results = results   # per-pair outcome + reason, surfaced in the panel
     session.add(AgentRun(agent="auto_trade", event="tick",
-                         detail={"pairs": len(results), "opened": len(opened),
-                                 "armed": len(armed), "results": results}))
+                         detail={"pairs": len(results), "opened": len(opened), "results": results}))
     session.commit()
     return {"ran": True, "opened": len(opened), "results": results}
 

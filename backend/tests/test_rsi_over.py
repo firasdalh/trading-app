@@ -284,6 +284,46 @@ def test_auto_watch_tick_runs_and_records_when_enabled(db_session, monkeypatch):
     assert cfg.last_run_at is not None  # last_result/candidates are persisted by the sweep's done(), tested separately
 
 
+def test_auto_watch_skips_sweep_when_book_full(db_session, monkeypatch):
+    # ROOM gate: with max_open_positions already open, the auto-watch (skip_if_full=True) must NOT sweep.
+    from types import SimpleNamespace
+    from app.core.state import get_or_create_risk_config
+
+    rc = get_or_create_risk_config(db_session)
+    rc.max_open_positions = 3
+    db_session.commit()
+    monkeypatch.setattr(scan_mod, "kill_switch_active", lambda s: False)
+    monkeypatch.setattr(scan_mod, "live_broker_positions",
+                        lambda s: [SimpleNamespace(symbol=f"P{i}", direction="long") for i in range(3)])
+
+    def _boom(s):
+        raise AssertionError("swept the universe despite a full book")
+
+    monkeypatch.setattr(scan_mod, "_universe", _boom)  # proves the sweep is skipped
+    out = scan_mod.run_rsi_over_scan(db_session, "1h", skip_if_full=True)
+    assert out["found"] is None and "no room" in out["reason"]
+
+
+def test_manual_scan_runs_even_when_book_full(db_session, monkeypatch):
+    # The manual one-click scan (skip_if_full default False) still sweeps when full — it's user-initiated.
+    from types import SimpleNamespace
+    from app.core.state import get_or_create_risk_config
+
+    rc = get_or_create_risk_config(db_session)
+    rc.max_open_positions = 3
+    db_session.commit()
+    monkeypatch.setattr(scan_mod, "kill_switch_active", lambda s: False)
+    monkeypatch.setattr(scan_mod, "live_broker_positions",
+                        lambda s: [SimpleNamespace(symbol=f"P{i}", direction="long") for i in range(3)])
+    monkeypatch.setattr(scan_mod, "_universe", lambda s: [("AAA", "forex")])
+    prop = TradeProposal(symbol="AAA", asset_class=AssetClass.FOREX, timeframe="1h",
+                         direction=Direction.NO_TRADE, confidence=0.0,
+                         technical=_tech(_ind(76, 100, 99, rec_hi=101)))
+    monkeypatch.setattr(scan_mod, "preview_symbol", lambda *a, **k: (prop, _approved(False)))
+    out = scan_mod.run_rsi_over_scan(db_session, "1h")  # skip_if_full defaults False
+    assert out["scanned"] == 1  # it DID sweep
+
+
 def test_auto_watch_tick_skips_within_interval(db_session, monkeypatch):
     from datetime import datetime, timezone
     cfg = scan_mod.get_or_create_rsi_over_config(db_session)

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { fmtUsd } from "../format";
 import type { AdvisorState, PositionAdvice } from "../types";
-import { actionText, ago } from "./advisorFormat";
+import { actionText, ago, localTime } from "./advisorFormat";
+import { srcLabel, srcColor } from "./sourceMeta";
 
 interface Props {
   // Bump to force a refresh (e.g. after a position is closed).
@@ -256,6 +257,19 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
                   >
                     {a.direction === "long" ? "▲" : "▼"} {a.symbol}
                   </span>
+                  {a.source && (
+                    <span
+                      className={`rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] font-semibold ${srcColor(a.source)}`}
+                      title="Who opened this position"
+                    >
+                      {srcLabel(a.source)}
+                    </span>
+                  )}
+                  {a.opened_at && (
+                    <span className="text-[10px] text-neutral-500" title={`Opened ${localTime(a.opened_at)}`}>
+                      opened {ago(a.opened_at)}
+                    </span>
+                  )}
                   <span className="text-sm font-medium">{a.headline}</span>
                   <span className={`text-[10px] font-semibold uppercase ${th.cls}`}>{th.text}</span>
                   {a.r_multiple != null && (

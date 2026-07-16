@@ -47,10 +47,12 @@ _SQLITE_ADDED_COLUMNS = {
     "auto_trade_config": [
         ("min_rr", "FLOAT DEFAULT 1.2"),
         ("min_profit_usd", "FLOAT DEFAULT 20.0"),
+        ("last_results", "JSON"),
     ],
     "app_settings": [
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),
         ("st_band_mode", "BOOLEAN DEFAULT 0"),
+        ("ai_momentum_read", "BOOLEAN DEFAULT 1"),
         ("ai_review_enabled", "BOOLEAN DEFAULT 0"),
         ("journal_reset_at", "DATETIME"),
         ("disabled_filters", "TEXT"),

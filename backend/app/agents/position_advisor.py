@@ -25,9 +25,10 @@ from app.core.logging import get_logger
 from app.core.state import get_or_create_settings
 from app.data.ohlcv_cache import get_ohlcv_cached
 from app.data.providers import get_calendar_provider
-from app.models.db import AdvisorConfig, AgentRun, TradeProposalRecord
+from app.models.db import AdvisorConfig, AgentRun, Position, TradeProposalRecord
+from app.models.enums import PositionStatus
 from app.models.schemas import PositionAdvice
-from app.risk.service import live_broker_positions
+from app.risk.service import _norm_symbol, live_broker_positions
 
 log = get_logger("agents.advisor")
 
@@ -305,6 +306,56 @@ def _base_advice(p, ev_label, ev_mins, winning, has_stop) -> tuple[str, str, str
             f"their job on this {side}.")
 
 
+# AI scenario read per symbol, cached to keep the advisor cheap (the read makes an LLM call). The
+# advisor may tick every few minutes but a pair's forward scenario doesn't change that fast.
+_SCENARIO_CACHE: dict[str, tuple[datetime, dict]] = {}
+_SCENARIO_TTL_MIN = 20
+
+
+def _cached_scenarios(session: Session, symbol: str, asset_class) -> dict | None:
+    now = datetime.now(timezone.utc)
+    hit = _SCENARIO_CACHE.get(symbol.upper())
+    if hit and (now - hit[0]).total_seconds() < _SCENARIO_TTL_MIN * 60:
+        return hit[1]
+    try:
+        from app.agents.scenarios import ai_scenarios
+        read = ai_scenarios(session, symbol, asset_class)
+    except Exception:  # noqa: BLE001 - scenario read is best-effort; keep the last good one
+        return hit[1] if hit else None
+    if read:
+        _SCENARIO_CACHE[symbol.upper()] = (now, read)
+    return read
+
+
+def _scenario_awareness(session: Session, p) -> tuple[str, str] | None:
+    """Judge the open position against the AI's forward SCENARIO read: is it following the plan, is a
+    pullback expected here (don't panic), or has the read turned against it? Returns (note, lean) with
+    lean in {'with','against','neutral'}, or None if there's no read."""
+    from app.models.enums import AssetClass
+
+    try:
+        read = _cached_scenarios(session, p.symbol, AssetClass(p.asset_class))
+    except Exception:  # noqa: BLE001
+        return None
+    if not read or not read.get("scenarios"):
+        return None
+    primary = read["scenarios"][0]
+    prob, label = primary.get("prob"), (primary.get("label") or "").strip()
+    path = (primary.get("path") or read.get("headline") or "").strip()
+    bias = (read.get("overall_bias") or "").lower()
+    inval = read.get("invalidation")
+    long_ = p.direction == "long"
+    if ("bull" in bias and long_) or ("bear" in bias and not long_):
+        lean, lean_txt = "with", f"On plan — the AI's read still favours your {p.direction}; a pullback here is expected, not a failure."
+    elif ("bear" in bias and long_) or ("bull" in bias and not long_):
+        lean, lean_txt = "against", f"Heads-up — the AI's forward read now leans AGAINST your {p.direction}."
+    else:
+        lean, lean_txt = "neutral", "The AI's forward read is mixed here."
+    inval_txt = f" Invalidation to watch: {inval}." if inval else ""
+    note = f"AI scenario ({prob}% {label}): {path} {lean_txt}{inval_txt}"
+    return note, lean
+
+
 def advise_positions(session: Session) -> list[PositionAdvice]:
     """Advisories for the panel/endpoint (the per-position fresh read is discarded)."""
     return _advise_with_context(session)[0]
@@ -318,7 +369,18 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
     out: list[PositionAdvice] = []
     contexts: dict[str, dict] = {}
 
+    # Match each live position to OUR record (by symbol+direction) for its open-time + source. A trade
+    # opened directly in the terminal won't match, so opened_at/source stay None (shown as blank).
+    db_open: dict = {}
+    if session is not None:
+        db_open = {
+            (_norm_symbol(pos.symbol), pos.direction): pos
+            for pos in session.scalars(
+                select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
+        }
+
     for p in live_broker_positions(session):
+        dbp = db_open.get((_norm_symbol(p.symbol), p.direction))
         try:
             events = cal.get_events(p.symbol, lookahead_hours=12, include_medium=True)
         except Exception:  # noqa: BLE001
@@ -367,6 +429,17 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
                     thesis = {**thesis, "note": thesis["note"] + f" The AI agrees the thesis is slipping — {reason}"}
                 elif ok and thesis["label"] == "intact":
                     thesis = {**thesis, "note": thesis["note"] + " The AI re-check still backs this trade."}
+        # SCENARIO awareness: fold in the AI two-scenario read — are we following the plan, is a
+        # pullback expected (don't panic), or has the read turned against the position? Like the AI
+        # thesis review, it can ESCALATE at most to 'weakening' (tighten the stop) — never auto-close.
+        scen_note: str | None = None
+        scen = _scenario_awareness(session, p)
+        if scen is not None:
+            scen_note, lean = scen
+            if lean == "against" and thesis is not None and thesis["label"] == "intact":
+                thesis = {"label": "weakening",
+                          "note": ("Why: the AI's forward scenarios now lean against this trade — "
+                                   "consider tightening your stop or trimming.")}
         r_mult = _r_multiple(session, p, ctx)
         thesis_label = thesis["label"] if thesis else "unknown"
         # Scale-out suggestion (Mode A): once a winner reaches the milestone, a pro books partial
@@ -395,9 +468,13 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
                 if ev_label is None:
                     headline = f"{p.symbol} — losing momentum"
 
+        if scen_note:
+            detail = f"{detail} {scen_note}"
+
         out.append(PositionAdvice(
             symbol=p.symbol, direction=p.direction, unrealized_pnl=round(p.unrealized_pnl, 2),
             has_stop=has_stop, severity=severity, headline=headline, detail=detail,
+            opened_at=(dbp.opened_at if dbp else None), source=(dbp.source if dbp else None),
             thesis=thesis_label, r_multiple=r_mult, event_label=ev_label, minutes_to_event=ev_mins,
             events_soon=events_soon,
         ))

@@ -312,11 +312,14 @@ def test_expired_setup_is_marked(db_session, monkeypatch):
 
 def test_hybrid_arms_blocked_candidates(db_session, monkeypatch):
     """Hybrid arms a 'wait for the break' conditional for a blocked-but-valid candidate instead of
-    discarding it — even when nothing is opened at market this tick."""
+    discarding it — even when nothing is opened at market this tick. The preview scan SHORTLISTS the
+    symbol; the armed order is re-derived from the SAME full analyze_symbol as the 'Run analysis'
+    button (no_execute), so an auto-arm equals what a manual Run analysis would suggest."""
     import app.agents.hybrid as hybrid
     from app.models.db import WatchItem
-    from app.models.enums import AssetClass, RiskDecisionType
-    from app.models.schemas import ConditionalSuggestion, RiskDecision, TradeProposal
+    from app.models.enums import AssetClass, ProposalStatus, RiskDecisionType
+    from app.models.schemas import (AnalyzeResponse, ConditionalSuggestion, RiskDecision,
+                                     TradeProposal)
 
     db_session.add(WatchItem(symbol="UKOILm", asset_class="energy", timeframe="1h", enabled=True))
     cfg = hybrid.get_or_create_hybrid_config(db_session)
@@ -330,6 +333,9 @@ def test_hybrid_arms_blocked_candidates(db_session, monkeypatch):
     dec = RiskDecision(decision=RiskDecisionType.VETOED, approved=False, reason="blocked", symbol="UKOILm")
 
     monkeypatch.setattr(hybrid, "preview_symbol", lambda *a, **k: (prop, dec))
+    # The arm re-derives from the full analysis — mock it to carry the same conditional.
+    resp = AnalyzeResponse(proposal_id=1, status=ProposalStatus.RISK_VETOED.value, proposal=prop, risk=dec)
+    monkeypatch.setattr(hybrid, "analyze_symbol", lambda *a, **k: resp)
     monkeypatch.setattr(hybrid, "live_broker_positions", lambda s: [])
     monkeypatch.setattr(hybrid, "kill_switch_active", lambda s: False)
     monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
@@ -338,6 +344,42 @@ def test_hybrid_arms_blocked_candidates(db_session, monkeypatch):
     armed = cond.active_armed(db_session)
     assert any(a.symbol == "UKOILm" and a.order_type == "sell_stop" and a.source == "hybrid"
                for a in armed)
+
+
+def test_hybrid_arm_defers_to_full_analysis(db_session, monkeypatch):
+    """The preview may shortlist a symbol to arm, but the arm is re-derived from the full analysis
+    (same engine as 'Run analysis'). If that full analysis no longer wants a wait-for-the-break
+    setup, the symbol is NOT armed — the auto-runner has no separate arming brain of its own."""
+    import app.agents.hybrid as hybrid
+    from app.models.db import WatchItem
+    from app.models.enums import AssetClass, ProposalStatus, RiskDecisionType
+    from app.models.schemas import (AnalyzeResponse, ConditionalSuggestion, RiskDecision,
+                                     TradeProposal)
+
+    db_session.add(WatchItem(symbol="UKOILm", asset_class="energy", timeframe="1h", enabled=True))
+    cfg = hybrid.get_or_create_hybrid_config(db_session)
+    cfg.enabled, cfg.conditional_enabled = True, True
+    db_session.commit()
+
+    # The preview scan says "worth arming" ...
+    sugg = ConditionalSuggestion(order_type="sell_stop", trigger_price=78.1, stop_loss=78.4,
+                                 take_profit=77.4, confidence=0.62, rr=2.0, reason="break 78.2")
+    prev = TradeProposal(symbol="UKOILm", asset_class=AssetClass.ENERGY, direction=Direction.NO_TRADE,
+                         confidence=0.0, conditional=sugg)
+    dec = RiskDecision(decision=RiskDecisionType.VETOED, approved=False, reason="blocked", symbol="UKOILm")
+    # ... but the FULL analysis stands fully aside (no conditional) -> nothing to arm.
+    full = TradeProposal(symbol="UKOILm", asset_class=AssetClass.ENERGY, direction=Direction.NO_TRADE,
+                         confidence=0.0)
+    resp = AnalyzeResponse(proposal_id=1, status=ProposalStatus.RISK_VETOED.value, proposal=full, risk=dec)
+
+    monkeypatch.setattr(hybrid, "preview_symbol", lambda *a, **k: (prev, dec))
+    monkeypatch.setattr(hybrid, "analyze_symbol", lambda *a, **k: resp)
+    monkeypatch.setattr(hybrid, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr(hybrid, "kill_switch_active", lambda s: False)
+    monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
+
+    hybrid.run_hybrid(db_session)
+    assert not cond.active_armed(db_session)  # full analysis didn't want it -> not armed
 
 
 def test_armed_auto_cancelled_when_symbol_already_open(db_session, monkeypatch):

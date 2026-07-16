@@ -22,6 +22,7 @@ class AutoTradeView(BaseModel):
     pairs: list[dict]
     last_run_at: str | None = None
     last_result: str | None = None
+    last_results: list[dict] = []   # per-pair outcome + reason from the last tick
 
 
 def _view(cfg) -> AutoTradeView:
@@ -33,6 +34,7 @@ def _view(cfg) -> AutoTradeView:
         pairs=list(cfg.pairs or []),
         last_run_at=cfg.last_run_at.isoformat() if cfg.last_run_at else None,
         last_result=cfg.last_result,
+        last_results=list(getattr(cfg, "last_results", None) or []),
     )
 
 

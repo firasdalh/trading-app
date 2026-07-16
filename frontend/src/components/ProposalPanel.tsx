@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { ArmSetupButton } from "./ArmSetupButton";
+import { ago, localTime } from "./advisorFormat";
 import { RegimeBadge } from "./RegimeBadge";
 import { AiDecisionCard } from "./AiDecisionCard";
 import { ReviewExplanation } from "./ReviewExplanation";
@@ -163,6 +164,11 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
             <DirectionBadge direction={proposal.direction} />
           )}
           <span className="text-xs text-neutral-400">{proposal.timeframe}</span>
+          {result?.analyzed_at && (
+            <span className="text-[11px] text-neutral-500" title={`Last analysed ${localTime(result.analyzed_at)}`}>
+              · analysed {ago(result.analyzed_at)}
+            </span>
+          )}
           {proposal.regime && <RegimeBadge regime={proposal.regime} strategy={proposal.strategy} />}
           <AlignmentBadge alignment={proposal.alignment} />
         </div>
@@ -535,6 +541,15 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
 
   type V = "good" | "bad" | "neutral";
   const macdDir = macdH == null ? null : macdH > 0 ? "long" : "short";
+  // AI momentum classification (set only when the ambiguous-momentum fork ran) — takes over the
+  // Momentum row so you see WHY it was read that way, not just the raw MACD sign.
+  const mr = proposal.momentum_read;
+  const mrLabel = mr ? ({ healthy_pullback: "Healthy pullback", weak_momentum: "Weak momentum",
+                          probable_reversal: "Probable reversal" } as Record<string, string>)[mr.category] ?? mr.category : null;
+  const mrVerdict: V | null = mr ? (mr.category === "healthy_pullback" ? "good"
+    : mr.category === "probable_reversal" ? "bad" : "neutral") : null;
+  const mrTone = mr ? (mr.category === "healthy_pullback" ? "text-bull"
+    : mr.category === "probable_reversal" ? "text-bear" : "text-warn") : undefined;
   const biasStr = proposal.fundamental?.bias;
   const biasDir = biasStr === "bullish" ? "long" : biasStr === "bearish" ? "short" : null;
   const htfAgree = !!(dir && htf && (dir === "long" ? htf === "up" : htf === "down"));
@@ -577,10 +592,14 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
     },
     {
       label: "Momentum (MACD)",
-      value: macdH == null ? "—" : `${macdH > 0 ? "bullish" : "bearish"} (${macdH.toFixed(3)})`,
-      tone: macdH == null ? undefined : macdH > 0 ? "text-bull" : "text-bear",
-      verdict: macdDir && dir ? (macdDir === dir ? "good" : "bad") : "neutral",
-      note: macdDir && dir ? (macdDir === dir ? `Momentum backs the ${dirWord}.` : `Momentum runs against the ${dirWord}.`) : "",
+      value: mr
+        ? `AI: ${mrLabel}${mr.confidence != null ? ` (${Math.round(mr.confidence * 100)}%)` : ""}`
+        : macdH == null ? "—" : `${macdH > 0 ? "bullish" : "bearish"} (${macdH.toFixed(3)})`,
+      tone: mr ? mrTone : macdH == null ? undefined : macdH > 0 ? "text-bull" : "text-bear",
+      verdict: mr ? mrVerdict! : macdDir && dir ? (macdDir === dir ? "good" : "bad") : "neutral",
+      note: mr
+        ? `AI read the pullback — ${mr.evidence}`
+        : macdDir && dir ? (macdDir === dir ? `Momentum backs the ${dirWord}.` : `Momentum runs against the ${dirWord}.`) : "",
     },
     {
       label: "RSI (14)",

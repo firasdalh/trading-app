@@ -97,12 +97,9 @@ def test_auto_trade_paper_only(db_session, monkeypatch):
     assert "live" in out.get("skipped", "").lower()
 
 
-def test_auto_trade_arms_pending_setup(db_session, monkeypatch):
-    # The AI decides to WAIT for a retest (arm a buy at support) -> the auto-trader places the pending
-    # order (following the scenario level) instead of forcing a market entry.
-    import app.agents.conditional as cond_mod
-    from app.models.schemas import ConditionalSuggestion
-
+def test_auto_trade_does_not_arm(db_session, monkeypatch):
+    # The AI returns a WAIT/conditional and no tradeable scenario here -> the auto-trader NEVER arms a
+    # pending order; it skips. (Arming was removed — it only ever opens at market.)
     monkeypatch.setattr(at, "get_broker_for", lambda ac, bm: _Paper())
     rec = TradeProposalRecord(symbol="BTCUSDm", asset_class="crypto", timeframe="1h",
                               direction="no_trade", confidence=0.0, rationale="wait",
@@ -110,17 +107,29 @@ def test_auto_trade_arms_pending_setup(db_session, monkeypatch):
     db_session.add(rec)
     db_session.commit()
     db_session.refresh(rec)
-    cond = ConditionalSuggestion(order_type="buy_limit", trigger_price=63936.12, stop_loss=63800.0,
-                                 take_profit=64500.0, confidence=0.65, rr=2.0, reason="buy the dip at support")
     prop = TradeProposal(symbol="BTCUSDm", asset_class=AssetClass.CRYPTO, direction=Direction.NO_TRADE,
-                         confidence=0.0, watch=True, conditional=cond)
+                         confidence=0.0, watch=True)  # no technical -> the scenario open can't run
     risk = RiskDecision(decision=RiskDecisionType.VETOED, approved=False, reason="no market trade",
                         symbol="BTCUSDm")
     monkeypatch.setattr(at, "analyze_symbol",
                         lambda *a, **k: AnalyzeResponse(proposal_id=rec.id, status=rec.status, proposal=prop, risk=risk))
-    monkeypatch.setattr(cond_mod, "arm_conditional", lambda *a, **k: object())  # armed OK
     out = at._auto_trade_symbol(db_session, _cfg(db_session, min_conf=0.6), _pair("BTCUSDm"))
-    assert "armed" in out and "long" in out["armed"]
+    assert "armed" not in out and out.get("skipped")
+
+
+def test_auto_trade_skips_when_book_full(db_session, monkeypatch):
+    # ROOM gate: with max_open_positions (3) already open on OTHER pairs, don't fire (before any LLM).
+    from app.core.state import get_or_create_risk_config
+
+    monkeypatch.setattr(at, "get_broker_for", lambda ac, bm: _Paper())
+    rc = get_or_create_risk_config(db_session)
+    rc.max_open_positions = 3
+    for s in ("AAAUSDm", "BBBUSDm", "CCCUSDm"):
+        db_session.add(Position(symbol=s, asset_class="crypto", direction="long", qty=1.0,
+                                entry_price=100.0, status=PositionStatus.OPEN.value, last_price=100.0))
+    db_session.commit()
+    out = at._auto_trade_symbol(db_session, _cfg(db_session), _pair("ETHUSDm"))
+    assert "no room" in out.get("skipped", "")
 
 
 def _approved_dec():
@@ -128,65 +137,97 @@ def _approved_dec():
                         approved_qty=0.1, risk_amount=50.0)
 
 
-def _uptrend_tech(price=100.0, sup=98.0, res=106.0):
+def _uptrend_tech(price=100.0, sup=98.0, res=106.0, rsi=None, macd=None):
     from app.models.schemas import TechnicalRead, TimeframeRead
+    ind = {"last_close": price, "atr14": 2.0}
+    if rsi is not None:
+        ind["rsi14"] = rsi
+    if macd is not None:
+        ind["macd_hist"] = macd
     return TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
-        TimeframeRead(timeframe="1h", trend="up", indicators={"last_close": price, "atr14": 2.0},
-                      support_levels=[sup], resistance_levels=[res]),
+        TimeframeRead(timeframe="1h", trend="up", indicators=ind, support_levels=[sup], resistance_levels=[res]),
         TimeframeRead(timeframe="4h", trend="up",
                       indicators={"ema20": 100.0, "ema50": 98.0, "ema200": 95.0}),
     ])
 
 
-def test_opens_now_when_room_to_target(db_session, monkeypatch):
-    # higher-TF up, price mid-range with room to resistance -> OPEN NOW at market (don't wait for a dip).
-    import app.execution.executor as executor
-    import app.risk.service as risk_service
+def _mock_scen(monkeypatch, *, direction="down", prob=65):
+    """Patch the AI scenario read so the primary forward scenario has a given direction + probability."""
+    import app.agents.scenarios as scen_mod
+    monkeypatch.setattr(scen_mod, "ai_scenarios", lambda *a, **k: {"scenarios": [
+        {"label": "test scenario", "direction": direction, "prob": prob, "path": "x", "reasoning": "y"}]})
 
-    monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved_dec())
+
+def _exec_ok(monkeypatch):
+    import app.execution.executor as executor
 
     def _exec(session, record):
         record.status = ProposalStatus.EXECUTED.value
         session.commit()
 
     monkeypatch.setattr(executor, "execute_proposal", _exec)
-    out = at._dip_or_open(db_session, "X", "crypto", "1h", _uptrend_tech(price=100.0), _cfg(db_session))
-    assert out and out.get("opened") == "long" and "$" in out.get("note", "")
 
 
-def test_arms_dip_when_price_near_target(db_session, monkeypatch):
-    # price hugging resistance -> open-now R:R is too thin -> ARM the dip-buy at support instead.
-    import app.agents.conditional as cond_mod
+def test_scenario_opens_down_toward_support(db_session, monkeypatch):
+    # Primary scenario is DOWN (65%); price near resistance -> OPEN a short at market toward support.
     import app.risk.service as risk_service
 
+    _mock_scen(monkeypatch, direction="down", prob=65)
     monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved_dec())
-    monkeypatch.setattr(cond_mod, "arm_conditional", lambda *a, **k: object())
-    out = at._dip_or_open(db_session, "X", "crypto", "1h", _uptrend_tech(price=105.5), _cfg(db_session))
-    assert out and "armed" in out and "long" in out["armed"]
+    _exec_ok(monkeypatch)
+    out = at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=104.0), _cfg(db_session))
+    assert out and out.get("opened") == "short" and "scenario" in out.get("note", "")
 
 
-def test_skips_when_profit_below_min_usd(db_session, monkeypatch):
-    # A tiny risk_amount -> $ potential below the $20 floor -> skip (no trade worth <$20).
+def test_scenario_opens_up_toward_resistance(db_session, monkeypatch):
+    # Primary scenario is UP (70%); price near support -> OPEN a long at market toward resistance.
     import app.risk.service as risk_service
-    from app.models.enums import RiskDecisionType as RDT
 
-    monkeypatch.setattr(risk_service, "assess", lambda *a, **k: RiskDecision(
-        decision=RDT.APPROVED, approved=True, reason="ok", symbol="X", approved_qty=0.001, risk_amount=1.0))
-    # rr ~ up to 8 * $1 = $8 < $20 floor
-    out = at._dip_or_open(db_session, "X", "crypto", "1h", _uptrend_tech(price=105.5), _cfg(db_session))
-    assert out is None
+    _mock_scen(monkeypatch, direction="up", prob=70)
+    monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved_dec())
+    _exec_ok(monkeypatch)
+    out = at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=100.0), _cfg(db_session))
+    assert out and out.get("opened") == "long"
 
 
-def test_dip_none_when_higher_tf_not_up(db_session):
-    from app.models.schemas import TechnicalRead, TimeframeRead
+def test_scenario_skips_below_confidence(db_session, monkeypatch):
+    # Primary scenario prob 55 < min_confidence 60 -> no trade.
+    _mock_scen(monkeypatch, direction="down", prob=55)
+    assert at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=104.0),
+                                  _cfg(db_session)) is None
 
-    tech = TechnicalRead(symbol="X", overall_trend="sideways", confidence=0.6, timeframes=[
-        TimeframeRead(timeframe="1h", trend="sideways", indicators={"last_close": 100.0, "atr14": 2.0},
-                      support_levels=[98.0], resistance_levels=[106.0]),
-        TimeframeRead(timeframe="4h", trend="sideways",
-                      indicators={"ema20": 100.0, "ema50": 100.0, "ema200": 100.0}),
-    ])
-    assert at._dip_or_open(db_session, "X", "crypto", "1h", tech, _cfg(db_session)) is None
+
+def test_scenario_skips_when_momentum_against(db_session, monkeypatch):
+    # Down scenario but MACD is strongly UP (against the short) -> the move may not happen -> skip.
+    _mock_scen(monkeypatch, direction="down", prob=65)
+    assert at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=104.0, macd=1.0),
+                                  _cfg(db_session)) is None
+
+
+def test_scenario_skips_low_rr(db_session, monkeypatch):
+    # Down scenario but price hugs support (tiny reward, far stop) -> R:R below min -> skip.
+    _mock_scen(monkeypatch, direction="down", prob=65)
+    assert at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=99.0),
+                                  _cfg(db_session)) is None
+
+
+def test_scenario_skips_sideways(db_session, monkeypatch):
+    # No clear directional lean -> nothing to trade.
+    _mock_scen(monkeypatch, direction="sideways", prob=80)
+    assert at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=104.0),
+                                  _cfg(db_session)) is None
+
+
+def test_run_auto_trade_persists_last_results(db_session, monkeypatch):
+    # The panel shows the last check time + per-pair result/reason -> run_auto_trade must persist them.
+    at.set_pair(db_session, "ETHUSDm", "crypto", True)
+    monkeypatch.setattr(at, "_auto_trade_symbol",
+                        lambda s, cfg, pair: {"symbol": pair["symbol"], "skipped": "cooldown"})
+    at.run_auto_trade(db_session)
+    cfg = at.get_or_create_auto_trade_config(db_session)
+    assert cfg.last_run_at is not None
+    assert cfg.last_results and cfg.last_results[0]["symbol"] == "ETHUSDm"
+    assert cfg.last_results[0]["skipped"] == "cooldown"
 
 
 def test_set_pair_toggles(db_session):

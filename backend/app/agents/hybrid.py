@@ -57,27 +57,44 @@ def get_or_create_hybrid_config(session: Session) -> HybridConfig:
 
 def _arm_from(session: Session, cfg: HybridConfig, armable: list, exclude: str | None = None) -> int:
     """Arm the strongest blocked-but-valid candidates as conditional break-entries, up to the
-    max_armed cap and skipping the symbol just opened at market. Hybrid-armed setups auto-execute
-    on the trigger (after the re-check), so the gate is the double-check, not a manual click.
-    Returns how many were actually armed this call (for the Hybrid activity stats)."""
+    max_armed cap and skipping the symbol just opened at market.
+
+    The preview scan only SHORTLISTS which symbols are worth arming (ranked by confidence); the
+    armed order itself is re-derived from the SAME full analysis the "Run analysis" button runs
+    (``analyze_symbol``, ``no_execute=True`` so analysing-to-arm can't open a market trade as a
+    side effect), so an auto-armed order always equals what a manual Run analysis would suggest for
+    that pair — not the lighter preview. If the full analysis no longer wants a wait-for-the-break
+    setup, that symbol simply isn't armed. Hybrid-armed setups auto-execute on the trigger (after
+    the re-check), so the gate is the double-check, not a manual click. Returns how many were armed."""
     from app.agents.conditional import active_armed, arm_conditional
 
     room = max(0, cfg.max_armed - len(active_armed(session)))
     if room <= 0:
         return 0
     armed = 0
-    for _conf, it, cond, direction in sorted(armable, key=lambda x: -x[0]):
+    for _conf, it, _cond, _direction in sorted(armable, key=lambda x: -x[0]):
         if armed >= room:
             break
         if exclude and _norm_symbol(it.symbol) == _norm_symbol(exclude):
             continue
-        res = arm_conditional(
+        try:
+            res = analyze_symbol(session, it.symbol, AssetClass(it.asset_class), it.timeframe,
+                                 use_llm=True, source="hybrid", no_execute=True)
+        except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop arming the rest
+            log.warning("hybrid arm re-analysis failed",
+                        extra={"symbol": it.symbol, "error": str(exc)})
+            continue
+        cond = res.proposal.conditional
+        if cond is None:
+            continue  # the full analysis didn't produce a wait-for-the-break setup -> nothing to arm
+        direction = "long" if str(cond.order_type).startswith("buy") else "short"
+        s = arm_conditional(
             session, symbol=it.symbol, asset_class=it.asset_class, timeframe=it.timeframe,
             direction=direction, order_type=cond.order_type, trigger_price=cond.trigger_price,
             stop_loss=cond.stop_loss, take_profit=cond.take_profit, confidence=cond.confidence,
             rr=cond.rr, rationale=cond.reason, source="hybrid", auto_execute=True,
         )
-        if res is not None:
+        if s is not None:
             armed += 1
     return armed
 

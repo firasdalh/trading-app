@@ -192,6 +192,11 @@ class TradeProposal(BaseModel):
     # risks, and the action/levels — so the UI can render it cleanly instead of parsing the rationale.
     ai_decision: dict | None = None
 
+    # AI momentum CLASSIFICATION at an ambiguous-momentum fork: {category, evidence, confidence}. Set
+    # ONLY when the AI momentum-read ran (MACD rolling over / RSI stretched); None otherwise. The engine
+    # decides the action from it — this field is for the UI to show WHY momentum was read the way it was.
+    momentum_read: dict | None = None
+
     # The full reasoning bundle that produced this proposal (for audit + UI).
     fundamental: FundamentalRead | None = None
     technical: TechnicalRead | None = None
@@ -304,6 +309,7 @@ class PositionView(BaseModel):
     unrealized_pnl: float = 0.0
     realized_pnl: float | None = None
     source: str | None = None   # who opened it (ai / rsi_over / armed / hybrid / manual / …)
+    opened_at: datetime | None = None   # when the position was opened (app-tracked rows)
     # Margin required to hold the position, in the account currency (USD) — the "cost to open".
     # Broker-computed (MT5) with full currency conversion; None when the broker can't supply it.
     cost_usd: float | None = None
@@ -328,6 +334,10 @@ class PositionAdvice(BaseModel):
     severity: str            # info | warn | danger
     headline: str
     detail: str
+    # When the position was opened + who opened it (manual / rsi_over / armed / hybrid / auto_trade /
+    # ai / …), so the advisor card shows the trade's age and origin at a glance.
+    opened_at: datetime | None = None
+    source: str | None = None
     # Re-check of the original plan against the current read: is the trade still on track?
     thesis: str = "unknown"  # intact | weakening | invalidated | unknown
     r_multiple: float | None = None   # progress in R (profit / planned risk)
@@ -357,6 +367,7 @@ class AppSettingsView(BaseModel):
     kill_switch_engaged: bool
     trend_only_mode: bool = True
     st_band_mode: bool = False
+    ai_momentum_read: bool = True
     ai_review_enabled: bool = False
     disabled_filters: list[str] = []
     journal_reset_at: datetime | None = None
@@ -449,6 +460,7 @@ class AnalyzeResponse(BaseModel):
     status: str
     proposal: TradeProposal
     risk: RiskDecision
+    analyzed_at: datetime | None = None   # when this analysis ran (shown as "analysed X ago")
 
 
 class BacktestRequest(BaseModel):

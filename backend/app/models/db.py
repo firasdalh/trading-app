@@ -81,6 +81,12 @@ class AppSettings(Base):
     # overrides the AI decider. Toggle from the dashboard. OFF by default.
     st_band_mode: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # AI MOMENTUM classifier: at the "ambiguous momentum" forks (MACD rolling over / RSI stretched)
+    # the AI classifies WHY momentum disagrees (healthy_pullback / weak_momentum / probable_reversal
+    # + evidence + confidence) and the DETERMINISTIC engine decides enter/wait/reject/arm from it. The
+    # AI only labels — it never decides direction/levels or overrides. Default ON (user-requested).
+    ai_momentum_read: Mapped[bool] = mapped_column(Boolean, default=True)
+
     # AI confirm/veto REVIEW of the deterministic setup. Repeatability testing showed the reasoning-
     # model reviewer flips its verdict on ~82% of setups run-to-run (not a stable filter), and a plain
     # confidence>=70% gate matches its win rate deterministically. So default this OFF: the AI is kept
@@ -387,7 +393,8 @@ class AutoTradeConfig(Base):
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=5)     # re-entry wait after a close
     pairs: Mapped[list] = mapped_column(JSON, default=list)  # [{"symbol","asset_class"}] auto-traded
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_result: Mapped[str | None] = mapped_column(Text)
+    last_result: Mapped[str | None] = mapped_column(Text)          # short one-line summary of the last tick
+    last_results: Mapped[list | None] = mapped_column(JSON)        # per-pair outcome + reason from the last tick
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

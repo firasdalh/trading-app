@@ -125,6 +125,32 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               Backtests: same return, ~40% less drawdown.
             </div>
           </button>
+
+          <button
+            disabled={busy}
+            onClick={() =>
+              run(() => api.setAiMomentumRead(!settings?.app.ai_momentum_read),
+                  `AI momentum-read ${settings?.app.ai_momentum_read ? "OFF" : "ON"}.`)}
+            className={`mt-2 w-full rounded-md border px-3 py-2 text-left text-sm ${
+              settings?.app.ai_momentum_read
+                ? "border-blue-500 bg-blue-500/10"
+                : "border-neutral-700 hover:bg-neutral-800"
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-medium">AI momentum-read</span>
+              <span className={`text-xs font-semibold ${
+                settings?.app.ai_momentum_read ? "text-bull" : "text-neutral-400"
+              }`}>
+                {settings?.app.ai_momentum_read ? "ON" : "OFF"}
+              </span>
+            </div>
+            <div className="text-xs text-neutral-400">
+              At an ambiguous pullback (MACD rolling over / RSI stretched), the AI classifies it as a
+              healthy pullback, weak momentum, or probable reversal — the deterministic engine then
+              decides enter / wait / reject / arm. The AI only labels; it never overrides.
+            </div>
+          </button>
         </section>
 
         <section className="space-y-2">

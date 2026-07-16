@@ -212,6 +212,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
+  setAiMomentumRead: (enabled: boolean) =>
+    request<SettingsResponse>("/api/settings/ai-momentum-read", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
   setAiReview: (enabled: boolean) =>
     request<SettingsResponse>("/api/settings/ai-review", {
       method: "POST",

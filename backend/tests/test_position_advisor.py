@@ -162,6 +162,20 @@ def test_ai_confirm_keeps_intact_and_notes_it(monkeypatch):
     assert a.thesis == "intact" and "AI re-check still backs" in a.detail
 
 
+def test_advice_enriched_with_source_and_opened_time(db_session, monkeypatch):
+    # A live position matched to OUR record carries who opened it + when (the source badge + age).
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    db_session.add(Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
+                            entry_price=4470.0, status=PositionStatus.OPEN.value, last_price=4470.0,
+                            source="hybrid"))
+    db_session.commit()
+    _patch(monkeypatch, [_pos(symbol="XAUUSDm", direction="short")], [])
+    [a] = advisor.advise_positions(session=db_session)
+    assert a.source == "hybrid" and a.opened_at is not None
+
+
 # ---- auto-watch config + tick ----
 
 def test_run_advisor_stamps_last_run(db_session, monkeypatch):
@@ -615,3 +629,26 @@ def test_run_advisor_executes_when_toggle_on(db_session, monkeypatch):
     db_session.commit()
     out = advisor.run_advisor(db_session)
     assert out["actions"][0]["action"] == "close"
+
+
+def test_scenario_awareness_with_and_against(monkeypatch):
+    """The advisor judges an open position against the AI scenario read: aligned bias = 'with'
+    (a pullback here is expected), opposing bias = 'against' (heads-up)."""
+    import types
+
+    import app.agents.scenarios as scen_mod
+
+    advisor._SCENARIO_CACHE.clear()
+    read = {"scenarios": [{"label": "Pullback then bounce", "direction": "up", "prob": 60,
+                           "path": "pull back to 0.80745 support then resume up"}],
+            "overall_bias": "bullish", "invalidation": "close below 0.80745", "headline": "bullish"}
+    monkeypatch.setattr(scen_mod, "ai_scenarios", lambda *a, **k: read)
+
+    p_long = types.SimpleNamespace(symbol="USDCHFm", asset_class="forex", direction="long")
+    note, lean = advisor._scenario_awareness(None, p_long)
+    assert lean == "with" and "On plan" in note and "0.80745" in note
+
+    advisor._SCENARIO_CACHE.clear()
+    p_short = types.SimpleNamespace(symbol="USDCHFm", asset_class="forex", direction="short")
+    _, lean2 = advisor._scenario_awareness(None, p_short)
+    assert lean2 == "against"

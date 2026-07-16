@@ -115,6 +115,7 @@ _PULLBACK_ATR = 2.5   # price > this many ATR beyond EMA20 = stretched entry -> 
                       # steady trend rides ~2.4 ATR from the lagging EMA, so only flag real spikes)
 _VALUE_ENTRY_ATR = 1.0  # entry within ~1 ATR of the 20-EMA = a pullback to VALUE -> a pro's
                         # preferred trend entry (tight risk to the swing, lots of room to target)
+_MOM_AI_MIN_CONF = 0.55  # below this the AI momentum class isn't trusted -> keep the deterministic fixed arm
 _STRETCHED_ATR = 1.5    # 1.5-2.5 ATR from value = getting stretched (small anti-chase penalty);
                         # beyond _PULLBACK_ATR it's a full chase (bigger penalty) — see grading below
 # --- map-read WALL-proximity soft factor. Unlike the REMOVED channel factor, the wall penalty applies
@@ -155,11 +156,16 @@ DET_FILTERS = [
     {"key": "ema200", "label": "Long-term trend (EMA200)",
      "desc": "Prefer trades on the right side of the 200-EMA (with the long-term trend); down-weight entries against it."},
     {"key": "momentum", "label": "MACD momentum",
-     "desc": "Momentum must align; if it's rolling over, arm the pullback instead of entering into it."},
+     "desc": "Momentum must align with the trade. When it's rolling over against the trend, the engine "
+             "doesn't chase — with AI momentum-read ON it classifies the pullback (healthy pullback / "
+             "weak momentum / probable reversal) and decides enter / arm the dip / wait / reject; with "
+             "it OFF it just arms the pullback and waits (the fixed rule)."},
     {"key": "macd_rising", "label": "MACD histogram rising",
      "desc": "Prefer entries where the MACD histogram is EXPANDING (growing bars) in the trade direction; down-weight a fading histogram even if still aligned."},
     {"key": "rsi_extreme", "label": "RSI overextension",
-     "desc": "Don't chase into an overbought/oversold RSI — arm the pullback (unless a strong trend rides it)."},
+     "desc": "Don't chase into an overbought/oversold RSI. Unless a strong trend rides it, the engine "
+             "reads the stretch — with AI momentum-read ON it classifies the pullback (healthy / weak / "
+             "reversal) and decides enter / arm the dip / wait / reject; OFF it arms the pullback."},
     {"key": "divergence", "label": "RSI divergence",
      "desc": "Skip entries into a momentum-vs-price divergence while stretched (exhaustion)."},
     {"key": "volatility", "label": "Volatility blow-off",
@@ -883,6 +889,73 @@ def _conditional_resumption(
     )
 
 
+def _first_level_beyond(direction: Direction, px: float, levels: list[float]) -> float | None:
+    """Nearest key level in the trade direction (resistance above for a long / support below a short)."""
+    if direction == Direction.LONG:
+        ahead = [lv for lv in levels if lv > px]
+        return min(ahead) if ahead else None
+    behind = [lv for lv in levels if 0 < lv < px]
+    return max(behind) if behind else None
+
+
+def _momentum_action(base: TradeProposal, direction: Direction, ind: dict, tf0,
+                     technical: TechnicalRead, atr_v: float | None, px: float,
+                     momentum_ai: bool, symbol: str) -> tuple[str, TradeProposal | None]:
+    """AI CLASSIFIES the momentum disagreement (healthy_pullback / weak_momentum / probable_reversal
+    + evidence + confidence); the DETERMINISTIC engine here maps the class to an action. Returns
+    ``(action, proposal)``:
+      - ``('decided', base)`` — the engine armed a dip-limit / rejected from the classification: return it.
+      - ``('enter', None)``   — healthy pullback AT value: take the normal market entry (fall through).
+      - ``('fallback', None)``— no AI / low-confidence: keep the caller's original fixed arm-and-wait rule.
+    The AI only labels; it never chooses direction/levels and never bypasses the downstream gates."""
+    if not momentum_ai:
+        return "fallback", None
+    from app.agents.momentum_read import interpret_momentum
+
+    read = interpret_momentum(symbol, direction, ind, technical, tf0.timeframe if tf0 else "")
+    if read is None or read.confidence < _MOM_AI_MIN_CONF:
+        return "fallback", None
+    # Surface the classification to the UI ("What the analysis saw") regardless of the action chosen.
+    base.momentum_read = {"category": read.category, "evidence": read.evidence,
+                          "confidence": round(read.confidence, 2)}
+    tag = f"[momentum AI: {read.category} · {round(read.confidence * 100)}% — {read.evidence}]"
+    conf = round(min(0.7, 0.45 + 0.25 * technical.confidence + 0.1 * read.confidence), 2)
+    ema20 = ind.get("ema20")
+
+    if read.category == "probable_reversal":
+        base.watch = True
+        base.conditional = None
+        base.rationale = (f"Probable reversal — standing aside, not arming into a turning "
+                          f"{direction.value}. {tag}")
+        return "decided", base
+
+    if read.category == "weak_momentum":
+        base.watch = True
+        base.conditional = _conditional_resumption(
+            direction, px, ind, atr_v, _key_levels(technical, tf0, px), conf)
+        note = ("Armed a resumption break to wait for momentum to confirm."
+                if base.conditional is not None else "Waiting for confirmation (no clean break to arm).")
+        base.rationale = f"Weak momentum — waiting rather than entering. {note} {tag}"
+        return "decided", base
+
+    # healthy_pullback: buy the dip. AT value -> enter at market; still stretched from value -> arm a
+    # LIMIT back at value for a better fill.
+    stretched = bool(ema20 and atr_v and (
+        (direction == Direction.LONG and px > ema20 + _VALUE_ENTRY_ATR * atr_v)
+        or (direction == Direction.SHORT and px < ema20 - _VALUE_ENTRY_ATR * atr_v)))
+    if not stretched:
+        return "enter", None
+    target = _first_level_beyond(direction, px, _key_levels(technical, tf0, px))
+    cond = _conditional_pullback(direction, px, ema20, atr_v, ind, target, conf) if target else None
+    if cond is None:
+        return "fallback", None            # couldn't build a clean value entry -> keep the safe fixed arm
+    base.watch = True
+    base.conditional = cond
+    base.rationale = (f"Healthy pullback (higher-TF momentum aligned) but price is stretched from value — "
+                      f"armed a {cond.order_type} back at value (~EMA20) to buy the dip. {tag}")
+    return "decided", base
+
+
 _ST_BAND_MIN_RR = 1.5      # skip a signal whose structure target is closer than this
 _ST_BAND_TP_R = 2.0        # fallback target (R) when there's no clean opposing S/R level
 _ST_BAND_FRESH_FLIP = 3    # EARLY entry: only take the break within this many bars of a SuperTrend flip
@@ -1079,7 +1152,7 @@ def _deterministic_decision(
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
     trend_only: bool = False, st_band: bool = False, rsi_over: bool = False,
     rsi_confirm: bool = True, rsi_macd: bool = False, rsi_div: bool = False, rsi_trend_filter: bool = True,
-    disable: frozenset[str] = frozenset(),
+    disable: frozenset[str] = frozenset(), momentum_ai: bool = False,
 ) -> TradeProposal:
     # ``disable`` is a BACKTEST-ONLY filter-ablation switch (the live path never passes it): naming a
     # gate ("mtf", "momentum", "structure", "volatility", "divergence", "minrr", "rsi_extreme") skips it, so the
@@ -1175,21 +1248,29 @@ def _deterministic_decision(
                               "not buying into it.")
             return base
         if macd_hist is not None and macd_hist < -mom_thresh and "momentum" not in disable:
-            # Trend up but momentum meaningfully down = pullback. Arm a resumption break instead of
-            # just waiting, so it fires when momentum turns back up.
-            base.watch = True
             px = ind.get("last_close") or 0.0
-            base.conditional = _conditional_resumption(
-                Direction.LONG, px, ind, atr_v, _key_levels(technical, tf0, px),
-                round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
-            armed_note = ("Arm a long on a break back up to resume the trend."
-                          if base.conditional is not None
-                          else "Waiting for momentum to turn back up (no clean break level to arm yet).")
-            base.rationale = (
-                f"Uptrend pullback — momentum still down (MACD hist {macd_hist}, RSI {rsi}, "
-                f"−DI {mdi} > +DI {pdi}). {armed_note}"
-            )
-            return base
+            # AI classifies WHY momentum disagrees; the engine decides enter/arm/reject. When the AI is
+            # off / unavailable / low-confidence it returns 'fallback' and we keep the fixed arm below.
+            action, decided = _momentum_action(base, Direction.LONG, ind, tf0, technical, atr_v, px,
+                                                momentum_ai, symbol)
+            if action == "decided":
+                return decided
+            if action != "enter":
+                # (fixed rule) Trend up but momentum meaningfully down = pullback. Arm a resumption
+                # break instead of just waiting, so it fires when momentum turns back up.
+                base.watch = True
+                base.conditional = _conditional_resumption(
+                    Direction.LONG, px, ind, atr_v, _key_levels(technical, tf0, px),
+                    round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+                armed_note = ("Arm a long on a break back up to resume the trend."
+                              if base.conditional is not None
+                              else "Waiting for momentum to turn back up (no clean break level to arm yet).")
+                base.rationale = (
+                    f"Uptrend pullback — momentum still down (MACD hist {macd_hist}, RSI {rsi}, "
+                    f"−DI {mdi} > +DI {pdi}). {armed_note}"
+                )
+                return base
+            # action == 'enter' (healthy pullback AT value) -> fall through to the normal market entry
         lvl = _opposing_big_tf_level(Direction.LONG, px, atr_v, big_levels)
         if lvl is not None and "htf_level" not in disable:
             base.watch = True
@@ -1210,19 +1291,25 @@ def _deterministic_decision(
                               "not selling into it.")
             return base
         if macd_hist is not None and macd_hist > mom_thresh and "momentum" not in disable:
-            base.watch = True
             px = ind.get("last_close") or 0.0
-            base.conditional = _conditional_resumption(
-                Direction.SHORT, px, ind, atr_v, _key_levels(technical, tf0, px),
-                round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
-            armed_note = ("Arm a short on a break back down to resume the trend."
-                          if base.conditional is not None
-                          else "Waiting for momentum to turn back down (no clean break level to arm yet).")
-            base.rationale = (
-                f"Downtrend pullback — momentum turning up (MACD hist {macd_hist}, RSI {rsi}, "
-                f"+DI {pdi} > −DI {mdi}). {armed_note}"
-            )
-            return base
+            action, decided = _momentum_action(base, Direction.SHORT, ind, tf0, technical, atr_v, px,
+                                                momentum_ai, symbol)
+            if action == "decided":
+                return decided
+            if action != "enter":
+                base.watch = True
+                base.conditional = _conditional_resumption(
+                    Direction.SHORT, px, ind, atr_v, _key_levels(technical, tf0, px),
+                    round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+                armed_note = ("Arm a short on a break back down to resume the trend."
+                              if base.conditional is not None
+                              else "Waiting for momentum to turn back down (no clean break level to arm yet).")
+                base.rationale = (
+                    f"Downtrend pullback — momentum turning up (MACD hist {macd_hist}, RSI {rsi}, "
+                    f"+DI {pdi} > −DI {mdi}). {armed_note}"
+                )
+                return base
+            # action == 'enter' (healthy pullback AT value) -> fall through to the normal market entry
         lvl = _opposing_big_tf_level(Direction.SHORT, px, atr_v, big_levels)
         if lvl is not None and "htf_level" not in disable:
             base.watch = True
@@ -1326,21 +1413,27 @@ def _deterministic_decision(
     )
     strong_trend = adx_v is not None and adx_v >= _ADX_STRONG
     if rsi_extreme and not strong_trend and "rsi_extreme" not in disable:
-        base.watch = True
         px = ind.get("last_close") or 0.0
-        base.conditional = _conditional_resumption(
-            direction, px, ind, atr_v, _key_levels(technical, tf0, px),
-            round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
-        zone = "overbought" if direction == Direction.LONG else "oversold"
-        dip = "dip" if direction == Direction.LONG else "bounce"
-        armed_note = (f"Armed a {direction.value} pullback-resumption to join on the {dip}."
-                      if base.conditional is not None
-                      else f"Waiting for the {dip} (no clean break level to arm yet).")
-        base.rationale = (
-            f"{direction.value.upper()} trend but RSI {round(rsi)} is {zone} — a pullback is likely and "
-            f"the trend isn't strong-enough-with-momentum to ride it, so not chasing at market. {armed_note}"
-        )
-        return base
+        action, decided = _momentum_action(base, direction, ind, tf0, technical, atr_v, px,
+                                            momentum_ai, symbol)
+        if action == "decided":
+            return decided
+        if action != "enter":
+            base.watch = True
+            base.conditional = _conditional_resumption(
+                direction, px, ind, atr_v, _key_levels(technical, tf0, px),
+                round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+            zone = "overbought" if direction == Direction.LONG else "oversold"
+            dip = "dip" if direction == Direction.LONG else "bounce"
+            armed_note = (f"Armed a {direction.value} pullback-resumption to join on the {dip}."
+                          if base.conditional is not None
+                          else f"Waiting for the {dip} (no clean break level to arm yet).")
+            base.rationale = (
+                f"{direction.value.upper()} trend but RSI {round(rsi)} is {zone} — a pullback is likely and "
+                f"the trend isn't strong-enough-with-momentum to ride it, so not chasing at market. {armed_note}"
+            )
+            return base
+        # action == 'enter' (healthy pullback AT value) -> fall through to the normal market entry
 
     support = tf0.support_levels[0] if tf0 and tf0.support_levels else None
     resistance = tf0.resistance_levels[0] if tf0 and tf0.resistance_levels else None
@@ -1693,7 +1786,7 @@ def run_orchestrator(
     st_band: bool = False, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
     rsi_div: bool = False, rsi_trend_filter: bool = True,
     disable: frozenset[str] = frozenset(),
-    ai_review: bool = True,
+    ai_review: bool = True, momentum_ai: bool = False,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -1712,7 +1805,8 @@ def run_orchestrator(
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
                                        trend_only=trend_only, st_band=st_band, rsi_over=rsi_over,
                                        rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
-                                       rsi_trend_filter=rsi_trend_filter, disable=disable)
+                                       rsi_trend_filter=rsi_trend_filter, disable=disable,
+                                       momentum_ai=momentum_ai)
 
     # SuperTrend-band and RSI-Over are purely mechanical strategies — no LLM confirm/veto over them.
     # ai_review=False takes the AI out of the trade decision entirely (the deterministic engine +

@@ -73,7 +73,9 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
                                 rsi_trend_filter=rsi_trend_filter,
-                                disable=frozenset(settings.disabled_filters or ()))
+                                disable=frozenset(settings.disabled_filters or ()),
+                                momentum_ai=(settings.ai_momentum_read and use_llm
+                                             and llm_available() and not ai_decides))
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
@@ -112,7 +114,7 @@ def analyze_symbol(
     use_llm: bool = True, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
     rsi_div: bool = False, rsi_trend_filter: bool = True, source: str | None = None,
     cooldown_override: int | None = None, force_ai_decide: bool = False,
-    min_rr: float | None = None,
+    min_rr: float | None = None, no_execute: bool = False,
 ) -> AnalyzeResponse:
     """Run the full pipeline for one symbol. ``use_llm=False`` forces the deterministic
     agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
@@ -151,7 +153,9 @@ def analyze_symbol(
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
                                 rsi_trend_filter=rsi_trend_filter,
-                                disable=frozenset(settings.disabled_filters or ()))
+                                disable=frozenset(settings.disabled_filters or ()),
+                                momentum_ai=(settings.ai_momentum_read and use_llm
+                                             and llm_available() and not ai_decides))
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         det_proposal = proposal   # keep the deterministic call for the shadow scorecard
@@ -209,7 +213,10 @@ def analyze_symbol(
 
     # 5. Execution mode: Mode A waits for the user; Modes B/C auto-execute risk-approved
     #    proposals (B paper-only, C live with the confirmation gate enforced in the executor).
-    if decision.approved:
+    #    ``no_execute`` runs the FULL analysis (persisted + shadow-logged, identical to the "Run
+    #    analysis" button) but suppresses the auto-open — used when a caller wants the analysis's
+    #    conditional to ARM from (Hybrid's arm step), not to fire a market trade as a side effect.
+    if decision.approved and not no_execute:
         _maybe_auto_execute(session, record, broker)
 
     session.add(AgentRun(
@@ -225,4 +232,5 @@ def analyze_symbol(
 
     log.info("analysis complete", extra={"symbol": symbol, "proposal_id": record.id,
                                          "direction": proposal.direction.value, "status": record.status})
-    return AnalyzeResponse(proposal_id=record.id, status=record.status, proposal=proposal, risk=decision)
+    return AnalyzeResponse(proposal_id=record.id, status=record.status, proposal=proposal,
+                           risk=decision, analyzed_at=now)

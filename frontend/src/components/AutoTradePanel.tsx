@@ -1,6 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { AssetClass, AutoTradeView } from "../types";
+import type { AssetClass, AutoTradeResult, AutoTradeView } from "../types";
+import { ago, localTime } from "./advisorFormat";
+
+// One line per pair: what happened last pass + why (green if it opened, muted if it stood aside).
+function resultRow(r: AutoTradeResult) {
+  const opened = !!r.opened;
+  const outcome = r.opened
+    ? `opened ${r.opened.toUpperCase()}${r.confidence != null ? ` @ ${Math.round(r.confidence * 100)}%` : ""}`
+    : r.blocked ? "blocked" : r.error ? "error" : "no trade";
+  const reason = r.note || r.skipped || r.blocked || r.error || "";
+  return (
+    <div key={r.symbol} className="flex items-baseline gap-1.5 text-[11px]">
+      <span className={`font-semibold ${opened ? "text-bull" : "text-neutral-400"}`}>{r.symbol}</span>
+      <span className={opened ? "text-bull" : "text-neutral-500"}>{outcome}</span>
+      {reason && <span className="text-neutral-600">— {reason}</span>}
+    </div>
+  );
+}
 
 /**
  * Per-pair AI auto-trader. Toggle it ON for the charted pair and, every ~15 min, the AI analyses it
@@ -197,12 +214,25 @@ export function AutoTradePanel({
         </div>
       )}
 
-      {cfg?.last_result && (
-        <div className="mt-1.5 text-[11px] text-neutral-500">Last pass: {cfg.last_result}</div>
+      {(cfg?.last_run_at || cfg?.last_result) && (
+        <div className="mt-2 rounded-md border border-neutral-800 bg-neutral-900/40 px-2.5 py-1.5">
+          <div className="flex items-baseline justify-between text-[11px]">
+            <span className="font-medium text-neutral-400">Last check</span>
+            {cfg?.last_run_at && (
+              <span className="text-neutral-500" title={localTime(cfg.last_run_at)}>{ago(cfg.last_run_at)}</span>
+            )}
+          </div>
+          {cfg?.last_results && cfg.last_results.length > 0 ? (
+            <div className="mt-1 space-y-0.5">{cfg.last_results.map(resultRow)}</div>
+          ) : (
+            cfg?.last_result && <div className="mt-0.5 text-[11px] text-neutral-500">{cfg.last_result}</div>
+          )}
+        </div>
       )}
       <div className="mt-1.5 text-[10px] text-neutral-600">
-        Auto-opens paper trades on the interval at ≥{((cfg?.min_confidence ?? 0.6) * 100).toFixed(0)}% following the
-        AI's scenario levels; rides to TP/SL, re-enters after the cooldown. Every risk gate + the kill-switch apply.
+        Opens the AI's next scenario move at market (never a pending order) at ≥{((cfg?.min_confidence ?? 0.6) * 100).toFixed(0)}% —
+        a quick win, riding to TP/SL, then re-entering after the cooldown. Won't fire once 3 positions are open.
+        Every risk gate + the kill-switch apply.
       </div>
     </div>
   );

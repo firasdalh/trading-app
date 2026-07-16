@@ -57,7 +57,7 @@ def rsi_over_tick(session: Session) -> dict:
     session.commit()
     return run_rsi_over_scan(session, cfg.timeframe, confirm=cfg.confirm, macd=cfg.macd,
                              rsi_div=cfg.rsi_div, trend_filter=cfg.trend_filter,
-                             auto_approve=cfg.auto_approve)
+                             auto_approve=cfg.auto_approve, skip_if_full=True)
 
 # Which asset classes to sweep (the user's tradable universe: FX / metals / energy / indices / crypto).
 _SCAN_CLASSES = (AssetClass.FOREX, AssetClass.METAL, AssetClass.ENERGY, AssetClass.INDEX, AssetClass.CRYPTO)
@@ -136,12 +136,14 @@ def _closest_text(cands: dict) -> str:
 
 def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: bool = True,
                       macd: bool = False, rsi_div: bool = False, trend_filter: bool = True,
-                      auto_approve: bool = False) -> dict:
+                      auto_approve: bool = False, skip_if_full: bool = False) -> dict:
     """Sweep the available universe for the first RSI-extreme reversal the Risk Manager approves, stage
     it (Mode A: queue for approval; Modes B/C: auto-open), and return a short summary. Confirmations
     (OR): ``confirm`` = EMA10 close-through; ``macd`` = MACD cross/divergence; ``rsi_div`` = RSI
     divergence. ``trend_filter`` (default) refuses fading against a strong higher-TF trend.
-    ``auto_approve`` opens a found pair directly (all gates still apply). ``timeframe`` None -> '1h'."""
+    ``auto_approve`` opens a found pair directly (all gates still apply). ``timeframe`` None -> '1h'.
+    ``skip_if_full`` (the auto-watch tick) bails before the sweep when the book is already at
+    max_open_positions — no point analysing/staging a trade that can't be opened."""
     tf = timeframe or "1h"
 
     def done(reason: str, found: dict | None = None, scanned: int = 0, signals: int = 0,
@@ -171,6 +173,14 @@ def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: b
         log.warning("rsi-over: broker positions failed", extra={"error": str(exc)})
         return done("could not read open positions")
     open_syms = {_norm_symbol(p.symbol) for p in open_positions}
+    # ROOM gate (auto-watch): if the book is already full, skip the whole sweep — a found setup would
+    # only get blocked by the Risk Manager anyway. The manual one-click scan passes skip_if_full=False
+    # so it still runs (user-initiated + shows the RSI landscape).
+    if skip_if_full:
+        from app.core.state import get_or_create_risk_config
+        max_pos = get_or_create_risk_config(session).max_open_positions
+        if len(open_positions) >= max_pos:
+            return done(f"no room ({len(open_positions)}/{max_pos} positions open) — auto-watch skipped the sweep")
     pending_syms = {
         _norm_symbol(r.symbol) for r in session.scalars(
             select(TradeProposalRecord).where(
