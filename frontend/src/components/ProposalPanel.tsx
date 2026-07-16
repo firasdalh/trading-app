@@ -520,6 +520,10 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
 
   const adx = ind["adx"] as number | undefined;
   const macdH = ind["macd_hist"] as number | undefined;
+  const atr = ind["atr14"] as number | undefined;
+  // A MACD within the engine's noise band (|hist| < 10% of ATR, the same _MOM_ATR_FRAC gate the
+  // engine uses) is FLAT — neither for nor against; don't count a near-zero histogram as a con.
+  const macdFlat = macdH != null && atr != null && atr > 0 && Math.abs(macdH) < 0.1 * atr;
   const rsi = ind["rsi14"] as number | undefined;
   const e = proposal.entry;
   const s = proposal.stop_loss;
@@ -594,12 +598,13 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
       label: "Momentum (MACD)",
       value: mr
         ? `AI: ${mrLabel}${mr.confidence != null ? ` (${Math.round(mr.confidence * 100)}%)` : ""}`
-        : macdH == null ? "—" : `${macdH > 0 ? "bullish" : "bearish"} (${macdH.toFixed(3)})`,
-      tone: mr ? mrTone : macdH == null ? undefined : macdH > 0 ? "text-bull" : "text-bear",
-      verdict: mr ? mrVerdict! : macdDir && dir ? (macdDir === dir ? "good" : "bad") : "neutral",
+        : macdH == null ? "—" : macdFlat ? `flat (${macdH.toFixed(3)})` : `${macdH > 0 ? "bullish" : "bearish"} (${macdH.toFixed(3)})`,
+      tone: mr ? mrTone : macdH == null || macdFlat ? undefined : macdH > 0 ? "text-bull" : "text-bear",
+      verdict: mr ? mrVerdict! : macdFlat ? "neutral" : macdDir && dir ? (macdDir === dir ? "good" : "bad") : "neutral",
       note: mr
         ? `AI read the pullback — ${mr.evidence}`
-        : macdDir && dir ? (macdDir === dir ? `Momentum backs the ${dirWord}.` : `Momentum runs against the ${dirWord}.`) : "",
+        : macdFlat ? "Momentum is flat (within the noise band) — neither for nor against."
+          : macdDir && dir ? (macdDir === dir ? `Momentum backs the ${dirWord}.` : `Momentum runs against the ${dirWord}.`) : "",
     },
     {
       label: "RSI (14)",

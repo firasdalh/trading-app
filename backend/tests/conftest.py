@@ -21,6 +21,13 @@ def _force_deterministic_agents(monkeypatch):
             monkeypatch.setattr(mod, "llm_available", lambda: False, raising=False)
         except Exception:  # noqa: BLE001
             pass
+    # Clear the per-symbol LLM-read caches so a cached read never leaks between tests.
+    for mod_name, attr in (("fundamental", "_FUND_CACHE"), ("scenarios", "_CACHE"),
+                           ("momentum_read", "_CACHE")):
+        try:
+            getattr(importlib.import_module(f"app.agents.{mod_name}"), attr).clear()
+        except Exception:  # noqa: BLE001
+            pass
     # Offline data providers — never hit the network (e.g. the live economic calendar).
     from app.data import providers
     providers.set_providers(

@@ -14,6 +14,8 @@ Boundaries (deliberate):
 """
 from __future__ import annotations
 
+import time
+
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -23,6 +25,11 @@ from app.core.logging import get_logger
 from app.models.enums import AssetClass
 
 log = get_logger("agents.scenarios")
+
+# The AI scenario read is a slow-moving "lean", so cache it per symbol and share it across ALL callers
+# (the Run-analysis card, the auto-trader, the position advisor) — skips the ~1500-token call on repeats.
+_CACHE: dict[tuple, tuple[float, dict]] = {}
+_TTL_SEC = 15 * 60
 
 
 class _Scenario(BaseModel):
@@ -118,7 +125,16 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
 
     Returns None only when there's no market data at all. When the LLM is unavailable OR the call
     fails, returns the deterministic fallback (source='deterministic') so the endpoint always answers.
+
+    The successful AI read is cached per (symbol, asset_class) for ``_TTL_SEC`` and shared across every
+    caller, so repeat reads within the window cost no tokens. The cheap deterministic fallback isn't
+    cached (so it's retried / upgraded to the AI read as soon as the LLM is available again).
     """
+    key = (symbol.upper(), asset_class.value)
+    hit = _CACHE.get(key)
+    if hit is not None and (time.monotonic() - hit[0]) < _TTL_SEC:
+        return hit[1]
+
     ctx = build_context(session, symbol, asset_class)
     if ctx is None:
         return None
@@ -151,10 +167,12 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
     primary = scen[0]["label"] if scen else read.primary
     log.info("ai scenarios", extra={"symbol": symbol, "primary": primary,
                                      "probs": [s["prob"] for s in scen]})
-    return {
+    result = {
         "symbol": symbol, "price": ctx["price"], "source": "ai",
         "headline": read.headline, "primary": primary, "why_primary": read.why_primary,
         "scenarios": scen, "invalidation": read.invalidation or ctx.get("invalidation"),
         "overall_bias": ctx.get("overall_bias"), "scorecard": ctx.get("scorecard", []),
         "note": "AI judgement — probabilities are a lean, not a measurement, and will vary run-to-run.",
     }
+    _CACHE[key] = (time.monotonic(), result)
+    return result

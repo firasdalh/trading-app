@@ -36,6 +36,38 @@ def test_neutral_by_default():
     assert read.stand_aside_windows == []
 
 
+def _fake_read(bias=TradingBias.BULLISH):
+    from app.models.schemas import FundamentalRead
+    return FundamentalRead(symbol="AAPL", bias=bias, key_drivers=[], surprise_assessment="x",
+                           stand_aside_windows=[], confidence=0.3, notes="llm")
+
+
+def test_fundamental_llm_read_is_cached(monkeypatch):
+    # The ~2000-token LLM read is cached per symbol -> a repeat analysis makes NO second call.
+    import app.agents.fundamental as fund
+    monkeypatch.setattr(fund, "llm_available", lambda: True)
+    calls = {"n": 0}
+    monkeypatch.setattr(fund, "analyze", lambda **k: (calls.__setitem__("n", calls["n"] + 1) or _fake_read()))
+    r1 = run_fundamental("AAPL", now=NOW)
+    r2 = run_fundamental("AAPL", now=NOW)
+    assert calls["n"] == 1 and r1.bias == TradingBias.BULLISH and r2.bias == TradingBias.BULLISH
+
+
+def test_fundamental_cache_keeps_windows_fresh(monkeypatch):
+    # SAFETY: even a cache hit must pick up a NEWLY-added high-impact event window (windows never cached).
+    import app.agents.fundamental as fund
+    monkeypatch.setattr(fund, "llm_available", lambda: True)
+    calls = {"n": 0}
+    monkeypatch.setattr(fund, "analyze", lambda **k: (calls.__setitem__("n", calls["n"] + 1) or _fake_read()))
+    r1 = run_fundamental("AAPL", now=NOW)
+    assert r1.stand_aside_windows == [] and calls["n"] == 1
+    event = CalendarEvent(label="FOMC", when=NOW, importance="high", forecast=5.0, previous=5.0)
+    providers.set_providers(calendar=StubCalendarProvider([event]))
+    r2 = run_fundamental("AAPL", now=NOW)          # cache hit for the bias ...
+    assert calls["n"] == 1                          # ... no second LLM call ...
+    assert len(r2.stand_aside_windows) == 1         # ... but the fresh news window IS applied
+
+
 def test_bias_follows_sentiment():
     providers.set_providers(sentiment=_PosSentiment())
     assert run_fundamental("AAPL", now=NOW).bias == TradingBias.BULLISH

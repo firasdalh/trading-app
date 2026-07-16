@@ -11,6 +11,7 @@ sentiment and builds stand-aside windows around high-impact calendar events.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.agents.llm import analyze, llm_available
@@ -163,12 +164,26 @@ def _deterministic_read(symbol: str, now: datetime) -> FundamentalRead:
     )
 
 
+# The LLM bias/sentiment read barely moves between ticks, so cache it per symbol and skip the ~2000-
+# token call on repeat analyses. The news-blackout WINDOWS are NOT cached — they gate trades around
+# events, so they're recomputed fresh (deterministically, no tokens) on every call, even a cache hit.
+_FUND_CACHE: dict[str, tuple[float, FundamentalRead]] = {}
+_FUND_TTL_SEC = 30 * 60  # refresh the macro read every ~30 min
+
+
 def run_fundamental(symbol: str, now: datetime | None = None, use_llm: bool = True) -> FundamentalRead:
     now = now or datetime.now(timezone.utc)
 
     if use_llm and llm_available():
-        sentiment = get_sentiment_provider().get_sentiment(symbol)
+        # Calendar events are cheap (no tokens) + drive the stand-aside windows, so fetch them every
+        # call and ALWAYS recompute the windows fresh — only the LLM bias read below is cached.
         events = get_calendar_provider().get_events(symbol)
+        key = symbol.upper()
+        hit = _FUND_CACHE.get(key)
+        if hit is not None and (time.monotonic() - hit[0]) < _FUND_TTL_SEC:
+            return hit[1].model_copy(update={"stand_aside_windows": _high_impact_windows(events, now)})
+
+        sentiment = get_sentiment_provider().get_sentiment(symbol)
         news = get_news_provider().get_news(symbol, limit=10)
         user = (
             f"symbol={symbol} now={now.isoformat()}\n\n"
@@ -186,6 +201,7 @@ def run_fundamental(symbol: str, now: datetime | None = None, use_llm: bool = Tr
             # The calendar is the single source of truth for stand-aside windows — replace the
             # model's (which can duplicate or mis-time the same event).
             result.stand_aside_windows = _high_impact_windows(events, now)
+            _FUND_CACHE[key] = (time.monotonic(), result)
             log.info("fundamental read via LLM", extra={"symbol": symbol, "bias": result.bias.value})
             return result
 
