@@ -154,6 +154,19 @@ def _conditional_tick() -> None:
         log.warning("conditional tick failed", extra={"error": str(exc)})
 
 
+def _shadow_eval_tick() -> None:
+    """Grade shadow decisions whose horizon has elapsed, so the AI-vs-deterministic scorecard AND the
+    AI's own self-learning brief stay fresh without waiting for someone to open the scorecard panel."""
+    from app.agents.shadow import evaluate_shadows
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            evaluate_shadows(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("shadow eval tick failed", extra={"error": str(exc)})
+
+
 def _register_monitor_job() -> None:
     from app.core.scheduler import get_scheduler
 
@@ -179,8 +192,12 @@ def _register_monitor_job() -> None:
     # Polls every 60s; the per-pair AI auto-trader enforces its own interval (default 15 min).
     sched.add_job(_auto_trade_tick, "interval", seconds=60, id="auto_trade",
                   replace_existing=True, max_instances=1)
+    # Every 10 min: grade shadow decisions whose horizon elapsed (keeps the AI-vs-deterministic
+    # scorecard + the AI's self-learning brief current without needing the panel open).
+    sched.add_job(_shadow_eval_tick, "interval", seconds=600, id="shadow_eval",
+                  replace_existing=True, max_instances=1)
     log.info("position monitor (10s) + scanner (20s) + advisor (30s) + hybrid (60s) + "
-             "conditional watch (15s) + rsi-over watch (60s) scheduled")
+             "conditional watch (15s) + rsi-over watch (60s) + shadow-eval (600s) scheduled")
 
 
 @asynccontextmanager

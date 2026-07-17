@@ -58,7 +58,7 @@ interface Props {
   scenarioBusy?: boolean;
   // Toggle the AI scenario's cited S/R lines on the chart (shared with the chart's own scenario card).
   scenLevelsShown?: boolean;
-  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null } | null) => void;
+  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
 }
 
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
@@ -402,7 +402,7 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
               onShowLevels={onToggleScenLevels
                 ? () => onToggleScenLevels(scenario
                     ? { support: scenario.nearest_support ?? null, resistance: scenario.nearest_resistance ?? null,
-                        target: scenario.target ?? null }
+                        target: scenario.target ?? null, invalidation: scenario.invalidation_price ?? null }
                     : null)
                 : undefined} />
           ) : (
@@ -518,6 +518,24 @@ function StandAsideCard({ proposal }: { proposal: TradeProposal }) {
   );
 }
 
+// Normalize a timeframe's trend to a concise keyword. It's usually "up"/"down"/"sideways", but can
+// occasionally arrive as a verbose description — keep the factor VALUE short so it never overflows.
+function trendWord(t: string | undefined | null): string {
+  if (!t) return "—";
+  const s = t.trim().toLowerCase();
+  if (["up", "uptrend", "bullish", "rising"].includes(s)) return "UP";
+  if (["down", "downtrend", "bearish", "falling"].includes(s)) return "DOWN";
+  if (["sideways", "range", "flat", "neutral"].includes(s)) return "SIDEWAYS";
+  // Verbose/descriptive value: a range/corrective/mixed read -> SIDEWAYS (matches the neutral verdict);
+  // otherwise a single clear direction; else SIDEWAYS. Keeps the factor value a clean keyword.
+  if (/(sideways|range|flat|neutral|chop|correct|consolidat|mixed)/.test(s)) return "SIDEWAYS";
+  const up = /\b(up|uptrend|bull|rising|higher)\b/.test(s);
+  const down = /\b(down|downtrend|bear|falling|lower)\b/.test(s);
+  if (up && !down) return "UP";
+  if (down && !up) return "DOWN";
+  return "SIDEWAYS";
+}
+
 function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; standAside?: boolean }) {
   const tech = proposal.technical;
   if (!tech || !tech.timeframes.length) return null;
@@ -579,20 +597,20 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
   const factors: { label: string; value: string; tone?: string; verdict: V; note: string }[] = [
     {
       label: "Entry-TF trend",
-      value: (entryTf?.trend ?? "—").toUpperCase(),
+      value: trendWord(entryTf?.trend),
       tone: trendTone(entryTf?.trend),
       verdict: dir ? "neutral" : "bad",
       note: dir
-        ? `Your ${proposal.timeframe} points ${(entryTf?.trend ?? "").toUpperCase()} — the ${dirWord} the engine weighed.`
+        ? `Your ${proposal.timeframe} points ${trendWord(entryTf?.trend)} — the ${dirWord} the engine weighed.`
         : "No clear trend on your timeframe — nothing to trade.",
     },
     {
       label: `Higher-TF trend (${macro?.timeframe ?? "—"})`,
-      value: (htf ?? "—").toUpperCase(),
+      value: trendWord(htf),
       tone: trendTone(htf),
       verdict: htfAgainst ? "bad" : htfAgree ? "good" : "neutral",
       note: htfAgainst
-        ? `The ${macro?.timeframe} is ${(htf ?? "").toUpperCase()} — against a ${dirWord}. No confluence: this is the blocker.`
+        ? `The ${macro?.timeframe} is ${trendWord(htf)} — against a ${dirWord}. No confluence: this is the blocker.`
         : htfAgree
           ? `Agrees with the ${dirWord} — confluence.`
           : "Sideways — neither helps nor blocks.",
@@ -671,8 +689,9 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
             <span className={`mt-0.5 w-3 shrink-0 text-center font-bold ${V_TONE[f.verdict]}`}>{V_ICON[f.verdict]}</span>
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline justify-between gap-2">
-                <span className="text-neutral-300">{f.label}</span>
-                <span className={`shrink-0 tabular-nums ${f.tone ?? "text-neutral-200"}`}>{f.value}</span>
+                <span className="shrink-0 text-neutral-300">{f.label}</span>
+                <span className={`min-w-0 flex-1 truncate text-right tabular-nums ${f.tone ?? "text-neutral-200"}`}
+                      title={f.value}>{f.value}</span>
               </div>
               {f.note && <div className="text-[11px] leading-snug text-neutral-500">{f.note}</div>}
             </div>

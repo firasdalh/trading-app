@@ -87,9 +87,9 @@ interface Props {
   onSetArmedLevels?: (id: number, levels: { trigger_price?: number; stop_loss?: number; take_profit?: number }) => void;
   // The AI scenario's cited S/R to plot on the chart — lifted to the Dashboard so BOTH the floating
   // scenario card AND the Run-analysis scenario card toggle the same lines. null = hidden.
-  scenLevels?: { support: number | null; resistance: number | null; target: number | null } | null;
+  scenLevels?: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null;
   scenLevelsShown?: boolean;
-  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null } | null) => void;
+  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
 }
 
 const EMA_CONFIG = [
@@ -1008,9 +1008,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         series.createPriceLine({ price, color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title }),
       );
     };
-    add(scenLevels.resistance, "#f59e0b", "🤖 AI R");   // amber resistance
-    add(scenLevels.support, "#26a69a", "🤖 AI S");      // teal support
-    add(scenLevels.target, "#a78bfa", "🎯 AI target");  // violet — the scenario's continuation TP
+    const inv = scenLevels.invalidation;
+    const same = (a: number | null, b: number | null) =>
+      a != null && b != null && Math.abs(a - b) < Math.abs(a) * 1e-4;
+    add(scenLevels.target, "#a78bfa", "🎯 AI target");          // violet — the scenario's continuation TP
+    add(inv, "#ef5350", "⛔ Invalidation");                     // red — the stop reference (flips the scenario)
+    if (!same(scenLevels.resistance, inv)) add(scenLevels.resistance, "#f59e0b", "🤖 AI R");
+    if (!same(scenLevels.support, inv)) add(scenLevels.support, "#26a69a", "🤖 AI S");
   }, [scenLevels]);
 
   // Open-position overlay (solid lines) — drawn from live broker positions for THIS symbol,
@@ -1364,7 +1368,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           <ScenarioCard read={scen} levelsShown={scenLevelsShown}
                         onShowLevels={() => onToggleScenLevels?.(
                           scen ? { support: scen.nearest_support ?? null, resistance: scen.nearest_resistance ?? null,
-                                   target: scen.target ?? null } : null)} />
+                                   target: scen.target ?? null, invalidation: scen.invalidation_price ?? null } : null)} />
         </div>
       )}
 

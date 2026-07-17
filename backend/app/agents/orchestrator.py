@@ -162,6 +162,10 @@ DET_FILTERS = [
              "it OFF it just arms the pullback and waits (the fixed rule)."},
     {"key": "macd_rising", "label": "MACD histogram rising",
      "desc": "Prefer entries where the MACD histogram is EXPANDING (growing bars) in the trade direction; down-weight a fading histogram even if still aligned."},
+    {"key": "flat_momentum", "label": "No flat-momentum entries",
+     "desc": "Don't take a MARKET pullback-at-value entry when momentum is FLAT (MACD hist inside the "
+             "noise band) — a pullback with nothing pushing it gets run over. Arm a resumption instead so "
+             "it fires only once momentum confirms the direction. (Added after the flat-MACD USDCHF loss.)"},
     {"key": "rsi_extreme", "label": "RSI overextension",
      "desc": "Don't chase into an overbought/oversold RSI. Unless a strong trend rides it, the engine "
              "reads the stretch — with AI momentum-read ON it classifies the pullback (healthy / weak / "
@@ -1708,6 +1712,28 @@ def _deterministic_decision(
                 f"nearest level {round(nearest, 5)} {side} entry (below the {_MIN_RR_ENTRY:.1f}R minimum) "
                 f"and no clean armed alternative right now — waiting for a better entry."
             )
+        return base
+
+    # FLAT-MOMENTUM guard: a pullback bought AT value with NO momentum behind it (entry-TF MACD inside
+    # the noise band) AND the higher-TF momentum pushing AGAINST it is a coin flip that gets run over —
+    # the USDCHF loss (MACD hist ~0 + cross-TF conflict, a "value" long that kept falling). Requiring
+    # BOTH keeps clean trend pullbacks (flat MACD but the higher TF agrees) taking the market entry, so
+    # it doesn't touch the winning core. When it fires, ARM a resumption so it enters only once momentum
+    # confirms. Value entries only (chases/breakouts handled elsewhere); toggle "flat_momentum".
+    flat_mom = macd_hist is not None and atr_v and atr_v > 0 and abs(macd_hist) < _MOM_ATR_FRAC * atr_v
+    cross_tf_conflict = (macro_conflict and macro_tf is not None and tf0 is not None
+                         and macro_tf.timeframe != tf0.timeframe)   # a genuinely HIGHER TF opposes
+    if at_value and flat_mom and cross_tf_conflict and "flat_momentum" not in disable:
+        base.watch = True
+        px2 = ind.get("last_close") or entry
+        resume = _conditional_resumption(direction, px2, ind, atr_v, _key_levels(technical, tf0, px2), confidence)
+        base.conditional = resume or base.conditional
+        armed_note = ("Armed a resumption to enter only when momentum confirms."
+                      if base.conditional is not None else "Waiting for momentum to confirm.")
+        base.rationale = (
+            f"{direction.value.upper()} at value is valid, but momentum is FLAT (MACD hist {macd_hist}, "
+            f"within the noise band) — a pullback with nothing pushing it gets run over. {armed_note}"
+        )
         return base
 
     base.direction = direction

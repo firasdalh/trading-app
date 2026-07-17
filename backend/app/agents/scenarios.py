@@ -84,6 +84,17 @@ def _scenario_target(ctx: dict, scen: list[dict]) -> float | None:
     return None
 
 
+def _invalidation_price(ctx: dict, scen: list[dict]) -> float | None:
+    """The numeric level that INVALIDATES the primary scenario (a stop reference): a close back above
+    the resistance for a down scenario, or back below the support for an up scenario."""
+    primary_dir = (scen[0].get("direction") if scen else "") or ""
+    if primary_dir == "down":
+        return (ctx.get("nearest_resistance") or {}).get("price")
+    if primary_dir == "up":
+        return (ctx.get("nearest_support") or {}).get("price")
+    return None
+
+
 def _lvl(d: dict | None) -> str:
     """Render a nearest-level dict ('{price, tf, kind}') as 'TF price', or '(none)'."""
     if not d:
@@ -138,6 +149,7 @@ def _deterministic_fallback(ctx: dict) -> dict:
         "nearest_support": (ctx.get("nearest_support") or {}).get("price"),
         "nearest_resistance": (ctx.get("nearest_resistance") or {}).get("price"),
         "target": _scenario_target(ctx, out),
+        "invalidation_price": _invalidation_price(ctx, out),
         "overall_bias": ctx.get("overall_bias"), "scorecard": ctx.get("scorecard", []),
         "note": "No AI model configured — showing the deterministic map scenarios.",
     }
@@ -198,6 +210,7 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
         "nearest_support": (ctx.get("nearest_support") or {}).get("price"),
         "nearest_resistance": (ctx.get("nearest_resistance") or {}).get("price"),
         "target": _scenario_target(ctx, scen),   # the primary scenario's continuation target (TP reference)
+        "invalidation_price": _invalidation_price(ctx, scen),   # the level that flips it (stop reference)
         "overall_bias": ctx.get("overall_bias"), "scorecard": ctx.get("scorecard", []),
         "note": "AI judgement — probabilities are a lean, not a measurement, and will vary run-to-run.",
     }

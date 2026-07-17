@@ -265,9 +265,54 @@ def _auto_trade_symbol(session: Session, cfg: AutoTradeConfig, pair: dict) -> di
     return {"symbol": symbol, "skipped": f"no setup ({prop.direction.value}, {prop.confidence:.0%})"}
 
 
+# Circuit-breaker: the per-pair auto-trader is the one net-negative source (its counter-trend "quick
+# win" scenario moves get run over). After a losing RUN we pause auto-opening for a cooldown, then let
+# a single probe through — so it never locks on permanently, and it slows down exactly when it's cold.
+_BREAKER_LOOKBACK = 8       # judge the auto-trader on its last N closed trades
+_BREAKER_MIN = 5            # need at least this many before the breaker can trip
+_BREAKER_PAUSE_HOURS = 4    # pause window from the most recent close after a losing run
+
+
+def _auto_trade_breaker(session: Session) -> str | None:
+    """Returns a reason string when the auto-trader should be paused (recent net-negative run within the
+    cooldown), else None. Self-resets: once the cooldown elapses a probe is allowed; if it loses, the
+    window updates and the breaker re-trips (so a bad streak keeps it slow without ever hard-locking)."""
+    rows = list(session.scalars(
+        select(Position).where(Position.status == PositionStatus.CLOSED.value,
+                               Position.source == "auto_trade",
+                               Position.realized_pnl.is_not(None))
+        .order_by(Position.closed_at.desc()).limit(_BREAKER_LOOKBACK)))
+    if len(rows) < _BREAKER_MIN:
+        return None
+    net = sum(p.realized_pnl for p in rows)
+    if net >= 0:
+        return None
+    last = max((p.closed_at for p in rows if p.closed_at), default=None)
+    if last is None:
+        return None
+    last = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+    hrs = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+    if hrs >= _BREAKER_PAUSE_HOURS:
+        return None  # cooldown elapsed -> let a probe trade through
+    wins = sum(1 for p in rows if p.realized_pnl > 0)
+    return (f"circuit-breaker: last {len(rows)} auto-trades net ${net:.0f} ({wins}/{len(rows)} win) — "
+            f"paused ~{_BREAKER_PAUSE_HOURS - hrs:.1f}h for conditions to change")
+
+
 def run_auto_trade(session: Session) -> dict:
     """One pass over every enabled pair. Records to the audit log + stamps last_run."""
     cfg = get_or_create_auto_trade_config(session)
+    breaker = _auto_trade_breaker(session)
+    if breaker:
+        cfg.last_run_at = datetime.now(timezone.utc)
+        cfg.last_result = breaker
+        cfg.last_results = [{"symbol": p.get("symbol"), "skipped": "circuit-breaker (recent losses)"}
+                            for p in (cfg.pairs or [])]
+        session.add(AgentRun(agent="auto_trade", event="tick",
+                             detail={"breaker": breaker, "pairs": len(cfg.pairs or [])}))
+        session.commit()
+        log.warning("auto-trade paused by circuit-breaker", extra={"reason": breaker})
+        return {"ran": True, "opened": 0, "breaker": breaker, "results": cfg.last_results}
     results = [_auto_trade_symbol(session, cfg, p) for p in (cfg.pairs or [])]
     opened = [r for r in results if r.get("opened")]
     cfg.last_run_at = datetime.now(timezone.utc)

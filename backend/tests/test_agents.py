@@ -160,6 +160,28 @@ def test_macd_histogram_rising_lifts_confidence_vs_fading():
     assert off_r.confidence == off_f.confidence   # filter off -> histogram slope no longer scored
 
 
+def test_flat_momentum_arms_only_with_cross_tf_conflict():
+    # A pullback AT value with FLAT entry-TF momentum AND the higher-TF momentum AGAINST it (the USDCHF
+    # loss) must NOT take the market entry — it arms a resumption. Toggling the filter off restores it.
+    from app.agents.orchestrator import _deterministic_decision
+    from app.models.schemas import TechnicalRead, TimeframeRead
+    entry_ind = {"last_close": 100.0, "ema20": 100.0, "ema50": 98.0, "ema200": 95.0, "atr14": 2.0,
+                 "adx": 22.0, "plus_di": 25.0, "minus_di": 15.0, "rsi14": 55.0,
+                 "macd_hist": 0.0, "macd_hist_prev": 0.0, "vol_ratio": 1.2}   # flat momentum, AT value
+    hi_ind = {"last_close": 100.0, "ema20": 99.0, "ema50": 97.0, "ema200": 94.0, "atr14": 2.0,
+              "adx": 25.0, "macd_hist": -1.0}   # trend up (EMA stack) but MACD momentum AGAINST the long
+    tech = TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend="up", indicators=entry_ind,
+                      support_levels=[96.0], resistance_levels=[108.0]),
+        TimeframeRead(timeframe="4h", trend="up", indicators=hi_ind, support_levels=[], resistance_levels=[]),
+    ])
+    armed = _deterministic_decision("X", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert armed.direction == Direction.NO_TRADE and armed.watch is True and "flat" in armed.rationale.lower()
+    took = _deterministic_decision("X", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW,
+                                   disable=frozenset({"flat_momentum"}))
+    assert took.direction == Direction.LONG   # filter off -> takes the market entry
+
+
 def test_ema200_filter_gates_its_confidence_factor():
     # A newly-exposed filter: with ema200 ON, being on the right side of the 200-EMA adds confidence;
     # disabling the filter removes that contribution entirely.

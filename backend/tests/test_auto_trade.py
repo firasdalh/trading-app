@@ -230,6 +230,46 @@ def test_run_auto_trade_persists_last_results(db_session, monkeypatch):
     assert cfg.last_results[0]["skipped"] == "cooldown"
 
 
+def _closed_auto(db_session, pnl, when=None):
+    from datetime import datetime, timezone
+    db_session.add(Position(symbol="X", asset_class="crypto", direction="short", qty=1.0,
+                            entry_price=100.0, status=PositionStatus.CLOSED.value, last_price=100.0,
+                            source="auto_trade", realized_pnl=pnl,
+                            closed_at=when or datetime.now(timezone.utc)))
+
+
+def test_breaker_pauses_after_losing_run(db_session, monkeypatch):
+    # 5 recent closed auto-trades net-negative -> the circuit-breaker pauses the whole pass.
+    for _ in range(5):
+        _closed_auto(db_session, -20.0)
+    db_session.commit()
+    at.set_pair(db_session, "ETHUSDm", "crypto", True)
+
+    def _boom(*a, **k):
+        raise AssertionError("opened a trade despite the circuit-breaker")
+
+    monkeypatch.setattr(at, "_auto_trade_symbol", _boom)
+    out = at.run_auto_trade(db_session)
+    assert out["opened"] == 0 and "circuit-breaker" in (out.get("breaker") or "")
+
+
+def test_breaker_resets_after_cooldown(db_session):
+    # Same losing run, but the most recent close is older than the pause window -> a probe is allowed.
+    from datetime import datetime, timedelta, timezone
+    old = datetime.now(timezone.utc) - timedelta(hours=5)
+    for _ in range(5):
+        _closed_auto(db_session, -20.0, when=old)
+    db_session.commit()
+    assert at._auto_trade_breaker(db_session) is None
+
+
+def test_breaker_off_when_net_positive(db_session):
+    for _ in range(5):
+        _closed_auto(db_session, 30.0)
+    db_session.commit()
+    assert at._auto_trade_breaker(db_session) is None
+
+
 def test_set_pair_toggles(db_session):
     at.set_pair(db_session, "ETHUSDm", "crypto", True)
     assert any(p["symbol"] == "ETHUSDm" for p in at.get_or_create_auto_trade_config(db_session).pairs)

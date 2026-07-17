@@ -84,8 +84,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [scenarioBusy, setScenarioBusy] = useState(false);
   // The AI scenario's S/R lines pinned on the chart — one shared state so BOTH scenario cards (the
   // chart's floating one + the Run-analysis one) toggle the same lines. null = hidden.
-  const [scenLevels, setScenLevels] = useState<{ support: number | null; resistance: number | null; target: number | null } | null>(null);
-  const toggleScenLevels = (lv: { support: number | null; resistance: number | null; target: number | null } | null) =>
+  const [scenLevels, setScenLevels] = useState<{ support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null>(null);
+  const toggleScenLevels = (lv: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) =>
     setScenLevels((prev) => (prev ? null : lv));
   const [status, setStatus] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -561,7 +561,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         </div>
       </div>
 
-      {aiReview && <ShadowScorecardPanel />}
+      {/* Always shown (not gated on AI-decides) — you read this to DECIDE whether the AI is worth
+          turning on. It just displays the accumulated record; new rows are logged when AI-decides is ON. */}
+      <ShadowScorecardPanel />
 
       <WatchlistPanel
         currentSymbol={symbol}

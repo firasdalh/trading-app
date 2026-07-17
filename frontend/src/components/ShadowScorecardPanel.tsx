@@ -90,6 +90,16 @@ export function ShadowScorecardPanel() {
               <Row label="⚙️ Deterministic" s={card.deterministic} />
             </tbody>
           </table>
+          {/* Absolute read first — is EITHER decider actually making money? (the relative edge below
+              is secondary; "less bad" is still losing). */}
+          {(() => {
+            const a = card.ai.expectancy_r, d = card.deterministic.expectancy_r;
+            if (a != null && a > 0)
+              return <div className="mt-2 rounded bg-bull/10 px-2 py-1 text-bull">✓ The AI is net-positive ({r(a)}/trade) over {card.ai.directional} graded trades.</div>;
+            if (a != null && d != null && a < 0 && d < 0)
+              return <div className="mt-2 rounded bg-bear/10 px-2 py-1 text-bear">⚠ Both deciders are net-negative in this sample (AI {r(a)}, deterministic {r(d)}) — no profitable edge yet. The proven lever is fewer, higher-quality trades (trend-only mode).</div>;
+            return null;
+          })()}
           <div className="mt-2 border-t border-neutral-800 pt-1.5 text-[11px]">
             {aiEdge == null ? (
               <span className="text-neutral-500">Not enough directional trades on both sides yet to compare.</span>
