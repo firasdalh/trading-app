@@ -433,6 +433,7 @@ export interface AiScenarioRead {
   invalidation: string | null;
   nearest_support?: number | null;      // the exact S/R levels the AI cites (for one-click plotting)
   nearest_resistance?: number | null;
+  target?: number | null;               // the primary scenario's continuation target (a TP reference)
   overall_bias: string;
   scorecard: { factor: string; signal: string; note: string }[];
   note: string;

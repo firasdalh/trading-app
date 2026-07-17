@@ -64,6 +64,26 @@ _SYSTEM = (
 )
 
 
+def _scenario_target(ctx: dict, scen: list[dict]) -> float | None:
+    """The continuation TARGET of the PRIMARY scenario — the next level in its direction (i.e. where to
+    set a TP). Reuses build_context's break candidate target (nearest level BEYOND the wall it breaks),
+    falling back to the 2nd rung of the ladder. None when there's no clear directional target."""
+    primary_dir = (scen[0].get("direction") if scen else "") or ""
+    if primary_dir == "down":
+        cand = ctx.get("breakdown") or {}
+        if cand.get("target"):
+            return cand["target"]
+        lad = ctx.get("support_ladder") or []
+        return lad[1]["price"] if len(lad) >= 2 else None
+    if primary_dir == "up":
+        cand = ctx.get("breakout_up") or {}
+        if cand.get("target"):
+            return cand["target"]
+        lad = ctx.get("resistance_ladder") or []
+        return lad[1]["price"] if len(lad) >= 2 else None
+    return None
+
+
 def _lvl(d: dict | None) -> str:
     """Render a nearest-level dict ('{price, tf, kind}') as 'TF price', or '(none)'."""
     if not d:
@@ -117,6 +137,7 @@ def _deterministic_fallback(ctx: dict) -> dict:
         "scenarios": out, "invalidation": ctx.get("invalidation"),
         "nearest_support": (ctx.get("nearest_support") or {}).get("price"),
         "nearest_resistance": (ctx.get("nearest_resistance") or {}).get("price"),
+        "target": _scenario_target(ctx, out),
         "overall_bias": ctx.get("overall_bias"), "scorecard": ctx.get("scorecard", []),
         "note": "No AI model configured — showing the deterministic map scenarios.",
     }
@@ -176,6 +197,7 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
         # The exact S/R levels the AI reasoned over (it was fed these) — so the UI can plot them.
         "nearest_support": (ctx.get("nearest_support") or {}).get("price"),
         "nearest_resistance": (ctx.get("nearest_resistance") or {}).get("price"),
+        "target": _scenario_target(ctx, scen),   # the primary scenario's continuation target (TP reference)
         "overall_bias": ctx.get("overall_bias"), "scorecard": ctx.get("scorecard", []),
         "note": "AI judgement — probabilities are a lean, not a measurement, and will vary run-to-run.",
     }

@@ -18,7 +18,7 @@ export function ScenarioCard({ read, onShowLevels, levelsShown }: {
   levelsShown?: boolean;
 }) {
   const isAi = read.source === "ai";
-  const hasLevels = read.nearest_support != null || read.nearest_resistance != null;
+  const hasLevels = read.nearest_support != null || read.nearest_resistance != null || read.target != null;
   return (
     <div className="text-xs">
       <div className="mb-1.5 flex items-center gap-2">
@@ -78,6 +78,12 @@ export function ScenarioCard({ read, onShowLevels, levelsShown }: {
         </div>
       )}
 
+      {read.target != null && (
+        <div className="mt-2 rounded bg-violet-950/40 px-2 py-1 text-violet-200">
+          🎯 <span className="font-semibold">Scenario target (TP reference):</span> {read.target}
+        </div>
+      )}
+
       {read.invalidation && <div className="mt-2 text-amber-300">⚠ Invalidation: {read.invalidation}</div>}
 
       {onShowLevels && hasLevels && (
@@ -88,11 +94,12 @@ export function ScenarioCard({ read, onShowLevels, levelsShown }: {
               ? "border-violet-500 bg-violet-500/20 text-violet-100"
               : "border-neutral-700 bg-neutral-800/60 text-neutral-200 hover:bg-neutral-700"
           }`}
-          title="Draw the AI's cited support/resistance as bold labelled lines on the chart"
+          title="Draw the AI's cited support/resistance + the scenario target as bold labelled lines on the chart"
         >
           📍 {levelsShown ? "Hide" : "Show"} these levels on the chart
           {read.nearest_support != null && <span className="ml-1 text-emerald-300">S {read.nearest_support}</span>}
           {read.nearest_resistance != null && <span className="ml-1 text-amber-300">R {read.nearest_resistance}</span>}
+          {read.target != null && <span className="ml-1 text-violet-300">🎯 {read.target}</span>}
         </button>
       )}
 

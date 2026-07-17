@@ -58,7 +58,7 @@ interface Props {
   scenarioBusy?: boolean;
   // Toggle the AI scenario's cited S/R lines on the chart (shared with the chart's own scenario card).
   scenLevelsShown?: boolean;
-  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null } | null) => void;
+  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null } | null) => void;
 }
 
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
@@ -401,7 +401,8 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
             <ScenarioCard read={scenario} levelsShown={scenLevelsShown}
               onShowLevels={onToggleScenLevels
                 ? () => onToggleScenLevels(scenario
-                    ? { support: scenario.nearest_support ?? null, resistance: scenario.nearest_resistance ?? null }
+                    ? { support: scenario.nearest_support ?? null, resistance: scenario.nearest_resistance ?? null,
+                        target: scenario.target ?? null }
                     : null)
                 : undefined} />
           ) : (

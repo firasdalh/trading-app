@@ -87,9 +87,9 @@ interface Props {
   onSetArmedLevels?: (id: number, levels: { trigger_price?: number; stop_loss?: number; take_profit?: number }) => void;
   // The AI scenario's cited S/R to plot on the chart — lifted to the Dashboard so BOTH the floating
   // scenario card AND the Run-analysis scenario card toggle the same lines. null = hidden.
-  scenLevels?: { support: number | null; resistance: number | null } | null;
+  scenLevels?: { support: number | null; resistance: number | null; target: number | null } | null;
   scenLevelsShown?: boolean;
-  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null } | null) => void;
+  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null } | null) => void;
 }
 
 const EMA_CONFIG = [
@@ -1010,6 +1010,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     };
     add(scenLevels.resistance, "#f59e0b", "🤖 AI R");   // amber resistance
     add(scenLevels.support, "#26a69a", "🤖 AI S");      // teal support
+    add(scenLevels.target, "#a78bfa", "🎯 AI target");  // violet — the scenario's continuation TP
   }, [scenLevels]);
 
   // Open-position overlay (solid lines) — drawn from live broker positions for THIS symbol,
@@ -1362,7 +1363,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           </button>
           <ScenarioCard read={scen} levelsShown={scenLevelsShown}
                         onShowLevels={() => onToggleScenLevels?.(
-                          scen ? { support: scen.nearest_support ?? null, resistance: scen.nearest_resistance ?? null } : null)} />
+                          scen ? { support: scen.nearest_support ?? null, resistance: scen.nearest_resistance ?? null,
+                                   target: scen.target ?? null } : null)} />
         </div>
       )}
 
