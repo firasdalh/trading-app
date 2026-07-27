@@ -56,6 +56,7 @@ interface Props {
   analyzing?: boolean;
   scenario?: AiScenarioRead | null;   // Step 4: AI two-scenario read (info only)
   scenarioBusy?: boolean;
+  onLoadScenarios?: () => void;        // opt-in fetch (info-only read costs AI tokens, so it's on demand)
   // Toggle the AI scenario's cited S/R lines on the chart (shared with the chart's own scenario card).
   scenLevelsShown?: boolean;
   onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
@@ -64,7 +65,7 @@ interface Props {
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, scenLevelsShown, onToggleScenLevels }: Props) {
+export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, onLoadScenarios, scenLevelsShown, onToggleScenLevels }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -170,6 +171,12 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
           {result?.analyzed_at && (
             <span className="text-[11px] text-neutral-500" title={`Last analysed ${localTime(result.analyzed_at)}`}>
               · analysed {ago(result.analyzed_at)}
+            </span>
+          )}
+          {result?.market_open === false && (
+            <span className="rounded bg-warn/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-warn"
+                  title="This market's session is CLOSED (weekend / holiday / out-of-hours) — the prices are the last close, not live. The auto-traders stand down until it reopens.">
+              ⏸ Market closed
             </span>
           )}
           {proposal.regime && <RegimeBadge regime={proposal.regime} strategy={proposal.strategy} />}
@@ -365,7 +372,8 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
 
       {/* Market read behind the decision — shown for an actionable setup ("Why this setup") AND for a
           stand-aside ("What the analysis saw"), so a no-trade isn't just a bare one-liner. */}
-      <SetupSignals proposal={proposal} standAside={noTrade} />
+      <SetupSignals proposal={proposal} standAside={noTrade}
+        onToggleScenLevels={onToggleScenLevels} scenLevelsShown={scenLevelsShown} />
 
       {/* For an actionable setup the chips above already cover it, so only surface the LLM reviewer's
           note if present (the no-trade rationale now lives in the StandAsideCard). The structured
@@ -393,21 +401,31 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
 
       <Reasoning result={result} />
 
-      {/* AI two-scenario read (the clean "what's likely + the levels + invalidation" analysis). Shown
-          ALSO when the AI is the DECIDER, so you always see the scenario read the decision follows. */}
-      {(scenario || scenarioBusy) && (
+      {/* AI two-scenario read — INFO ONLY (the engine's decision never uses it) and it costs AI tokens,
+          so it's fetched ON DEMAND via the button, not auto-run on every analysis. */}
+      {result && (
         <div className="rounded-md border border-violet-800/40 bg-violet-950/10 p-2">
           {scenario ? (
             <ScenarioCard read={scenario} levelsShown={scenLevelsShown}
+              assetClass={proposal.asset_class} timeframe={proposal.timeframe}
               onShowLevels={onToggleScenLevels
                 ? () => onToggleScenLevels(scenario
                     ? { support: scenario.nearest_support ?? null, resistance: scenario.nearest_resistance ?? null,
                         target: scenario.target ?? null, invalidation: scenario.invalidation_price ?? null }
                     : null)
                 : undefined} />
-          ) : (
+          ) : scenarioBusy ? (
             <div className="text-xs text-violet-300/80">🤖 Reasoning out two scenarios…</div>
-          )}
+          ) : onLoadScenarios ? (
+            <button
+              onClick={onLoadScenarios}
+              className="flex w-full items-center justify-center gap-1.5 text-xs font-medium text-violet-300 hover:text-violet-200"
+              title="Fetch the AI's two forward scenarios for this pair. Info only — it does NOT change the engine's decision, and it uses AI tokens, so it's opt-in."
+            >
+              🤖 Show AI scenarios
+              <span className="text-[10px] text-neutral-500">(optional · uses AI tokens)</span>
+            </button>
+          ) : null}
         </div>
       )}
 
@@ -536,7 +554,11 @@ function trendWord(t: string | undefined | null): string {
   return "SIDEWAYS";
 }
 
-function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; standAside?: boolean }) {
+function SetupSignals({ proposal, standAside, onToggleScenLevels, scenLevelsShown }: {
+  proposal: TradeProposal; standAside?: boolean;
+  onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
+  scenLevelsShown?: boolean;
+}) {
   const tech = proposal.technical;
   if (!tech || !tech.timeframes.length) return null;
 
@@ -581,6 +603,22 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
     : mr.category === "probable_reversal" ? "bad" : "neutral") : null;
   const mrTone = mr ? (mr.category === "healthy_pullback" ? "text-bull"
     : mr.category === "probable_reversal" ? "text-bear" : "text-warn") : undefined;
+  // AI regime-texture read (set only when the moderate-ADX boundary fork ran) — enriches the ADX row.
+  const rg = proposal.regime_read;
+  const rgLabel = rg ? ({ emerging_trend: "Emerging trend", choppy_range: "Choppy range",
+                          transition: "Transition" } as Record<string, string>)[rg.category] ?? rg.category : null;
+  const rgVerdict: V | null = rg ? (rg.category === "emerging_trend" ? "good"
+    : rg.category === "choppy_range" ? "bad" : "neutral") : null;
+  const rgTone = rg ? (rg.category === "emerging_trend" ? "text-bull"
+    : rg.category === "choppy_range" ? "text-bear" : "text-warn") : undefined;
+  // AI price-action read at a major opposing level (set only when a big-TF level was in the path).
+  const pa = proposal.priceaction_read;
+  const paLabel = pa ? ({ likely_break: "Likely break", likely_reject: "Likely reject",
+                          indecision: "Indecision" } as Record<string, string>)[pa.category] ?? pa.category : null;
+  const paVerdict: V | null = pa ? (pa.category === "likely_break" ? "good"
+    : pa.category === "likely_reject" ? "bad" : "neutral") : null;
+  const paTone = pa ? (pa.category === "likely_break" ? "text-bull"
+    : pa.category === "likely_reject" ? "text-bear" : "text-warn") : undefined;
   const biasStr = proposal.fundamental?.bias;
   const biasDir = biasStr === "bullish" ? "long" : biasStr === "bearish" ? "short" : null;
   const htfAgree = !!(dir && htf && (dir === "long" ? htf === "up" : htf === "down"));
@@ -617,10 +655,25 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
     },
     {
       label: "Trend strength (ADX)",
-      value: adx == null ? "—" : `${adx.toFixed(0)} ${adx >= 25 ? "(strong)" : adx < 20 ? "(weak)" : "(moderate)"}`,
-      verdict: adx == null ? "neutral" : adx >= 25 ? "good" : adx < 20 ? "bad" : "neutral",
-      note: adx == null ? "" : adx >= 25 ? "Strong trend — worth trading." : adx < 20 ? "Weak / choppy — trend entries fail here." : "Moderate — trend still forming.",
+      value: rg
+        ? `AI: ${rgLabel}${rg.confidence != null ? ` (${Math.round(rg.confidence * 100)}%)` : ""}`
+        : adx == null ? "—" : `${adx.toFixed(0)} ${adx >= 25 ? "(strong)" : adx < 20 ? "(weak)" : "(moderate)"}`,
+      tone: rg ? rgTone : undefined,
+      verdict: rg ? rgVerdict! : adx == null ? "neutral" : adx >= 25 ? "good" : adx < 20 ? "bad" : "neutral",
+      note: rg
+        ? `AI read the moderate-ADX regime — ${rg.evidence}`
+        : adx == null ? "" : adx >= 25 ? "Strong trend — worth trading." : adx < 20 ? "Weak / choppy — trend entries fail here." : "Moderate — trend still forming.",
     },
+    // Price-action at a major opposing level — only present when the AI level-read ran.
+    ...(pa
+      ? [{
+          label: "Level in the path",
+          value: `AI: ${paLabel}${pa.confidence != null ? ` (${Math.round(pa.confidence * 100)}%)` : ""}`,
+          tone: paTone,
+          verdict: paVerdict!,
+          note: `AI read the level — ${pa.evidence}`,
+        }]
+      : []),
     {
       label: "Momentum (MACD)",
       value: mr
@@ -671,6 +724,130 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
   const V_ICON: Record<V, string> = { good: "✓", bad: "✗", neutral: "•" };
   const V_TONE: Record<V, string> = { good: "text-bull", bad: "text-bear", neutral: "text-neutral-600" };
 
+  // ---- Probability outlook (DETERMINISTIC — derived from the same read above; no AI tokens) ----
+  // Turns the factors into rough odds for the three ways this resolves for the direction the engine
+  // weighed: it continues (target), stalls/ranges (no follow-through / an armed limit never fills), or
+  // reverses (invalidation). A heuristic, not a guarantee — the % just makes the spread explicit.
+  const armedLimit = (proposal.conditional?.order_type ?? "").includes("limit");
+  const healthyPB = mr?.category === "healthy_pullback";
+  const rejecting = pa?.category === "likely_reject";   // AI reads the opposing level as HOLDING (price rejects)
+
+  // Nearest S/R across ALL timeframes, tagged with the TF (so a path can cite "1H resistance 84.406 /
+  // 4H support 81.794" like a chart-reader) — the outlook, the narratives, and the "show levels" button
+  // all RESPECT these, not just the R:R. `pxRef` = entry, or last close for a watch.
+  const pxRef = (proposal.entry ?? (ind["last_close"] as number | undefined)) ?? null;
+  const resAbove: { price: number; tf: string }[] = [];
+  const supBelow: { price: number; tf: string }[] = [];
+  if (pxRef != null) {
+    for (const tfr of tech.timeframes) {
+      for (const r of tfr.resistance_levels ?? []) if (typeof r === "number" && r > pxRef) resAbove.push({ price: r, tf: tfr.timeframe });
+      for (const sv of tfr.support_levels ?? []) if (typeof sv === "number" && sv < pxRef) supBelow.push({ price: sv, tf: tfr.timeframe });
+    }
+  }
+  const nearResL = resAbove.sort((a, b) => a.price - b.price)[0] ?? null;   // nearest above
+  const nearSupL = supBelow.sort((a, b) => b.price - a.price)[0] ?? null;   // nearest below
+  const nearRes = nearResL?.price ?? null;
+  const nearSup = nearSupL?.price ?? null;
+  const setupTarget = (proposal.take_profit ?? proposal.conditional?.take_profit) ?? null;
+  const setupStop = (proposal.stop_loss ?? proposal.conditional?.stop_loss) ?? null;
+  // Headroom (in ATR) toward the target side — a wall just ahead caps upside; clear runway helps.
+  const targetSide = dir === "long" ? nearRes : dir === "short" ? nearSup : null;
+  const headroomAtr = targetSide != null && pxRef != null && atr && atr > 0 ? Math.abs(targetSide - pxRef) / atr : null;
+
+  const outlook = (() => {
+    if (!dir) return null;                                // no directional edge -> no scenarios
+    let cont = 0.45, stall = 0.20, rev = 0.15;
+    if (htfAgree) cont += 0.20; else if (htfAgainst) { cont -= 0.15; rev += 0.18; }
+    if (adx != null) { if (adx >= 40) cont += 0.15; else if (adx >= 25) cont += 0.08; else if (adx < 20) { cont -= 0.05; rev += 0.10; stall += 0.10; } }
+    if (macdFlat) stall += 0.10;
+    else if (macdDir && macdDir === dir) cont += 0.08;
+    else if (macdDir && macdDir !== dir && !healthyPB) rev += 0.06;   // pullback IS the setup -> no penalty
+    if (rsiGood) cont += 0.05;
+    if (rsiBad) rev += 0.10;
+    if (mr) { if (mr.category === "healthy_pullback") cont += 0.12; else if (mr.category === "weak_momentum") stall += 0.15; else if (mr.category === "probable_reversal") { rev += 0.22; cont -= 0.10; } }
+    if (pa) {
+      const c = pa.confidence ?? 0.6;
+      if (pa.category === "likely_break") cont += 0.10 + 0.15 * c;        // AI: the wall gives way -> continue
+      else if (pa.category === "likely_reject") {                         // AI: the wall HOLDS -> reject & pull back
+        const w = 0.20 + 0.35 * c;                                        // weighted by the AI's confidence
+        cont -= w; stall += w * 0.65; rev += w * 0.35;
+      } else stall += 0.10;                                               // indecision
+    }
+    if (rg) { if (rg.category === "emerging_trend") cont += 0.06; else if (rg.category === "choppy_range") { stall += 0.10; cont -= 0.05; } else stall += 0.05; }
+    if (armedLimit) stall += 0.10;                        // a pending limit can simply never get filled
+    // STRUCTURE: a tested wall just ahead caps the continuation. When the AI explicitly reads the level
+    // as HOLDING (likely_reject), even a strong trend loses the usual break-through exemption.
+    if (headroomAtr != null) {
+      if (headroomAtr < 1 && (rejecting || !(adx != null && adx >= 40))) { cont -= 0.10; stall += 0.06; rev += 0.04; }
+      else if (headroomAtr >= 3 && !rejecting) cont += 0.05;
+    }
+    const raw = [Math.max(0.04, cont), Math.max(0.04, stall), Math.max(0.04, rev)];
+    const sum = raw[0] + raw[1] + raw[2];
+    const pct = raw.map((r) => Math.round((r / sum) * 100));
+    pct[0] += 100 - (pct[0] + pct[1] + pct[2]);           // absorb rounding into the top bucket
+    return { pct };
+  })();
+  // Prefer the actionable R:R; fall back to the armed conditional's R:R (a watch has no proposal-level levels).
+  const rrEff = rr ?? proposal.conditional?.rr ?? null;
+  const rrSuffix = rrEff != null ? ` (~${rrEff.toFixed(1)}R)` : "";
+  const isPullback = armedLimit || healthyPB;
+  const long = dir === "long";
+  // Human-readable level references, tagged with their timeframe (e.g. "1H resistance 84.406").
+  const resStr = nearResL ? `${nearResL.tf.toUpperCase()} resistance ${fmtPrice(nearResL.price)}` : null;
+  const supStr = nearSupL ? `${nearSupL.tf.toUpperCase()} support ${fmtPrice(nearSupL.price)}` : null;
+  const tgtStr = setupTarget != null ? fmtPrice(setupTarget) : null;
+  const stopStr = setupStop != null ? fmtPrice(setupStop) : null;
+
+  // Each scenario is a PATH narrative citing the real levels. Two framings: the engine is REJECTING at
+  // the opposing level (AI likely_reject -> the pause/pullback is the main outcome, NOT a continuation),
+  // or it's WITH the trend (continuation is the main outcome).
+  let contLabel: string, contPath: string, stallLabel: string, stallPath: string, revLabel: string, revPath: string;
+  if (rejecting) {
+    contLabel = long ? "Breaks resistance → continues up" : "Breaks support → continues down";
+    contPath = long
+      ? `Breaks through ${resStr ?? "resistance"} and continues up${tgtStr ? ` → target ${tgtStr}` : ""}${rrSuffix}.`
+      : `Breaks ${supStr ?? "support"} and continues down${tgtStr ? ` → target ${tgtStr}` : ""}${rrSuffix}.`;
+    stallLabel = long ? "Rejects at resistance, pulls back" : "Rejects at support, bounces";
+    stallPath = long
+      ? `Rejects near ${resStr ?? "resistance"} (as the AI read), pulls back ${supStr ? `toward ${supStr}` : "to value (~EMA20)"} — a pause in the uptrend, not a breakout.`
+      : `Rejects near ${supStr ?? "support"} (as the AI read), bounces ${resStr ? `toward ${resStr}` : "to value (~EMA20)"} — a pause in the downtrend, not a breakdown.`;
+    revLabel = long ? "Deeper reversal — loses support" : "Deeper reversal — breaks resistance";
+    revPath = long
+      ? `Turns down hard and loses ${supStr ?? "support"} → the uptrend structure breaks${stopStr ? `, stop ${stopStr}` : ""}.`
+      : `Turns up hard and breaks ${resStr ?? "resistance"} → the downtrend structure breaks${stopStr ? `, stop ${stopStr}` : ""}.`;
+  } else {
+    contLabel = isPullback
+      ? (long ? "Pullback to support, then continuation up" : "Bounce to resistance, then continuation down")
+      : (long ? "Continuation up" : "Continuation down");
+    contPath = isPullback
+      ? (long
+          ? `${resStr ? `Rejects near ${resStr}, ` : ""}pulls back ${supStr ? `toward ${supStr}` : "to value (~EMA20)"}, then resumes upward if support holds${tgtStr ? ` → target ${tgtStr}` : ""}${rrSuffix}.`
+          : `${supStr ? `Bounces near ${supStr}, ` : ""}rallies ${resStr ? `toward ${resStr}` : "to value (~EMA20)"}, then resumes downward if resistance holds${tgtStr ? ` → target ${tgtStr}` : ""}${rrSuffix}.`)
+      : (long
+          ? `Holds ${supStr ? `above ${supStr}` : "the trend"}${resStr ? ` and pushes through ${resStr}` : ""}${tgtStr ? ` toward target ${tgtStr}` : ""}${rrSuffix}.`
+          : `Holds ${resStr ? `below ${resStr}` : "the trend"}${supStr ? ` and breaks ${supStr}` : ""}${tgtStr ? ` toward target ${tgtStr}` : ""}${rrSuffix}.`);
+    stallLabel = "Stalls / ranges — no follow-through";
+    stallPath = `Chops ${supStr && resStr ? `between ${supStr} and ${resStr}` : "sideways"} without committing${armedLimit ? " — the pending limit may never fill" : ""}.`;
+    revLabel = long ? "Loses support — reverses" : "Breaks resistance — reverses";
+    revPath = long
+      ? `Breaks below ${supStr ?? "support"} → the long invalidates${stopStr ? `, stop ${stopStr}` : ""} (~-1R).`
+      : `Breaks above ${resStr ?? "resistance"} → the short invalidates${stopStr ? `, stop ${stopStr}` : ""} (~-1R).`;
+  }
+
+  const scenarios = outlook ? [
+    { key: "cont", tone: "text-bull", bar: "bg-bull", prob: outlook.pct[0], label: contLabel, path: contPath },
+    { key: "stall", tone: "text-warn", bar: "bg-warn", prob: outlook.pct[1], label: stallLabel, path: stallPath },
+    { key: "rev", tone: "text-bear", bar: "bg-bear", prob: outlook.pct[2], label: revLabel, path: revPath },
+  ] : [];
+  // The "chosen" path = the MOST LIKELY outcome (the engine's implied read) — not always continuation.
+  const chosenKey = scenarios.length ? [...scenarios].sort((a, b) => b.prob - a.prob)[0].key : null;
+
+  // The setup's own lines for the "Show levels" button (reuses the AI-scenario chart overlay channel):
+  // target + stop/invalidation from the proposal (or the armed conditional) + the nearest S/R it respects.
+  const setupLevels = (setupTarget != null || setupStop != null || nearSup != null || nearRes != null)
+    ? { support: nearSup, resistance: nearRes, target: setupTarget, invalidation: setupStop }
+    : null;
+
   return (
     <div className="rounded-md border border-neutral-800 p-3">
       <div className="mb-2 flex items-center justify-between">
@@ -698,6 +875,53 @@ function SetupSignals({ proposal, standAside }: { proposal: TradeProposal; stand
           </div>
         ))}
       </div>
+
+      {/* Probability outlook — deterministic scenarios from the read above (no AI tokens). */}
+      {scenarios.length > 0 && (
+        <div className="mt-3 border-t border-neutral-800 pt-2.5">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+              Probability outlook
+            </span>
+            <span className="text-[10px] text-neutral-600">from the read · not a guarantee</span>
+          </div>
+          {/* stacked odds bar (continue / stall / reverse) */}
+          <div className="mb-2 flex h-1.5 overflow-hidden rounded-full bg-neutral-800">
+            {scenarios.map((sc) => (
+              <div key={sc.key} className={sc.bar} style={{ width: `${sc.prob}%` }} title={`${sc.label} — ${sc.prob}%`} />
+            ))}
+          </div>
+          <div className="space-y-2">
+            {[...scenarios].sort((a, b) => b.prob - a.prob).map((sc) => (
+              <div key={sc.key} className="flex gap-2 text-sm">
+                <span className={`w-9 shrink-0 text-right font-semibold tabular-nums ${sc.tone}`}>{sc.prob}%</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`font-medium ${sc.tone}`}>{sc.label}</span>
+                    {sc.key === chosenKey && (
+                      <span className="rounded bg-neutral-700 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-neutral-300">
+                        most likely
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] leading-snug text-neutral-400">{sc.path}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Plot the setup's own lines — target, stop/invalidation, and the nearest S/R it respects. */}
+          {onToggleScenLevels && setupLevels && (
+            <button
+              onClick={() => onToggleScenLevels(scenLevelsShown ? null : setupLevels)}
+              className="mt-2.5 w-full rounded border border-neutral-700 py-1.5 text-xs font-medium text-neutral-200 hover:bg-neutral-800"
+              title="Draw the target, stop/invalidation, and nearest support/resistance on the chart"
+            >
+              {scenLevelsShown ? "✕ Hide levels on the chart" : "📈 Show these levels on the chart"}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -1011,10 +1011,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     const inv = scenLevels.invalidation;
     const same = (a: number | null, b: number | null) =>
       a != null && b != null && Math.abs(a - b) < Math.abs(a) * 1e-4;
-    add(scenLevels.target, "#a78bfa", "🎯 AI target");          // violet — the scenario's continuation TP
-    add(inv, "#ef5350", "⛔ Invalidation");                     // red — the stop reference (flips the scenario)
-    if (!same(scenLevels.resistance, inv)) add(scenLevels.resistance, "#f59e0b", "🤖 AI R");
-    if (!same(scenLevels.support, inv)) add(scenLevels.support, "#26a69a", "🤖 AI S");
+    add(scenLevels.target, "#a78bfa", "🎯 Target");             // violet — the continuation TP
+    add(inv, "#ef5350", "⛔ Stop / invalidation");              // red — the stop reference (flips the setup)
+    if (!same(scenLevels.resistance, inv)) add(scenLevels.resistance, "#f59e0b", "🟠 Resistance");
+    if (!same(scenLevels.support, inv)) add(scenLevels.support, "#26a69a", "🟢 Support");
   }, [scenLevels]);
 
   // Open-position overlay (solid lines) — drawn from live broker positions for THIS symbol,

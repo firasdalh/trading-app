@@ -96,6 +96,7 @@ def evaluate_proposal(
     has_open_same_direction: bool = False,
     correlated_exposure: str | None = None,
     not_tradeable_reason: str | None = None,
+    breaker_reason: str | None = None,
     risk_per_lot: float | None = None,
 ) -> RiskDecision:
     """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
@@ -168,6 +169,13 @@ def evaluate_proposal(
             return _veto(symbol, "daily loss limit reached — trading paused for the day", checks)
     else:
         checks["daily_loss_ok"] = True
+
+    # --- 3b. system-wide entry circuit breakers (trade-count / loss-streak / performance divergence) ---
+    # Computed by the service from recent trade history (deterministic, no LLM). Like the daily-loss
+    # pause, these only gate NEW entries — they never touch an open position. All are off by default.
+    checks["breaker_ok"] = breaker_reason is None
+    if breaker_reason:
+        return _veto(symbol, breaker_reason, checks)
 
     # --- 4. max open positions ---
     room_for_positions = account.open_positions < limits.max_open_positions

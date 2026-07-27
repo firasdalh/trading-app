@@ -19,6 +19,8 @@ class AutoTradeView(BaseModel):
     min_rr: float
     min_profit_usd: float
     cooldown_minutes: int
+    strategy: str = "scenario"   # "scenario" (AI) | "supertrend" (mechanical)
+    timeframe: str = "1h"        # ONE timeframe applied to every auto-traded pair
     pairs: list[dict]
     last_run_at: str | None = None
     last_result: str | None = None
@@ -31,6 +33,8 @@ def _view(cfg) -> AutoTradeView:
         min_confidence=cfg.min_confidence, min_rr=getattr(cfg, "min_rr", 1.2),
         min_profit_usd=getattr(cfg, "min_profit_usd", 20.0),
         cooldown_minutes=cfg.cooldown_minutes,
+        strategy=getattr(cfg, "strategy", None) or "scenario",
+        timeframe=getattr(cfg, "timeframe", None) or "1h",
         pairs=list(cfg.pairs or []),
         last_run_at=cfg.last_run_at.isoformat() if cfg.last_run_at else None,
         last_result=cfg.last_result,
@@ -63,6 +67,8 @@ class ConfigRequest(BaseModel):
     min_rr: float | None = Field(None, ge=1.0, le=3.0)
     min_profit_usd: float | None = Field(None, ge=0.0, le=100000.0)
     cooldown_minutes: int | None = Field(None, ge=0, le=240)
+    strategy: str | None = Field(None, pattern="^(scenario|supertrend|reversal)$")
+    timeframe: str | None = Field(None, pattern="^(5m|15m|30m|1h|4h|1d)$")
 
 
 @router.post("/config")
@@ -80,6 +86,10 @@ def set_config(req: ConfigRequest, session: Session = Depends(get_session)) -> A
         cfg.min_profit_usd = req.min_profit_usd
     if req.cooldown_minutes is not None:
         cfg.cooldown_minutes = req.cooldown_minutes
+    if req.strategy is not None:
+        cfg.strategy = req.strategy
+    if req.timeframe is not None:
+        cfg.timeframe = req.timeframe
     session.commit()
     return _view(cfg)
 

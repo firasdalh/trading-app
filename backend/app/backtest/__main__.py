@@ -53,6 +53,13 @@ def main() -> None:
                     "(e.g. 'range_breakout,ema_pullback') — measure a setup's contribution")
     ap.add_argument("--min-align", type=float, default=0.0, help="only trade setups with trend "
                     "alignment >= this (e.g. 0.85 = A+ only) — segment high- vs low-conviction trends")
+    ap.add_argument("--breakers", action="store_true", help="also measure how often the entry "
+                    "circuit breakers (trade-count / loss-streak / performance) would have tripped")
+    ap.add_argument("--brk-max-trades", type=int, default=8, help="breaker report: max trades/day")
+    ap.add_argument("--brk-max-losses", type=int, default=3, help="breaker report: max losses in a row")
+    ap.add_argument("--brk-cooldown", type=int, default=120, help="breaker report: cooldown minutes")
+    ap.add_argument("--brk-window", type=int, default=10, help="breaker report: expectancy window")
+    ap.add_argument("--brk-floor", type=float, default=-0.2, help="breaker report: expectancy floor (R)")
     args = ap.parse_args()
     regimes = {r.strip() for r in args.regimes.split(",") if r.strip()} or None
     disable = frozenset(d.strip() for d in args.disable.split(",") if d.strip())
@@ -92,6 +99,19 @@ def main() -> None:
         else:
             print(format_report(all_trades, title=f"BACKTEST — {tag}",
                                 risk_pct=args.risk_pct, cost_r=args.cost_r))
+
+        if args.breakers and all_trades:
+            from app.backtest.breakers import format_breaker_report, simulate_breakers
+            impacts = simulate_breakers(
+                all_trades,
+                max_trades_per_day=args.brk_max_trades,
+                max_consecutive_losses=args.brk_max_losses,
+                breaker_cooldown_minutes=args.brk_cooldown,
+                expectancy_window=args.brk_window,
+                min_expectancy_r=args.brk_floor,
+            )
+            print()
+            print(format_breaker_report(all_trades, impacts))
     finally:
         session.close()
 

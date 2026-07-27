@@ -10,7 +10,6 @@ pipeline works offline. The deterministic path is conservative by design.
 """
 from __future__ import annotations
 
-import json
 import math
 from datetime import datetime, timezone
 
@@ -82,6 +81,8 @@ def _last_close(technical: TechnicalRead) -> float | None:
 # Indicator gates for the deterministic decision.
 _ADX_MIN = 20.0       # below this the market is ranging -> stand aside
 _ADX_STRONG = 23.0    # >=23 the trend is strong enough for trend-following (per the entry checklist)
+_FLAT_MOM_WEAK_ADX = 26.0  # a FLAT-MACD value entry in a barely-trending tape (ADX < this) has no
+#                            conviction -> arm a resumption instead of firing at market (the AUDNZD loss)
 _REGIME_VOL_EXPANSION = 1.6  # recent ATR >= 1.6x its baseline = volatility expansion (regime shift)
 _REGIME_VOL_EXTREME = 2.2    # a sharp vol blow-off WITHOUT a strong trend -> stand aside (whipsaw)
 _ATR_STOP_MULT = 1.5  # protective stop = entry +/- 1.5 * ATR (forex/metal/index/stock/energy)
@@ -116,6 +117,8 @@ _PULLBACK_ATR = 2.5   # price > this many ATR beyond EMA20 = stretched entry -> 
 _VALUE_ENTRY_ATR = 1.0  # entry within ~1 ATR of the 20-EMA = a pullback to VALUE -> a pro's
                         # preferred trend entry (tight risk to the swing, lots of room to target)
 _MOM_AI_MIN_CONF = 0.55  # below this the AI momentum class isn't trusted -> keep the deterministic fixed arm
+_REGIME_AI_MIN_CONF = 0.55  # below this the AI regime-texture class isn't trusted -> keep the deterministic regime
+_PA_AI_MIN_CONF = 0.55   # below this the AI price-action class isn't trusted -> keep waiting at the level
 _STRETCHED_ATR = 1.5    # 1.5-2.5 ATR from value = getting stretched (small anti-chase penalty);
                         # beyond _PULLBACK_ATR it's a full chase (bigger penalty) — see grading below
 # --- map-read WALL-proximity soft factor. Unlike the REMOVED channel factor, the wall penalty applies
@@ -960,9 +963,74 @@ def _momentum_action(base: TradeProposal, direction: Direction, ind: dict, tf0,
     return "decided", base
 
 
+def _regime_refine(base: TradeProposal, ind: dict, technical: TechnicalRead, tf0,
+                   regime_ai: bool, symbol: str) -> str | None:
+    """AI CLASSIFIES the ambiguous ('moderate') regime texture (emerging_trend / choppy_range /
+    transition + evidence + confidence); the DETERMINISTIC engine here maps the class to a regime the
+    rest of the pipeline understands. Returns the refined regime string ('trending' / 'ranging') to
+    ADOPT, or None to keep 'moderate' (transition / no AI / low confidence). The AI only labels — it
+    never picks direction/levels and never bypasses a downstream gate."""
+    if not regime_ai:
+        return None
+    from app.agents.regime_read import interpret_regime
+
+    tf = tf0.timeframe if tf0 else ""
+    read = interpret_regime(symbol, ind, technical, tf)
+    if read is None or read.confidence < _REGIME_AI_MIN_CONF:
+        return None
+    base.regime_read = {"category": read.category, "evidence": read.evidence,
+                        "confidence": round(read.confidence, 2)}
+    tag = f"[regime AI: {read.category} · {round(read.confidence * 100)}% — {read.evidence}]"
+    if read.category == "emerging_trend":
+        base.rationale = f"Moderate regime read as an EMERGING TREND — treating it as a trend. {tag}"
+        return "trending"
+    if read.category == "choppy_range":
+        base.rationale = f"Moderate regime read as CHOPPY RANGE — treating it as a range, not a trend. {tag}"
+        return "ranging"
+    # transition: leave the regime as 'moderate' (the trend-only gate / mild-trend handling stands).
+    base.rationale = f"Moderate regime read as a TRANSITION — no clear texture, standing pat. {tag}"
+    return None
+
+
+def _level_action(base: TradeProposal, direction: Direction, lvl: float, ind: dict,
+                  technical: TechnicalRead, tf0, priceaction_ai: bool, symbol: str) -> tuple[str, TradeProposal | None]:
+    """AI CLASSIFIES how price will resolve at a major opposing level (likely_reject / likely_break /
+    indecision + evidence + confidence); the DETERMINISTIC engine here maps the class to an action.
+    Returns ``(action, proposal)``:
+      - ``('decided', base)`` — wait at the level (reject / indecision): return it.
+      - ``('enter', None)``   — the AI reads the level as breaking: take the trade THROUGH it (fall through).
+      - ``('fallback', None)``— no AI / low confidence: keep the caller's fixed 'respect the level & wait'.
+    The AI only labels; it never chooses direction/levels and never bypasses the downstream gates."""
+    if not priceaction_ai:
+        return "fallback", None
+    from app.agents.priceaction_read import interpret_price_action
+
+    tf = tf0.timeframe if tf0 else ""
+    read = interpret_price_action(symbol, direction, lvl, ind, tf)
+    if read is None or read.confidence < _PA_AI_MIN_CONF:
+        return "fallback", None
+    base.priceaction_read = {"category": read.category, "evidence": read.evidence,
+                             "confidence": round(read.confidence, 2)}
+    tag = f"[price-action AI: {read.category} · {round(read.confidence * 100)}% — {read.evidence}]"
+    kind = "resistance" if direction == Direction.LONG else "support"
+    if read.category == "likely_break":
+        return "enter", None   # take the trade through the level; every downstream gate still applies
+    base.watch = True
+    verb = "rejecting off" if read.category == "likely_reject" else "undecided at"
+    base.rationale = (f"Respecting a higher-timeframe level: major {kind} ~{round(lvl, 6)} in the path and "
+                      f"price is {verb} it — waiting for a break or a cleaner pullback. {tag}")
+    return "decided", base
+
+
 _ST_BAND_MIN_RR = 1.5      # skip a signal whose structure target is closer than this
 _ST_BAND_TP_R = 2.0        # fallback target (R) when there's no clean opposing S/R level
-_ST_BAND_FRESH_FLIP = 3    # EARLY entry: only take the break within this many bars of a SuperTrend flip
+_ST_BAND_FRESH_LINE_ATR = 1.5  # EARLY entry, by PRICE not bars: take the break only while the close is
+#                            still within this many ATR of the SuperTrend LINE (the trend's trailing
+#                            anchor). A young move sits near its line (tight stop); a late/run-away move
+#                            has pulled far from it. Replaces the rigid "within N bars of the flip" rule —
+#                            a slow, controlled trend still qualifies after many bars if price is near the
+#                            line; a fast chase is still skipped.
+_ST_BAND_STRETCH_ATR = 2.0  # anti-chase: skip a breakout whose close is > this many ATR beyond value (EMA20)
 
 # --- RSI-Over: a simple mean-reversion strategy. RSI at an extreme => price is stretched and likely
 # to snap back; we take the reversal, but ONLY once the EMA10 confirms the turn (a close back through
@@ -971,6 +1039,21 @@ _RSI_OVER_OB = 72.0        # RSI at/above this = overbought -> look for a SHORT
 _RSI_OVER_OS = 28.0        # RSI at/below this = oversold  -> look for a LONG
 _RSI_OVER_TP_R = 1.5       # target = this many R (risk = entry-to-stop, stop just beyond the recent swing)
 _RSI_OVER_BUF_ATR = 0.2    # stop buffer beyond the recent swing high/low, as a fraction of ATR
+_RSI_OVER_STRONG_ADX = 30.0  # don't fade an overbought/oversold extreme when the IMMEDIATE higher TF
+#                              trends the same way this strongly (ADX>=this) — that's a strong runaway to
+#                              fade into (the BTC short into a 1h uptrend, ADX 54). Macro-TF opposition
+#                              already refuses at any strength; this adds the immediate-higher-TF guard.
+_RSI_AT_LEVEL_ATR = 0.6      # "at a level" = price within this many ATR of the opposing S/R (fade-at-level filter)
+
+
+def _nearest_fade_level(is_long: bool, price: float, tf0) -> float | None:
+    """The nearest opposing level to fade INTO: SUPPORT (for a long at an oversold low) or RESISTANCE
+    (for a short at an overbought high), from the entry-TF read. None when no level is available."""
+    if tf0 is None:
+        return None
+    levels = (tf0.support_levels if is_long else tf0.resistance_levels) or []
+    cand = [lv for lv in levels if lv]
+    return min(cand, key=lambda lv: abs(lv - price)) if cand else None
 
 
 def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) -> TradeProposal:
@@ -1002,13 +1085,32 @@ def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) 
                               f"SuperTrend ({'up' if st_dir > 0 else 'down'}).")
         return base
 
-    # EARLY entry only: require a FRESH SuperTrend flip (skip late mid-trend band-breaks, which
-    # backtested worst). bars_since_flip is None when the read couldn't compute it.
-    bsf = ind.get("supertrend_bars_since_flip")
-    if bsf is None or bsf > _ST_BAND_FRESH_FLIP:
-        base.rationale = (f"SuperTrend-band: {direction.value} signal but not a fresh flip "
-                          f"(bars since flip: {bsf}) — waiting for an early entry.")
+    # EARLY entry only, measured by PRICE not bars: take the break only while the close is still close to
+    # the SuperTrend LINE (the trend's trailing anchor). A young move sits near its line (a tight stop to
+    # it); a late / run-away move has pulled far from it (wide stop, exhausted). This lets a slow,
+    # controlled trend qualify even after many bars — while still skipping the late chase.
+    st_line = ind.get("supertrend")
+    if st_line is None or atr_v <= 0:
+        base.rationale = "SuperTrend-band: no trade — SuperTrend line / ATR unavailable for the early-entry check."
         return base
+    line_dist = abs(last - st_line) / atr_v
+    if line_dist > _ST_BAND_FRESH_LINE_ATR:
+        base.rationale = (f"SuperTrend-band: {direction.value} signal but the close is {line_dist:.1f}xATR "
+                          f"from the SuperTrend line ({round(st_line, 6)}) — too far into the move (late "
+                          f"entry / wide stop). Waiting for a break closer to the line.")
+        return base
+
+    # NOT-STRETCHED (anti-chase): even a fresh flip can SPIKE far past the band on the entry candle —
+    # buying that overshoot is where the give-back comes from. Skip if the close is more than
+    # _ST_BAND_STRETCH_ATR ATR beyond value (the EMA20 mid); wait for a closer re-entry.
+    ema_mid = ind.get("ema20")
+    if ema_mid and atr_v > 0:
+        stretch = (last - ema_mid) if is_long else (ema_mid - last)
+        if stretch > _ST_BAND_STRETCH_ATR * atr_v:
+            base.rationale = (f"SuperTrend-band: {direction.value} signal but the close is stretched "
+                              f"{stretch / atr_v:.1f}xATR beyond value (EMA20 {round(ema_mid, 6)}) — "
+                              f"not chasing an over-extended breakout.")
+            return base
 
     # Structure-based stop & target (support/resistance), with a beyond-the-wick buffer and ATR/2R
     # fallbacks when there's no clean level.
@@ -1045,12 +1147,14 @@ def _supertrend_band_decision(base: TradeProposal, ind: dict, tf0, symbol: str) 
     return base
 
 
-def _rsi_over_trigger(confirm: bool, macd: bool, rsi_div: bool,
-                      ema_ok: bool, macd_ok: bool, div_ok: bool, macd_kind: str) -> str | None:
+def _rsi_over_trigger(confirm: bool, macd: bool, rsi_div: bool, rej_candle: bool,
+                      ema_ok: bool, macd_ok: bool, div_ok: bool, rej_ok: bool,
+                      macd_kind: str) -> str | None:
     """Which confirmation(s) fired for an RSI-Over entry, as a label — or None if not confirmed yet.
     EMA10 is the STRONG confirm; MACD (cross/divergence) is the EARLY one; RSI divergence is the
-    exhaustion tell. With several enabled, the entry fires on EITHER (whichever confirms first)."""
-    if not confirm and not macd and not rsi_div:
+    exhaustion tell; a rejection candle is the price-action tell. With several enabled, the entry
+    fires on EITHER (whichever confirms first)."""
+    if not confirm and not macd and not rsi_div and not rej_candle:
         return "RSI extreme only"
     parts = []
     if confirm and ema_ok:
@@ -1059,17 +1163,26 @@ def _rsi_over_trigger(confirm: bool, macd: bool, rsi_div: bool,
         parts.append(f"MACD {macd_kind}")
     if rsi_div and div_ok:
         parts.append("RSI divergence")
+    if rej_candle and rej_ok:
+        parts.append("rejection (candle/trap)")
     return " + ".join(parts) if parts else None
 
 
 def _rsi_over_decision(base: TradeProposal, ind: dict, tf0, symbol: str,
                        confirm: bool = True, macd: bool = False, rsi_div: bool = False,
-                       trend_filter: bool = True, macro: str = "sideways") -> TradeProposal:
+                       rej_candle: bool = False, at_level: bool = False, pa_confirm: bool = False,
+                       trend_filter: bool = True, macro: str = "sideways",
+                       htf: str = "sideways", htf_name: str = "higher-TF") -> TradeProposal:
     """Mechanical RSI-extreme mean-reversion. RSI >= _RSI_OVER_OB (overbought) -> SHORT; RSI <=
     _RSI_OVER_OS (oversold) -> LONG. The entry needs a confirmation of the turn (OR of the enabled):
       confirm (EMA10, default) = a close back through EMA10 — the STRONG, later confirmation;
-      macd                     = a MACD signal-line cross OR MACD divergence — the EARLY entry;
-      rsi_div                  = an RSI divergence (price extreme, momentum not = the exhaustion tell).
+      macd                     = a fresh MACD signal-line CROSS on the last bar (a real intersection) — the EARLY entry;
+      rsi_div                  = an RSI divergence (price extreme, momentum not = the exhaustion tell);
+      rej_candle               = a REJECTION at the level — a single-bar candle (engulfing / long wick)
+                                 OR a multi-bar FAILED BREAK / trap (swept beyond a prior level in the
+                                 last few bars then closed back inside) — the price-action tell.
+    ``at_level`` (a FILTER, not a confirm): only fade when the extreme is AT a key opposing level
+    (resistance for a short / support for a long) — a pro fades INTO a wall, not in open space.
     ``trend_filter`` (default) REFUSES a fade AGAINST a clear higher-timeframe trend (``macro``) — the
     #1 protection against fading a runaway. Stop sits just beyond the recent swing; target _RSI_OVER_TP_R
     x the risk. The deterministic Risk Manager still sizes + gates every signal."""
@@ -1079,9 +1192,10 @@ def _rsi_over_decision(base: TradeProposal, ind: dict, tf0, symbol: str,
     last = ind.get("last_close")
     atr_v = ind.get("atr14") or 0.0
     rec_hi, rec_lo = ind.get("recent_high"), ind.get("recent_low")
-    m_cross = ind.get("macd_cross") or 0.0
-    m_div_bull, m_div_bear = ind.get("macd_div_bull") or 0.0, ind.get("macd_div_bear") or 0.0
+    m_cross = ind.get("macd_cross") or 0.0   # +1/-1 = a fresh signal-line cross on the last bar (0 = none)
     r_div_bull, r_div_bear = ind.get("div_bull") or 0.0, ind.get("div_bear") or 0.0  # RSI divergence
+    rej_bull, rej_bear = ind.get("rej_bull") or 0.0, ind.get("rej_bear") or 0.0      # reversal candle
+    fb_bull, fb_bear = ind.get("fbreak_bull") or 0.0, ind.get("fbreak_bear") or 0.0  # failed break / trap
     if r is None or last is None or (confirm and ema10 is None):
         base.rationale = ("RSI-Over: not enough data (need RSI14"
                           + (", EMA10" if confirm else "") + ", last close).")
@@ -1091,36 +1205,74 @@ def _rsi_over_decision(base: TradeProposal, ind: dict, tf0, symbol: str,
     if r >= _RSI_OVER_OB:
         direction, is_long, zone, opp = Direction.SHORT, False, "overbought", "up"
         ema_ok = ema10 is not None and last < ema10
-        macd_ok = m_cross == -1.0 or m_div_bear == 1.0
-        macd_kind = "cross" if m_cross == -1.0 else ("divergence" if m_div_bear == 1.0 else "")
+        macd_ok = m_cross == -1.0     # a GENUINE bearish signal-line cross on the last bar only
+        macd_kind = "cross"
         div_ok = r_div_bear == 1.0
+        rej_ok = rej_bear == 1.0 or fb_bear == 1.0   # a rejection candle OR a failed upside break
     elif r <= _RSI_OVER_OS:
         direction, is_long, zone, opp = Direction.LONG, True, "oversold", "down"
         ema_ok = ema10 is not None and last > ema10
-        macd_ok = m_cross == 1.0 or m_div_bull == 1.0
-        macd_kind = "cross" if m_cross == 1.0 else ("divergence" if m_div_bull == 1.0 else "")
+        macd_ok = m_cross == 1.0      # a GENUINE bullish signal-line cross on the last bar only
+        macd_kind = "cross"
         div_ok = r_div_bull == 1.0
+        rej_ok = rej_bull == 1.0 or fb_bull == 1.0   # a rejection candle OR a failed downside break
     else:
         base.rationale = (f"RSI-Over: RSI {r:.0f} is not in an extreme zone "
                           f"(need >= {_RSI_OVER_OB:.0f} or <= {_RSI_OVER_OS:.0f}).")
         return base
 
-    # --- #1 TREND FILTER: don't fade AGAINST a clear higher-timeframe trend (a fade into a runaway
-    # is how RSI mean-reversion blows up). Only fade WITH or neutral to the higher TF. ---
-    if trend_filter and macro == opp:
-        base.rationale = (f"RSI-Over: RSI {r:.0f} {zone}, but NOT fading against the higher-timeframe "
-                          f"{macro}trend — a {direction.value} here fights the trend (a pullback in a "
-                          f"trend, not a top/bottom). Standing aside.")
+    # --- #1 TREND FILTER: don't fade AGAINST a clear higher-timeframe trend (a fade into a runaway is
+    # how RSI mean-reversion blows up). Refuse when the MACRO (highest) TF opposes at ANY strength, OR
+    # when the IMMEDIATE higher TF opposes AND the move is STRONG (ADX >= _RSI_OVER_STRONG_ADX) — the
+    # "don't short a strong 1h uptrend" case (the BTC loss: 1h up, ADX 54). A weak/choppy higher TF is
+    # still fadeable (that's where the mean-reversion edge lives). ---
+    adx = ind.get("adx")
+    strong_htf_against = htf == opp and adx is not None and adx >= _RSI_OVER_STRONG_ADX
+    if trend_filter and (macro == opp or strong_htf_against):
+        which = (f"the higher-timeframe {macro}trend" if macro == opp
+                 else f"a STRONG {htf}trend on the {htf_name} (ADX {adx:.0f})")
+        base.rationale = (f"RSI-Over: RSI {r:.0f} {zone}, but NOT fading against {which} — a "
+                          f"{direction.value} here fights the trend (a pullback in a trend, not a "
+                          f"top/bottom). Standing aside.")
         return base
 
+    # --- LOCATION FILTER (at_level): only fade when price is AT a key opposing level — resistance
+    # for a short / support for a long. A pro fades INTO a wall, not in open space. ---
+    if at_level:
+        lvl = _nearest_fade_level(is_long, last, tf0)
+        if lvl is None or atr_v <= 0 or abs(lvl - last) > _RSI_AT_LEVEL_ATR * atr_v:
+            wall = "support" if is_long else "resistance"
+            base.rationale = (f"RSI-Over: RSI {r:.0f} {zone} but NOT at a key {wall} "
+                              f"(fade-at-level filter on) — skipping a fade in open space.")
+            return base
+
     # --- confirmation (OR of the enabled sources) ---
-    trig = _rsi_over_trigger(confirm, macd, rsi_div, ema_ok, macd_ok, div_ok, macd_kind)
+    trig = _rsi_over_trigger(confirm, macd, rsi_div, rej_candle, ema_ok, macd_ok, div_ok, rej_ok,
+                             macd_kind)
     if trig is None:
         waits = [w for w, on in (("EMA10 close", confirm), ("a MACD cross/divergence", macd),
-                                 ("an RSI divergence", rsi_div)) if on]
+                                 ("an RSI divergence", rsi_div),
+                                 ("a rejection candle", rej_candle)) if on]
         base.rationale = (f"RSI-Over: RSI {r:.0f} {zone} but the turn has not confirmed yet "
                           f"(waiting for {' or '.join(waits)}).")
         return base
+
+    # --- AI LEVEL CHECK (pa_confirm): before fading, ask the price-action classifier whether the level
+    # is HOLDING (reject → fade it) or GIVING WAY (break → don't fade a breaking level). Bounded + evidence-
+    # bearing; the mechanical rules still decide. Fails OPEN (no LLM / low-confidence → the fade stands). ---
+    if pa_confirm:
+        from app.agents.priceaction_read import interpret_price_action
+        lvl_chk = _nearest_fade_level(is_long, last, tf0)
+        if lvl_chk is not None:
+            # Frame the faded level as the BARRIER (opposite side to the fade) so the snapshot reads right.
+            pa = interpret_price_action(symbol, "short" if is_long else "long", lvl_chk, ind,
+                                        tf0.timeframe if tf0 else "")
+            if pa is not None and pa.category == "likely_break" and pa.confidence >= _PA_AI_MIN_CONF:
+                base.rationale = (f"RSI-Over {direction.value.upper()}: RSI {r:.0f} {zone} at "
+                                  f"{round(lvl_chk, 6)}, but the AI reads the level as BREAKING "
+                                  f"(likely_break {round(pa.confidence * 100)}% — {pa.evidence}) — not "
+                                  "fading a level that's giving way. Standing aside.")
+                return base
 
     # --- stop just beyond the recent swing; target _RSI_OVER_TP_R x the risk ---
     buf = _RSI_OVER_BUF_ATR * atr_v
@@ -1156,7 +1308,9 @@ def _deterministic_decision(
     technical: TechnicalRead, fundamental: FundamentalRead, now: datetime,
     trend_only: bool = False, st_band: bool = False, rsi_over: bool = False,
     rsi_confirm: bool = True, rsi_macd: bool = False, rsi_div: bool = False, rsi_trend_filter: bool = True,
+    rsi_rej: bool = False, rsi_at_level: bool = False, rsi_pa: bool = False,
     disable: frozenset[str] = frozenset(), momentum_ai: bool = False,
+    regime_ai: bool = False, priceaction_ai: bool = False,
 ) -> TradeProposal:
     # ``disable`` is a BACKTEST-ONLY filter-ablation switch (the live path never passes it): naming a
     # gate ("mtf", "momentum", "structure", "volatility", "divergence", "minrr", "rsi_extreme") skips it, so the
@@ -1198,7 +1352,20 @@ def _deterministic_decision(
     # and (default) filtered against fading a strong higher-timeframe trend.
     if rsi_over:
         return _rsi_over_decision(base, ind, tf0, symbol, confirm=rsi_confirm, macd=rsi_macd,
-                                  rsi_div=rsi_div, trend_filter=rsi_trend_filter, macro=macro)
+                                  rsi_div=rsi_div, rej_candle=rsi_rej, at_level=rsi_at_level,
+                                  pa_confirm=rsi_pa, trend_filter=rsi_trend_filter, macro=macro,
+                                  htf=htf_trend, htf_name=htf_name)
+    # AI regime-texture read at the AMBIGUOUS boundary only ('moderate' ADX): the AI classifies whether
+    # this grey zone is an emerging trend (promote -> trade it), choppy range (demote -> fade/stand
+    # aside), or a transition (leave as-is). Off / low-confidence / transition -> the deterministic
+    # regime stands. It never picks direction — every gate below still runs.
+    if regime == "moderate" and regime_ai:
+        refined = _regime_refine(base, ind, technical, tf0, regime_ai, symbol)
+        if refined:
+            regime = refined
+            policy = regime_policy(regime)
+            base.regime = regime
+            base.strategy = policy["strategy"]
     # Trend-only mode: only trade a CLEAR trend (ADX >= 25 -> "trending"); stand aside in moderate /
     # ranging / volatile. Backtests show the trend regime is the edge while moderate+ranging are net
     # drags (same return, ~40% more drawdown when included). The live default comes from the setting.
@@ -1277,11 +1444,17 @@ def _deterministic_decision(
             # action == 'enter' (healthy pullback AT value) -> fall through to the normal market entry
         lvl = _opposing_big_tf_level(Direction.LONG, px, atr_v, big_levels)
         if lvl is not None and "htf_level" not in disable:
-            base.watch = True
-            base.rationale = (f"Respecting a higher-timeframe level: major resistance ~{round(lvl, 6)} "
-                              f"just overhead (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
-                              "cleaner pullback before buying into it.")
-            return base
+            action, decided = _level_action(base, Direction.LONG, lvl, ind, technical, tf0,
+                                             priceaction_ai, symbol)
+            if action == "decided":
+                return decided
+            if action == "fallback":
+                base.watch = True
+                base.rationale = (f"Respecting a higher-timeframe level: major resistance ~{round(lvl, 6)} "
+                                  f"just overhead (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
+                                  "cleaner pullback before buying into it.")
+                return base
+            # action == "enter" (AI: likely_break) -> take the trade THROUGH the level (fall through)
         direction = Direction.LONG
     elif trend == "down":
         # Higher-TF UP + entry-TF dipped down = a dip in the bigger uptrend. Try to BUY the dip (arm
@@ -1316,11 +1489,17 @@ def _deterministic_decision(
             # action == 'enter' (healthy pullback AT value) -> fall through to the normal market entry
         lvl = _opposing_big_tf_level(Direction.SHORT, px, atr_v, big_levels)
         if lvl is not None and "htf_level" not in disable:
-            base.watch = True
-            base.rationale = (f"Respecting a higher-timeframe level: major support ~{round(lvl, 6)} "
-                              f"just below (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
-                              "cleaner pullback before selling into it.")
-            return base
+            action, decided = _level_action(base, Direction.SHORT, lvl, ind, technical, tf0,
+                                             priceaction_ai, symbol)
+            if action == "decided":
+                return decided
+            if action == "fallback":
+                base.watch = True
+                base.rationale = (f"Respecting a higher-timeframe level: major support ~{round(lvl, 6)} "
+                                  f"just below (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
+                                  "cleaner pullback before selling into it.")
+                return base
+            # action == "enter" (AI: likely_break) -> take the trade THROUGH the level (fall through)
         direction = Direction.SHORT
     else:
         base.rationale = "No clear trend (EMAs sideways) — sitting out."
@@ -1715,24 +1894,29 @@ def _deterministic_decision(
         return base
 
     # FLAT-MOMENTUM guard: a pullback bought AT value with NO momentum behind it (entry-TF MACD inside
-    # the noise band) AND the higher-TF momentum pushing AGAINST it is a coin flip that gets run over —
-    # the USDCHF loss (MACD hist ~0 + cross-TF conflict, a "value" long that kept falling). Requiring
-    # BOTH keeps clean trend pullbacks (flat MACD but the higher TF agrees) taking the market entry, so
-    # it doesn't touch the winning core. When it fires, ARM a resumption so it enters only once momentum
-    # confirms. Value entries only (chases/breakouts handled elsewhere); toggle "flat_momentum".
+    # the noise band) is a coin flip that gets run over. It fires in two no-conviction cases:
+    #   (a) CROSS-TF conflict — the higher-TF momentum pushes AGAINST it (the USDCHF loss); or
+    #   (b) WEAK TREND — the trend is only marginal (ADX < _FLAT_MOM_WEAK_ADX), so a flat MACD means
+    #       there's simply no push at all (the AUDNZD short: ADX 24 + MACD ~0, stopped in minutes).
+    # A flat MACD in a STRONG, aligned trend still takes the market entry (that's the winning core). When
+    # it fires, ARM a resumption so it enters only once momentum confirms. Value entries only (chases/
+    # breakouts handled elsewhere); toggle "flat_momentum".
     flat_mom = macd_hist is not None and atr_v and atr_v > 0 and abs(macd_hist) < _MOM_ATR_FRAC * atr_v
     cross_tf_conflict = (macro_conflict and macro_tf is not None and tf0 is not None
                          and macro_tf.timeframe != tf0.timeframe)   # a genuinely HIGHER TF opposes
-    if at_value and flat_mom and cross_tf_conflict and "flat_momentum" not in disable:
+    weak_trend = adx_v is not None and adx_v < _FLAT_MOM_WEAK_ADX   # barely trending -> flat = no push
+    if at_value and flat_mom and (cross_tf_conflict or weak_trend) and "flat_momentum" not in disable:
         base.watch = True
         px2 = ind.get("last_close") or entry
         resume = _conditional_resumption(direction, px2, ind, atr_v, _key_levels(technical, tf0, px2), confidence)
         base.conditional = resume or base.conditional
         armed_note = ("Armed a resumption to enter only when momentum confirms."
                       if base.conditional is not None else "Waiting for momentum to confirm.")
+        weak_txt = (f", and the trend is weak (ADX {adx_v:.0f})" if (weak_trend and not cross_tf_conflict)
+                    else "")
         base.rationale = (
             f"{direction.value.upper()} at value is valid, but momentum is FLAT (MACD hist {macd_hist}, "
-            f"within the noise band) — a pullback with nothing pushing it gets run over. {armed_note}"
+            f"within the noise band){weak_txt} — a pullback with nothing pushing it gets run over. {armed_note}"
         )
         return base
 
@@ -1810,9 +1994,11 @@ def run_orchestrator(
     technical: TechnicalRead, fundamental: FundamentalRead,
     now: datetime | None = None, use_llm: bool = True, trend_only: bool = False,
     st_band: bool = False, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
-    rsi_div: bool = False, rsi_trend_filter: bool = True,
+    rsi_div: bool = False, rsi_trend_filter: bool = True, rsi_rej: bool = False, rsi_at_level: bool = False,
+    rsi_pa: bool = False,
     disable: frozenset[str] = frozenset(),
     ai_review: bool = True, momentum_ai: bool = False,
+    regime_ai: bool = False, priceaction_ai: bool = False,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -1831,8 +2017,10 @@ def run_orchestrator(
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
                                        trend_only=trend_only, st_band=st_band, rsi_over=rsi_over,
                                        rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
-                                       rsi_trend_filter=rsi_trend_filter, disable=disable,
-                                       momentum_ai=momentum_ai)
+                                       rsi_trend_filter=rsi_trend_filter, rsi_rej=rsi_rej,
+                                       rsi_at_level=rsi_at_level, rsi_pa=rsi_pa, disable=disable,
+                                       momentum_ai=momentum_ai, regime_ai=regime_ai,
+                                       priceaction_ai=priceaction_ai)
 
     # SuperTrend-band and RSI-Over are purely mechanical strategies — no LLM confirm/veto over them.
     # ai_review=False takes the AI out of the trade decision entirely (the deterministic engine +

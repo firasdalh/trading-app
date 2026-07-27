@@ -55,10 +55,24 @@ _STRUCT_TRAIL_BUFFER_ATR = 0.2  # structural trail sits this far beyond the swin
 _PROTECT_ATR_MULT = 1.5     # protective stop for a naked position = 1.5 ATR from price
 
 # --- partial profit-taking (scale out) ---
-_PARTIAL_R = 1.5            # at +1.5R, book partial profit and de-risk the rest to breakeven
-_PARTIAL_FRACTION = 0.5     # take half off
+_PARTIAL_R = 1.5            # advice-text milestone + the FIRST-third laddered book (BE already at +1R)
+_PARTIAL_FRACTION = 0.5     # fallback: take half off (a position with no planned size on record)
+# LADDERED tranching (a pro pyramids OUT): book ~a third at +1.5R, another third at +3R, trail the
+# runner. A tranche can also be pulled EARLY when price banks into a wall with fading momentum (below).
+_LADDER_R1 = 1.5           # book the first third here
+_LADDER_R2 = 3.0           # book the second third here
+_LADDER_FRACTION = 1.0 / 3.0  # each tranche ~ a third of the ORIGINAL size
+# BANK INTO A WALL: sell into strength — take the next tranche early when a real winner (>= this R)
+# reaches a strong opposing S/R level and momentum is fading into it.
+_WALL_MIN_R = 1.0
+_WALL_NEAR_ATR = 0.6        # price within this many ATR of the opposing level = "at the wall"
+_RSI_OB_EXIT = 70.0         # RSI overbought (long) rolling back = fading into the wall
+_RSI_OS_EXIT = 30.0         # RSI oversold (short) rolling back = fading into the wall
 _RUN_R = 1.8               # near the ~2R target in a strong intact trend, let the winner RUN:
 #                            drop the fixed take-profit and ride a trailing stop instead of capping
+# TIME-STOP: only close a stagnant trade that is still roughly FLAT (a winner is managed by the trail,
+# a loser by its stop). "Flat" = the trade hasn't moved more than this many R either way.
+_TIME_STOP_FLAT_R = 0.5
 _PARTIAL_DONE: set[str] = set()  # symbols already scaled this position (reset when it goes flat)
 
 # --- hysteresis + cooldown so auto-execute doesn't thrash ---
@@ -101,6 +115,23 @@ def _plan_proposal(session: Session, symbol: str, direction: str | None = None):
             if r.status == ProposalStatus.EXECUTED.value and r.direction == direction:
                 return r
     return same[0] if same else None
+
+
+def _position_opened_at(session: Session, symbol: str, direction: str | None = None) -> datetime | None:
+    """When the app-tracked OPEN position for this symbol(+direction) was opened — for the time-stop.
+    Returns None for a trade opened directly in the terminal (no app row to measure the hold from)."""
+    from app.models.enums import PositionStatus
+    from app.risk.service import _norm_symbol
+
+    norm = _norm_symbol(symbol)
+    rows = session.scalars(
+        select(Position).where(Position.status == PositionStatus.OPEN.value)
+        .order_by(Position.opened_at.desc())
+    ).all()
+    for r in rows:
+        if _norm_symbol(r.symbol) == norm and (direction is None or r.direction == direction):
+            return _aware(r.opened_at) if r.opened_at else None
+    return None
 
 
 def _planned_timeframe(session: Session, symbol: str, direction: str | None = None) -> str:
@@ -163,16 +194,27 @@ def _position_context(session: Session, p) -> dict | None:
         prim = next((x for x in tech.timeframes if x.timeframe == tf), tech.timeframes[0])
         macro_tf = _macro_tf_label(tech, tf)
         ind = prim.indicators
+        # Nearest opposing S/R across ALL timeframes (for the "bank into a wall" exit): the nearest
+        # resistance ABOVE for a long / support BELOW for a short, tagged with the TF it came from.
+        px = ind.get("last_close")
+        near_res = near_sup = None
+        if px:
+            res_above = [(r, t.timeframe) for t in tech.timeframes for r in (t.resistance_levels or []) if r and r > px]
+            sup_below = [(s, t.timeframe) for t in tech.timeframes for s in (t.support_levels or []) if s and s < px]
+            near_res = min(res_above, key=lambda x: x[0]) if res_above else None
+            near_sup = max(sup_below, key=lambda x: x[0]) if sup_below else None
         # Carry the same chart-reading signals the entry engine uses, so EXIT management is as
         # senior-trader as entry: market structure, change-of-character, the latest swing levels
-        # (for structural trailing), and the regime (for how aggressively to manage).
+        # (for structural trailing), the regime, RSI (for exhaustion), and the nearest wall.
         return {"tf": tf, "trend": _trend_from_indicators(ind, prim.trend),
                 "macro": _macro_trend(tech), "macro_tf": macro_tf,
                 "macd_hist": ind.get("macd_hist"), "atr": ind.get("atr14"),
                 "last": ind.get("last_close"),
+                "rsi": ind.get("rsi14"), "rsi_prev": ind.get("rsi14_prev"),
                 "regime": _regime(ind), "structure": _structure_label(ind),
                 "choch": bool(ind.get("choch")),
                 "swing_high": ind.get("swing_high"), "swing_low": ind.get("swing_low"),
+                "near_res": near_res, "near_sup": near_sup,
                 "_tech": tech}   # the full read, so the AI thesis re-check can reuse it (no refetch)
     except Exception:  # noqa: BLE001 - the advisor must never crash the scan/endpoint
         return None
@@ -306,53 +348,30 @@ def _base_advice(p, ev_label, ev_mins, winning, has_stop) -> tuple[str, str, str
             f"their job on this {side}.")
 
 
-# AI scenario read per symbol, cached to keep the advisor cheap (the read makes an LLM call). The
-# advisor may tick every few minutes but a pair's forward scenario doesn't change that fast.
-_SCENARIO_CACHE: dict[str, tuple[datetime, dict]] = {}
-_SCENARIO_TTL_MIN = 20
-
-
-def _cached_scenarios(session: Session, symbol: str, asset_class) -> dict | None:
-    now = datetime.now(timezone.utc)
-    hit = _SCENARIO_CACHE.get(symbol.upper())
-    if hit and (now - hit[0]).total_seconds() < _SCENARIO_TTL_MIN * 60:
-        return hit[1]
-    try:
-        from app.agents.scenarios import ai_scenarios
-        read = ai_scenarios(session, symbol, asset_class)
-    except Exception:  # noqa: BLE001 - scenario read is best-effort; keep the last good one
-        return hit[1] if hit else None
-    if read:
-        _SCENARIO_CACHE[symbol.upper()] = (now, read)
-    return read
-
-
-def _scenario_awareness(session: Session, p) -> tuple[str, str] | None:
-    """Judge the open position against the AI's forward SCENARIO read: is it following the plan, is a
-    pullback expected here (don't panic), or has the read turned against it? Returns (note, lean) with
-    lean in {'with','against','neutral'}, or None if there's no read."""
-    from app.models.enums import AssetClass
-
-    try:
-        read = _cached_scenarios(session, p.symbol, AssetClass(p.asset_class))
-    except Exception:  # noqa: BLE001
+def _scenario_awareness(p, ctx: dict | None) -> tuple[str, str] | None:
+    """Judge the open position against the DETERMINISTIC engine's OWN read — the plan it decided on —
+    NOT an AI scenario. The deterministic engine is the decider, so the advisor checks the position
+    against that engine's bigger-picture (macro / higher-timeframe) trend: is the trade still following
+    the plan (bigger trend still with it -> a pullback here is expected, don't panic), or has the read
+    turned against it? Reuses the already-computed ``ctx`` (no refetch, no LLM). Returns (note, lean)
+    with lean in {'with','against','neutral'}, or None when there's no context."""
+    if not ctx:
         return None
-    if not read or not read.get("scenarios"):
-        return None
-    primary = read["scenarios"][0]
-    prob, label = primary.get("prob"), (primary.get("label") or "").strip()
-    path = (primary.get("path") or read.get("headline") or "").strip()
-    bias = (read.get("overall_bias") or "").lower()
-    inval = read.get("invalidation")
+    macro = ctx.get("macro")
+    macro_tf = ctx.get("macro_tf") or ctx.get("tf") or "higher-timeframe"
     long_ = p.direction == "long"
-    if ("bull" in bias and long_) or ("bear" in bias and not long_):
-        lean, lean_txt = "with", f"On plan — the AI's read still favours your {p.direction}; a pullback here is expected, not a failure."
-    elif ("bear" in bias and long_) or ("bull" in bias and not long_):
-        lean, lean_txt = "against", f"Heads-up — the AI's forward read now leans AGAINST your {p.direction}."
+    inval = ctx.get("swing_low") if long_ else ctx.get("swing_high")   # the swing the trade is riding
+    if (macro == "up" and long_) or (macro == "down" and not long_):
+        lean, lean_txt = "with", (f"on plan — the deterministic read on the bigger {macro_tf} chart still "
+                                  f"favours your {p.direction}, so a pullback here is expected, not a failure.")
+    elif (macro == "down" and long_) or (macro == "up" and not long_):
+        lean, lean_txt = "against", (f"heads-up — the bigger {macro_tf} chart's deterministic trend now "
+                                     f"leans AGAINST your {p.direction}.")
     else:
-        lean, lean_txt = "neutral", "The AI's forward read is mixed here."
-    inval_txt = f" Invalidation to watch: {inval}." if inval else ""
-    note = f"AI scenario ({prob}% {label}): {path} {lean_txt}{inval_txt}"
+        lean, lean_txt = "neutral", f"the bigger {macro_tf} chart reads mixed here."
+    inval_txt = (f" Structure to watch: the {'swing low' if long_ else 'swing high'} at {round(inval, 6)}."
+                 if inval else "")
+    note = f"Plan check ({macro_tf} trend {macro or 'flat'}): {lean_txt}{inval_txt}"
     return note, lean
 
 
@@ -429,26 +448,27 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
                     thesis = {**thesis, "note": thesis["note"] + f" The AI agrees the thesis is slipping — {reason}"}
                 elif ok and thesis["label"] == "intact":
                     thesis = {**thesis, "note": thesis["note"] + " The AI re-check still backs this trade."}
-        # SCENARIO awareness: fold in the AI two-scenario read — are we following the plan, is a
-        # pullback expected (don't panic), or has the read turned against the position? Like the AI
-        # thesis review, it can ESCALATE at most to 'weakening' (tighten the stop) — never auto-close.
+        # PLAN awareness: fold in the DETERMINISTIC engine's own read (the plan it decided on) — are we
+        # following the plan, is a pullback expected (don't panic), or has the bigger-picture read turned
+        # against the position? No AI. It can ESCALATE at most to 'weakening' (tighten the stop) — never
+        # auto-close.
         scen_note: str | None = None
-        scen = _scenario_awareness(session, p)
+        scen = _scenario_awareness(p, ctx)
         if scen is not None:
             scen_note, lean = scen
             if lean == "against" and thesis is not None and thesis["label"] == "intact":
                 thesis = {"label": "weakening",
-                          "note": ("Why: the AI's forward scenarios now lean against this trade — "
-                                   "consider tightening your stop or trimming.")}
+                          "note": ("Why: the bigger-picture deterministic read now leans against this "
+                                   "trade — consider tightening your stop or trimming.")}
         r_mult = _r_multiple(session, p, ctx)
         thesis_label = thesis["label"] if thesis else "unknown"
-        # Scale-out suggestion (Mode A): once a winner reaches the milestone, a pro books partial
-        # profit and trails the rest. (The auto-advisor does this itself when enabled.)
-        if (r_mult is not None and r_mult >= _PARTIAL_R
+        # Scale-out suggestion (Mode A): a pro pyramids OUT — bank a third at +1.5R, another third near
+        # +3R (or earlier into a wall), and trail the runner. (The auto-advisor does this when enabled.)
+        if (r_mult is not None and r_mult >= _LADDER_R1
                 and not _already_scaled(session, p.symbol, p.qty, p.direction)):
-            detail = (f"{detail} You're past +{r_mult:.1f}x your risk — consider banking about "
-                      f"{int(_PARTIAL_FRACTION * 100)}% of the position now and trailing the rest to "
-                      "let it run.")
+            detail = (f"{detail} You're past +{r_mult:.1f}x your risk — a pro would bank about a third "
+                      f"now (and another third near +{_LADDER_R2:.0f}R, or earlier if price stalls at a "
+                      "level), trailing the runner to let it work.")
             if severity == "info":
                 severity = "warn"
         if thesis is not None:
@@ -542,6 +562,28 @@ def _already_scaled(session: Session, symbol: str, qty: float | None, direction:
     return False
 
 
+def _scaled_tranche(session: Session, symbol: str, qty: float | None, direction: str | None) -> tuple[int, bool]:
+    """How many laddered tranches have already been booked (0/1/2) + whether a planned size is on
+    record. DERIVED from the live remaining size vs plan so it survives restarts and re-entries:
+    ~full = 0 booked, ~2/3 left = 1 booked, ~1/3 left = 2 booked (done). With no plan on record (a
+    terminal-opened position) it can't ladder — returns (0/2, False) and the caller falls back to a
+    single 50% partial gated by the in-memory ``_PARTIAL_DONE`` flag."""
+    if symbol in _PARTIAL_DONE:
+        return 2, False              # already scaled (single-partial fallback) / min-lot: no more
+    try:
+        row = _plan_proposal(session, symbol, direction)
+        if not row or not row.approved_qty or qty is None:
+            return 0, False
+        frac = qty / row.approved_qty
+        if frac <= 0.55:
+            return 2, True           # ~a third left -> both tranches booked
+        if frac <= 0.90:
+            return 1, True           # ~two thirds left -> one tranche booked
+        return 0, True               # ~full size -> none booked yet
+    except Exception:  # noqa: BLE001
+        return 0, False
+
+
 def _trail_stop(direction: str, last: float, atr: float, ctx: dict, regime: str) -> tuple[float, str]:
     """Where to trail the stop. In a TRENDING regime, trail behind the last swing (structure) to
     give the move room — like a trend trader riding it; otherwise (volatile/ranging/moderate) use a
@@ -567,14 +609,16 @@ def _structure_stop(direction: str, ctx: dict, atr: float | None) -> float | Non
 
 
 def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
-                   already_scaled: bool = False) -> dict | None:
+                   tranche: int = 0, has_plan: bool = True,
+                   opened_at: datetime | None = None, max_hold_hours: float = 0.0) -> dict | None:
     """The bounded, deterministic set of actions the advisor may take autonomously — only
     highest-confidence, RISK-REDUCING moves: close an invalidated trade, attach a protective
-    stop, scale out partial profit, lock to breakeven, or trail. It never opens, sizes up, flips,
-    or loosens a stop.
+    stop, LADDER out partial profit (a third at +1.5R, a third at +3R, or early into a wall), lock
+    to breakeven, or trail. It never opens, sizes up, flips, or loosens a stop.
 
     Regime-aware: a clean trend gets room (trail behind structure, normal R thresholds); a
-    volatile/ranging tape banks sooner (tighter ATR trail, lower breakeven/trail R)."""
+    volatile/ranging tape banks sooner. ``tranche`` = tranches already booked (0/1/2); ``has_plan``
+    = a planned size is on record (so we can ladder; else a single 50% fallback)."""
     if a.thesis == "invalidated":
         return {"action": "close", "kind": "close",
                 "reason": "thesis invalidated — the trend has flipped against the position"}
@@ -584,15 +628,57 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
     d = p.direction
     regime = (ctx or {}).get("regime") or "moderate"
 
-    # 0) Scale out: at the profit milestone, book partial profit ONCE and de-risk the rest. Done
-    # before the trail/breakeven below, so we take money off the table first. The executor then
-    # also moves the remainder's stop to breakeven.
-    if plan_risk and last and atr and not already_scaled:
-        profit0 = (last - p.entry_price) if d == "long" else (p.entry_price - last)
-        if profit0 / plan_risk >= _PARTIAL_R:
-            return {"action": "take_partial", "kind": "partial", "fraction": _PARTIAL_FRACTION,
-                    "reason": (f"+{profit0 / plan_risk:.1f}R — scaling out "
-                               f"{int(_PARTIAL_FRACTION * 100)}% and moving the rest to breakeven")}
+    # Time-stop: a trade held past the max hold that's STILL roughly flat (neither target nor stop has
+    # resolved it) is dead money tying up the exposure slot — close it. Only when we know the open time
+    # AND a risk reference AND price; a winner (past +flat R) rides the trail, a loser its stop.
+    if max_hold_hours and max_hold_hours > 0 and opened_at is not None and plan_risk and last:
+        held_h = (datetime.now(timezone.utc) - _aware(opened_at)).total_seconds() / 3600.0
+        if held_h >= max_hold_hours:
+            profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
+            r = profit / plan_risk
+            if abs(r) < _TIME_STOP_FLAT_R:
+                return {"action": "close", "kind": "time_stop",
+                        "reason": (f"held {held_h:.0f}h and still flat ({r:+.1f}R) — closing the "
+                                   "stagnant trade to free the slot")}
+
+    # 0) LADDERED scale-out — book ~a third at its R milestone, OR early when price banks into a strong
+    # opposing level with fading momentum (sell into strength), whichever comes first. Done before the
+    # trail/breakeven below (take money off the table first); the executor then de-risks the runner.
+    if plan_risk and last and atr and tranche < 2:
+        profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
+        r = profit / plan_risk
+        r_trigger = _LADDER_R1 if tranche == 0 else _LADDER_R2
+        # "At a wall, momentum fading" — the pro's early bank.
+        wall = (ctx or {}).get("near_res") if d == "long" else (ctx or {}).get("near_sup")
+        wall_note = ""
+        at_wall = False
+        if wall is not None and r >= _WALL_MIN_R:
+            wall_px, wall_tf = wall
+            if abs(wall_px - last) <= _WALL_NEAR_ATR * atr:
+                mh, rsi, rsi_prev = (ctx or {}).get("macd_hist"), (ctx or {}).get("rsi"), (ctx or {}).get("rsi_prev")
+                mom_fading = (mh is not None and ((d == "long" and mh <= 0) or (d == "short" and mh >= 0))) or (
+                    rsi is not None and rsi_prev is not None and (
+                        (d == "long" and rsi >= _RSI_OB_EXIT and rsi < rsi_prev)
+                        or (d == "short" and rsi <= _RSI_OS_EXIT and rsi > rsi_prev)))
+                if mom_fading:
+                    at_wall = True
+                    kind_txt = "resistance" if d == "long" else "support"
+                    rsi_txt = f", RSI {rsi:.0f} rolling over" if rsi is not None else ", momentum fading"
+                    wall_note = f" into {wall_tf.upper()} {kind_txt} {round(wall_px, 5)}{rsi_txt}"
+        if r >= r_trigger or at_wall:
+            # Fraction of the CURRENT position that removes ~a third of the ORIGINAL (or a single 50%
+            # when there's no plan to ladder from).
+            if has_plan:
+                frac_open = max(_LADDER_FRACTION, 1.0 - tranche * _LADDER_FRACTION)
+                frac = min(0.9, _LADDER_FRACTION / frac_open)
+            else:
+                frac = _PARTIAL_FRACTION
+            nth = "first" if tranche == 0 else "second"
+            why = (f"+{r:.1f}R — banking the {nth} third early, selling into strength{wall_note}"
+                   if at_wall else
+                   f"+{r:.1f}R — booking the {nth} third and de-risking the rest to breakeven")
+            return {"action": "take_partial", "kind": "partial", "fraction": round(frac, 3),
+                    "has_plan": has_plan, "reason": why}
 
     # 1) Naked position -> attach an ATR protective stop (always risk-reducing).
     if (p.stop_loss is None or p.stop_loss == 0) and atr and last:
@@ -720,6 +806,7 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
 
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
+    max_hold_hours = get_or_create_advisor_config(session).max_hold_hours or 0.0
     positions = {p.symbol: p for p in live_broker_positions(session)}
     contexts = contexts or {}
     # A symbol that has gone flat can scale out again next time it's entered.
@@ -740,14 +827,19 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
 
         ctx = contexts.get(a.symbol) or _position_context(session, p)
         plan_risk = _plan_risk(session, a.symbol, (ctx or {}).get("atr"), a.direction)
-        decision = _auto_decision(a, p, ctx or {}, plan_risk,
-                                  already_scaled=_already_scaled(session, p.symbol, p.qty, p.direction))
+        tranche, has_plan = _scaled_tranche(session, p.symbol, p.qty, p.direction)
+        opened_at = _position_opened_at(session, p.symbol, p.direction)
+        decision = _auto_decision(a, p, ctx or {}, plan_risk, tranche=tranche, has_plan=has_plan,
+                                  opened_at=opened_at, max_hold_hours=max_hold_hours)
         if decision is None:
             continue
         action, kind, reason = decision["action"], decision["kind"], decision["reason"]
 
         if action == "close":
-            if _INVALID_STREAK.get(a.symbol, 0) < _CLOSE_CONFIRM:
+            # A time-stop is a slow, definite condition (held N hours + flat), so it doesn't need the
+            # multi-read invalidation hysteresis — only the invalidation close does. Both respect the
+            # per-symbol close cooldown so we never double-fire.
+            if kind != "time_stop" and _INVALID_STREAK.get(a.symbol, 0) < _CLOSE_CONFIRM:
                 actions.append({"symbol": a.symbol, "action": "close_pending", "kind": "close",
                                 "ok": False, "reason": (
                                     f"awaiting confirmation "
@@ -777,7 +869,8 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                 result = broker.close_partial(p.symbol, decision.get("fraction", _PARTIAL_FRACTION))
                 ok = result.status.value not in ("error", "rejected")
                 if ok:
-                    _PARTIAL_DONE.add(a.symbol)
+                    if not decision.get("has_plan"):
+                        _PARTIAL_DONE.add(a.symbol)   # single-partial fallback (no plan) -> don't re-scale
                     # De-risk the runner: trail behind the last swing (STRUCTURE) when we can — the
                     # market respects structure, not your entry — else fall back to breakeven. Only
                     # if it TIGHTENS: a stop already trailed past entry (locked in profit) is left

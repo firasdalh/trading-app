@@ -18,7 +18,7 @@ from app.api.routes import build_settings_response
 from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.logging import get_logger
-from app.core.state import get_or_create_risk_config, get_or_create_settings
+from app.core.state import get_or_create_daily_state, get_or_create_risk_config, get_or_create_settings
 from app.execution.kill_switch import flatten_all
 from app.execution.monitor import monitor_positions
 from app.models.db import Position
@@ -71,6 +71,13 @@ class RiskUpdateRequest(BaseModel):
     loss_cooldown_minutes: int | None = None
     # Master on/off for the daily-loss circuit breaker (demo-account testing convenience).
     daily_loss_breaker_enabled: bool | None = None
+    # Additional entry circuit breakers (all optional; 0 / False disables each).
+    max_trades_per_day: int | None = None
+    max_consecutive_losses: int | None = None
+    breaker_cooldown_minutes: int | None = None
+    perf_breaker_enabled: bool | None = None
+    min_expectancy_r: float | None = None
+    expectancy_window: int | None = None
 
 
 def _check_phrase(phrase: str | None) -> None:
@@ -209,6 +216,28 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
         else:
             log.warning("daily-loss circuit breaker re-enabled")
 
+    # Additional entry breakers (0 / False disables each — these only ADD protection).
+    if req.max_trades_per_day is not None:
+        if req.max_trades_per_day < 0:
+            raise HTTPException(status_code=400, detail="max_trades_per_day must be >= 0 (0 = off)")
+        risk.max_trades_per_day = req.max_trades_per_day
+    if req.max_consecutive_losses is not None:
+        if req.max_consecutive_losses < 0:
+            raise HTTPException(status_code=400, detail="max_consecutive_losses must be >= 0 (0 = off)")
+        risk.max_consecutive_losses = req.max_consecutive_losses
+    if req.breaker_cooldown_minutes is not None:
+        if req.breaker_cooldown_minutes < 0:
+            raise HTTPException(status_code=400, detail="breaker_cooldown_minutes must be >= 0")
+        risk.breaker_cooldown_minutes = req.breaker_cooldown_minutes
+    if req.perf_breaker_enabled is not None:
+        risk.perf_breaker_enabled = req.perf_breaker_enabled
+    if req.min_expectancy_r is not None:
+        risk.min_expectancy_r = req.min_expectancy_r
+    if req.expectancy_window is not None:
+        if req.expectancy_window < 1:
+            raise HTTPException(status_code=400, detail="expectancy_window must be >= 1")
+        risk.expectancy_window = req.expectancy_window
+
     session.commit()
     log.info("risk config updated")
     return build_settings_response(session)
@@ -261,6 +290,44 @@ def set_ai_momentum_read(req: AiMomentumReadRequest,
     settings.ai_momentum_read = req.enabled
     session.commit()
     log.info("ai momentum-read set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
+class AiRegimeReadRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/ai-regime-read", response_model=SettingsResponse)
+def set_ai_regime_read(req: AiRegimeReadRequest,
+                       session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle the AI regime-texture CLASSIFIER: when ON, only at the ambiguous ('moderate' ADX) regime
+    boundary the AI classifies the texture (emerging_trend / choppy_range / transition + evidence +
+    confidence) and the deterministic engine promotes it to a trend / demotes it to a range / stands
+    pat. The AI only labels — it never decides direction/levels or overrides; every gate still runs.
+    OFF reverts to the fixed ADX-threshold regime. Reversible."""
+    settings = get_or_create_settings(session)
+    settings.ai_regime_read = req.enabled
+    session.commit()
+    log.info("ai regime-read set", extra={"enabled": req.enabled})
+    return build_settings_response(session)
+
+
+class AiPriceActionReadRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/settings/ai-priceaction-read", response_model=SettingsResponse)
+def set_ai_priceaction_read(req: AiPriceActionReadRequest,
+                            session: Session = Depends(get_session)) -> SettingsResponse:
+    """Toggle the AI price-action CLASSIFIER: when ON, when a major opposing level sits in a trade's
+    path the AI classifies how price will resolve there (likely_reject / likely_break / indecision +
+    evidence + confidence) and the deterministic engine waits or takes the trade through the level. The
+    AI only labels — it never decides direction/levels or overrides; every gate still runs. OFF reverts
+    to the fixed 'respect the level and wait' rule. Reversible."""
+    settings = get_or_create_settings(session)
+    settings.ai_priceaction_read = req.enabled
+    session.commit()
+    log.info("ai priceaction-read set", extra={"enabled": req.enabled})
     return build_settings_response(session)
 
 
@@ -470,6 +537,8 @@ class AdvisorConfigRequest(BaseModel):
     enabled: bool | None = None
     auto_execute: bool | None = None
     interval_seconds: int | None = Field(None, ge=30, le=3600)
+    # Time-based exit: auto-close a stagnant position held this many hours and still flat. 0 = off.
+    max_hold_hours: float | None = Field(None, ge=0, le=240)
 
 
 class AdvisorAction(BaseModel):
@@ -487,6 +556,7 @@ class AdvisorView(BaseModel):
     enabled: bool
     auto_execute: bool
     interval_seconds: int
+    max_hold_hours: float = 0.0
     last_run_at: str | None = None
     advice: list[PositionAdvice]
     actions: list[AdvisorAction] = []
@@ -510,7 +580,8 @@ def _advisor_view(session: Session, actions: list[dict] | None = None) -> Adviso
     cfg = get_or_create_advisor_config(session)
     return AdvisorView(
         enabled=cfg.enabled, auto_execute=cfg.auto_execute,
-        interval_seconds=cfg.interval_seconds, last_run_at=_iso_utc(cfg.last_run_at),
+        interval_seconds=cfg.interval_seconds, max_hold_hours=cfg.max_hold_hours or 0.0,
+        last_run_at=_iso_utc(cfg.last_run_at),
         advice=advise_positions(session),
         actions=[AdvisorAction(**{k: v for k, v in a.items() if k != "asset_class"})
                  for a in (actions or [])],
@@ -534,9 +605,12 @@ def advisor_set_config(req: AdvisorConfigRequest, session: Session = Depends(get
         cfg.auto_execute = req.auto_execute
     if req.interval_seconds is not None:
         cfg.interval_seconds = req.interval_seconds
+    if req.max_hold_hours is not None:
+        cfg.max_hold_hours = req.max_hold_hours
     session.commit()
     log.warning("advisor config updated", extra={"enabled": cfg.enabled,
-                "auto_execute": cfg.auto_execute, "interval": cfg.interval_seconds})
+                "auto_execute": cfg.auto_execute, "interval": cfg.interval_seconds,
+                "max_hold_hours": cfg.max_hold_hours})
     return _advisor_view(session)
 
 

@@ -23,7 +23,8 @@ def _force_deterministic_agents(monkeypatch):
             pass
     # Clear the per-symbol LLM-read caches so a cached read never leaks between tests.
     for mod_name, attr in (("fundamental", "_FUND_CACHE"), ("scenarios", "_CACHE"),
-                           ("momentum_read", "_CACHE")):
+                           ("momentum_read", "_CACHE"), ("regime_read", "_CACHE"),
+                           ("priceaction_read", "_CACHE")):
         try:
             getattr(importlib.import_module(f"app.agents.{mod_name}"), attr).clear()
         except Exception:  # noqa: BLE001

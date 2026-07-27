@@ -26,15 +26,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.models.enums import (
-    AssetClass,
-    Direction,
     ExecutionMode,
-    OrderSide,
     OrderStatus,
-    OrderType,
     PositionStatus,
     ProposalStatus,
-    RiskDecisionType,
 )
 
 
@@ -87,6 +82,14 @@ class AppSettings(Base):
     # AI only labels — it never decides direction/levels or overrides. Default ON (user-requested).
     ai_momentum_read: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # AI REGIME-texture classifier: at the ambiguous ('moderate' ADX) regime boundary the AI classifies
+    # the texture (emerging_trend / choppy_range / transition) and the engine promotes/demotes/stands
+    # pat. AI only labels. Default ON. AI PRICE-ACTION classifier: at a major opposing level in the
+    # trade's path, the AI classifies likely_reject / likely_break / indecision and the engine waits or
+    # takes the trade through. AI only labels. Default ON.
+    ai_regime_read: Mapped[bool] = mapped_column(Boolean, default=True)
+    ai_priceaction_read: Mapped[bool] = mapped_column(Boolean, default=True)
+
     # AI confirm/veto REVIEW of the deterministic setup. Repeatability testing showed the reasoning-
     # model reviewer flips its verdict on ~82% of setups run-to-run (not a stable filter), and a plain
     # confidence>=70% gate matches its win rate deterministically. So default this OFF: the AI is kept
@@ -127,6 +130,25 @@ class RiskConfig(Base):
     # are skipped. Disabling it removes a real-money protection, so the UI warns loudly and
     # every toggle is logged at WARNING.
     daily_loss_breaker_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # --- Additional entry circuit breakers (all OFF by default so they never change behaviour until
+    # turned on). Enforced by the Risk Manager via ``service.entry_breaker_reason``; they PAUSE new
+    # entries only (never touch an open position). ---
+    # Cap on trades OPENED per UTC day — a backstop against a runaway loop churning many small trades.
+    # 0 = disabled.
+    max_trades_per_day: Mapped[int] = mapped_column(Integer, default=0)
+    # After this many LOSING trades in a row, pause new entries for ``breaker_cooldown_minutes`` then
+    # allow a single probe (a win resets the streak). 0 = disabled.
+    max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
+    # Cooldown the loss-streak + performance breakers wait (from the most recent close) before they
+    # let a probe trade through — so they self-reset into a probe instead of latching forever.
+    breaker_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=120)
+    # Performance / divergence breaker: pause when live results drift below the backtest edge. When
+    # on, if the last ``expectancy_window`` closed trades average below ``min_expectancy_r`` (in R),
+    # pause new entries for a cooldown. The floor is the user's "backtest expectancy minus tolerance".
+    perf_breaker_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    min_expectancy_r: Mapped[float] = mapped_column(Float, default=-0.2)
+    expectancy_window: Mapped[int] = mapped_column(Integer, default=10)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
@@ -341,6 +363,11 @@ class AdvisorConfig(Base):
     # When True the advisor may autonomously act on its highest-confidence, risk-reducing
     # decisions (close an invalidated trade, lock a winner's stop to breakeven). Off by default.
     auto_execute: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Time-based exit: close a STAGNANT position (held this many hours and still roughly flat, i.e.
+    # neither the target nor the stop has resolved it) to free the capital + exposure slot. Only fires
+    # under auto_execute, only when flat (winners are managed by the trail, losers by the stop).
+    # 0 = disabled.
+    max_hold_hours: Mapped[float] = mapped_column(Float, default=0.0)
     interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
@@ -391,6 +418,8 @@ class AutoTradeConfig(Base):
     min_rr: Mapped[float] = mapped_column(Float, default=1.2)             # reward:risk floor (< 1.5 = looser)
     min_profit_usd: Mapped[float] = mapped_column(Float, default=20.0)    # skip if < this $ to the target
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=5)     # re-entry wait after a close
+    strategy: Mapped[str] = mapped_column(String(16), default="scenario")  # "scenario" (AI) | "supertrend" | "reversal"
+    timeframe: Mapped[str] = mapped_column(String(8), default="1h")        # ONE timeframe for ALL auto-traded pairs
     pairs: Mapped[list] = mapped_column(JSON, default=list)  # [{"symbol","asset_class"}] auto-traded
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)          # short one-line summary of the last tick
@@ -415,6 +444,9 @@ class RsiOverConfig(Base):
     confirm: Mapped[bool] = mapped_column(Boolean, default=True)          # require the EMA10 close-through
     macd: Mapped[bool] = mapped_column(Boolean, default=False)            # also accept a MACD cross/divergence (early)
     rsi_div: Mapped[bool] = mapped_column(Boolean, default=False)         # also accept an RSI divergence (exhaustion) as a confirm
+    rej_candle: Mapped[bool] = mapped_column(Boolean, default=False)      # also accept a rejection candle (engulfing / long wick) as a confirm
+    at_level: Mapped[bool] = mapped_column(Boolean, default=False)        # FILTER: only fade when the extreme is AT a key opposing S/R level
+    pa_confirm: Mapped[bool] = mapped_column(Boolean, default=False)      # FILTER: ask the AI price-action classifier if the level is holding (fade) or breaking (skip)
     trend_filter: Mapped[bool] = mapped_column(Boolean, default=True)     # don't fade against a strong higher-TF trend
     auto_approve: Mapped[bool] = mapped_column(Boolean, default=False)    # open a found pair directly (skip the manual Mode-A click; all gates still apply)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

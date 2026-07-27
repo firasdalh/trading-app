@@ -36,23 +36,35 @@ _SQLITE_ADDED_COLUMNS = {
     "trade_proposals": [
         ("review_decision", "VARCHAR(16)"),
         ("watch", "BOOLEAN DEFAULT 0"),
+        ("source", "VARCHAR(24) DEFAULT 'analysis'"),
     ],
     "advisor_config": [
         ("auto_execute", "BOOLEAN DEFAULT 0"),
+        ("max_hold_hours", "FLOAT DEFAULT 0"),
     ],
     "risk_config": [
         ("daily_loss_breaker_enabled", "BOOLEAN DEFAULT 1"),
         ("loss_cooldown_minutes", "INTEGER DEFAULT 180"),
+        ("max_trades_per_day", "INTEGER DEFAULT 0"),
+        ("max_consecutive_losses", "INTEGER DEFAULT 0"),
+        ("breaker_cooldown_minutes", "INTEGER DEFAULT 120"),
+        ("perf_breaker_enabled", "BOOLEAN DEFAULT 0"),
+        ("min_expectancy_r", "FLOAT DEFAULT -0.2"),
+        ("expectancy_window", "INTEGER DEFAULT 10"),
     ],
     "auto_trade_config": [
         ("min_rr", "FLOAT DEFAULT 1.2"),
         ("min_profit_usd", "FLOAT DEFAULT 20.0"),
         ("last_results", "JSON"),
+        ("strategy", "VARCHAR DEFAULT 'scenario'"),
+        ("timeframe", "VARCHAR DEFAULT '1h'"),
     ],
     "app_settings": [
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),
         ("st_band_mode", "BOOLEAN DEFAULT 0"),
         ("ai_momentum_read", "BOOLEAN DEFAULT 1"),
+        ("ai_regime_read", "BOOLEAN DEFAULT 1"),
+        ("ai_priceaction_read", "BOOLEAN DEFAULT 1"),
         ("ai_review_enabled", "BOOLEAN DEFAULT 0"),
         ("journal_reset_at", "DATETIME"),
         ("disabled_filters", "TEXT"),
@@ -63,9 +75,6 @@ _SQLITE_ADDED_COLUMNS = {
     "positions": [
         ("confidence", "FLOAT"),
         ("source", "VARCHAR(24)"),
-    ],
-    "trade_proposals": [
-        ("source", "VARCHAR(24) DEFAULT 'analysis'"),
     ],
     "hybrid_config": [
         ("conditional_enabled", "BOOLEAN DEFAULT 1"),
@@ -79,6 +88,9 @@ _SQLITE_ADDED_COLUMNS = {
     "rsi_over_config": [
         ("macd", "BOOLEAN DEFAULT 0"),
         ("rsi_div", "BOOLEAN DEFAULT 0"),
+        ("rej_candle", "BOOLEAN DEFAULT 0"),
+        ("at_level", "BOOLEAN DEFAULT 0"),
+        ("pa_confirm", "BOOLEAN DEFAULT 0"),
         ("trend_filter", "BOOLEAN DEFAULT 1"),
         ("auto_approve", "BOOLEAN DEFAULT 0"),
         ("last_scan_at", "DATETIME"),

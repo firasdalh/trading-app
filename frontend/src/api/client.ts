@@ -87,6 +87,7 @@ export const api = {
     enabled?: boolean;
     auto_execute?: boolean;
     interval_seconds?: number;
+    max_hold_hours?: number;
   }) =>
     request<AdvisorState>("/api/positions/advisor/config", {
       method: "POST",
@@ -214,6 +215,16 @@ export const api = {
     }),
   setAiMomentumRead: (enabled: boolean) =>
     request<SettingsResponse>("/api/settings/ai-momentum-read", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  setAiRegimeRead: (enabled: boolean) =>
+    request<SettingsResponse>("/api/settings/ai-regime-read", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  setAiPriceactionRead: (enabled: boolean) =>
+    request<SettingsResponse>("/api/settings/ai-priceaction-read", {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
@@ -350,7 +361,11 @@ export const api = {
     enabled?: boolean;
     interval_seconds?: number;
     min_confidence?: number;
+    min_rr?: number;
+    min_profit_usd?: number;
     cooldown_minutes?: number;
+    strategy?: "scenario" | "supertrend" | "reversal";
+    timeframe?: string;
   }) =>
     request<import("../types").AutoTradeView>("/api/auto-trade/config", {
       method: "POST",
@@ -362,7 +377,10 @@ export const api = {
   // (EMA10-confirmed when `confirm`) and stage it (Mode A queues it). "" timeframe -> default 1h.
   rsiOverScan: (
     timeframe?: string,
-    opts: { confirm?: boolean; macd?: boolean; rsiDiv?: boolean; trendFilter?: boolean; autoApprove?: boolean } = {},
+    opts: {
+      confirm?: boolean; macd?: boolean; rsiDiv?: boolean; rejCandle?: boolean;
+      atLevel?: boolean; paConfirm?: boolean; trendFilter?: boolean; autoApprove?: boolean;
+    } = {},
   ) =>
     request<import("../types").RsiOverScanResult>("/api/rsi-over/scan", {
       method: "POST",
@@ -371,6 +389,9 @@ export const api = {
         confirm: opts.confirm ?? true,
         macd: opts.macd ?? false,
         rsi_div: opts.rsiDiv ?? false,
+        rej_candle: opts.rejCandle ?? false,
+        at_level: opts.atLevel ?? false,
+        pa_confirm: opts.paConfirm ?? false,
         trend_filter: opts.trendFilter ?? true,
         auto_approve: opts.autoApprove ?? false,
       }),

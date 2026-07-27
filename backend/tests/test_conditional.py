@@ -219,6 +219,26 @@ def test_sell_stop_breakout_waits_when_price_above_stop(db_session, monkeypatch)
     assert s.status == "armed" and out["invalidated"] == 0 and out["triggered"] == 0
 
 
+def test_stale_arm_past_stop_is_invalidated(db_session, monkeypatch):
+    # A short arm >HALF through its window whose close still sits ABOVE its stop -> the move went the other
+    # way and had its chance -> cancel the zombie (the AUDNZD case). 8h into a 12h window.
+    now = datetime.now(timezone.utc)
+    s = _arm(db_session, created_at=now - timedelta(hours=8), valid_until=now + timedelta(hours=4))
+    _stub_market_series(monkeypatch, [78.6] * 60)   # close 78.6 is ABOVE the stop 78.4 (thesis broken)
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert s.status == "cancelled" and out["invalidated"] == 1 and "thesis broken" in (s.last_note or "")
+
+
+def test_fresh_arm_past_stop_not_invalidated(db_session, monkeypatch):
+    # SAME price-past-stop, but the arm is FRESH -> a breakout legitimately waits counter-current -> NOT
+    # killed (only stale+wrong cancels; this guards the JP225/USOIL "kill seconds after arming" bug).
+    now = datetime.now(timezone.utc)
+    s = _arm(db_session, created_at=now, valid_until=now + timedelta(hours=12))
+    _stub_market_series(monkeypatch, [78.6] * 60)   # above the stop, but fresh
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert s.status == "armed" and out["invalidated"] == 0
 
 
 def test_trigger_fires_and_opens_on_break(db_session, monkeypatch):

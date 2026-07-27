@@ -31,6 +31,14 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [maxPos, setMaxPos] = useState("");
+  const [exposurePct, setExposurePct] = useState("");
+  useEffect(() => {
+    if (settings) {
+      setMaxPos(String(settings.risk.max_open_positions));
+      setExposurePct((settings.risk.max_total_exposure * 100).toFixed(0));
+    }
+  }, [settings]);
 
   const currentMode = settings?.app.execution_mode;
   const isLive = settings?.app.broker_env === "live";
@@ -53,6 +61,18 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
 
   const chooseMode = (mode: ExecutionMode) => {
     run(() => api.setMode(mode), `Switched to ${mode}.`);
+  };
+
+  const saveMaxPos = () => {
+    const n = Math.round(Number(maxPos));
+    if (!Number.isFinite(n) || n < 1 || n === settings?.risk.max_open_positions) return;
+    run(() => api.updateRisk({ max_open_positions: n }), `Max open trades set to ${n}.`);
+  };
+  const saveExposure = () => {
+    const pct = Number(exposurePct);
+    if (!Number.isFinite(pct) || pct <= 0 || pct > 100) return;
+    if (settings && Math.abs(pct / 100 - settings.risk.max_total_exposure) < 1e-9) return;
+    run(() => api.updateRisk({ max_total_exposure: pct / 100 }), `Max exposure set to ${pct}%.`);
   };
 
   return (
@@ -151,6 +171,58 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               decides enter / wait / reject / arm. The AI only labels; it never overrides.
             </div>
           </button>
+
+          <button
+            disabled={busy}
+            onClick={() =>
+              run(() => api.setAiRegimeRead(!settings?.app.ai_regime_read),
+                  `AI regime-read ${settings?.app.ai_regime_read ? "OFF" : "ON"}.`)}
+            className={`mt-2 w-full rounded-md border px-3 py-2 text-left text-sm ${
+              settings?.app.ai_regime_read
+                ? "border-blue-500 bg-blue-500/10"
+                : "border-neutral-700 hover:bg-neutral-800"
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-medium">AI regime-read</span>
+              <span className={`text-xs font-semibold ${
+                settings?.app.ai_regime_read ? "text-bull" : "text-neutral-400"
+              }`}>
+                {settings?.app.ai_regime_read ? "ON" : "OFF"}
+              </span>
+            </div>
+            <div className="text-xs text-neutral-400">
+              Only at the grey zone between trend and range (moderate ADX), the AI reads the texture as an
+              emerging trend, choppy range, or transition — the engine then treats it as a trend, a range,
+              or stands pat. The AI only labels; every gate still runs.
+            </div>
+          </button>
+
+          <button
+            disabled={busy}
+            onClick={() =>
+              run(() => api.setAiPriceactionRead(!settings?.app.ai_priceaction_read),
+                  `AI price-action-read ${settings?.app.ai_priceaction_read ? "OFF" : "ON"}.`)}
+            className={`mt-2 w-full rounded-md border px-3 py-2 text-left text-sm ${
+              settings?.app.ai_priceaction_read
+                ? "border-blue-500 bg-blue-500/10"
+                : "border-neutral-700 hover:bg-neutral-800"
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-medium">AI price-action-read</span>
+              <span className={`text-xs font-semibold ${
+                settings?.app.ai_priceaction_read ? "text-bull" : "text-neutral-400"
+              }`}>
+                {settings?.app.ai_priceaction_read ? "ON" : "OFF"}
+              </span>
+            </div>
+            <div className="text-xs text-neutral-400">
+              When a major level sits in a trade's path, the AI reads whether price is likely to reject,
+              break through, or is undecided — the engine then waits or takes the trade through the level.
+              The AI only labels; it never overrides.
+            </div>
+          </button>
         </section>
 
         <section className="space-y-2">
@@ -219,14 +291,39 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             Risk limits (bounded by RISK.md)
           </div>
           {settings && (
-            <div className="grid grid-cols-2 gap-2 text-xs text-neutral-400">
-              <div>Per-trade risk: {(settings.risk.risk_per_trade * 100).toFixed(2)}%</div>
-              <div>Max positions: {settings.risk.max_open_positions}</div>
-              <div>Max daily loss: {(settings.risk.max_daily_loss * 100).toFixed(1)}%</div>
-              <div>Max exposure: {(settings.risk.max_total_exposure * 100).toFixed(1)}%</div>
-              <div>Per-pair cooldown: {settings.risk.per_pair_cooldown_minutes}m</div>
-              <div>Loss cooldown: {settings.risk.loss_cooldown_minutes}m</div>
-            </div>
+            <>
+              <div className="grid grid-cols-2 gap-2 text-xs text-neutral-400">
+                <div>Per-trade risk: {(settings.risk.risk_per_trade * 100).toFixed(2)}%</div>
+                <label className="flex items-center gap-1.5" title="How many positions can be open at once. Takes effect immediately.">
+                  <span>Max open trades:</span>
+                  <input
+                    type="number" min={1} max={20} value={maxPos} disabled={busy}
+                    onChange={(e) => setMaxPos(e.target.value)} onBlur={saveMaxPos}
+                    onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                    className="field w-14 px-1.5 py-0.5 text-right tabular-nums"
+                  />
+                </label>
+                <div>Max daily loss: {(settings.risk.max_daily_loss * 100).toFixed(1)}%</div>
+                <label className="flex items-center gap-1.5" title="Total risk-at-entry budget across all open trades. Must be big enough to fit the trade count.">
+                  <span>Max exposure:</span>
+                  <input
+                    type="number" min={1} max={100} value={exposurePct} disabled={busy}
+                    onChange={(e) => setExposurePct(e.target.value)} onBlur={saveExposure}
+                    onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                    className="field w-14 px-1.5 py-0.5 text-right tabular-nums"
+                  />
+                  <span>%</span>
+                </label>
+                <div>Per-pair cooldown: {settings.risk.per_pair_cooldown_minutes}m</div>
+                <div>Loss cooldown: {settings.risk.loss_cooldown_minutes}m</div>
+              </div>
+              <p className="mt-1.5 text-[11px] text-neutral-500">
+                The two are linked: to open N trades at {(settings.risk.risk_per_trade * 100).toFixed(0)}% risk
+                each, Max exposure must be ≥ N × {(settings.risk.risk_per_trade * 100).toFixed(0)}%. E.g. 5
+                trades → set Max exposure ≥ {(settings.risk.risk_per_trade * 5 * 100).toFixed(0)}%. Raising the
+                trade count alone won't open more unless exposure allows it.
+              </p>
+            </>
           )}
         </section>
 

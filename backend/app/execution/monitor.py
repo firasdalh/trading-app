@@ -20,8 +20,7 @@ from app.brokers.registry import get_broker_for
 from app.core.logging import get_logger
 from app.core.state import get_or_create_daily_state, get_or_create_risk_config, get_or_create_settings
 from app.models.db import AgentRun, Position
-from app.models.enums import AssetClass, Direction, OrderSide, OrderStatus, OrderType, PositionStatus
-from app.models.schemas import OrderRequest
+from app.models.enums import AssetClass, Direction, PositionStatus
 
 log = get_logger("execution.monitor")
 

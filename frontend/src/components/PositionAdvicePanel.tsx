@@ -33,6 +33,7 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
   const [state, setState] = useState<AdvisorState | null>(null);
   const [busy, setBusy] = useState(false);
   const [intervalInput, setIntervalInput] = useState("300");
+  const [maxHoldInput, setMaxHoldInput] = useState("0");
 
   const load = useCallback(async (run: boolean) => {
     setBusy(true);
@@ -40,6 +41,7 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
       const s = run ? await api.advisorRun() : await api.advisorState();
       setState(s);
       setIntervalInput(String(s.interval_seconds));
+      setMaxHoldInput(String(s.max_hold_hours ?? 0));
     } finally {
       setBusy(false);
     }
@@ -101,6 +103,16 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
     setBusy(true);
     try {
       setState(await api.advisorConfig({ interval_seconds: secs }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveMaxHold = async () => {
+    const h = Math.min(240, Math.max(0, Number(maxHoldInput) || 0));
+    setBusy(true);
+    try {
+      setState(await api.advisorConfig({ max_hold_hours: h }));
     } finally {
       setBusy(false);
     }
@@ -200,9 +212,28 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
       )}
 
       {autoExecute && (
-        <div className="mb-2 rounded border border-bear/40 bg-bear/10 px-2 py-1 text-[11px] text-bear">
-          Auto-execute is ON — the advisor may close an invalidated trade or move a winner's stop
-          to breakeven by itself. It never opens or sizes up, and respects the kill switch.
+        <div className="mb-2 space-y-1.5 rounded border border-bear/40 bg-bear/10 px-2 py-1.5 text-[11px] text-bear">
+          <div>
+            Auto-execute is ON — the advisor may close an invalidated trade or move a winner's stop
+            to breakeven by itself. It never opens or sizes up, and respects the kill switch.
+          </div>
+          <label
+            className="flex items-center gap-1.5 text-neutral-400"
+            title="Time-stop: auto-close a stagnant position held this many hours and still roughly flat (neither target nor stop has resolved it), to free the slot. 0 = off."
+          >
+            Time-stop: close a flat trade after
+            <input
+              name="advisor-max-hold"
+              autoComplete="off"
+              value={maxHoldInput}
+              onChange={(e) => setMaxHoldInput(e.target.value)}
+              onBlur={saveMaxHold}
+              onKeyDown={(e) => e.key === "Enter" && saveMaxHold()}
+              inputMode="numeric"
+              className="field w-14 px-1.5 py-1 text-center tabular-nums"
+            />
+            h {Number(maxHoldInput) > 0 ? "" : "(off)"}
+          </label>
         </div>
       )}
 

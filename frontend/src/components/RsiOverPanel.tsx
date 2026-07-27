@@ -72,6 +72,9 @@ export function RsiOverPanel({ onStaged, onSelect }: {
   const [confirm, setConfirm] = useLocalStorage("rsiover.confirm", true);
   const [macd, setMacd] = useLocalStorage("rsiover.macd", false);
   const [rsiDiv, setRsiDiv] = useLocalStorage("rsiover.rsiDiv", false);
+  const [rejCandle, setRejCandle] = useLocalStorage("rsiover.rejCandle", false);
+  const [atLevel, setAtLevel] = useLocalStorage("rsiover.atLevel", false);
+  const [paConfirm, setPaConfirm] = useLocalStorage("rsiover.paConfirm", false);
   const [trendFilter, setTrendFilter] = useLocalStorage("rsiover.trendFilter", true);
   const [autoApprove, setAutoApprove] = useLocalStorage("rsiover.autoApprove", false);
   const [everyMin, setEveryMin] = useLocalStorage("rsiover.everyMin", 15);  // auto-watch interval (minutes)
@@ -110,6 +113,9 @@ export function RsiOverPanel({ onStaged, onSelect }: {
   const changeTf = (v: string) => { setTf(v); syncWatch({ timeframe: v }); };
   const changeEvery = (min: number) => { setEveryMin(min); syncWatch({ interval_seconds: min * 60 }); };
   const changeRsiDiv = (v: boolean) => { setRsiDiv(v); syncWatch({ rsi_div: v }); };
+  const changeRejCandle = (v: boolean) => { setRejCandle(v); syncWatch({ rej_candle: v }); };
+  const changeAtLevel = (v: boolean) => { setAtLevel(v); syncWatch({ at_level: v }); };
+  const changePaConfirm = (v: boolean) => { setPaConfirm(v); syncWatch({ pa_confirm: v }); };
   const changeTrendFilter = (v: boolean) => { setTrendFilter(v); syncWatch({ trend_filter: v }); };
   const changeAutoApprove = (v: boolean) => { setAutoApprove(v); syncWatch({ auto_approve: v }); };
 
@@ -119,7 +125,8 @@ export function RsiOverPanel({ onStaged, onSelect }: {
       // Watch with the panel's current TF + confirmation, every 15 min.
       const cfg = await api.setRsiOverConfig(
         next
-          ? { enabled: true, timeframe: tf, confirm, macd, rsi_div: rsiDiv, trend_filter: trendFilter,
+          ? { enabled: true, timeframe: tf, confirm, macd, rsi_div: rsiDiv, rej_candle: rejCandle,
+              at_level: atLevel, pa_confirm: paConfirm, trend_filter: trendFilter,
               auto_approve: autoApprove, interval_seconds: everyMin * 60 }
           : { enabled: false },
       );
@@ -133,7 +140,7 @@ export function RsiOverPanel({ onStaged, onSelect }: {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.rsiOverScan(tf, { confirm, macd, rsiDiv, trendFilter, autoApprove });
+      const res = await api.rsiOverScan(tf, { confirm, macd, rsiDiv, rejCandle, atLevel, paConfirm, trendFilter, autoApprove });
       setResult(res);
       if (res.found) onStaged?.();
     } catch (e) {
@@ -160,11 +167,19 @@ export function RsiOverPanel({ onStaged, onSelect }: {
             <Toggle checked={confirm} onChange={changeConfirm} label="EMA10"
                     title="Strong confirmation: wait for a close through EMA10 (later, safer)." />
             <Toggle checked={macd} onChange={changeMacd} label="MACD"
-                    title="Early entry: a MACD signal-line cross or divergence gets you into the pullback sooner." />
+                    title="Early entry: a FRESH MACD signal-line cross (a real line intersection on the last bar) gets you into the pullback sooner." />
             <Toggle checked={rsiDiv} onChange={changeRsiDiv} label="RSI div"
                     title="Also accept an RSI divergence (price new extreme, RSI doesn't) — the exhaustion tell." />
+            <Toggle checked={rejCandle} onChange={changeRejCandle} label="Rejection"
+                    title="Also accept a rejection candle (bearish/bullish engulfing or a long rejection wick) on the extreme bar — the price-action tell that the turn is happening right here." />
           </div>
         </div>
+
+        <Toggle checked={atLevel} onChange={changeAtLevel} label="At level" tone="green"
+                title="FILTER: only fade when the RSI extreme is AT a key opposing level (resistance for a short / support for a long) — fade into a wall, not in open space." />
+
+        <Toggle checked={paConfirm} onChange={changePaConfirm} label="AI level check" tone="green"
+                title="FILTER: right before opening, ask the AI price-action classifier whether the level is HOLDING (reject → fade it) or GIVING WAY (break → skip). Bounded + evidence-bearing; the mechanical rules still decide. Fails open (no AI / low confidence → the fade stands)." />
 
         <Toggle checked={trendFilter} onChange={changeTrendFilter} label="Trend filter" tone="green"
                 title="Don't fade AGAINST a clear higher-timeframe trend — protects against fading a runaway. Recommended ON." />

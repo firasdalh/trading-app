@@ -8,6 +8,7 @@ import type { DetFiltersView } from "../types";
 export function EntryFiltersPanel() {
   const [cfg, setCfg] = useState<DetFiltersView | null>(null);
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);   // collapsed by default — advanced/rarely-touched controls
 
   useEffect(() => {
     api.detFilters().then(setCfg).catch(() => {});
@@ -34,14 +35,20 @@ export function EntryFiltersPanel() {
 
   return (
     <div className="card">
-      <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full flex-wrap items-baseline gap-x-2 gap-y-0.5 text-left"
+        title={open ? "Hide the entry filters" : "Show the entry filters"}
+      >
+        <span className="text-neutral-500">{open ? "▾" : "▸"}</span>
         <span className="whitespace-nowrap text-sm font-semibold">⚙️ Deterministic entry filters</span>
         <span className="text-xs text-neutral-500">
           {active}/{cfg.filters.length} active · the entry checklist the deterministic engine applies (structure → R:R)
         </span>
-      </div>
+      </button>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+      {open && (<>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {cfg.filters.map((f) => {
           const on = !disabled.has(f.key);
           return (
@@ -73,6 +80,7 @@ export function EntryFiltersPanel() {
         affects Run analysis, the scan, and the deterministic Hybrid path (not RSI-Over / SuperTrend, which
         have their own rules). Validate changes on the Backtest before trusting them live.
       </p>
+      </>)}
     </div>
   );
 }

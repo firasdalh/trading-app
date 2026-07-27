@@ -113,6 +113,16 @@ class BrokerAdapter(ABC):
         """
         return True, None
 
+    def market_open(self, symbol: str) -> bool:
+        """Whether ``symbol``'s session is OPEN right now (tradeable + live prices).
+
+        Default: True — brokers that can't report session state assume open (the simulator is always
+        open; a crypto venue is 24/7). MT5 overrides this to catch a CLOSED session (weekend / holiday
+        / out-of-hours) via a stale last-tick, so the auto-traders don't run and the UI can flag that
+        the quote is frozen. Advisory only — the executor's order attempt remains the final gate.
+        """
+        return True
+
     # ---- lifecycle ----
 
     def get_realized_pnl(self, since) -> float | None:

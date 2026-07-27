@@ -1,4 +1,6 @@
-import type { AiScenarioRead } from "../types";
+import { useState } from "react";
+import { api } from "../api/client";
+import type { AiScenarioRead, AssetClass } from "../types";
 
 const MEDAL = ["🥇", "🥈"];
 
@@ -12,13 +14,78 @@ function dirArrow(d: string): string {
  * Renders the AI two-scenario read (ranked + scored + why-primary). INFO only.
  * Used both in the chart's floating 🤖 panel and inline in the Run-analysis result.
  */
-export function ScenarioCard({ read, onShowLevels, levelsShown }: {
+export function ScenarioCard({ read, onShowLevels, levelsShown, assetClass, timeframe, onActed }: {
   read: AiScenarioRead;
   onShowLevels?: () => void;   // when provided (chart context), shows a one-click "plot the AI's levels" button
   levelsShown?: boolean;
+  assetClass?: string;         // when assetClass + timeframe are provided, the ACTION buttons are shown
+  timeframe?: string;
+  onActed?: () => void;        // called after a trade is staged/armed (so the parent can refresh)
 }) {
   const isAi = read.source === "ai";
   const hasLevels = read.nearest_support != null || read.nearest_resistance != null || read.target != null;
+
+  // --- act on the PRIMARY scenario (manual, Risk-Manager-gated) ---
+  // The scenario's `direction` is the IMMEDIATE move — often "sideways" for a pullback-then-bounce — so
+  // fall back to the overall bias, then target-vs-price, to get the TRADE direction the scenario implies.
+  const dir = read.scenarios[0]?.direction ?? "";
+  const bias = (read.overall_bias || "").toLowerCase();
+  let isLong = dir === "up";
+  let isShort = dir === "down";
+  if (!isLong && !isShort) {
+    if (bias.includes("bull")) isLong = true;
+    else if (bias.includes("bear")) isShort = true;
+    else if (read.target != null && read.price) { isLong = read.target > read.price; isShort = read.target < read.price; }
+  }
+  const armEntry = isLong ? read.nearest_support : read.nearest_resistance;   // buy the dip / sell the rally
+  // TP: the scenario target, else the opposite level (the bounce target).
+  const rawTarget = read.target ?? (isLong ? read.nearest_resistance : read.nearest_support);
+  // Only pass a stop/TP that's on the CORRECT side of the entry; otherwise null → the backend derives it.
+  const validStop = (entry: number): number | null => {
+    const inv = read.invalidation_price;
+    if (inv == null) return null;
+    return isLong ? (inv < entry ? inv : null) : (inv > entry ? inv : null);
+  };
+  const validTp = (entry: number): number | null =>
+    rawTarget != null && (isLong ? rawTarget > entry : rawTarget < entry) ? rawTarget : null;
+  const tradable = (isLong || isShort) && !!assetClass && !!timeframe;
+  const [acting, setActing] = useState(false);
+  const [actMsg, setActMsg] = useState<string | null>(null);
+  const [actErr, setActErr] = useState<string | null>(null);
+
+  const openNow = async () => {
+    if (!tradable) return;
+    setActing(true); setActErr(null); setActMsg(null);
+    try {
+      await api.manualTrade({
+        symbol: read.symbol, asset_class: assetClass as AssetClass, direction: isLong ? "long" : "short",
+        stop_loss: validStop(read.price), take_profit: validTp(read.price),
+        timeframe, execute: false,   // stage for approval, don't open silently
+      });
+      setActMsg("Staged as a market trade — approve it in Pending approval below to execute.");
+      onActed?.();
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : String(e));
+    } finally { setActing(false); }
+  };
+
+  const armPullback = async () => {
+    if (!tradable || armEntry == null) return;
+    setActing(true); setActErr(null); setActMsg(null);
+    try {
+      await api.armConditional({
+        symbol: read.symbol, asset_class: assetClass!, timeframe: timeframe!,
+        direction: isLong ? "long" : "short", order_type: isLong ? "buy_limit" : "sell_limit",
+        trigger_price: armEntry, stop_loss: validStop(armEntry), take_profit: validTp(armEntry),
+        confidence: (read.scenarios[0]?.prob ?? 60) / 100, reason: `AI scenario: ${read.primary}`,
+      });
+      setActMsg(`Armed a ${isLong ? "buy" : "sell"}-limit at ${armEntry} — fires on the pullback (after a re-check). See Armed setups.`);
+      onActed?.();
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : String(e));
+    } finally { setActing(false); }
+  };
+
   return (
     <div className="text-xs">
       <div className="mb-1.5 flex items-center gap-2">
@@ -103,8 +170,44 @@ export function ScenarioCard({ read, onShowLevels, levelsShown }: {
         </button>
       )}
 
+      {tradable && (
+        <div className="mt-2 space-y-1.5 border-t border-neutral-800 pt-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            Trade this scenario ({isLong ? "long" : "short"})
+          </div>
+          <div className="flex gap-1.5">
+            <button
+              onClick={openNow}
+              disabled={acting}
+              className="flex-1 rounded-md border border-violet-600 bg-violet-600/20 px-2 py-1.5 text-[11px] font-medium text-violet-100 hover:bg-violet-600/30 disabled:opacity-50"
+              title="Open at market now in the scenario direction (stop at invalidation, target = scenario target). Goes to Pending approval for your OK — nothing opens without it."
+            >
+              ⚡ Open now @ market
+            </button>
+            {armEntry != null && (
+              <button
+                onClick={armPullback}
+                disabled={acting}
+                className="flex-1 rounded-md border border-amber-600 bg-amber-600/15 px-2 py-1.5 text-[11px] font-medium text-amber-200 hover:bg-amber-600/25 disabled:opacity-50"
+                title={`Arm a ${isLong ? "buy" : "sell"}-limit at ${armEntry} — waits for the pullback, then fires after a re-check.`}
+              >
+                🎯 Arm the {isLong ? "dip" : "rally"} @ {armEntry}
+              </button>
+            )}
+          </div>
+          {actMsg && <div className="rounded bg-bull/15 px-2 py-1 text-[11px] text-bull">✅ {actMsg}</div>}
+          {actErr && <div className="rounded bg-bear/15 px-2 py-1 text-[11px] text-bear">✗ {actErr}</div>}
+          <div className="text-[10px] text-neutral-600">
+            Risk-Manager-sized &amp; gated — the 3% cap, exposure, max-trades &amp; kill-switch all still apply.
+          </div>
+        </div>
+      )}
+
       <div className="mt-2 border-t border-neutral-800 pt-1.5 text-[10px] text-neutral-600">
-        {read.note} Info only — it does NOT change the engine's decision.
+        {read.note}{" "}
+        {tradable
+          ? "The read informs; the buttons above are your manual, risk-gated action."
+          : "Info only — this read does not change the engine's decision."}
       </div>
     </div>
   );

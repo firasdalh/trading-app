@@ -16,8 +16,6 @@ from app.models.enums import (
     OrderSide,
     OrderStatus,
     OrderType,
-    PositionStatus,
-    ProposalStatus,
     ReviewDecision,
     RiskDecisionType,
     TradingBias,
@@ -197,6 +195,16 @@ class TradeProposal(BaseModel):
     # decides the action from it — this field is for the UI to show WHY momentum was read the way it was.
     momentum_read: dict | None = None
 
+    # AI REGIME-texture classification at the ambiguous ('moderate') regime boundary: {category,
+    # evidence, confidence}. Set ONLY when the AI regime-read ran; None otherwise. The engine decides
+    # promote/demote/stand-pat from it — this field is for the UI.
+    regime_read: dict | None = None
+
+    # AI PRICE-ACTION classification at a major opposing level in the trade's path: {category, evidence,
+    # confidence}. Set ONLY when the AI price-action read ran (a big-TF level in the way); None
+    # otherwise. The engine decides wait/enter-through from it — this field is for the UI.
+    priceaction_read: dict | None = None
+
     # The full reasoning bundle that produced this proposal (for audit + UI).
     fundamental: FundamentalRead | None = None
     technical: TechnicalRead | None = None
@@ -356,6 +364,13 @@ class RiskConfigView(BaseModel):
     per_pair_cooldown_minutes: int
     loss_cooldown_minutes: int = 180
     daily_loss_breaker_enabled: bool = True
+    # Additional entry circuit breakers (all off/0 by default). Enforced by the Risk Manager.
+    max_trades_per_day: int = 0
+    max_consecutive_losses: int = 0
+    breaker_cooldown_minutes: int = 120
+    perf_breaker_enabled: bool = False
+    min_expectancy_r: float = -0.2
+    expectancy_window: int = 10
 
 
 class AppSettingsView(BaseModel):
@@ -368,6 +383,8 @@ class AppSettingsView(BaseModel):
     trend_only_mode: bool = True
     st_band_mode: bool = False
     ai_momentum_read: bool = True
+    ai_regime_read: bool = True
+    ai_priceaction_read: bool = True
     ai_review_enabled: bool = False
     disabled_filters: list[str] = []
     journal_reset_at: datetime | None = None
@@ -397,6 +414,10 @@ class RiskStateView(BaseModel):
     # Whether the daily-loss circuit breaker is currently armed. When False the breaker is
     # OFF (e.g. demo-account testing): no auto-pause and no daily-loss veto.
     daily_loss_breaker_enabled: bool = True
+    # An active entry circuit breaker (trade-count / loss-streak / performance divergence) pausing
+    # NEW entries right now, with its reason — None when none is tripped. Independent of the daily-
+    # loss pause above.
+    entry_breaker: str | None = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -461,6 +482,7 @@ class AnalyzeResponse(BaseModel):
     proposal: TradeProposal
     risk: RiskDecision
     analyzed_at: datetime | None = None   # when this analysis ran (shown as "analysed X ago")
+    market_open: bool | None = None       # False = the symbol's session is CLOSED (weekend/holiday) — stale prices
 
 
 class BacktestRequest(BaseModel):

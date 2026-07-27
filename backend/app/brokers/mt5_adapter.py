@@ -22,9 +22,8 @@ import threading
 from datetime import datetime, timezone
 
 from app.brokers.base import BrokerAdapter, BrokerError
-from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.models.enums import AssetClass, OrderSide, OrderStatus, OrderType
+from app.models.enums import AssetClass, OrderSide, OrderStatus
 from app.models.schemas import (
     AccountState,
     Candle,
@@ -98,6 +97,10 @@ _RETCODE_MSG = {
     10021: "off quotes (no prices)", 10025: "no changes (already set)",
     10027: "autotrading disabled in terminal",
 }
+
+# No new tick for this many seconds = the session is CLOSED (weekend / holiday / out-of-hours). Well
+# above any liquid symbol's tick gap in-session, well below a weekend, so a live market never trips it.
+_MARKET_STALE_SECONDS = 600
 
 
 def _retcode_error(result, fallback: str) -> str:
@@ -668,6 +671,27 @@ class Mt5BrokerAdapter(BrokerAdapter):
         if mode == 2 and direction == "long":       # SHORTONLY
             return False, "broker allows short-only on this instrument"
         return True, None
+
+    def market_open(self, symbol: str) -> bool:
+        """Session-open check: the instrument isn't disabled/close-only AND its last tick is RECENT.
+        A stale last tick (no new prices for ``_MARKET_STALE_SECONDS``) = the market is closed — a
+        weekend / holiday / out-of-hours gap. Crypto (24/7) keeps ticking so it reads open; FX / indices
+        / metals / energy go stale over the weekend. Relies on the broker server clock being at or ahead
+        of UTC (Exness is), so a live tick is never mis-read as old, while a closed session is hours/days
+        stale — far past the threshold. Advisory: the executor's order attempt is still the final gate."""
+        name = self._resolve_symbol(symbol)
+        try:
+            mode = getattr(self._symbol_info(name), "trade_mode", 4)
+            if mode in (0, 3):                       # DISABLED / CLOSEONLY -> not tradeable now
+                return False
+            tick = self._mt5.symbol_info_tick(name)
+            t = int(getattr(tick, "time", 0)) if tick is not None else 0
+            if t <= 0:
+                return True                          # no tick time -> can't tell; don't block
+            age = datetime.now(timezone.utc).timestamp() - t
+            return age <= _MARKET_STALE_SECONDS
+        except Exception:  # noqa: BLE001 - on a lookup failure, don't block (executor is the final gate)
+            return True
 
     def contract_size(self, symbol: str) -> float:
         """The symbol's MT5 contract size (qty is stored in lots, so P&L must scale by this)."""

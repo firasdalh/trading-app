@@ -53,7 +53,6 @@ import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
 import { QuickTradePanel } from "./QuickTradePanel";
 import { AutoTradePanel } from "./AutoTradePanel";
-import { ShadowScorecardPanel } from "./ShadowScorecardPanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
 import { RiskDashboard } from "./RiskDashboard";
@@ -86,7 +85,14 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   // chart's floating one + the Run-analysis one) toggle the same lines. null = hidden.
   const [scenLevels, setScenLevels] = useState<{ support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null>(null);
   const toggleScenLevels = (lv: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) =>
-    setScenLevels((prev) => (prev ? null : lv));
+    // null clears; the same set clears (toggle off); a DIFFERENT set replaces (so the setup-levels
+    // button and the AI-scenario button switch cleanly instead of just clearing each other).
+    setScenLevels((prev) => {
+      if (lv == null) return null;
+      const same = prev != null && prev.support === lv.support && prev.resistance === lv.resistance
+        && prev.target === lv.target && prev.invalidation === lv.invalidation;
+      return same ? null : lv;
+    });
   const [status, setStatus] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
@@ -238,18 +244,25 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
       const res = await api.analyze(symbol, assetClass, timeframe);
       setResult(res);
       setStatus(res.status);
-      // Step 4: fold in the AI two-scenario read (info only; anchored to the same map). Runs after
-      // the proposal so the panel appears immediately and the scenarios fill in when ready.
-      setScenarioBusy(true);
-      api
-        .scenarios(symbol, assetClass)
-        .then(setScenario)
-        .catch(() => setScenario(null))
-        .finally(() => setScenarioBusy(false));
+      // The AI two-scenario read is INFO-ONLY — the engine's decision never uses it — so it's no longer
+      // auto-fetched on every analysis (that burned ~1500 AI tokens each time). It's loaded on demand
+      // via the "Show AI scenarios" button below (loadScenarios).
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  // Opt-in AI scenario read for the CURRENT symbol (info-only; costs tokens) — fetched only on request.
+  const loadScenarios = async () => {
+    setScenarioBusy(true);
+    try {
+      setScenario(await api.scenarios(symbol, assetClass));
+    } catch {
+      setScenario(null);
+    } finally {
+      setScenarioBusy(false);
     }
   };
 
@@ -546,6 +559,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           analyzing={analyzing}
           scenario={scenario}
           scenarioBusy={scenarioBusy}
+          onLoadScenarios={loadScenarios}
           scenLevelsShown={!!scenLevels}
           onToggleScenLevels={toggleScenLevels}
         />
@@ -560,10 +574,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           <ConditionalsPanel onSelect={openPositionSymbol} />
         </div>
       </div>
-
-      {/* Always shown (not gated on AI-decides) — you read this to DECIDE whether the AI is worth
-          turning on. It just displays the accumulated record; new rows are logged when AI-decides is ON. */}
-      <ShadowScorecardPanel />
 
       <WatchlistPanel
         currentSymbol={symbol}
@@ -582,8 +592,6 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         onSelect={openPositionSymbol}
         onOpened={() => setPosBump((b) => b + 1)}
       />
-
-      <EntryFiltersPanel />
 
       <RsiOverPanel onStaged={() => setPosBump((b) => b + 1)} onSelect={openPositionSymbol} />
 
@@ -609,6 +617,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           <AdvisorActivity refreshSignal={posBump} />
         </div>
       </div>
+
+      <EntryFiltersPanel />
     </div>
   );
 }

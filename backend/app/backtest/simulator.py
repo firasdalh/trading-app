@@ -840,6 +840,12 @@ def _pf(m: BTMetrics) -> str:
     return "inf" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}"
 
 
+def _conf_bucket(t: BTTrade) -> str:
+    """Confidence decile label, e.g. '70-80%'. Top bucket is 90-100%."""
+    lo = min(90, int((t.confidence or 0.0) * 10) * 10)
+    return f"{lo}-{lo + 10}%"
+
+
 def _line(name: str, m: BTMetrics) -> str:
     return (f"{name:<16} n={m.n:<4} win={m.win_rate * 100:4.1f}%  exp={m.expectancy_r:+.3f}R  "
             f"PF={_pf(m):<5} totR={m.total_r:+6.1f}  maxDD={m.max_dd_r:4.1f}R")
@@ -880,6 +886,14 @@ def format_report(trades: list[BTTrade], *, title: str, risk_pct: float = 0.01,
     ]
     out += ["  " + _line(k, compute_metrics(v, risk_pct=risk_pct))
             for k, v in sorted(group_by(trades, lambda t: t.regime).items())]
+    # By confidence decile — does a higher score actually predict a better outcome? (If 90%+ wins
+    # LESS than 70-80%, the score is miscalibrated at the top and picking the max is counterproductive.)
+    out += ["", "By confidence:"]
+    out += ["  " + _line(k, compute_metrics(v, risk_pct=risk_pct))
+            for k, v in sorted(group_by(trades, _conf_bucket).items())]
+    out += ["", "By strategy:"]
+    out += ["  " + _line(k, compute_metrics(v, risk_pct=risk_pct))
+            for k, v in sorted(group_by(trades, lambda t: t.strategy).items())]
     out += ["", "By symbol:"]
     out += ["  " + _line(k, compute_metrics(v, risk_pct=risk_pct))
             for k, v in sorted(group_by(trades, lambda t: t.symbol).items())]

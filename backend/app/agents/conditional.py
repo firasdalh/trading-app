@@ -39,6 +39,12 @@ log = get_logger("agents.conditional")
 
 _DEFAULT_VALID_HOURS = 12
 _MAX_RETRIES = 20          # give up auto-re-arming after this many declined re-checks
+_INVALIDATE_LIFE_FRAC = 0.5  # a STALE zombie kill: once an arm is past this fraction of its validity
+#                            window AND price (confirmed close) sits on the LOSING side of its stop, the
+#                            thesis has had ample time and the move went the other way -> cancel. A FRESH
+#                            arm past its stop is NOT killed (a breakout legitimately waits counter-current
+#                            for a while — the JP225 buy_stop / USOIL sell_stop bug was killing those
+#                            SECONDS after arming). Only the combo of "old enough + still wrong" cancels.
 _TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
 
 
@@ -252,15 +258,17 @@ def _decline(session: Session, s: ConditionalSetup, why: str, *, terminal: bool)
     return 0
 
 
-# NOTE: there is deliberately NO pre-trigger price-level invalidation. Earlier versions killed an armed
-# setup when a confirmed close moved back through a trend EMA(50) (Task 5) or through the setup's own
-# stop — but BOTH wrongly invalidated valid setups seconds after arming: a pending BREAKOUT order
-# legitimately sits on the far side of its (post-entry) stop while it waits, and price sits on the
-# 'wrong' side of the EMA in a range (the JP225 buy_stop / USOIL sell_stop bug). A target-based check
-# is redundant (reaching the target means the trigger was already crossed, so the trigger-time re-check
-# catches it). So an armed setup simply WAITS for its trigger, bounded by the wall-clock `valid_until`;
-# the double-check at the trigger (_mechanical_invalidation + AI review + Risk Manager) is what prevents
-# a broken idea from ever opening.
+# NOTE on pre-trigger invalidation: the ONLY pre-trigger kill is the STALE-ZOMBIE check in
+# check_conditional_setups — an arm past HALF its validity window whose confirmed CLOSE still sits on the
+# losing side of its stop is cancelled (the move went the other way and had its chance). Earlier versions
+# were more eager and WRONGLY killed valid setups SECONDS after arming: a confirmed close back through a
+# trend EMA(50) (Task 5), or ANY touch of the setup's own stop — a pending BREAKOUT legitimately waits
+# counter-current on the 'wrong' side of its (post-entry) stop for a while (the JP225 buy_stop / USOIL
+# sell_stop bug). The TIME gate is what makes the current check safe: a fresh arm is never killed for
+# waiting; only a stale one that's still wrong. A target-based check stays redundant (reaching the target
+# crosses the trigger, so the trigger-time re-check catches it). Otherwise an armed setup WAITS for its
+# trigger, bounded by `valid_until`; the trigger-time double-check (_mechanical_invalidation + AI review +
+# Risk Manager) prevents a broken idea from opening.
 
 
 def _mechanical_invalidation(s: ConditionalSetup, ref: float) -> tuple[str | None, bool]:
@@ -488,8 +496,26 @@ def check_conditional_setups(session: Session) -> dict:
         if s.require_close_confirm and closes:  # confirm on the latest candle close (avoid wick-driven false breaks)
             ref = closes[-1]
 
-        # No pre-trigger price invalidation (see the NOTE above _mechanical_invalidation): an armed
-        # setup waits for its trigger, bounded by `valid_until`; the trigger-time re-check gates it.
+        # STALE-ZOMBIE INVALIDATION: a breakout order legitimately waits counter-current (on the wrong
+        # side of its post-entry stop) for a WHILE, so we don't kill a fresh one. But once an arm is past
+        # half its validity window AND price (confirmed CLOSE, never a wick) still sits on the LOSING side
+        # of its stop, the thesis has had its chance and the market went the other way — cancel the zombie
+        # instead of dangling to expiry (the AUDNZDm short that watched price make new highs for ~11h).
+        inval_ref = closes[-1] if closes else price
+        past_stop = s.stop_loss is not None and (
+            (s.direction == Direction.SHORT.value and inval_ref >= s.stop_loss)
+            or (s.direction == Direction.LONG.value and inval_ref <= s.stop_loss))
+        stale = (s.created_at is not None and s.valid_until is not None
+                 and now >= _aware(s.created_at) + (_aware(s.valid_until) - _aware(s.created_at)) * _INVALIDATE_LIFE_FRAC)
+        if past_stop and stale:
+            s.status = ConditionalStatus.CANCELLED.value
+            s.last_note = (f"auto-cancelled — {int(_INVALIDATE_LIFE_FRAC * 100)}%+ through its window and "
+                           f"price {round(inval_ref, 6)} is past the stop {round(s.stop_loss, 6)}; the move "
+                           "went the other way (thesis broken).")
+            session.add(s)
+            invalidated += 1
+            continue
+
         if not _crossed(s.order_type, ref, s.trigger_price):
             continue  # trigger not reached yet — keep waiting
 

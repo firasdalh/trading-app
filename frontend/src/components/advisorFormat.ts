@@ -30,6 +30,7 @@ export function localTime(iso: string | null): string {
 
 // Human label for an advisor action/kind.
 export function actionText(a: { action: string; kind?: string | null; stop?: number | null; reason?: string | null }): string {
+  if (a.kind === "time_stop") return "closed stagnant trade (time-stop)";
   if (a.action === "close" || a.kind === "close") return "closed position";
   if (a.action === "close_pending") return "close pending confirmation";
   if (a.action === "stop_deferred") return a.reason || "stop change deferred (market closed)";

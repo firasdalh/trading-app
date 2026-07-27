@@ -18,8 +18,11 @@ router = APIRouter(prefix="/api/rsi-over", tags=["rsi-over"])
 class RsiOverScanRequest(BaseModel):
     timeframe: str | None = None  # None -> 1h
     confirm: bool = True          # require the EMA10 close-through (strong confirmation)
-    macd: bool = False            # also accept a MACD cross/divergence (early pullback entry)
+    macd: bool = False            # also accept a fresh MACD signal-line cross (early pullback entry)
     rsi_div: bool = False         # also accept an RSI divergence (exhaustion tell)
+    rej_candle: bool = False      # also accept a rejection candle (engulfing / long wick)
+    at_level: bool = False        # FILTER: only fade when the extreme is AT a key opposing S/R level
+    pa_confirm: bool = False       # FILTER: AI price-action check — skip if it reads the level as breaking
     trend_filter: bool = True     # don't fade against a strong higher-TF trend
     auto_approve: bool = False    # open a found pair directly (skip the manual Mode-A click)
 
@@ -27,10 +30,12 @@ class RsiOverScanRequest(BaseModel):
 @router.post("/scan")
 def scan(req: RsiOverScanRequest, session: Session = Depends(get_session)) -> dict:
     """Sweep all available pairs on ``timeframe`` and stage the first tradeable RSI-Over setup.
-    Confirmations (OR): ``confirm`` EMA10, ``macd``, ``rsi_div``. ``trend_filter`` refuses fading a
-    strong higher-TF trend. ``auto_approve`` opens it directly. Returns {ran, found, reason, ...}."""
+    Confirmations (OR): ``confirm`` EMA10, ``macd``, ``rsi_div``, ``rej_candle``. ``at_level`` requires
+    the extreme to sit at a key opposing S/R. ``trend_filter`` refuses fading a strong higher-TF trend.
+    ``auto_approve`` opens it directly. Returns {ran, found, reason, ...}."""
     return run_rsi_over_scan(session, req.timeframe, confirm=req.confirm, macd=req.macd,
-                             rsi_div=req.rsi_div, trend_filter=req.trend_filter,
+                             rsi_div=req.rsi_div, rej_candle=req.rej_candle, at_level=req.at_level,
+                             pa_confirm=req.pa_confirm, trend_filter=req.trend_filter,
                              auto_approve=req.auto_approve)
 
 
@@ -43,6 +48,9 @@ class RsiOverConfigView(BaseModel):
     confirm: bool
     macd: bool
     rsi_div: bool
+    rej_candle: bool
+    at_level: bool
+    pa_confirm: bool
     trend_filter: bool
     auto_approve: bool
     last_run_at: datetime | None
@@ -60,6 +68,9 @@ class RsiOverConfigRequest(BaseModel):
     confirm: bool | None = None
     macd: bool | None = None
     rsi_div: bool | None = None
+    rej_candle: bool | None = None
+    at_level: bool | None = None
+    pa_confirm: bool | None = None
     trend_filter: bool | None = None
     auto_approve: bool | None = None
 
@@ -71,7 +82,8 @@ def _config_view(cfg) -> RsiOverConfigView:
         cands = None
     return RsiOverConfigView(enabled=cfg.enabled, interval_seconds=cfg.interval_seconds,
                              timeframe=cfg.timeframe, confirm=cfg.confirm, macd=cfg.macd,
-                             rsi_div=cfg.rsi_div, trend_filter=cfg.trend_filter,
+                             rsi_div=cfg.rsi_div, rej_candle=cfg.rej_candle, at_level=cfg.at_level,
+                             pa_confirm=cfg.pa_confirm, trend_filter=cfg.trend_filter,
                              auto_approve=cfg.auto_approve,
                              last_run_at=cfg.last_run_at, last_result=cfg.last_result,
                              last_scan_at=cfg.last_scan_at, last_scanned=cfg.last_scanned or 0,
@@ -99,6 +111,12 @@ def set_config(req: RsiOverConfigRequest, session: Session = Depends(get_session
         cfg.macd = req.macd
     if req.rsi_div is not None:
         cfg.rsi_div = req.rsi_div
+    if req.rej_candle is not None:
+        cfg.rej_candle = req.rej_candle
+    if req.at_level is not None:
+        cfg.at_level = req.at_level
+    if req.pa_confirm is not None:
+        cfg.pa_confirm = req.pa_confirm
     if req.trend_filter is not None:
         cfg.trend_filter = req.trend_filter
     if req.auto_approve is not None:

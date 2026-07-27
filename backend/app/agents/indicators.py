@@ -45,6 +45,76 @@ def swing_levels(candles: list[Candle], lookback: int = 20) -> tuple[float | Non
     return round(support, 4), round(resistance, 4)
 
 
+_WICK_BODY_MULT = 1.5   # a rejection wick must be >= this many times the candle body
+_WICK_RANGE_FRAC = 0.5  # ...and >= this fraction of the whole bar's range
+
+
+def rejection_candle(candles: list[Candle]) -> dict:
+    """Reversal candle on the LAST completed bar — the price-action confirmation a chart trader
+    waits for at an RSI extreme (the market showing sellers/buyers defended the level right here):
+
+      rej_bear (1.0) = a bearish rejection (a shooting-star / long UPPER wick that closes in the
+                       lower half, or a bearish ENGULFING) — confirms a SHORT at an overbought high.
+      rej_bull (1.0) = a bullish rejection (a hammer / long LOWER wick that closes in the upper
+                       half, or a bullish ENGULFING) — confirms a LONG at an oversold low.
+
+    Zero flags when there's no clear rejection. Needs >= 2 bars. Pure price action, no lookahead
+    (only the last completed bar and the one before it)."""
+    out = {"rej_bull": 0.0, "rej_bear": 0.0}
+    if len(candles) < 2:
+        return out
+    c, p = candles[-1], candles[-2]
+    o, h, lo, cl = c.open, c.high, c.low, c.close
+    rng = h - lo
+    if rng <= 0:
+        return out
+    body = abs(cl - o)
+    upper = h - max(o, cl)      # upper wick
+    lower = min(o, cl) - lo     # lower wick
+    mid = lo + 0.5 * rng
+    # Pin bar / long-wick rejection: a dominant wick on one side and the close pushed to the far side.
+    pin_bear = upper >= _WICK_BODY_MULT * body and upper >= _WICK_RANGE_FRAC * rng and cl <= mid
+    pin_bull = lower >= _WICK_BODY_MULT * body and lower >= _WICK_RANGE_FRAC * rng and cl >= mid
+    # Engulfing: the last body fully covers the prior (opposite-coloured) body.
+    engulf_bear = cl < o and p.close > p.open and o >= p.close and cl <= p.open
+    engulf_bull = cl > o and p.close < p.open and o <= p.close and cl >= p.open
+    out["rej_bear"] = 1.0 if (pin_bear or engulf_bear) else 0.0
+    out["rej_bull"] = 1.0 if (pin_bull or engulf_bull) else 0.0
+    return out
+
+
+def failed_break(candles: list[Candle], lookback: int = 4, prior_window: int = 20) -> dict:
+    """A FAILED BREAK / trap — the multi-bar cousin of the rejection candle. Price sweeps BEYOND a
+    prior level within the last ``lookback`` bars, then closes back on the original side (a bull/bear
+    trap / stop-run). This catches the "fake break of resistance/support, then reverse a few bars
+    later" that a single-bar rejection candle misses:
+
+      fbreak_bear (1.0) = swept ABOVE a prior high (last ``lookback`` bars) but the last close is back
+                          BELOW it — a failed upside break → a SHORT rejection.
+      fbreak_bull (1.0) = swept BELOW a prior low but the last close is back ABOVE it — a failed
+                          downside break → a LONG rejection.
+
+    The "prior level" is the high/low of the ``prior_window`` bars BEFORE the recent sweep, so a fresh
+    new-high/low that CLOSES beyond the level (a real break) does NOT flag — only a poke-and-reclaim."""
+    out = {"fbreak_bull": 0.0, "fbreak_bear": 0.0}
+    if len(candles) < lookback + 3:
+        return out
+    recent = candles[-lookback:]
+    prior = candles[-(lookback + prior_window):-lookback]
+    if not prior:
+        return out
+    prior_high = max(c.high for c in prior)
+    prior_low = min(c.low for c in prior)
+    swept_high = max(c.high for c in recent)
+    swept_low = min(c.low for c in recent)
+    last_close = candles[-1].close
+    if swept_high > prior_high and last_close < prior_high:
+        out["fbreak_bear"] = 1.0   # poked above prior resistance, closed back below = bull trap
+    if swept_low < prior_low and last_close > prior_low:
+        out["fbreak_bull"] = 1.0   # poked below prior support, closed back above = bear trap
+    return out
+
+
 def market_structure(candles: list[Candle], left: int = 3, right: int = 3) -> dict:
     """Read market structure the way a chart trader does — from the sequence of swing pivots.
 

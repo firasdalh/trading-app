@@ -6,10 +6,11 @@ limit — it only assembles inputs.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.brokers.base import BrokerAdapter
@@ -221,6 +222,104 @@ def evaluate_daily_pause(session: Session) -> bool:
 
     return daily.trading_paused
 
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _position_is_loss(row: Position) -> bool | None:
+    """Whether a CLOSED position was a loss: realized P&L < 0, or (when P&L wasn't recorded) the
+    exit went against the trade. None when it can't be determined."""
+    if row.realized_pnl is not None:
+        return row.realized_pnl < 0
+    if row.last_price is not None and row.entry_price is not None:
+        return (row.last_price >= row.entry_price) if row.direction == "short" \
+            else (row.last_price <= row.entry_price)
+    return None
+
+
+def _position_r_multiple(row: Position) -> float | None:
+    """Realized R (P&L ÷ risk-at-entry) of a closed position, or None if not computable."""
+    if row.realized_pnl is None or not row.risk_amount or row.risk_amount <= 0:
+        return None
+    return row.realized_pnl / row.risk_amount
+
+
+def entry_breaker_reason(session: Session) -> str | None:
+    """System-wide 'pause new entries' circuit breakers, derived from recent trade history
+    (deterministic — no LLM, no broker call). Returns a veto reason when a breaker is TRIPPED, else
+    None. All three are OFF by default (0 / disabled) so they never change behaviour until enabled:
+
+      • max_trades_per_day — cap trades OPENED per UTC day (a runaway-loop backstop). Resets at
+        the next UTC day.
+      • max_consecutive_losses — after N losing trades in a row, pause new entries for
+        ``breaker_cooldown_minutes`` from the last close, then allow a single probe (a win resets
+        the streak). Self-resets rather than latching forever.
+      • perf_breaker_enabled — if the last ``expectancy_window`` closed trades average below
+        ``min_expectancy_r`` (live results diverging from the backtest edge), pause for the same
+        cooldown, then probe. The floor is the user's "backtest expectancy minus tolerance".
+
+    Only NEW entries are gated (like the daily-loss pause); an open position is never touched.
+    """
+    rc = get_or_create_risk_config(session)
+    if rc.max_trades_per_day <= 0 and rc.max_consecutive_losses <= 0 and not rc.perf_breaker_enabled:
+        return None
+    now = datetime.now(timezone.utc)
+
+    # 1) daily trade-count cap (UTC day) — counts positions opened today.
+    if rc.max_trades_per_day > 0:
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        opened_today = session.scalar(
+            select(func.count(Position.id)).where(Position.opened_at >= day_start)
+        ) or 0
+        if opened_today >= rc.max_trades_per_day:
+            return (f"daily trade cap reached ({opened_today}/{rc.max_trades_per_day} today) — "
+                    "no new entries until the next UTC day")
+
+    need = max(rc.expectancy_window if rc.perf_breaker_enabled else 0,
+               rc.max_consecutive_losses if rc.max_consecutive_losses > 0 else 0)
+    if need <= 0:
+        return None
+    rows = session.scalars(
+        select(Position)
+        .where(Position.status == PositionStatus.CLOSED.value)
+        .order_by(Position.closed_at.desc())
+        .limit(need + 3)
+    ).all()
+    if not rows:
+        return None
+
+    # 2) consecutive-loss circuit breaker (cooldown -> probe).
+    if rc.max_consecutive_losses > 0:
+        streak = 0
+        for row in rows:
+            if _position_is_loss(row) is True:
+                streak += 1
+            else:
+                break
+        if streak >= rc.max_consecutive_losses and rows[0].closed_at is not None:
+            until = _as_utc(rows[0].closed_at) + timedelta(minutes=rc.breaker_cooldown_minutes)
+            if now < until:
+                mins = max(0, math.ceil((until - now).total_seconds() / 60))
+                return (f"circuit breaker: {streak} losses in a row — new entries paused "
+                        f"~{mins} min to reset, then a probe trade")
+
+    # 3) performance / divergence breaker (rolling expectancy vs the floor) — needs a FULL window.
+    if rc.perf_breaker_enabled and rc.expectancy_window > 0:
+        window = rows[: rc.expectancy_window]
+        rmults = [r for r in (_position_r_multiple(row) for row in window) if r is not None]
+        if len(rmults) >= rc.expectancy_window and window[0].closed_at is not None:
+            avg = sum(rmults) / len(rmults)
+            if avg < rc.min_expectancy_r:
+                until = _as_utc(window[0].closed_at) + timedelta(minutes=rc.breaker_cooldown_minutes)
+                if now < until:
+                    mins = max(0, math.ceil((until - now).total_seconds() / 60))
+                    return (f"performance breaker: last {len(rmults)} trades average {avg:+.2f}R "
+                            f"(below the {rc.min_expectancy_r:+.2f}R floor) — new entries paused "
+                            f"~{mins} min to reassess")
+    return None
+
+
 # Per-asset-class default tradable increment used for position sizing.
 _QTY_STEP = {
     AssetClass.STOCK: 1.0,     # whole shares
@@ -257,6 +356,9 @@ class ScanCache:
     """
     open_book: list[tuple[str, str]] | None = None
     accounts: dict[str, AccountState] = field(default_factory=dict)
+    # The system-wide entry-breaker verdict is global (not per-symbol), so compute it once per scan.
+    breaker_checked: bool = False
+    breaker_reason: str | None = None
 
 
 def _scan_open_book(session: Session, cache: ScanCache | None) -> list[tuple[str, str]]:
@@ -444,6 +546,15 @@ def assess(
         except Exception:  # noqa: BLE001 - never let a tradeability lookup block sizing
             pass
     qty_step, min_lot = _lot_specs(broker, proposal.asset_class, proposal.symbol)
+    # System-wide entry breakers (trade-count / loss-streak / performance divergence). Global, so
+    # compute once per scan when a cache is present; fresh each time on the single-symbol path.
+    if cache is not None:
+        if not cache.breaker_checked:
+            cache.breaker_reason = entry_breaker_reason(session)
+            cache.breaker_checked = True
+        breaker = cache.breaker_reason
+    else:
+        breaker = entry_breaker_reason(session)
     return evaluate_proposal(
         proposal,
         account,
@@ -457,6 +568,7 @@ def assess(
         has_open_same_direction=same_dir,
         correlated_exposure=correlated,
         not_tradeable_reason=not_tradeable,
+        breaker_reason=breaker,
         risk_per_lot=_risk_per_lot(broker, proposal.symbol, proposal.entry, proposal.stop_loss),
     )
 

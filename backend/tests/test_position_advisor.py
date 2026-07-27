@@ -243,6 +243,40 @@ def test_auto_decision_closes_invalidated():
     assert advisor._auto_decision(_adv(thesis="invalidated"), p, {}, None)["action"] == "close"
 
 
+# ---- time-based exit (stagnant trade) ----
+
+def test_auto_decision_time_stop_closes_stagnant():
+    # Flat short (last == entry 4449) held 30h with a 24h max -> time-stop close.
+    p = _pos(direction="short", stop=4470.0)
+    opened = datetime.now(timezone.utc) - timedelta(hours=30)
+    d = advisor._auto_decision(_adv(thesis="intact"), p, {"atr": 5.0, "last": 4449.0}, 10.0,
+                               opened_at=opened, max_hold_hours=24.0)
+    assert d is not None and d["kind"] == "time_stop" and d["action"] == "close"
+
+
+def test_auto_decision_time_stop_skips_a_winner():
+    # +0.6R (above the 0.5R flat band) -> a working trade is NOT time-stopped, even when old.
+    p = _pos(direction="short", stop=4470.0)
+    opened = datetime.now(timezone.utc) - timedelta(hours=30)
+    d = advisor._auto_decision(_adv(thesis="intact"), p, {"atr": 5.0, "last": 4443.0}, 10.0,
+                               opened_at=opened, max_hold_hours=24.0)
+    assert d is None  # profit 6 -> 0.6R: not flat, and below the +1R breakeven/trail thresholds
+
+
+def test_auto_decision_time_stop_skips_recent_trade():
+    p = _pos(direction="short", stop=4470.0)
+    opened = datetime.now(timezone.utc) - timedelta(hours=2)  # held < 24h
+    assert advisor._auto_decision(_adv(thesis="intact"), p, {"atr": 5.0, "last": 4449.0}, 10.0,
+                                  opened_at=opened, max_hold_hours=24.0) is None
+
+
+def test_auto_decision_time_stop_off_when_disabled():
+    p = _pos(direction="short", stop=4470.0)
+    opened = datetime.now(timezone.utc) - timedelta(hours=100)
+    assert advisor._auto_decision(_adv(thesis="intact"), p, {"atr": 5.0, "last": 4449.0}, 10.0,
+                                  opened_at=opened, max_hold_hours=0.0) is None
+
+
 def test_auto_decision_breakeven_winning_into_news():
     # short winning, stop above entry (worse side) -> lock to breakeven.
     p = _pos(direction="short", pnl=10.0, stop=4460.0)  # entry 4449 -> stop above = worse
@@ -259,10 +293,10 @@ def test_auto_decision_protects_naked_position():
 
 def test_auto_decision_trails_beyond_target_r():
     # short, big profit (last well below entry) -> trail; plan_risk 10, profit ~50 = 5R.
-    # already_scaled=True so we test the trail that manages the remainder after a partial.
+    # tranche=2 so we test the trail that manages the remainder after a partial.
     p = _pos(direction="short", stop=4460.0)
     decision = advisor._auto_decision(_adv(thesis="intact"), p,
-                                      {"atr": 5.0, "last": 4399.0}, 10.0, already_scaled=True)
+                                      {"atr": 5.0, "last": 4399.0}, 10.0, tranche=2)
     assert decision is not None and decision["kind"] == "trail"
     assert decision["stop"] < 4460.0  # tighter than the current stop
 
@@ -333,7 +367,7 @@ def test_trail_behind_structure_in_trending_regime():
     # plain structural trail that manages the runner from then on.
     p = _pos(direction="long", stop=4455.0, tp=None)  # entry 4449, stop already past breakeven
     ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending", "swing_low": 4460.0}
-    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)  # +2.1R
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, tranche=2)  # +2.1R
     assert d is not None and d["kind"] == "trail" and "structure" in d["reason"]
     assert abs(d["stop"] - 4459.6) < 0.01  # swing 4460 - 0.2*ATR(2)
 
@@ -341,7 +375,7 @@ def test_trail_behind_structure_in_trending_regime():
 def test_trail_atr_in_volatile_regime():
     p = _pos(direction="long", stop=4455.0)
     ctx = {"atr": 2.0, "last": 4470.0, "regime": "volatile", "swing_low": 4460.0}
-    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, tranche=2)
     assert d is not None and d["kind"] == "trail" and "ATR" in d["reason"]
     assert abs(d["stop"] - 4468.0) < 0.01  # 4470 - 1*ATR(2) (tighter than structure in a chop)
 
@@ -378,18 +412,58 @@ def test_protect_falls_back_to_breakeven_without_swing():
 
 # --- partial profit-taking (scale out) ---
 
-def test_auto_decision_scales_out_at_milestone():
+def test_auto_decision_scales_out_first_third_at_r1():
+    # tranche 0, past +1.5R -> book the FIRST third (a third of the original = ~0.333 of the current).
     p = _pos(direction="long", stop=4445.0)  # entry 4449
     ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending"}  # +2.1R
     d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
-    assert d is not None and d["action"] == "take_partial" and d["fraction"] == 0.5
+    assert d is not None and d["action"] == "take_partial" and abs(d["fraction"] - 1 / 3) < 0.01
+    assert "first third" in d["reason"]
 
 
-def test_auto_decision_no_double_scale():
+def test_auto_decision_second_third_at_r2():
+    # tranche 1 booked -> the SECOND third books at +3R (half of the remaining two thirds).
+    p = _pos(direction="long", stop=4455.0, tp=None)  # entry 4449
+    ctx = {"atr": 2.0, "last": 4479.0, "regime": "trending"}  # +3.0R
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, tranche=1)
+    assert d is not None and d["action"] == "take_partial" and abs(d["fraction"] - 0.5) < 0.01
+    assert "second third" in d["reason"]
+
+
+def test_auto_decision_no_third_tranche_when_done():
+    # tranche 2 (both booked) -> no more partials; manage the runner (trail) instead.
+    p = _pos(direction="long", stop=4455.0, tp=None)
+    ctx = {"atr": 2.0, "last": 4490.0, "regime": "trending"}
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, tranche=2)
+    assert d is None or d["action"] != "take_partial"
+
+
+def test_auto_decision_no_partial_below_r1():
+    # +1.0R, tranche 0, no wall -> no scale yet (breakeven/structure handles +1R separately).
     p = _pos(direction="long", stop=4445.0)
-    ctx = {"atr": 2.0, "last": 4470.0, "regime": "trending"}
-    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
-    assert d is None or d["action"] != "take_partial"  # already scaled -> manage the rest instead
+    ctx = {"atr": 2.0, "last": 4459.0, "regime": "moderate"}  # +1.0R, no near_res
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    assert d is None or d["action"] != "take_partial"
+
+
+def test_auto_decision_banks_into_wall_early():
+    # +1.2R and price AT a 4H resistance with RSI rolling over -> bank the tranche EARLY (before +1.5R),
+    # selling into strength.
+    p = _pos(direction="long", stop=4445.0)  # entry 4449
+    ctx = {"atr": 2.0, "last": 4461.0, "regime": "trending", "near_res": (4462.0, "4h"),
+           "macd_hist": 0.5, "rsi": 75.0, "rsi_prev": 78.0}  # +1.2R, RSI 78->75 rolling over at the wall
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    assert d is not None and d["action"] == "take_partial" and "strength" in d["reason"]
+    assert "4H resistance" in d["reason"]
+
+
+def test_auto_decision_wall_needs_fading_momentum():
+    # Same wall but momentum still strong (MACD up, RSI rising) -> do NOT bank early.
+    p = _pos(direction="long", stop=4445.0)
+    ctx = {"atr": 2.0, "last": 4461.0, "regime": "trending", "near_res": (4462.0, "4h"),
+           "macd_hist": 1.0, "rsi": 74.0, "rsi_prev": 70.0}  # RSI rising, MACD up -> not fading
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0)
+    assert d is None or d["action"] != "take_partial"  # +1.2R < 1.5R and no fading -> no early bank
 
 
 def test_sim_close_partial_reduces_position():
@@ -404,6 +478,29 @@ def test_sim_close_partial_reduces_position():
     assert res.status.value not in ("error", "rejected")
     pos = b.get_open_positions()
     assert len(pos) == 1 and abs(pos[0].qty - 0.5) < 1e-6
+
+
+def test_auto_execute_time_stop_closes_stagnant(db_session, monkeypatch):
+    """A stagnant position past max_hold_hours is auto-closed immediately — no invalidation-streak
+    confirmation needed (the hold-time condition is already slow and definite)."""
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    broker = _Broker(is_paper=True)
+    # An app-tracked OPEN position opened 30h ago, so _position_opened_at can measure the hold.
+    db_session.add(Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=1.0,
+                            entry_price=4449.0, stop_loss=4470.0, status=PositionStatus.OPEN.value,
+                            opened_at=datetime.now(timezone.utc) - timedelta(hours=30)))
+    advisor.get_or_create_advisor_config(db_session).max_hold_hours = 24.0  # enable the time-stop
+    db_session.commit()
+    monkeypatch.setattr(advisor, "live_broker_positions",
+                        lambda session: [_pos(direction="short", stop=4470.0)])
+    monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
+    _patch_exec(monkeypatch, broker)
+    ctx = {"XAUUSDm": {"atr": 5.0, "last": 4449.0, "regime": "moderate"}}  # flat -> time-stop
+    actions = advisor._auto_execute(db_session, [_adv(symbol="XAUUSDm", thesis="intact")], ctx)
+    assert broker.closed == ["XAUUSDm"]  # closed on the first pass (no streak needed)
+    assert any(x["kind"] == "time_stop" and x["ok"] for x in actions)
 
 
 def test_auto_execute_takes_partial_and_moves_to_breakeven(db_session, monkeypatch):
@@ -480,7 +577,7 @@ def test_auto_decision_lets_winner_run_in_strong_trend():
     instead of capping at the planned target."""
     p = _pos(direction="short", stop=4460.0)  # entry 4449, take_profit 4397 still set
     ctx = {"atr": 5.0, "last": 4429.0, "regime": "trending"}  # profit 20 / plan 10 = +2.0R
-    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, tranche=2)
     assert d is not None and d["action"] == "run_target"
     assert d["stop"] < 4460.0  # trail is tighter than the current stop (never loosens)
 
@@ -489,7 +586,7 @@ def test_auto_decision_no_run_when_trend_not_strong():
     """Same +2R but a ranging/volatile regime -> do NOT remove the target; just trail/bank."""
     p = _pos(direction="short", stop=4460.0)
     ctx = {"atr": 5.0, "last": 4429.0, "regime": "ranging"}
-    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, already_scaled=True)
+    d = advisor._auto_decision(_adv(thesis="intact"), p, ctx, 10.0, tranche=2)
     assert d is None or d["action"] != "run_target"
 
 
@@ -509,7 +606,7 @@ def test_auto_execute_run_target_clears_take_profit(db_session, monkeypatch):
     monkeypatch.setattr(advisor, "live_broker_positions",
                         lambda session: [_pos(direction="short", stop=4460.0)])
     monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
-    monkeypatch.setattr(advisor, "_already_scaled", lambda *a, **k: True)  # past the partial step
+    monkeypatch.setattr(advisor, "_scaled_tranche", lambda *a, **k: (2, True))  # past the partial step
     _patch_exec(monkeypatch, broker)
     ctx = {"XAUUSDm": {"atr": 5.0, "last": 4429.0, "regime": "trending"}}
     actions = advisor._auto_execute(db_session, [_adv(thesis="intact")], ctx)
@@ -631,24 +728,25 @@ def test_run_advisor_executes_when_toggle_on(db_session, monkeypatch):
     assert out["actions"][0]["action"] == "close"
 
 
-def test_scenario_awareness_with_and_against(monkeypatch):
-    """The advisor judges an open position against the AI scenario read: aligned bias = 'with'
-    (a pullback here is expected), opposing bias = 'against' (heads-up)."""
+def test_scenario_awareness_uses_deterministic_macro(monkeypatch):
+    """The advisor judges an open position against the DETERMINISTIC engine's macro read (NOT the AI):
+    the bigger-timeframe trend WITH the position = 'with' (a pullback here is expected), AGAINST it =
+    'against' (heads-up). It reuses the already-computed deterministic context — no LLM/scenario call."""
     import types
 
-    import app.agents.scenarios as scen_mod
-
-    advisor._SCENARIO_CACHE.clear()
-    read = {"scenarios": [{"label": "Pullback then bounce", "direction": "up", "prob": 60,
-                           "path": "pull back to 0.80745 support then resume up"}],
-            "overall_bias": "bullish", "invalidation": "close below 0.80745", "headline": "bullish"}
-    monkeypatch.setattr(scen_mod, "ai_scenarios", lambda *a, **k: read)
-
     p_long = types.SimpleNamespace(symbol="USDCHFm", asset_class="forex", direction="long")
-    note, lean = advisor._scenario_awareness(None, p_long)
-    assert lean == "with" and "On plan" in note and "0.80745" in note
+    ctx_up = {"macro": "up", "macro_tf": "4h", "tf": "1h", "swing_low": 0.80745}
+    note, lean = advisor._scenario_awareness(p_long, ctx_up)
+    assert lean == "with" and "on plan" in note.lower() and "0.80745" in note
 
-    advisor._SCENARIO_CACHE.clear()
-    p_short = types.SimpleNamespace(symbol="USDCHFm", asset_class="forex", direction="short")
-    _, lean2 = advisor._scenario_awareness(None, p_short)
+    ctx_down = {"macro": "down", "macro_tf": "4h", "tf": "1h", "swing_high": 0.82}
+    _, lean2 = advisor._scenario_awareness(p_long, ctx_down)
     assert lean2 == "against"
+
+    # short mirrors: a macro UPtrend leans against a short
+    p_short = types.SimpleNamespace(symbol="USDCHFm", asset_class="forex", direction="short")
+    _, lean3 = advisor._scenario_awareness(p_short, ctx_up)
+    assert lean3 == "against"
+
+    # no context -> no plan check (returns None, never crashes)
+    assert advisor._scenario_awareness(p_long, None) is None

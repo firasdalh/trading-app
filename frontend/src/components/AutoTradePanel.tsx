@@ -37,11 +37,18 @@ export function AutoTradePanel({
   onSelect?: (p: { symbol: string; asset_class: string }) => void;
 }) {
   const [cfg, setCfg] = useState<AutoTradeView | null>(null);
+  const [maxPos, setMaxPos] = useState(3);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
       setCfg(await api.autoTrade());
+    } catch {
+      /* ignore */
+    }
+    try {
+      const s = await api.settings();
+      setMaxPos(s.risk.max_open_positions);
     } catch {
       /* ignore */
     }
@@ -89,7 +96,7 @@ export function AutoTradePanel({
     }
   };
 
-  const setNum = async (patch: Partial<Pick<AutoTradeView, "min_confidence" | "min_rr" | "min_profit_usd" | "cooldown_minutes" | "interval_seconds">>) => {
+  const setNum = async (patch: Partial<Pick<AutoTradeView, "min_confidence" | "min_rr" | "min_profit_usd" | "cooldown_minutes" | "interval_seconds" | "strategy" | "timeframe">>) => {
     setBusy(true);
     try {
       setCfg(await api.autoTradeConfig(patch));
@@ -97,6 +104,10 @@ export function AutoTradePanel({
       setBusy(false);
     }
   };
+
+  const strategy = cfg?.strategy ?? "scenario";
+  const superTrend = strategy === "supertrend";
+  const reversal = strategy === "reversal";
 
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-3">
@@ -115,6 +126,47 @@ export function AutoTradePanel({
       >
         {on ? `● Auto-trading ${symbol} — ON (tap to stop)` : `Auto-trade ${symbol} — OFF`}
       </button>
+
+      {/* Strategy + timeframe — global, applied to ALL auto-traded pairs */}
+      <div className="mt-2 rounded-md border border-neutral-800 bg-neutral-900/40 px-2.5 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] uppercase text-neutral-500">Strategy</span>
+          <select
+            value={strategy}
+            onChange={(e) => void setNum({ strategy: e.target.value as "scenario" | "supertrend" | "reversal" })}
+            disabled={busy}
+            className="rounded bg-neutral-800 px-1.5 py-1 text-xs font-semibold text-neutral-100"
+            title="Which engine opens the trades. Applies to every auto-traded pair."
+          >
+            <option value="reversal">🔄 Level bounce (mechanical scalp)</option>
+            <option value="supertrend">📈 SuperTrend (mechanical, no AI)</option>
+            <option value="scenario">🤖 AI scenario (follows the AI read)</option>
+          </select>
+        </div>
+        <div className="mt-1.5 flex items-center justify-between gap-2">
+          <span className="text-[10px] uppercase text-neutral-500">Timeframe</span>
+          <select
+            value={cfg?.timeframe ?? "1h"}
+            onChange={(e) => void setNum({ timeframe: e.target.value })}
+            disabled={busy}
+            className="rounded bg-neutral-800 px-1.5 py-1 text-xs font-semibold text-neutral-100"
+            title="The chart timeframe the auto-trader analyses on — one value for ALL auto-traded pairs."
+          >
+            {["5m", "15m", "30m", "1h", "4h", "1d"].map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="mt-1 text-[10px] text-neutral-600">
+          {reversal
+            ? "Mechanical scalp (no LLM): when price rejects an S/R level it takes the quick move to the opposite level — sells a resistance rejection to support, buys a support rejection to resistance. Buys dips in uptrends / sells rallies in downtrends; won't fade a strong trend."
+            : superTrend
+              ? "Mechanical: opens ONLY a fresh SuperTrend + EMA20-band breakout (no LLM = no tokens). No fresh break → it waits. Best on 1h."
+              : "AI-driven: opens the AI decider's trade or its primary scenario's next move at market."}
+        </div>
+      </div>
 
       {/* Params */}
       <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] uppercase text-neutral-500">
@@ -234,9 +286,12 @@ export function AutoTradePanel({
         </div>
       )}
       <div className="mt-1.5 text-[10px] text-neutral-600">
-        Opens the AI's next scenario move at market (never a pending order) at ≥{((cfg?.min_confidence ?? 0.6) * 100).toFixed(0)}% —
-        a quick win, riding to TP/SL, then re-entering after the cooldown. Won't fire once 3 positions are open.
-        Every risk gate + the kill-switch apply.
+        {reversal
+          ? "Scalps a level rejection at market (never a pending order) — a quick move to the opposite level, riding to TP/SL, then re-entering after the cooldown. "
+          : superTrend
+            ? "Opens a fresh SuperTrend + EMA20-band breakout at market (never a pending order), riding to TP/SL, then re-entering after the cooldown. "
+            : `Opens the AI's next scenario move at market (never a pending order) at ≥${((cfg?.min_confidence ?? 0.6) * 100).toFixed(0)}% — a quick win, riding to TP/SL, then re-entering after the cooldown. `}
+        Won't fire once {maxPos} position{maxPos === 1 ? " is" : "s are"} open. Every risk gate + the kill-switch apply.
       </div>
     </div>
   );

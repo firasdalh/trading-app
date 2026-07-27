@@ -91,7 +91,7 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
           Opportunities
         </button>
         <span className="text-xs text-neutral-500">
-          the AI decides every pair — open / arm / stand aside (matches Run analysis)
+          the engine decides every pair — open / arm / stand aside (same as Run analysis)
         </span>
         {items && (
           <span className="text-xs text-neutral-400">
@@ -256,6 +256,7 @@ function HybridControl({ onOpened, timeframe }: { onOpened?: () => void; timefra
   const [bump, setBump] = useState(0);
   const { data: state } = usePolling(() => api.hybridState(), 15000, [bump]);
   const { data: stats } = usePolling(() => api.hybridStats(), 20000, [bump]);
+  const { data: settings } = usePolling(() => api.settings(), 30000, []);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ interval: "", conf: "", cond: true, armed: "3" });
@@ -265,6 +266,7 @@ function HybridControl({ onOpened, timeframe }: { onOpened?: () => void; timefra
   const intervalMin = state ? Math.round(state.interval_seconds / 60) : 35;
   const confPct = state ? Math.round(state.min_confidence * 100) : 70;
   const condOn = state?.conditional_enabled ?? true;
+  const maxPos = settings?.risk.max_open_positions ?? 3;
 
   const toggle = async () => {
     setBusy(true);
@@ -354,12 +356,12 @@ function HybridControl({ onOpened, timeframe }: { onOpened?: () => void; timefra
 
       <p className="mt-1 text-xs text-neutral-500">
         Every ~{intervalMin} min it <span className="text-neutral-300">first checks for room</span> —
-        if 3 trades are already open it skips the scan entirely. Otherwise the{" "}
-        <span className="text-violet-300">AI decides every pair</span> (same as Run analysis) and
+        if {maxPos} trade{maxPos === 1 ? " is" : "s are"} already open it skips the scan entirely. Otherwise the{" "}
+        <span className="text-violet-300">engine decides every pair</span> (same as Run analysis) and
         auto-opens the single best setup above <span className="text-neutral-300">{confPct}%</span>{" "}
         confidence. Kill-switch, daily-loss, exposure & no-stacking limits still apply.
         {condOn && (
-          <> It also <span className="text-amber-300">arms</span> the AI's “wait for the break”
+          <> It also <span className="text-amber-300">arms</span> the engine's “wait for the break”
           setups, re-checking + opening them when the level gives way.</>
         )}
       </p>
@@ -469,10 +471,10 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
       title: "Watchlist scans the auto-pilot ran today" },
     { label: "Candidates", value: s.candidates, tone: "text-sky-300",
       title: "Risk-approved OPENS that cleared the confidence threshold (the ranking pool)" },
-    { label: "AI opens", value: s.ai_opens, tone: "text-bull",
-      title: "Pairs the AI decider chose to OPEN (a market direction) across today's scans" },
-    { label: "AI arms", value: s.ai_arms, tone: "text-amber-300",
-      title: "Pairs the AI decider chose to ARM (a pending break/pullback order)" },
+    { label: "Open signals", value: s.ai_opens, tone: "text-bull",
+      title: "Pairs the engine flagged with a market direction across today's scans — a SIGNAL, not an executed trade. Actual opens = Direct trades." },
+    { label: "Arm signals", value: s.ai_arms, tone: "text-amber-300",
+      title: "Pairs the engine flagged with a 'wait for the break' setup — a SIGNAL, not an armed order. Actual arms = Armed." },
     { label: "Direct trades", value: s.direct_trades, tone: "text-bull",
       title: "Market orders the Hybrid auto-opened" },
     { label: "Armed", value: s.armed_setups, tone: "text-amber-300",
@@ -505,8 +507,8 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
         ))}
       </div>
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
-        <span title="Of the pairs the AI decider evaluated today, the share it chose to ACT on (open or arm) ÷ scanned. Green ≥66% · amber 40–66% · red <40%">
-          AI act rate:{" "}
+        <span title="Of the pairs the engine evaluated today, the share that produced an open OR arm SIGNAL ÷ scanned. Green ≥66% · amber 40–66% · red <40%">
+          Signal rate:{" "}
           <span className={`font-semibold ${acceptTone}`}>
             {s.accept_rate == null ? "—" : `${Math.round(s.accept_rate * 100)}%`}
           </span>

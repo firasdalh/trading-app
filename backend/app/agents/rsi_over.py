@@ -56,7 +56,8 @@ def rsi_over_tick(session: Session) -> dict:
     session.add(cfg)
     session.commit()
     return run_rsi_over_scan(session, cfg.timeframe, confirm=cfg.confirm, macd=cfg.macd,
-                             rsi_div=cfg.rsi_div, trend_filter=cfg.trend_filter,
+                             rsi_div=cfg.rsi_div, rej_candle=cfg.rej_candle, at_level=cfg.at_level,
+                             pa_confirm=cfg.pa_confirm, trend_filter=cfg.trend_filter,
                              auto_approve=cfg.auto_approve, skip_if_full=True)
 
 # Which asset classes to sweep (the user's tradable universe: FX / metals / energy / indices / crypto).
@@ -135,7 +136,8 @@ def _closest_text(cands: dict) -> str:
 
 
 def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: bool = True,
-                      macd: bool = False, rsi_div: bool = False, trend_filter: bool = True,
+                      macd: bool = False, rsi_div: bool = False, rej_candle: bool = False,
+                      at_level: bool = False, pa_confirm: bool = False, trend_filter: bool = True,
                       auto_approve: bool = False, skip_if_full: bool = False) -> dict:
     """Sweep the available universe for the first RSI-extreme reversal the Risk Manager approves, stage
     it (Mode A: queue for approval; Modes B/C: auto-open), and return a short summary. Confirmations
@@ -192,6 +194,7 @@ def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: b
     if not universe:
         return done("no instruments to scan (broker returned no symbols and the watchlist is empty)")
 
+    settings = get_or_create_settings(session)
     scanned = 0
     signals = 0              # directional RSI-extreme + EMA10-confirmed reads seen
     blocked: list[str] = []  # signals the Risk Manager refused (exposure/correlation/room/min-lot)
@@ -199,11 +202,19 @@ def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: b
     for symbol, ac_str in universe:
         if _norm_symbol(symbol) in open_syms or _norm_symbol(symbol) in pending_syms:
             continue
+        # Skip a CLOSED market (weekend / holiday / out-of-hours) — its bars are stale, so any RSI signal
+        # is frozen and can't fill. Crypto keeps ticking so it stays open.
+        try:
+            if not get_broker_for(AssetClass(ac_str), settings.broker_map).market_open(symbol):
+                continue
+        except Exception:  # noqa: BLE001 - a status lookup failure shouldn't stop the sweep
+            pass
         try:
             ac = AssetClass(ac_str)
             prop, dec = preview_symbol(session, symbol, ac, tf, use_llm=False, cache=cache,
                                        rsi_over=True, rsi_confirm=confirm, rsi_macd=macd,
-                                       rsi_div=rsi_div, rsi_trend_filter=trend_filter)
+                                       rsi_div=rsi_div, rsi_rej=rej_candle, rsi_at_level=at_level,
+                                       rsi_pa=pa_confirm, rsi_trend_filter=trend_filter)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the sweep
             log.warning("rsi-over preview failed", extra={"symbol": symbol, "error": str(exc)})
             continue
@@ -225,6 +236,7 @@ def run_rsi_over_scan(session: Session, timeframe: str | None = None, confirm: b
         # First tradeable signal -> persist + risk-manage + stage (Mode A queues it for approval).
         res = analyze_symbol(session, symbol, ac, tf, use_llm=False, rsi_over=True,
                              rsi_confirm=confirm, rsi_macd=macd, rsi_div=rsi_div,
+                             rsi_rej=rej_candle, rsi_at_level=at_level, rsi_pa=pa_confirm,
                              rsi_trend_filter=trend_filter)
         status = res.status
         approve_note = ""

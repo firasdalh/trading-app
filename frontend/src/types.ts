@@ -113,6 +113,8 @@ export interface AutoTradeView {
   min_rr: number;
   min_profit_usd: number;
   cooldown_minutes: number;
+  strategy: "scenario" | "supertrend" | "reversal";
+  timeframe: string;
   pairs: AutoTradePair[];
   last_run_at: string | null;
   last_result: string | null;
@@ -149,6 +151,10 @@ export interface TradeProposal {
   ai_decision?: AiDecision | null;
   // AI momentum classification at an ambiguous-momentum fork (set only when it ran).
   momentum_read?: { category: string; evidence: string; confidence: number } | null;
+  // AI regime-texture classification at the ambiguous regime boundary (set only when it ran).
+  regime_read?: { category: string; evidence: string; confidence: number } | null;
+  // AI price-action classification at a major opposing level (set only when it ran).
+  priceaction_read?: { category: string; evidence: string; confidence: number } | null;
   technical: TechnicalRead | null;
   fundamental: FundamentalRead | null;
 }
@@ -188,6 +194,7 @@ export interface AnalyzeResponse {
   proposal: TradeProposal;
   risk: RiskDecision;
   analyzed_at?: string | null;   // when this analysis ran
+  market_open?: boolean | null;  // false = the symbol's session is closed (stale prices)
 }
 
 export interface TradeEconomics {
@@ -278,6 +285,7 @@ export interface AdvisorState {
   enabled: boolean;
   auto_execute: boolean;
   interval_seconds: number;
+  max_hold_hours: number;
   last_run_at: string | null;
   advice: PositionAdvice[];
   actions: AdvisorAction[];
@@ -305,6 +313,8 @@ export interface SettingsResponse {
     trend_only_mode: boolean;
     st_band_mode: boolean;
     ai_momentum_read: boolean;
+    ai_regime_read: boolean;
+    ai_priceaction_read: boolean;
     ai_review_enabled: boolean;
     live_confirmed_at: string | null;
   };
@@ -316,6 +326,12 @@ export interface SettingsResponse {
     per_pair_cooldown_minutes: number;
     loss_cooldown_minutes: number;
     daily_loss_breaker_enabled: boolean;
+    max_trades_per_day: number;
+    max_consecutive_losses: number;
+    breaker_cooldown_minutes: number;
+    perf_breaker_enabled: boolean;
+    min_expectancy_r: number;
+    expectancy_window: number;
   };
   env_kill_switch: boolean;
   env_broker_env: string;
@@ -334,6 +350,7 @@ export interface RiskState {
   max_daily_loss: number;
   daily_loss_limit_amount: number | null;
   daily_loss_breaker_enabled: boolean;
+  entry_breaker: string | null;
 }
 
 export interface BacktestMetrics {
@@ -656,6 +673,9 @@ export interface RsiOverConfig {
   confirm: boolean;
   macd: boolean;
   rsi_div: boolean;
+  rej_candle: boolean;
+  at_level: boolean;
+  pa_confirm: boolean;
   trend_filter: boolean;
   auto_approve: boolean;
   last_run_at: string | null;

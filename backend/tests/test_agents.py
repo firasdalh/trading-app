@@ -160,26 +160,53 @@ def test_macd_histogram_rising_lifts_confidence_vs_fading():
     assert off_r.confidence == off_f.confidence   # filter off -> histogram slope no longer scored
 
 
-def test_flat_momentum_arms_only_with_cross_tf_conflict():
-    # A pullback AT value with FLAT entry-TF momentum AND the higher-TF momentum AGAINST it (the USDCHF
-    # loss) must NOT take the market entry — it arms a resumption. Toggling the filter off restores it.
-    from app.agents.orchestrator import _deterministic_decision
+def _flat_tech(entry_adx: float, hi_macd: float):
+    """A LONG pullback AT value with FLAT entry-TF MACD; ``entry_adx`` sets the trend strength and
+    ``hi_macd`` the higher-TF momentum (negative = cross-TF conflict, positive = aligned)."""
     from app.models.schemas import TechnicalRead, TimeframeRead
     entry_ind = {"last_close": 100.0, "ema20": 100.0, "ema50": 98.0, "ema200": 95.0, "atr14": 2.0,
-                 "adx": 22.0, "plus_di": 25.0, "minus_di": 15.0, "rsi14": 55.0,
+                 "adx": entry_adx, "plus_di": 25.0, "minus_di": 15.0, "rsi14": 55.0,
                  "macd_hist": 0.0, "macd_hist_prev": 0.0, "vol_ratio": 1.2}   # flat momentum, AT value
     hi_ind = {"last_close": 100.0, "ema20": 99.0, "ema50": 97.0, "ema200": 94.0, "atr14": 2.0,
-              "adx": 25.0, "macd_hist": -1.0}   # trend up (EMA stack) but MACD momentum AGAINST the long
-    tech = TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
+              "adx": 25.0, "macd_hist": hi_macd}
+    return TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
         TimeframeRead(timeframe="1h", trend="up", indicators=entry_ind,
                       support_levels=[96.0], resistance_levels=[108.0]),
         TimeframeRead(timeframe="4h", trend="up", indicators=hi_ind, support_levels=[], resistance_levels=[]),
     ])
+
+
+def test_flat_momentum_arms_on_cross_tf_conflict():
+    # Flat entry-TF MACD AT value + higher-TF momentum AGAINST it (the USDCHF loss) -> arm, don't
+    # market-enter. Strong ADX (30) so the CROSS-TF branch is what fires. Toggling the filter off restores.
+    from app.agents.orchestrator import _deterministic_decision
+    tech = _flat_tech(entry_adx=30.0, hi_macd=-1.0)
     armed = _deterministic_decision("X", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
     assert armed.direction == Direction.NO_TRADE and armed.watch is True and "flat" in armed.rationale.lower()
     took = _deterministic_decision("X", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW,
                                    disable=frozenset({"flat_momentum"}))
     assert took.direction == Direction.LONG   # filter off -> takes the market entry
+
+
+def test_flat_momentum_arms_in_weak_trend_without_conflict():
+    # Flat MACD AT value in a BARELY-trending tape (ADX 24 < 26), higher TF ALIGNED (no conflict) — the
+    # AUDNZD loss: no push at all -> arm a resumption instead of firing at market.
+    from app.agents.orchestrator import _deterministic_decision
+    tech = _flat_tech(entry_adx=24.0, hi_macd=0.5)
+    armed = _deterministic_decision("X", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert armed.direction == Direction.NO_TRADE and armed.watch is True and "ADX" in armed.rationale
+    took = _deterministic_decision("X", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW,
+                                   disable=frozenset({"flat_momentum"}))
+    assert took.direction == Direction.LONG
+
+
+def test_flat_momentum_takes_entry_in_strong_aligned_trend():
+    # Flat MACD AT value but a STRONG (ADX 30 >= 26) aligned trend, no conflict -> STILL take the market
+    # entry (the winning core must be untouched by the weak-trend tightening).
+    from app.agents.orchestrator import _deterministic_decision
+    tech = _flat_tech(entry_adx=30.0, hi_macd=0.5)
+    took = _deterministic_decision("X", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert took.direction == Direction.LONG
 
 
 def test_ema200_filter_gates_its_confidence_factor():

@@ -19,11 +19,22 @@ def _base() -> TradeProposal:
 
 
 def _ind(rsi, ema10, last, atr=2.0, rec_hi=None, rec_lo=None, cross=0.0, div_bull=0.0, div_bear=0.0,
-         rdiv_bull=0.0, rdiv_bear=0.0):
+         rdiv_bull=0.0, rdiv_bear=0.0, adx=None, rej_bull=0.0, rej_bear=0.0,
+         fbreak_bull=0.0, fbreak_bear=0.0):
     return {"rsi14": rsi, "ema10": ema10, "last_close": last, "atr14": atr,
             "recent_high": rec_hi, "recent_low": rec_lo,
             "macd_cross": cross, "macd_div_bull": div_bull, "macd_div_bear": div_bear,
-            "div_bull": rdiv_bull, "div_bear": rdiv_bear}  # div_* = RSI divergence
+            "div_bull": rdiv_bull, "div_bear": rdiv_bear, "adx": adx,
+            "rej_bull": rej_bull, "rej_bear": rej_bear,        # div_* = RSI divergence, rej_* = candle
+            "fbreak_bull": fbreak_bull, "fbreak_bear": fbreak_bear}  # failed break / trap
+
+
+class _TF0:
+    """Minimal entry-TF read stub carrying just the S/R levels the at-level filter reads."""
+    def __init__(self, support=None, resistance=None, timeframe="1h"):
+        self.support_levels = support or []
+        self.resistance_levels = resistance or []
+        self.timeframe = timeframe
 
 
 # ---- core decision ----
@@ -131,11 +142,12 @@ def test_macd_cross_gives_early_short_before_ema10():
     assert p.direction == Direction.SHORT and "MACD cross" in p.rationale
 
 
-def test_macd_divergence_gives_early_long():
-    # Oversold, price below EMA10 (not confirmed) but a bullish MACD divergence -> early LONG.
-    ind = _ind(20, ema10=99, last=98, atr=2.0, rec_lo=97, div_bull=1.0)
+def test_macd_divergence_alone_does_not_confirm():
+    # MACD now requires a REAL signal-line cross — a MACD divergence alone (no cross) must NOT confirm,
+    # so a trade never fires on "MACD" without a proper line intersection.
+    ind = _ind(20, ema10=99, last=98, atr=2.0, rec_lo=97, div_bull=1.0)  # divergence only, no cross
     p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, macd=True)
-    assert p.direction == Direction.LONG and "MACD divergence" in p.rationale
+    assert p.direction == Direction.NO_TRADE and "not confirmed" in p.rationale
 
 
 def test_macd_wrong_direction_does_not_confirm():
@@ -179,6 +191,24 @@ def test_trend_filter_blocks_long_fade_against_downtrend():
     assert p.direction == Direction.NO_TRADE
 
 
+def test_trend_filter_blocks_fade_into_strong_immediate_uptrend():
+    # The BTC loss: MACRO sideways (old filter would allow) but the IMMEDIATE higher TF is UP and STRONG
+    # (ADX 54) -> refuse the overbought short.
+    ind = _ind(78, ema10=101, last=100, atr=2.0, rec_hi=103, adx=54.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=False, trend_filter=True,
+                           macro="sideways", htf="up", htf_name="1h")
+    assert p.direction == Direction.NO_TRADE and "STRONG" in p.rationale and "1h" in p.rationale
+
+
+def test_trend_filter_allows_fade_into_weak_immediate_uptrend():
+    # Same setup but the immediate higher TF is only WEAKLY up (ADX 22 < 30) -> still fadeable (the
+    # mean-reversion edge lives on weak/choppy higher-TF trends).
+    ind = _ind(78, ema10=101, last=100, atr=2.0, rec_hi=103, adx=22.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=False, trend_filter=True,
+                           macro="sideways", htf="up", htf_name="1h")
+    assert p.direction == Direction.SHORT
+
+
 # ---- #4 RSI divergence confirmation ----
 
 def test_rsi_divergence_confirms_short():
@@ -192,6 +222,217 @@ def test_rsi_divergence_confirms_long():
     ind = _ind(20, ema10=99, last=98, atr=2.0, rec_lo=97, rdiv_bull=1.0)
     p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rsi_div=True, macro="sideways")
     assert p.direction == Direction.LONG and "RSI divergence" in p.rationale
+
+
+# ---- rejection-candle indicator ----
+
+def test_rejection_candle_bearish_engulfing():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import rejection_candle
+    prev = C(open=100, high=101, low=99.5, close=100.8)      # green
+    last = C(open=101, high=101.2, low=99.0, close=99.2)     # red body engulfs the prior green body
+    out = rejection_candle([prev, last])
+    assert out["rej_bear"] == 1.0 and out["rej_bull"] == 0.0
+
+
+def test_rejection_candle_bullish_engulfing():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import rejection_candle
+    prev = C(open=100, high=100.5, low=99.0, close=99.2)     # red
+    last = C(open=99.1, high=101.0, low=99.0, close=100.5)   # green body engulfs the prior red body
+    out = rejection_candle([prev, last])
+    assert out["rej_bull"] == 1.0 and out["rej_bear"] == 0.0
+
+
+def test_rejection_candle_shooting_star():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import rejection_candle
+    prev = C(open=100, high=100, low=100, close=100)
+    last = C(open=100.0, high=103.0, low=99.8, close=100.1)  # long UPPER wick, closes low -> bearish pin
+    assert rejection_candle([prev, last])["rej_bear"] == 1.0
+
+
+def test_rejection_candle_hammer():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import rejection_candle
+    prev = C(open=100, high=100, low=100, close=100)
+    last = C(open=100.0, high=100.2, low=97.0, close=99.9)   # long LOWER wick, closes high -> bullish pin
+    assert rejection_candle([prev, last])["rej_bull"] == 1.0
+
+
+def test_rejection_candle_none_for_plain_bar():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import rejection_candle
+    prev = C(open=100, high=100.5, low=99.5, close=100.2)
+    last = C(open=100.2, high=100.8, low=100.0, close=100.6)  # ordinary bar, no dominant wick, no engulf
+    out = rejection_candle([prev, last])
+    assert out["rej_bear"] == 0.0 and out["rej_bull"] == 0.0
+
+
+def test_rejection_candle_too_few_bars():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import rejection_candle
+    assert rejection_candle([C(open=1, high=1, low=1, close=1)]) == {"rej_bull": 0.0, "rej_bear": 0.0}
+
+
+# ---- failed-break / trap indicator ----
+
+def test_failed_break_bearish_trap():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import failed_break
+    prior = [C(open=100, high=101, low=99, close=100) for _ in range(20)]      # prior high ~101
+    recent = [C(open=100, high=103, low=99.5, close=102),                      # poked above 101
+              C(open=102, high=102.5, low=100, close=100.5),
+              C(open=100.5, high=101, low=99.8, close=100.2),
+              C(open=100.2, high=100.4, low=99.5, close=100.0)]                # closed back below 101
+    out = failed_break(prior + recent)
+    assert out["fbreak_bear"] == 1.0 and out["fbreak_bull"] == 0.0
+
+
+def test_failed_break_bullish_trap():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import failed_break
+    prior = [C(open=100, high=101, low=99, close=100) for _ in range(20)]      # prior low ~99
+    recent = [C(open=100, high=100.2, low=97, close=98),                       # poked below 99
+              C(open=98, high=99.5, low=97.5, close=99.2),
+              C(open=99.2, high=100, low=98.5, close=99.6),
+              C(open=99.6, high=100.5, low=99.4, close=100.0)]                 # closed back above 99
+    out = failed_break(prior + recent)
+    assert out["fbreak_bull"] == 1.0 and out["fbreak_bear"] == 0.0
+
+
+def test_failed_break_none_for_clean_range():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import failed_break
+    bars = [C(open=100, high=100.5, low=99.5, close=100) for _ in range(24)]   # never pierces
+    out = failed_break(bars)
+    assert out["fbreak_bull"] == 0.0 and out["fbreak_bear"] == 0.0
+
+
+def test_failed_break_too_few_bars():
+    from types import SimpleNamespace as C
+    from app.agents.indicators import failed_break
+    assert failed_break([C(open=1, high=1, low=1, close=1) for _ in range(3)]) == \
+        {"fbreak_bull": 0.0, "fbreak_bear": 0.0}
+
+
+def test_failed_break_confirms_short_in_rsi_over():
+    # Overbought, price ABOVE EMA10 (not confirmed), no rejection candle, but a failed upside break -> SHORT.
+    ind = _ind(80, ema10=101, last=102, atr=2.0, rec_hi=103, fbreak_bear=1.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rej_candle=True)
+    assert p.direction == Direction.SHORT and "rejection" in p.rationale
+
+
+def test_failed_break_confirms_long_in_rsi_over():
+    ind = _ind(20, ema10=99, last=98, atr=2.0, rec_lo=97, fbreak_bull=1.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rej_candle=True)
+    assert p.direction == Direction.LONG and "rejection" in p.rationale
+
+
+# ---- rejection-candle confirmation (rej_candle=True) ----
+
+def test_rejection_candle_confirms_short():
+    # Overbought, price ABOVE EMA10 (EMA not confirmed), no MACD/div, but a bearish rejection candle -> SHORT.
+    ind = _ind(80, ema10=101, last=102, atr=2.0, rec_hi=103, rej_bear=1.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rej_candle=True)
+    assert p.direction == Direction.SHORT and "rejection" in p.rationale
+
+
+def test_rejection_candle_confirms_long():
+    ind = _ind(20, ema10=99, last=98, atr=2.0, rec_lo=97, rej_bull=1.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rej_candle=True)
+    assert p.direction == Direction.LONG and "rejection" in p.rationale
+
+
+def test_rejection_candle_wrong_side_does_not_confirm():
+    # Overbought but only a BULLISH rejection candle -> not a short confirm; EMA also not met -> no trade.
+    ind = _ind(80, ema10=101, last=102, atr=2.0, rec_hi=103, rej_bull=1.0)
+    p = _rsi_over_decision(_base(), ind, None, "X", confirm=True, rej_candle=True)
+    assert p.direction == Direction.NO_TRADE and "not confirmed" in p.rationale
+
+
+# ---- at-level location filter ----
+
+def test_at_level_allows_fade_near_resistance():
+    # Overbought short, EMA10 confirmed, resistance 100.5 within 0.6*ATR(2)=1.2 of price 100 -> allowed.
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, _TF0(resistance=[100.5]), "X", confirm=True, at_level=True)
+    assert p.direction == Direction.SHORT
+
+
+def test_at_level_blocks_fade_in_open_space():
+    # Nearest resistance is far (110, > 1.2 from 100) -> the fade-at-level filter stands aside.
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, _TF0(resistance=[110.0]), "X", confirm=True, at_level=True)
+    assert p.direction == Direction.NO_TRADE and "at a key resistance" in p.rationale
+
+
+def test_at_level_off_ignores_location():
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, _TF0(resistance=[110.0]), "X", confirm=True, at_level=False)
+    assert p.direction == Direction.SHORT  # location ignored when the filter is off
+
+
+def test_at_level_long_near_support():
+    ind = _ind(20, ema10=99, last=100, atr=2.0, rec_lo=97)
+    p = _rsi_over_decision(_base(), ind, _TF0(support=[99.5]), "X", confirm=True, at_level=True)
+    assert p.direction == Direction.LONG
+
+
+# ---- AI price-action level check (pa_confirm): fade only if the level is HOLDING, not GIVING WAY ----
+
+def _fake_pa(category, confidence=0.8):
+    from app.agents.priceaction_read import PriceActionRead
+    return PriceActionRead(category=category, evidence="mom fading, RSI turning", confidence=confidence)
+
+
+def test_pa_confirm_off_never_calls_the_classifier(monkeypatch):
+    # With pa_confirm off, the AI level check must NOT run (no LLM call) and the fade proceeds as usual.
+    import app.agents.priceaction_read as pa_mod
+
+    def _boom(*a, **k):
+        raise AssertionError("interpret_price_action called with pa_confirm off")
+
+    monkeypatch.setattr(pa_mod, "interpret_price_action", _boom)
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, _TF0(resistance=[100.5]), "X", confirm=True, pa_confirm=False)
+    assert p.direction == Direction.SHORT
+
+
+def test_pa_confirm_breaking_level_stands_aside(monkeypatch):
+    # Overbought short with a resistance in reach, but the AI reads the level as BREAKING -> stand aside.
+    import app.agents.priceaction_read as pa_mod
+    monkeypatch.setattr(pa_mod, "interpret_price_action", lambda *a, **k: _fake_pa("likely_break", 0.7))
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, _TF0(resistance=[100.5]), "X", confirm=True, pa_confirm=True)
+    assert p.direction == Direction.NO_TRADE and "BREAKING" in p.rationale and "likely_break" in p.rationale
+
+
+def test_pa_confirm_rejecting_level_allows_the_fade(monkeypatch):
+    # Same setup, but the AI reads the level as HOLDING (reject) -> the fade proceeds.
+    import app.agents.priceaction_read as pa_mod
+    monkeypatch.setattr(pa_mod, "interpret_price_action", lambda *a, **k: _fake_pa("likely_reject", 0.8))
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, _TF0(resistance=[100.5]), "X", confirm=True, pa_confirm=True)
+    assert p.direction == Direction.SHORT
+
+
+def test_pa_confirm_low_confidence_break_fails_open(monkeypatch):
+    # A "likely_break" below the trust threshold (0.55) is not acted on -> the fade still stands.
+    import app.agents.priceaction_read as pa_mod
+    monkeypatch.setattr(pa_mod, "interpret_price_action", lambda *a, **k: _fake_pa("likely_break", 0.40))
+    ind = _ind(80, ema10=101, last=100, atr=2.0, rec_hi=103)
+    p = _rsi_over_decision(_base(), ind, _TF0(resistance=[100.5]), "X", confirm=True, pa_confirm=True)
+    assert p.direction == Direction.SHORT
+
+
+def test_pa_confirm_no_llm_fails_open(monkeypatch):
+    # No LLM configured -> interpret_price_action returns None -> the fade proceeds (fails open).
+    import app.agents.priceaction_read as pa_mod
+    monkeypatch.setattr(pa_mod, "interpret_price_action", lambda *a, **k: None)
+    ind = _ind(20, ema10=99, last=100, atr=2.0, rec_lo=97)
+    p = _rsi_over_decision(_base(), ind, _TF0(support=[99.5]), "X", confirm=True, pa_confirm=True)
+    assert p.direction == Direction.LONG
 
 
 # ---- routing through the orchestrator (mechanical, no LLM) ----

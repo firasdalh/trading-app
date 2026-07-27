@@ -12,11 +12,13 @@ from app.agents.indicators import (
     bollinger,
     divergence,
     ema,
+    failed_break,
     macd,
     macd_signals,
     market_structure,
     reference_levels,
     regression_channel,
+    rejection_candle,
     rsi,
     supertrend_series,
     swing_levels,
@@ -169,6 +171,18 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
     if ms["swing_low"] is not None:
         indicators["swing_low"] = ms["swing_low"]
     indicators["choch"] = 1.0 if ms["choch"] else 0.0
+
+    # Reversal candle on the last bar (engulfing / rejection wick) — the price-action confirmation
+    # for the RSI-Over fade: rej_bear confirms a SHORT at overbought, rej_bull a LONG at oversold.
+    rc = rejection_candle(candles)
+    indicators["rej_bull"] = rc["rej_bull"]
+    indicators["rej_bear"] = rc["rej_bear"]
+    # Failed break / trap — a poke beyond a prior level in the last few bars that closed back inside
+    # (the multi-bar rejection a single-bar candle misses). fbreak_bear = failed upside break (short),
+    # fbreak_bull = failed downside break (long).
+    fb = failed_break(candles)
+    indicators["fbreak_bull"] = fb["fbreak_bull"]
+    indicators["fbreak_bear"] = fb["fbreak_bear"]
 
     # Regression CHANNEL (algorithmic diagonal trend line + price channel). Tells the engine WHERE
     # price sits vs dynamic support/resistance — e.g. a long firing right into the upper (resistance)

@@ -30,7 +30,7 @@ from app.models.schemas import (
     SettingsResponse,
     TradeProposal,
 )
-from app.risk.service import assess, realized_today, total_unrealized
+from app.risk.service import assess, entry_breaker_reason, realized_today, total_unrealized
 
 log = get_logger("api")
 router = APIRouter()
@@ -101,6 +101,7 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
         max_daily_loss=risk.max_daily_loss,
         daily_loss_limit_amount=limit_amount,
         daily_loss_breaker_enabled=risk.daily_loss_breaker_enabled,
+        entry_breaker=entry_breaker_reason(session),
     )
 
 

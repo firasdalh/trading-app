@@ -22,7 +22,7 @@ from app.core.logging import get_logger
 from app.data.ohlcv_cache import get_ohlcv_cached
 from app.core.state import get_or_create_settings
 from app.models.db import AgentRun, TradeProposalRecord
-from app.models.enums import AssetClass, Direction, ProposalStatus, RiskDecisionType
+from app.models.enums import AssetClass, ProposalStatus
 from app.models.schemas import AnalyzeResponse, OHLCVSeries
 from app.risk.service import assess
 
@@ -40,7 +40,8 @@ def _timeframes_for(primary: str) -> list[str]:
 def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
                    use_llm: bool = False, cache=None, read_llm: bool | None = None,
                    rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
-                   rsi_div: bool = False, rsi_trend_filter: bool = True):
+                   rsi_div: bool = False, rsi_trend_filter: bool = True,
+                   rsi_rej: bool = False, rsi_at_level: bool = False, rsi_pa: bool = False):
     """Analyse a symbol and run it through the Risk Manager WITHOUT persisting or executing —
     used to rank opportunities across the watchlist. Returns (proposal, risk_decision).
 
@@ -72,10 +73,15 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
                                 trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
-                                rsi_trend_filter=rsi_trend_filter,
+                                rsi_trend_filter=rsi_trend_filter, rsi_rej=rsi_rej,
+                                rsi_at_level=rsi_at_level, rsi_pa=rsi_pa,
                                 disable=frozenset(settings.disabled_filters or ()),
                                 momentum_ai=(settings.ai_momentum_read and use_llm
-                                             and llm_available() and not ai_decides))
+                                             and llm_available() and not ai_decides),
+                                regime_ai=(settings.ai_regime_read and use_llm
+                                           and llm_available() and not ai_decides),
+                                priceaction_ai=(settings.ai_priceaction_read and use_llm
+                                                and llm_available() and not ai_decides))
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
@@ -112,9 +118,10 @@ def _maybe_auto_execute(session: Session, record: TradeProposalRecord, broker) -
 def analyze_symbol(
     session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
     use_llm: bool = True, rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
-    rsi_div: bool = False, rsi_trend_filter: bool = True, source: str | None = None,
+    rsi_div: bool = False, rsi_trend_filter: bool = True, rsi_rej: bool = False,
+    rsi_at_level: bool = False, rsi_pa: bool = False, source: str | None = None,
     cooldown_override: int | None = None, force_ai_decide: bool = False,
-    min_rr: float | None = None, no_execute: bool = False,
+    min_rr: float | None = None, no_execute: bool = False, st_band: bool | None = None,
 ) -> AnalyzeResponse:
     """Run the full pipeline for one symbol. ``use_llm=False`` forces the deterministic
     agents (used by the auto-scanner to avoid burning LLM quota on every loop)."""
@@ -143,19 +150,28 @@ def analyze_symbol(
     # proposal. Mutually exclusive with st_band.
     # ``force_ai_decide`` (the per-pair AI auto-trader) turns on the decider for THIS call regardless
     # of the global toggle — that feature is AI-driven by definition (follows the scenario read).
+    # ``st_band`` overrides the global SuperTrend toggle for THIS call (None = follow settings) — the
+    # per-pair auto-trader uses it to run the mechanical SuperTrend strategy without flipping the whole
+    # system into SuperTrend mode.
+    st_band_eff = settings.st_band_mode if st_band is None else st_band
     ai_decides = ((review_on or force_ai_decide) and use_llm and llm_available()
-                  and not settings.st_band_mode and not rsi_over)
+                  and not st_band_eff and not rsi_over)
     technical = run_technical(symbol, series, use_llm=use_llm and (review_on or force_ai_decide) and not ai_decides)
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)  # AI kept for fundamentals
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
-                                st_band=settings.st_band_mode, rsi_over=rsi_over,
+                                st_band=st_band_eff, rsi_over=rsi_over,
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
-                                rsi_trend_filter=rsi_trend_filter,
+                                rsi_trend_filter=rsi_trend_filter, rsi_rej=rsi_rej,
+                                rsi_at_level=rsi_at_level, rsi_pa=rsi_pa,
                                 disable=frozenset(settings.disabled_filters or ()),
                                 momentum_ai=(settings.ai_momentum_read and use_llm
-                                             and llm_available() and not ai_decides))
+                                             and llm_available() and not ai_decides),
+                                regime_ai=(settings.ai_regime_read and use_llm
+                                           and llm_available() and not ai_decides),
+                                priceaction_ai=(settings.ai_priceaction_read and use_llm
+                                                and llm_available() and not ai_decides))
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         det_proposal = proposal   # keep the deterministic call for the shadow scorecard
@@ -232,5 +248,9 @@ def analyze_symbol(
 
     log.info("analysis complete", extra={"symbol": symbol, "proposal_id": record.id,
                                          "direction": proposal.direction.value, "status": record.status})
+    try:
+        market_open = broker.market_open(symbol)
+    except Exception:  # noqa: BLE001 - a status probe must never fail the analysis
+        market_open = None
     return AnalyzeResponse(proposal_id=record.id, status=record.status, proposal=proposal,
-                           risk=decision, analyzed_at=now)
+                           risk=decision, analyzed_at=now, market_open=market_open)

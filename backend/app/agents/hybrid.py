@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.llm import llm_available
 from app.agents.pipeline import analyze_symbol, preview_symbol
+from app.brokers.registry import get_broker_for
 from app.core.logging import get_logger
 from app.core.state import (
     get_or_create_risk_config,
@@ -168,6 +169,13 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     for it in items:
         if _norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms:
             continue
+        # Skip a CLOSED market (weekend / holiday / out-of-hours) — no point analysing stale prices or
+        # arming a setup that can't fill. Crypto keeps ticking so it stays open.
+        try:
+            if not get_broker_for(AssetClass(it.asset_class), settings.broker_map).market_open(it.symbol):
+                continue
+        except Exception:  # noqa: BLE001 - a status lookup failure shouldn't stop the scan
+            pass
         try:
             # AI-DECIDER per pair when active (SAME workflow as Run analysis / Scan watchlist): the
             # deterministic engine does the homework, the AI decides open/arm/skip. use_llm=False keeps

@@ -13,9 +13,15 @@ from app.models.schemas import AnalyzeResponse, RiskDecision, TradeProposal
 class _Paper:
     is_paper = True
 
+    def market_open(self, symbol):
+        return True
+
 
 class _Live:
     is_paper = False
+
+    def market_open(self, symbol):
+        return True
 
 
 def _resp(session, symbol="ETHUSDm", direction="long", conf=0.7, approved=True):
@@ -34,9 +40,9 @@ def _resp(session, symbol="ETHUSDm", direction="long", conf=0.7, approved=True):
     return AnalyzeResponse(proposal_id=rec.id, status=rec.status, proposal=prop, risk=risk)
 
 
-def _cfg(session, min_conf=0.6, cooldown=5):
+def _cfg(session, min_conf=0.6, cooldown=5, strategy="scenario"):
     cfg = at.get_or_create_auto_trade_config(session)
-    cfg.min_confidence, cfg.cooldown_minutes = min_conf, cooldown
+    cfg.min_confidence, cfg.cooldown_minutes, cfg.strategy = min_conf, cooldown, strategy
     session.commit()
     return cfg
 
@@ -91,6 +97,19 @@ def test_auto_trade_respects_cooldown(db_session, monkeypatch):
     assert "cooldown" in out.get("skipped", "")
 
 
+def test_auto_trade_skips_when_market_closed(db_session, monkeypatch):
+    # A closed session (weekend/holiday) -> don't analyse stale prices or stage an unfillable trade.
+    class _Closed:
+        is_paper = True
+
+        def market_open(self, symbol):
+            return False
+
+    monkeypatch.setattr(at, "get_broker_for", lambda ac, bm: _Closed())
+    out = at._auto_trade_symbol(db_session, _cfg(db_session), _pair("ETHUSDm"))
+    assert "market closed" in out.get("skipped", "")
+
+
 def test_auto_trade_paper_only(db_session, monkeypatch):
     monkeypatch.setattr(at, "get_broker_for", lambda ac, bm: _Live())
     out = at._auto_trade_symbol(db_session, _cfg(db_session), _pair())
@@ -137,17 +156,21 @@ def _approved_dec():
                         approved_qty=0.1, risk_amount=50.0)
 
 
-def _uptrend_tech(price=100.0, sup=98.0, res=106.0, rsi=None, macd=None):
+def _uptrend_tech(price=100.0, sup=98.0, res=106.0, rsi=None, macd=None, htf="up"):
+    # ``htf`` sets the higher-TF (4h) trend via its EMA stack, so the scenario-move's higher-TF gate
+    # can be exercised (a short needs a non-up higher TF; a long needs a non-down one).
     from app.models.schemas import TechnicalRead, TimeframeRead
     ind = {"last_close": price, "atr14": 2.0}
     if rsi is not None:
         ind["rsi14"] = rsi
     if macd is not None:
         ind["macd_hist"] = macd
+    hi = ({"ema20": 100.0, "ema50": 98.0, "ema200": 95.0} if htf == "up"
+          else {"ema20": 95.0, "ema50": 98.0, "ema200": 100.0} if htf == "down"
+          else {"ema20": 100.0, "ema50": 100.0, "ema200": 100.0})
     return TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
         TimeframeRead(timeframe="1h", trend="up", indicators=ind, support_levels=[sup], resistance_levels=[res]),
-        TimeframeRead(timeframe="4h", trend="up",
-                      indicators={"ema20": 100.0, "ema50": 98.0, "ema200": 95.0}),
+        TimeframeRead(timeframe="4h", trend=htf, indicators=hi),
     ])
 
 
@@ -169,14 +192,22 @@ def _exec_ok(monkeypatch):
 
 
 def test_scenario_opens_down_toward_support(db_session, monkeypatch):
-    # Primary scenario is DOWN (65%); price near resistance -> OPEN a short at market toward support.
+    # Primary scenario is DOWN (65%) AND the higher TF is down -> OPEN a short at market toward support.
     import app.risk.service as risk_service
 
     _mock_scen(monkeypatch, direction="down", prob=65)
     monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved_dec())
     _exec_ok(monkeypatch)
-    out = at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=104.0), _cfg(db_session))
+    out = at._open_scenario_move(db_session, "X", "crypto", "1h",
+                                 _uptrend_tech(price=104.0, htf="down"), _cfg(db_session))
     assert out and out.get("opened") == "short" and "scenario" in out.get("note", "")
+
+
+def test_scenario_skips_counter_trend(db_session, monkeypatch):
+    # Primary scenario is DOWN but the higher TF is UP -> a counter-trend fade -> skip (the ETH/USOIL fix).
+    _mock_scen(monkeypatch, direction="down", prob=70)
+    assert at._open_scenario_move(db_session, "X", "crypto", "1h",
+                                  _uptrend_tech(price=104.0, htf="up"), _cfg(db_session)) is None
 
 
 def test_scenario_opens_up_toward_resistance(db_session, monkeypatch):
@@ -198,17 +229,18 @@ def test_scenario_skips_below_confidence(db_session, monkeypatch):
 
 
 def test_scenario_skips_when_momentum_against(db_session, monkeypatch):
-    # Down scenario but MACD is strongly UP (against the short) -> the move may not happen -> skip.
+    # Down scenario, higher TF down (so the trend gate passes), but MACD is strongly UP (against the
+    # short) -> the move may not happen -> skip on the momentum gate.
     _mock_scen(monkeypatch, direction="down", prob=65)
-    assert at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=104.0, macd=1.0),
-                                  _cfg(db_session)) is None
+    assert at._open_scenario_move(db_session, "X", "crypto", "1h",
+                                  _uptrend_tech(price=104.0, macd=1.0, htf="down"), _cfg(db_session)) is None
 
 
 def test_scenario_skips_low_rr(db_session, monkeypatch):
-    # Down scenario but price hugs support (tiny reward, far stop) -> R:R below min -> skip.
+    # Down scenario, higher TF down, but price hugs support (tiny reward, far stop) -> R:R below min -> skip.
     _mock_scen(monkeypatch, direction="down", prob=65)
-    assert at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=99.0),
-                                  _cfg(db_session)) is None
+    assert at._open_scenario_move(db_session, "X", "crypto", "1h",
+                                  _uptrend_tech(price=99.0, htf="down"), _cfg(db_session)) is None
 
 
 def test_scenario_skips_sideways(db_session, monkeypatch):
@@ -216,6 +248,83 @@ def test_scenario_skips_sideways(db_session, monkeypatch):
     _mock_scen(monkeypatch, direction="sideways", prob=80)
     assert at._open_scenario_move(db_session, "X", "crypto", "1h", _uptrend_tech(price=104.0),
                                   _cfg(db_session)) is None
+
+
+# ---- reversal strategy (mechanical level-bounce scalp) ----
+
+def _rev_tech(price, sup, res, rsi, rsi_prev, adx=20.0, htf="sideways", atr=2.0,
+              rej_bull=0.0, rej_bear=0.0, fbreak_bull=0.0, fbreak_bear=0.0):
+    from app.models.schemas import TechnicalRead, TimeframeRead
+    ind = {"last_close": price, "atr14": atr, "rsi14": rsi, "rsi14_prev": rsi_prev, "adx": adx,
+           "rej_bull": rej_bull, "rej_bear": rej_bear,
+           "fbreak_bull": fbreak_bull, "fbreak_bear": fbreak_bear}
+    hi = ({"ema20": 100.0, "ema50": 98.0, "ema200": 95.0} if htf == "up"
+          else {"ema20": 95.0, "ema50": 98.0, "ema200": 100.0} if htf == "down"
+          else {"ema20": 100.0, "ema50": 100.0, "ema200": 100.0})
+    return TechnicalRead(symbol="X", overall_trend="up", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend="up", indicators=ind, support_levels=[sup], resistance_levels=[res]),
+        TimeframeRead(timeframe="4h", trend=htf, indicators=hi)])
+
+
+def test_reversal_shorts_resistance_rejection(db_session, monkeypatch):
+    # Price hugging resistance 106 (within 0.5*ATR) + RSI 62 rolling over (was 66) + a bearish rejection
+    # candle -> SHORT to support.
+    import app.risk.service as risk_service
+    monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved_dec())
+    _exec_ok(monkeypatch)
+    tech = _rev_tech(price=105.5, sup=100.0, res=106.0, rsi=62.0, rsi_prev=66.0, adx=20.0,
+                     htf="sideways", rej_bear=1.0)
+    out = at._open_reversal_move(db_session, "X", "crypto", "1h", tech, _cfg(db_session))
+    assert out and out.get("opened") == "short" and "resistance" in out.get("note", "")
+
+
+def test_reversal_longs_support_rejection(db_session, monkeypatch):
+    # Price hugging support 100 + RSI 40 turning up (was 36) + a bullish rejection candle -> LONG.
+    import app.risk.service as risk_service
+    monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved_dec())
+    _exec_ok(monkeypatch)
+    tech = _rev_tech(price=100.5, sup=100.0, res=106.0, rsi=40.0, rsi_prev=36.0, adx=20.0,
+                     htf="sideways", rej_bull=1.0)
+    out = at._open_reversal_move(db_session, "X", "crypto", "1h", tech, _cfg(db_session))
+    assert out and out.get("opened") == "long" and "support" in out.get("note", "")
+
+
+def test_reversal_skips_when_not_near_a_level(db_session):
+    # Price mid-range, far from both levels -> no rejection -> no trade.
+    tech = _rev_tech(price=103.0, sup=100.0, res=106.0, rsi=62.0, rsi_prev=66.0)
+    assert at._open_reversal_move(db_session, "X", "crypto", "1h", tech, _cfg(db_session)) is None
+
+
+def test_reversal_skips_no_momentum_turn(db_session):
+    # At resistance but RSI still RISING (not rolling over) -> no rejection yet -> wait.
+    tech = _rev_tech(price=105.5, sup=100.0, res=106.0, rsi=66.0, rsi_prev=62.0)
+    assert at._open_reversal_move(db_session, "X", "crypto", "1h", tech, _cfg(db_session)) is None
+
+
+def test_reversal_skips_without_any_rejection(db_session):
+    # At resistance + RSI rolling over, but NO rejection candle AND no failed break -> wait.
+    tech = _rev_tech(price=105.5, sup=100.0, res=106.0, rsi=62.0, rsi_prev=66.0,
+                     rej_bear=0.0, fbreak_bear=0.0)
+    assert at._open_reversal_move(db_session, "X", "crypto", "1h", tech, _cfg(db_session)) is None
+
+
+def test_reversal_shorts_on_failed_break(db_session, monkeypatch):
+    # No rejection candle, but a FAILED upside break (bull trap) at resistance -> still a valid short.
+    import app.risk.service as risk_service
+    monkeypatch.setattr(risk_service, "assess", lambda *a, **k: _approved_dec())
+    _exec_ok(monkeypatch)
+    tech = _rev_tech(price=105.5, sup=100.0, res=106.0, rsi=62.0, rsi_prev=66.0, adx=20.0,
+                     htf="sideways", rej_bear=0.0, fbreak_bear=1.0)
+    out = at._open_reversal_move(db_session, "X", "crypto", "1h", tech, _cfg(db_session))
+    assert out and out.get("opened") == "short" and "resistance" in out.get("note", "")
+
+
+def test_reversal_skips_fading_strong_uptrend(db_session):
+    # Resistance rejection (with a rejection candle), but the higher TF is UP and STRONG (ADX 30) ->
+    # don't fade a strong trend (isolates the trend filter — the candle is present).
+    tech = _rev_tech(price=105.5, sup=100.0, res=106.0, rsi=62.0, rsi_prev=66.0, adx=30.0,
+                     htf="up", rej_bear=1.0)
+    assert at._open_reversal_move(db_session, "X", "crypto", "1h", tech, _cfg(db_session)) is None
 
 
 def test_run_auto_trade_persists_last_results(db_session, monkeypatch):
@@ -268,6 +377,91 @@ def test_breaker_off_when_net_positive(db_session):
         _closed_auto(db_session, 30.0)
     db_session.commit()
     assert at._auto_trade_breaker(db_session) is None
+
+
+def test_breaker_trips_on_losing_streak_even_when_window_net_positive(db_session):
+    # 5 older wins (+150) then 3 RECENT losses (-60): the 8-window nets POSITIVE, so the net trip stays
+    # off — but 3 in a row is a losing streak, which must still pause it (the ETH short-run the net test missed).
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    for i in range(5):
+        _closed_auto(db_session, 30.0, when=now - timedelta(hours=10) - timedelta(minutes=i))
+    for i in range(3):
+        _closed_auto(db_session, -20.0, when=now - timedelta(minutes=15) + timedelta(minutes=i))
+    db_session.commit()
+    reason = at._auto_trade_breaker(db_session)
+    assert reason and "in a row" in reason
+
+
+def test_supertrend_strategy_runs_mechanically_and_opens(db_session, monkeypatch):
+    # strategy="supertrend" -> analyse with st_band=True + use_llm=False (mechanical, no tokens) and
+    # open the directional SuperTrend signal via path (a).
+    import app.execution.executor as executor
+
+    calls = {}
+
+    def _capture(session, symbol, ac, tf, **k):
+        calls.update(k)
+        return _resp(db_session, conf=0.7)
+
+    monkeypatch.setattr(at, "get_broker_for", lambda ac, bm: _Paper())
+    monkeypatch.setattr(at, "analyze_symbol", _capture)
+
+    def _exec(session, record):
+        record.status = ProposalStatus.EXECUTED.value
+        session.commit()
+
+    monkeypatch.setattr(executor, "execute_proposal", _exec)
+    out = at._auto_trade_symbol(db_session, _cfg(db_session, strategy="supertrend"), _pair())
+    assert out.get("opened") == "long"
+    assert calls.get("st_band") is True and calls.get("use_llm") is False
+    assert calls.get("force_ai_decide") in (None, False)  # SuperTrend never turns on the AI decider
+
+
+def test_global_timeframe_overrides_per_pair(db_session, monkeypatch):
+    # The panel's Timeframe selector sets ONE timeframe for all pairs — it must win over the per-pair
+    # value stored when the pair was toggled on.
+    import app.execution.executor as executor
+
+    seen = {}
+
+    def _capture(session, symbol, ac, tf, **k):
+        seen["tf"] = tf
+        return _resp(db_session, conf=0.7)
+
+    monkeypatch.setattr(at, "get_broker_for", lambda ac, bm: _Paper())
+    monkeypatch.setattr(at, "analyze_symbol", _capture)
+    monkeypatch.setattr(executor, "execute_proposal",
+                        lambda s, r: (setattr(r, "status", ProposalStatus.EXECUTED.value), s.commit()))
+    cfg = _cfg(db_session)
+    cfg.timeframe = "4h"
+    db_session.commit()
+    at._auto_trade_symbol(db_session, cfg, {"symbol": "ETHUSDm", "asset_class": "crypto", "timeframe": "15m"})
+    assert seen["tf"] == "4h"
+
+
+def test_supertrend_strategy_has_no_scenario_fallback(db_session, monkeypatch):
+    # strategy="supertrend" + a NO_TRADE (no fresh band break) -> skip; it must NOT fall back to the AI
+    # scenario move (that's scenario-strategy behaviour only).
+    monkeypatch.setattr(at, "get_broker_for", lambda ac, bm: _Paper())
+    rec = TradeProposalRecord(symbol="ETHUSDm", asset_class="crypto", timeframe="1h",
+                              direction="no_trade", confidence=0.0, rationale="inside band",
+                              status=ProposalStatus.RISK_VETOED.value)
+    db_session.add(rec)
+    db_session.commit()
+    db_session.refresh(rec)
+    prop = TradeProposal(symbol="ETHUSDm", asset_class=AssetClass.CRYPTO, direction=Direction.NO_TRADE,
+                         confidence=0.0)
+    risk = RiskDecision(decision=RiskDecisionType.VETOED, approved=False, reason="no trade", symbol="ETHUSDm")
+    monkeypatch.setattr(at, "analyze_symbol",
+                        lambda *a, **k: AnalyzeResponse(proposal_id=rec.id, status=rec.status, proposal=prop, risk=risk))
+
+    def _boom(*a, **k):
+        raise AssertionError("SuperTrend strategy must not use the scenario fallback")
+
+    monkeypatch.setattr(at, "_open_scenario_move", _boom)
+    out = at._auto_trade_symbol(db_session, _cfg(db_session, strategy="supertrend"), _pair())
+    assert out.get("skipped") and "no setup" in out["skipped"]
 
 
 def test_set_pair_toggles(db_session):

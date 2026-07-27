@@ -11,9 +11,17 @@ def _base() -> TradeProposal:
                          direction=Direction.NO_TRADE, confidence=0.0)
 
 
-def _inputs(dir_, ema_h, ema_l, last, atr=2.0, support=None, resistance=None, bars_since_flip=1.0):
+def _inputs(dir_, ema_h, ema_l, last, atr=2.0, support=None, resistance=None, bars_since_flip=1.0,
+            ema20=None, st_line=None):
+    # Default the SuperTrend LINE close to price (~0.5xATR) so the early-entry (distance-from-line) check
+    # passes; a test that wants a "late" entry passes a far ``st_line``.
+    if st_line is None:
+        st_line = (last - 0.5 * atr) if dir_ > 0 else (last + 0.5 * atr)
     ind = {"supertrend_dir": dir_, "ema20_high": ema_h, "ema20_low": ema_l,
-           "last_close": last, "atr14": atr, "supertrend_bars_since_flip": bars_since_flip}
+           "last_close": last, "atr14": atr, "supertrend": st_line,
+           "supertrend_bars_since_flip": bars_since_flip}
+    if ema20 is not None:
+        ind["ema20"] = ema20
     tf0 = TimeframeRead(
         timeframe="1h", trend="up" if dir_ > 0 else "down", indicators=ind,
         support_levels=[support] if support is not None else [],
@@ -53,12 +61,37 @@ def test_no_trade_when_supertrend_disagrees():
     assert p.direction == Direction.NO_TRADE and "match" in p.rationale.lower()
 
 
-def test_no_trade_when_flip_is_stale():
-    # Valid long setup, but the SuperTrend flip was long ago -> not an early entry -> skip.
+def test_no_trade_when_far_from_line():
+    # Valid long setup, but the close is far from the SuperTrend line (line 104, close 110 = 3xATR) ->
+    # late / run-away entry with a wide stop -> skip.
     ind, tf0 = _inputs(1.0, ema_h=108, ema_l=104, last=110, atr=2.0, support=105, resistance=120,
-                       bars_since_flip=20.0)
+                       st_line=104.0)
     p = _supertrend_band_decision(_base(), ind, tf0, "X")
-    assert p.direction == Direction.NO_TRADE and "fresh flip" in p.rationale.lower()
+    assert p.direction == Direction.NO_TRADE and "line" in p.rationale.lower()
+
+
+def test_trades_old_flip_if_close_to_line():
+    # An OLD flip (20 bars) no longer blocks the trade: because the close is still near the SuperTrend
+    # line (0.5xATR), it's an early-by-PRICE entry and trades — the whole point of the line-distance rule
+    # replacing the rigid bar count.
+    ind, tf0 = _inputs(1.0, ema_h=108, ema_l=104, last=110, atr=2.0, support=105, resistance=120,
+                       bars_since_flip=20.0, st_line=109.0)
+    p = _supertrend_band_decision(_base(), ind, tf0, "X")
+    assert p.direction == Direction.LONG
+
+
+def test_no_trade_when_breakout_stretched_from_value():
+    # Fresh flip + valid long, but the close is far above value (EMA20) -> chasing the breakout -> skip.
+    ind, tf0 = _inputs(1.0, ema_h=108, ema_l=104, last=120, atr=2.0, support=105, resistance=140, ema20=106)
+    p = _supertrend_band_decision(_base(), ind, tf0, "X")
+    assert p.direction == Direction.NO_TRADE and "stretched" in p.rationale.lower()
+
+
+def test_long_trades_when_not_stretched():
+    # Same setup but the close sits just above value (~1.5xATR) -> not a chase -> takes the trade.
+    ind, tf0 = _inputs(1.0, ema_h=108, ema_l=104, last=109, atr=2.0, support=105, resistance=120, ema20=106)
+    p = _supertrend_band_decision(_base(), ind, tf0, "X")
+    assert p.direction == Direction.LONG
 
 
 def test_no_trade_when_target_too_close():

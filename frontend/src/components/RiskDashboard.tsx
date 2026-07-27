@@ -21,6 +21,12 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
   const breakerOn = limits?.daily_loss_breaker_enabled ?? risk?.daily_loss_breaker_enabled ?? true;
   const [busy, setBusy] = useState(false);
 
+  // How many of the extra entry breakers are currently armed (for the collapsed-row status).
+  const activeBreakers =
+    ((limits?.max_trades_per_day ?? 0) > 0 ? 1 : 0) +
+    ((limits?.max_consecutive_losses ?? 0) > 0 ? 1 : 0) +
+    (limits?.perf_breaker_enabled ? 1 : 0);
+
   async function toggleBreaker(next: boolean) {
     if (!next && isLive) {
       const ok = window.confirm(
@@ -48,6 +54,16 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
     setBusy(true);
     try {
       await api.resumeTrading();
+      onChanged?.();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveRisk(patch: Record<string, number | boolean>) {
+    setBusy(true);
+    try {
+      await api.updateRisk(patch);
       onChanged?.();
     } finally {
       setBusy(false);
@@ -87,6 +103,15 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
           </div>
         )}
       </div>
+
+      {risk?.entry_breaker && (
+        <div
+          className="rounded-md border border-bear/40 bg-bear/15 px-2.5 py-1.5 text-xs font-semibold text-bear"
+          title="A circuit breaker is pausing new entries. Open positions are unaffected."
+        >
+          ⛔ New entries paused — {risk.entry_breaker}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-3 text-sm">
         <KV
@@ -138,7 +163,151 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
           {limits.per_pair_cooldown_minutes}m
         </div>
       )}
+
+      {limits && (
+        <details className="rounded-lg border border-neutral-800 bg-neutral-800/30">
+          <summary className="flex cursor-pointer select-none items-center gap-2 px-2.5 py-1.5 text-xs font-semibold text-neutral-300">
+            <span>Circuit breakers</span>
+            {activeBreakers > 0 ? (
+              <span className="rounded bg-bull/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-bull">
+                ● {activeBreakers} on
+              </span>
+            ) : (
+              <span className="rounded bg-neutral-700/60 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-neutral-500">
+                all off
+              </span>
+            )}
+            <span className="font-normal text-neutral-500">— pause new entries</span>
+          </summary>
+          <div className="space-y-2 px-2.5 pb-2.5 pt-1">
+            <NumField
+              label="Max trades / day"
+              hint="Backstop against a runaway loop. 0 = off. Counts trades opened per UTC day."
+              value={limits.max_trades_per_day}
+              step={1}
+              min={0}
+              busy={busy}
+              active={limits.max_trades_per_day > 0}
+              onCommit={(v) => saveRisk({ max_trades_per_day: v })}
+            />
+            <NumField
+              label="Max losses in a row"
+              hint="After N losing trades in a row, pause new entries for the cooldown, then probe. A win resets the streak. 0 = off."
+              value={limits.max_consecutive_losses}
+              step={1}
+              min={0}
+              busy={busy}
+              active={limits.max_consecutive_losses > 0}
+              onCommit={(v) => saveRisk({ max_consecutive_losses: v })}
+            />
+            <NumField
+              label="Breaker cooldown (min)"
+              hint="How long the loss-streak / performance breakers pause before letting a probe trade through."
+              value={limits.breaker_cooldown_minutes}
+              step={15}
+              min={0}
+              busy={busy}
+              onCommit={(v) => saveRisk({ breaker_cooldown_minutes: v })}
+            />
+            <label className="flex items-center justify-between gap-2 text-xs" title="Pause new entries when the last N trades average below the R floor (live results diverging from the backtest edge).">
+              <span className="flex items-center gap-1.5">
+                <span className="text-neutral-300">Performance breaker</span>
+                <StatePill on={limits.perf_breaker_enabled} />
+              </span>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={limits.perf_breaker_enabled}
+                onChange={(e) => saveRisk({ perf_breaker_enabled: e.target.checked })}
+              />
+            </label>
+            {limits.perf_breaker_enabled && (
+              <>
+                <NumField
+                  label="Expectancy floor (R)"
+                  hint="Set this to your backtest expectancy minus a tolerance. If the live average drops below it, entries pause. e.g. -0.2"
+                  value={limits.min_expectancy_r}
+                  step={0.05}
+                  busy={busy}
+                  onCommit={(v) => saveRisk({ min_expectancy_r: v })}
+                />
+                <NumField
+                  label="Window (trades)"
+                  hint="How many recent closed trades the expectancy is measured over (needs a full window before it can trip)."
+                  value={limits.expectancy_window}
+                  step={1}
+                  min={1}
+                  busy={busy}
+                  onCommit={(v) => saveRisk({ expectancy_window: v })}
+                />
+              </>
+            )}
+          </div>
+        </details>
+      )}
     </div>
+  );
+}
+
+// A small ON/off state chip so each breaker's status is visible at a glance.
+function StatePill({ on }: { on: boolean }) {
+  return (
+    <span
+      className={`rounded px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide ${
+        on ? "bg-bull/15 text-bull" : "bg-neutral-700/60 text-neutral-500"
+      }`}
+    >
+      {on ? "on" : "off"}
+    </span>
+  );
+}
+
+// A compact number field that commits on blur / Enter (so typing doesn't fire a request per keystroke).
+function NumField({
+  label,
+  hint,
+  value,
+  step,
+  min,
+  busy,
+  active,
+  onCommit,
+}: {
+  label: string;
+  hint?: string;
+  value: number;
+  step?: number;
+  min?: number;
+  busy: boolean;
+  active?: boolean;
+  onCommit: (value: number) => void;
+}) {
+  const commit = (raw: string) => {
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v === value) return;
+    if (min != null && v < min) return;
+    onCommit(v);
+  };
+  return (
+    <label className="flex items-center justify-between gap-2 text-xs" title={hint}>
+      <span className="flex items-center gap-1.5">
+        <span className="text-neutral-300">{label}</span>
+        {active !== undefined && <StatePill on={active} />}
+      </span>
+      <input
+        type="number"
+        step={step ?? 1}
+        min={min}
+        disabled={busy}
+        defaultValue={value}
+        key={value}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        className="w-20 rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-right tabular-nums text-neutral-100"
+      />
+    </label>
   );
 }
 

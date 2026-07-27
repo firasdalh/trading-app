@@ -13,7 +13,7 @@ from app.brokers.registry import get_broker_for
 from app.core.database import get_session
 from app.core.logging import get_logger
 from app.core.state import get_or_create_settings, kill_switch_active
-from app.models.enums import AssetClass, OrderSide, OrderType
+from app.models.enums import AssetClass
 from app.models.schemas import (
     AccountState,
     OHLCVSeries,
