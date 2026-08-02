@@ -245,10 +245,20 @@ def _ladder_tf(entry_trend, h1_trend, d1_trend, *, entry=100.0, adx=30.0, d1_res
 
 
 def test_ladder_allows_long_when_immediate_higher_agrees_even_if_daily_down():
-    # 15m up + 1h up, but the DAILY is down. The OLD "must agree with the daily" rule blocked this;
-    # the laddered rule trades WITH the immediate higher timeframe (the 1h).
-    p = _deterministic_decision("X", AssetClass.FOREX, "15m", _ladder_tf("up", "up", "down"), _fund(), now=NOW)
-    assert p.direction == Direction.LONG
+    # 15m up + 1h up, but the DAILY is down.
+    # The LADDERED rule on its own is happy here — it trades WITH the immediate higher TF (the 1h) —
+    # so with the big-picture filter switched off this is still a long.
+    # Since 2026-08-03 the `daily_align` filter sits ON TOP of the ladder and blocks it by default:
+    # replaying 1605 signals showed trades taken without an agreeing big-picture trend are right
+    # ~52 times per 100 (a coin flip), vs 55 when it agrees. Both rules are asserted here so the
+    # ladder's own behaviour stays covered and the added gate is explicit.
+    tech = _ladder_tf("up", "up", "down")
+    laddered = _deterministic_decision("X", AssetClass.FOREX, "15m", tech, _fund(), now=NOW,
+                                       disable=frozenset({"daily_align"}))
+    assert laddered.direction == Direction.LONG
+
+    gated = _deterministic_decision("X", AssetClass.FOREX, "15m", tech, _fund(), now=NOW)
+    assert gated.direction == Direction.NO_TRADE and gated.watch is True
 
 
 def test_ladder_blocks_long_when_immediate_higher_disagrees():

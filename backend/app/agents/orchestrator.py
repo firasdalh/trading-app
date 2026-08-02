@@ -140,6 +140,12 @@ DET_FILTERS = [
      "desc": "BOS / CHoCH / higher-high-higher-low confluence — refuse a trade that fights the swing structure."},
     {"key": "mtf", "label": "Higher-timeframe trend",
      "desc": "Trade WITH the immediate higher timeframe (15m→1h, 1h→4h, 4h→1d); don't fight the next TF up (no confluence → stand aside)."},
+    {"key": "daily_align", "label": "Daily / big-picture trend must agree",
+     "desc": "Only take a MARKET entry when the timeframe TWO rungs above the entry agrees with it "
+             "(1h→daily, 15m→4h). A sideways big picture also stands aside. This sits ON TOP of the "
+             "laddered next-TF rule. Measured over 1605 signals: direction accuracy rises from 52 "
+             "correct per 100 (a coin flip) to 55, and to 56 once forex is excluded — the only "
+             "filter tested that made the edge statistically real. Armed setups are unaffected."},
     {"key": "htf_level", "label": "Higher-TF S/R levels",
      "desc": "Respect major 4h/1d support/resistance — don't enter straight into a big-timeframe level (stand aside / wait for the break or pullback)."},
     {"key": "htf_pullback", "label": "Higher-TF pullback (buy the dip)",
@@ -253,6 +259,28 @@ def _higher_trend(technical: TechnicalRead, entry_tf: str) -> tuple[str, str]:
     if hi is None:
         return "sideways", ""
     return _trend_from_indicators(hi.indicators, hi.trend), hi.timeframe
+
+
+# The "big picture" confirmation timeframe sits this many rungs above the entry TF: 1h→1d, 15m→4h.
+# Two rungs (not a fixed "daily") so the context scales with the entry — demanding daily agreement on
+# a 15m scalp rejects good intraday setups for a context ~100x its size. For the 1h book this IS the
+# daily, which is exactly the rule the 1605-signal accuracy test validated.
+_CONFIRM_STEPS = 2
+
+
+def _confirm_trend(technical: TechnicalRead, entry_tf: str) -> tuple[str, str]:
+    """(trend, tf_name) of the timeframe ``_CONFIRM_STEPS`` rungs above the entry TF.
+
+    Falls back to the highest timeframe loaded when the ladder is shorter than that (a 4h entry has
+    only 1d above it). ('sideways', '') when nothing higher is loaded — the caller then skips the
+    gate rather than blocking blind."""
+    er = _TF_RANK.get(entry_tf, 0)
+    above = sorted((t for t in technical.timeframes if _TF_RANK.get(t.timeframe, 0) > er),
+                   key=lambda t: _TF_RANK.get(t.timeframe, 0))
+    if not above:
+        return "sideways", ""
+    pick = above[min(_CONFIRM_STEPS - 1, len(above) - 1)]
+    return _trend_from_indicators(pick.indicators, pick.trend), pick.timeframe
 
 
 def _big_tf_levels(technical: TechnicalRead, entry_tf: str) -> list[float]:
@@ -1504,6 +1532,28 @@ def _deterministic_decision(
     else:
         base.rationale = "No clear trend (EMAs sideways) — sitting out."
         return base
+
+    # --- BIG-PICTURE (daily) confirmation: don't take a market entry against the dominant trend ---
+    # The laddered rule above only checks the IMMEDIATE next timeframe up, which on a 1h chart is the
+    # 4h — still short-term. This adds the rung above that (1h→daily), where the dominant direction
+    # lives. A SIDEWAYS big picture also stands aside: over 1605 signals, requiring a definite
+    # agreeing trend is what lifted direction accuracy from 52/100 (indistinguishable from a coin
+    # flip) to 55/100. It only ever BLOCKS a market entry — armed/conditional setups are untouched,
+    # since those re-validate when they trigger.
+    if "daily_align" not in disable:
+        confirm_trend, confirm_name = _confirm_trend(technical, timeframe)
+        if confirm_name:  # a higher TF was actually loaded; otherwise there's nothing to confirm
+            want = "up" if direction == Direction.LONG else "down"
+            if confirm_trend != want:
+                base.watch = True
+                against = (f"is {confirm_trend.upper()}" if confirm_trend != "sideways"
+                           else "has no clear direction")
+                base.rationale = (
+                    f"Big-picture check: the {confirm_name} trend {against}, so a "
+                    f"{direction.value} isn't with the dominant trend. Standing aside — trades taken "
+                    f"against (or without) the {confirm_name} direction are barely better than a coin flip."
+                )
+                return base
 
     # --- market-structure confluence: a pro won't fight clear opposing swing structure ---
     # If the EMA stack points one way but the SWINGS (entry TF AND higher TF) point the other,

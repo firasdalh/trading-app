@@ -53,9 +53,6 @@ def main() -> None:
                     "(e.g. 'range_breakout,ema_pullback') — measure a setup's contribution")
     ap.add_argument("--min-align", type=float, default=0.0, help="only trade setups with trend "
                     "alignment >= this (e.g. 0.85 = A+ only) — segment high- vs low-conviction trends")
-    ap.add_argument("--daily-align", default="", help="test a MANDATORY daily-trend filter on top of "
-                    "the laddered rule: 'all' = every trade must agree with the daily, or a "
-                    "comma-list of asset classes to apply it to (e.g. 'forex,metal,crypto')")
     ap.add_argument("--breakers", action="store_true", help="also measure how often the entry "
                     "circuit breakers (trade-count / loss-streak / performance) would have tripped")
     ap.add_argument("--brk-max-trades", type=int, default=8, help="breaker report: max trades/day")
@@ -83,7 +80,7 @@ def main() -> None:
                 tr = simulate_symbol(broker, sym, AssetClass(ac), tf, bars=args.bars,
                                      max_hold=args.max_hold, cooldown=args.cooldown,
                                      cost_r=args.cost_r, regimes=regimes, disable=disable,
-                                     min_align=args.min_align, daily_align=args.daily_align)
+                                     min_align=args.min_align)
                 print(f"   {sym}: {len(tr)} trades", flush=True)
                 all_trades.extend(tr)
             except Exception as exc:  # noqa: BLE001 - one bad symbol shouldn't kill the run
