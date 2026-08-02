@@ -332,6 +332,8 @@ export interface SettingsResponse {
     perf_breaker_enabled: boolean;
     min_expectancy_r: number;
     expectancy_window: number;
+    spread_gate_enabled: boolean;
+    max_spread_r_fraction: number;
   };
   env_kill_switch: boolean;
   env_broker_env: string;

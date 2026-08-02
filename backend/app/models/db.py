@@ -149,6 +149,18 @@ class RiskConfig(Base):
     perf_breaker_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     min_expectancy_r: Mapped[float] = mapped_column(Float, default=-0.2)
     expectancy_window: Mapped[int] = mapped_column(Integer, default=10)
+
+    # --- Spread gate: refuse an entry whose live bid/ask spread eats too much of its own R. ---
+    # The spread is a deterministic tax paid the moment a trade opens: with a spread of 0.012 on a
+    # 0.029 stop (natural gas at the 22:30 rollover) the trade starts 41% of the way to its stop and
+    # must be right by 1.41R to make 1R — unwinnable regardless of signal quality. ON by default
+    # because it can only ever BLOCK a trade, and at the default 0.25 it passes every liquid-session
+    # entry in the journal (JP225 1.3%, USTEC 1.7%, USOIL 2.3%, DE30 1.2%) while catching the broken
+    # ones (AUDCHF 124%, EURUSD 79%, XAGGBP 33%). Read LIVE at entry, so a symbol is blocked only in
+    # the thin/rollover hours when its book is actually wide.
+    spread_gate_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Max tolerated spread as a fraction of the stop distance (|entry - stop|). 0 = disabled.
+    max_spread_r_fraction: Mapped[float] = mapped_column(Float, default=0.25)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

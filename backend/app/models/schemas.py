@@ -255,6 +255,10 @@ class RiskLimits(BaseModel):
     # Effective state of the daily-loss circuit breaker handed to the manager (already
     # resolved by the service layer). When False, the daily-loss gate is skipped.
     daily_loss_breaker_enabled: bool = True
+    # Spread gate: veto an entry whose live bid/ask spread is more than this fraction of its own
+    # stop distance (execution cost as a share of R). When disabled or 0, the gate is skipped.
+    spread_gate_enabled: bool = True
+    max_spread_r_fraction: float = 0.25
 
 
 class RiskDecision(BaseModel):
@@ -371,6 +375,9 @@ class RiskConfigView(BaseModel):
     perf_breaker_enabled: bool = False
     min_expectancy_r: float = -0.2
     expectancy_window: int = 10
+    # Spread gate (execution-cost guard) — ON by default, unlike the opt-in entry breakers above.
+    spread_gate_enabled: bool = True
+    max_spread_r_fraction: float = 0.25
 
 
 class AppSettingsView(BaseModel):

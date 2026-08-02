@@ -78,6 +78,9 @@ class RiskUpdateRequest(BaseModel):
     perf_breaker_enabled: bool | None = None
     min_expectancy_r: float | None = None
     expectancy_window: int | None = None
+    # Spread gate (execution-cost guard): veto entries whose live spread is too big a share of R.
+    spread_gate_enabled: bool | None = None
+    max_spread_r_fraction: float | None = None
 
 
 def _check_phrase(phrase: str | None) -> None:
@@ -237,6 +240,20 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
         if req.expectancy_window < 1:
             raise HTTPException(status_code=400, detail="expectancy_window must be >= 1")
         risk.expectancy_window = req.expectancy_window
+
+    # Spread gate. Turning it OFF or raising the fraction lets wider execution cost through, so
+    # (like the daily-loss breaker) a weakening change is logged rather than applied silently.
+    if req.spread_gate_enabled is not None:
+        risk.spread_gate_enabled = req.spread_gate_enabled
+        if not req.spread_gate_enabled:
+            log.warning("SPREAD GATE DISABLED — entries no longer checked against execution cost")
+    if req.max_spread_r_fraction is not None:
+        if req.max_spread_r_fraction < 0:
+            raise HTTPException(status_code=400, detail="max_spread_r_fraction must be >= 0 (0 = off)")
+        if req.max_spread_r_fraction > risk.max_spread_r_fraction:
+            log.warning("spread gate loosened", extra={"from": risk.max_spread_r_fraction,
+                                                       "to": req.max_spread_r_fraction})
+        risk.max_spread_r_fraction = req.max_spread_r_fraction
 
     session.commit()
     log.info("risk config updated")

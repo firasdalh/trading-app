@@ -114,13 +114,36 @@ def _simulate_trade(symbol: str, candles: list, i: int, prop, *, max_hold: int,
     )
 
 
+def _daily_blocks(daily_align: str, asset_class: AssetClass, technical, prop) -> bool:
+    """True when the mandatory daily-alignment arm would stand this trade aside.
+
+    ``daily_align``: "" = off, "all" = every trade, else a comma-list of asset classes it applies
+    to. A sideways daily counts as NOT aligned (strict reading of "the daily must agree")."""
+    if not daily_align:
+        return False
+    scope = {s.strip().lower() for s in daily_align.split(",") if s.strip()}
+    if "all" not in scope and asset_class.value.lower() not in scope:
+        return False
+    from app.agents.orchestrator import _macro_trend
+
+    want = "up" if prop.direction == Direction.LONG else "down"
+    return _macro_trend(technical) != want
+
+
 def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str = "1h", *,
                     bars: int = 1500, context_bars: int = 600, max_hold: int = 96,
                     cooldown: int = 3, cost_r: float = 0.0,
                     regimes: set[str] | None = None,
                     disable: frozenset[str] = frozenset(),
-                    min_align: float = 0.0) -> list[BTTrade]:
+                    min_align: float = 0.0,
+                    daily_align: str = "") -> list[BTTrade]:
     """Replay the engine bar-by-bar over ``bars`` of history and return the simulated trades.
+
+    ``daily_align`` tests a MANDATORY daily-trend filter on top of the live laddered rule (which
+    only compares to the IMMEDIATE higher TF). "" = off (live behaviour), "all" = every trade must
+    agree with the daily EMA trend, or a comma-list of asset classes to apply it to selectively
+    (e.g. "forex,metal,crypto" — the journal's counter-daily losers). ANALYSIS SCOPE ONLY: this
+    does not change the live engine, it measures what such a filter would have done.
 
     At each entry-timeframe bar the engine is given the last 200 bars of EACH timeframe ending at
     that bar (no look-ahead), exactly like the live scanner. While a trade is open (plus a short
@@ -185,6 +208,12 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
             continue
         if regimes is not None and prop.regime not in regimes:
             i += 1   # stand aside in regimes we're not trading (e.g. trade trending only)
+            continue
+        # Mandatory daily-trend filter (analysis arm). The daily is always loaded as context, so
+        # _macro_trend is the 1d read; a 'sideways' daily is treated as NOT aligned (the strict
+        # reading of "the daily must agree").
+        if _daily_blocks(daily_align, asset_class, technical, prop):
+            i += 1
             continue
 
         tf0 = next((x for x in technical.timeframes if x.timeframe == timeframe),

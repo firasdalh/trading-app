@@ -51,6 +51,8 @@ _SQLITE_ADDED_COLUMNS = {
         ("perf_breaker_enabled", "BOOLEAN DEFAULT 0"),
         ("min_expectancy_r", "FLOAT DEFAULT -0.2"),
         ("expectancy_window", "INTEGER DEFAULT 10"),
+        ("spread_gate_enabled", "BOOLEAN DEFAULT 1"),
+        ("max_spread_r_fraction", "FLOAT DEFAULT 0.25"),
     ],
     "auto_trade_config": [
         ("min_rr", "FLOAT DEFAULT 1.2"),

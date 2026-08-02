@@ -98,6 +98,7 @@ def evaluate_proposal(
     not_tradeable_reason: str | None = None,
     breaker_reason: str | None = None,
     risk_per_lot: float | None = None,
+    spread: float | None = None,
 ) -> RiskDecision:
     """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
 
@@ -146,6 +147,31 @@ def evaluate_proposal(
         checks["take_profit_valid"] = tp_ok
         if not tp_ok:
             return _veto(symbol, "take-profit is on the wrong side of entry", checks)
+
+    # --- 1b. SPREAD GATE: refuse a setup whose execution cost eats too much of its own R. ---
+    # The bid/ask spread is a deterministic tax charged the instant the trade opens (enter at the
+    # far side of the book, exit at the near side). Measured against the stop distance it says how
+    # much of the risk budget is spent before the thesis is even tested: natural gas quoting 0.012
+    # on a 0.029 stop is 41% of R gone at entry, so the trade must be right by 1.41R to make 1R.
+    # No signal quality survives that, which is why a "95% confidence" XNGUSD short still bled.
+    # ``spread`` is read LIVE by the service (never a static per-symbol table) because the same
+    # instrument quotes 0.0066 in its liquid window and 0.024 at the daily rollover — so this
+    # blocks a symbol only during the hours its book is actually too wide to trade.
+    # Fails OPEN: an unavailable spread (None) skips the gate rather than halting all trading.
+    stop_distance = abs(entry - stop)
+    spread_frac = (spread / stop_distance) if (spread is not None and stop_distance > 0) else None
+    if (limits.spread_gate_enabled and limits.max_spread_r_fraction > 0
+            and spread_frac is not None):
+        checks["spread_ok"] = spread_frac <= limits.max_spread_r_fraction
+        if not checks["spread_ok"]:
+            return _veto(
+                symbol,
+                f"spread too wide — {spread_frac:.0%} of the stop distance "
+                f"(max {limits.max_spread_r_fraction:.0%}); execution cost would eat the edge",
+                checks,
+            )
+    else:
+        checks["spread_ok"] = True
 
     # --- 1c. broker tradeability: refuse a setup the broker won't let us OPEN (instrument
     # disabled / close-only, or the wrong direction for a long-only/short-only symbol). Otherwise

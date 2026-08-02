@@ -341,6 +341,8 @@ def build_limits(session: Session) -> RiskLimits:
         loss_cooldown_minutes=rc.loss_cooldown_minutes,
         risk_per_trade_ceiling=cfg.risk_per_trade_ceiling,
         daily_loss_breaker_enabled=rc.daily_loss_breaker_enabled,
+        spread_gate_enabled=getattr(rc, "spread_gate_enabled", True),
+        max_spread_r_fraction=getattr(rc, "max_spread_r_fraction", 0.25),
     )
 
 
@@ -481,6 +483,18 @@ def _lot_specs(broker, asset_class, symbol: str) -> tuple[float | None, float]:
     return step, min_lot
 
 
+def _live_spread(broker, symbol: str) -> float | None:
+    """Live bid/ask spread for the spread gate, in price units. Read fresh on every assessment —
+    deliberately NOT cached in ScanCache, because the spread is the one input that changes
+    intraday (a symbol is fine in its liquid session and untradeable at the rollover), so a value
+    memoized across a scan would defeat the whole point. None on any failure (gate fails open)."""
+    try:
+        sp = broker.spread(symbol)
+        return sp if (sp and sp > 0) else None
+    except Exception:  # noqa: BLE001 - never let a spread read block sizing
+        return None
+
+
 def _risk_per_lot(broker, symbol: str, entry: float | None, stop: float | None) -> float | None:
     """Account-currency risk of 1 lot over the stop — the broker's value if available (currency-
     correct via order_calc_profit), else ``|entry-stop| × contract_size`` (correct only when the
@@ -570,6 +584,7 @@ def assess(
         not_tradeable_reason=not_tradeable,
         breaker_reason=breaker,
         risk_per_lot=_risk_per_lot(broker, proposal.symbol, proposal.entry, proposal.stop_loss),
+        spread=_live_spread(broker, proposal.symbol),
     )
 
 

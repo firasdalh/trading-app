@@ -184,6 +184,21 @@ class BrokerAdapter(ABC):
         sub-minimum size the broker would silently clamp up at order time."""
         return None, None
 
+    def spread(self, symbol: str) -> float | None:
+        """Current raw bid/ask spread in PRICE units, or None when the broker can't report it.
+
+        This is the unavoidable round-trip execution cost of a trade: you enter at the far side of
+        the book and exit at the near side, so a position starts ``spread`` behind. Compared against
+        the stop distance by the Risk Manager's spread gate — a spread that is a large fraction of R
+        makes a setup unwinnable no matter how good the signal (natural gas at 0.012 on a 0.029 stop
+        is 41% of R gone before the thesis is even tested).
+
+        Returned RAW (not annualised, not normalised): the caller divides by |entry - stop|. Must be
+        read LIVE at entry time, never cached across sessions — the same symbol can quote 0.0066 in
+        its liquid window and 0.024 at the daily rollover.
+        """
+        return None
+
     def risk_per_lot(self, symbol: str, entry: float, stop: float) -> float | None:
         """Account-currency loss of ONE lot if price moves entry->stop — the basis for currency-
         correct sizing (lots = risk budget ÷ risk_per_lot). None when the broker can't compute it;

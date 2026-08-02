@@ -262,6 +262,27 @@ class Mt5BrokerAdapter(BrokerAdapter):
         ndp = len(str(step).split(".")[1]) if "." in str(step) else 0
         return round(lots, ndp or 2)
 
+    def spread(self, symbol: str) -> float | None:
+        """Live ask-bid in price units from the current tick. None when either side is missing or
+        the spread is non-positive (a crossed/stale book) so the gate fails OPEN rather than
+        blocking every trade on a bad read."""
+        try:
+            name = self._resolve_symbol(symbol)
+            tick = self._mt5.symbol_info_tick(name)
+            bid = float(getattr(tick, "bid", 0) or 0) if tick is not None else 0.0
+            ask = float(getattr(tick, "ask", 0) or 0) if tick is not None else 0.0
+            if not (bid and ask):
+                info = self._mt5.symbol_info(name)
+                if info is not None:
+                    bid = float(getattr(info, "bid", 0) or 0)
+                    ask = float(getattr(info, "ask", 0) or 0)
+            if not (bid and ask):
+                return None
+            sp = ask - bid
+            return sp if sp > 0 else None
+        except Exception:  # noqa: BLE001 - best-effort; a failed read must not block trading
+            return None
+
     def risk_per_lot(self, symbol: str, entry: float, stop: float) -> float | None:
         """Account-currency loss of 1 lot moving entry->stop, via order_calc_profit (MT5 converts
         FX, so a JPY pair / HKD index is reported in the USD account). None on failure."""

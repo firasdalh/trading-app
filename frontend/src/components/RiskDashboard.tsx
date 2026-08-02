@@ -245,6 +245,56 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
           </div>
         </details>
       )}
+
+      {limits && (
+        <details className="rounded-lg border border-neutral-800 bg-neutral-800/30">
+          <summary className="flex cursor-pointer select-none items-center gap-2 px-2.5 py-1.5 text-xs font-semibold text-neutral-300">
+            <span>Spread gate</span>
+            <StatePill on={limits.spread_gate_enabled} />
+            <span className="font-normal text-neutral-500">— execution cost</span>
+          </summary>
+          <div className="space-y-2 px-2.5 pb-2.5 pt-1">
+            <p className="text-[11px] leading-snug text-neutral-500">
+              Blocks an entry when the live bid/ask spread is too big a share of its own stop
+              distance. A spread worth 40% of R means the trade must be right by 1.4R just to make
+              1R. Checked fresh at entry, so a symbol is only blocked while its book is actually
+              wide (thin hours / rollover).
+            </p>
+            <label
+              className="flex items-center justify-between gap-2 text-xs"
+              title="Veto entries whose spread eats too much of the risk budget. Can only block trades, never loosen a limit."
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="text-neutral-300">Spread gate</span>
+                <StatePill on={limits.spread_gate_enabled} />
+              </span>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={limits.spread_gate_enabled}
+                onChange={(e) => saveRisk({ spread_gate_enabled: e.target.checked })}
+              />
+            </label>
+            {limits.spread_gate_enabled && (
+              <NumField
+                label="Max spread (% of R)"
+                hint="Reject entries whose spread exceeds this share of the stop distance. 25 is lenient (passes every liquid-session index entry); 10 is strict. 0 = off."
+                value={Math.round(limits.max_spread_r_fraction * 1000) / 10}
+                step={5}
+                min={0}
+                busy={busy}
+                active={limits.max_spread_r_fraction > 0}
+                onCommit={(v) => saveRisk({ max_spread_r_fraction: v / 100 })}
+              />
+            )}
+            {limits.spread_gate_enabled && limits.max_spread_r_fraction === 0 && (
+              <div className="rounded bg-bear/10 px-2 py-1 text-[11px] text-bear">
+                ⚠ Max spread is 0% — the gate is on but does nothing.
+              </div>
+            )}
+          </div>
+        </details>
+      )}
     </div>
   );
 }
