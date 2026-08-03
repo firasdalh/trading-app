@@ -12,6 +12,7 @@ from app.agents.indicators import (
     bollinger,
     divergence,
     ema,
+    ema_slope,
     failed_break,
     macd,
     macd_signals,
@@ -147,6 +148,16 @@ def _deterministic_timeframe(series: OHLCVSeries) -> TimeframeRead:
         indicators["adx"] = adx_v["adx"]
         indicators["plus_di"] = adx_v["plus_di"]
         indicators["minus_di"] = adx_v["minus_di"]
+        if adx_v.get("adx_prev") is not None:
+            indicators["adx_prev"] = adx_v["adx_prev"]   # trend strength building or fading?
+    # Long-term trend SLOPE (in ATRs over 20 bars): price above a FLAT EMA200 is a range, not an
+    # uptrend. The slope is what separates a real long-term trend from a sideways drift.
+    if indicators.get("atr14"):
+        sl = ema_slope(closes, 200, 20, indicators["atr14"])
+        if sl is None:                      # not enough history for the 200 — fall back to the 50
+            sl = ema_slope(closes, 50, 20, indicators["atr14"])
+        if sl is not None:
+            indicators["ema_slope"] = sl
     # Participation.
     vr = volume_ratio(candles)
     if vr is not None:

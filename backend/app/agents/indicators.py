@@ -467,7 +467,31 @@ def adx(candles: list[Candle], period: int = 14) -> dict | None:
     adx_s = _rma(dx, period)
     if not adx_s:
         return None
-    return {"adx": round(adx_s[-1], 2), "plus_di": round(pdi[-1], 2), "minus_di": round(mdi[-1], 2)}
+    return {"adx": round(adx_s[-1], 2), "plus_di": round(pdi[-1], 2), "minus_di": round(mdi[-1], 2),
+            # Previous bar's ADX -> "is trend strength BUILDING or FADING?". ADX 30 and falling is a
+            # trend running out of steam; ADX 24 and rising is often one starting. The level alone
+            # can't tell them apart.
+            "adx_prev": round(adx_s[-2], 2) if len(adx_s) >= 2 else None}
+
+
+def ema_slope(closes: list[float], period: int, lookback: int = 20,
+              atr_value: float | None = None) -> float | None:
+    """How far the EMA has TRAVELLED over ``lookback`` bars, measured in ATRs.
+
+    Price being above a flat EMA200 is not an uptrend — it's a range with the average in the middle.
+    The slope separates the two. Normalising by ATR makes the number comparable across instruments
+    (0.5 means the average moved half a typical bar's range per lookback window); without it a gold
+    slope and a EURUSD slope aren't on the same scale. Returns None when there isn't enough history.
+    """
+    if lookback <= 0 or len(closes) < period + lookback:
+        return None
+    series = _ema_full(closes, period)
+    now, then = series[-1], series[-1 - lookback]
+    if now is None or then is None:
+        return None
+    if not atr_value or atr_value <= 0:
+        return None
+    return round((now - then) / atr_value, 4)
 
 
 def macd(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -> dict | None:

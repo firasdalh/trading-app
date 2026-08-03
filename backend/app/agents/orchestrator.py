@@ -156,6 +156,16 @@ DET_FILTERS = [
      "desc": "In a trend, take the continuation when price pulls back to the EMA20 (dynamic support/resistance) and closes back on the trend side — a tight-stopped entry off the moving average."},
     {"key": "failed_break", "label": "Failed-break reversal",
      "desc": "In a range, fade a FALSE breakout (a liquidity sweep beyond the range that closes back inside — a bull/bear trap) back toward the mean, stop beyond the sweep. Not against a clear higher-TF trend."},
+    {"key": "trend_slope", "label": "Long-term trend must be SLOPING",
+     "desc": "Price above a FLAT EMA200 is a range with the average in the middle, not an uptrend. "
+             "This requires the long EMA to have actually TRAVELLED in the trade's direction "
+             "(at least 0.1 ATR over the last 20 bars), which filters out sideways drift that only "
+             "looks like a trend because price sits on the right side of the line."},
+    {"key": "adx_rising", "label": "Trend strength must be BUILDING",
+     "desc": "ADX measures trend strength but not its direction of travel. ADX 30 and FALLING is a "
+             "trend running out of steam; ADX 24 and RISING is often one just starting — the level "
+             "alone can't tell them apart. This rejects entries where ADX is falling versus the "
+             "previous bar, so the engine joins trends that are strengthening, not fading."},
     {"key": "alignment", "label": "Trend alignment (A+ boost)",
      "desc": "Grade each trend trade by how clearly the direction stacks up (all timeframes + strength + momentum). A fully-aligned 'A+' trend gets a small confidence bump so the clearest setups rank up and the Hybrid prioritises them."},
     {"key": "chase", "label": "Anti-chase (ATR distance)",
@@ -266,6 +276,11 @@ def _higher_trend(technical: TechnicalRead, entry_tf: str) -> tuple[str, str]:
 # a 15m scalp rejects good intraday setups for a context ~100x its size. For the 1h book this IS the
 # daily, which is exactly the rule the 1605-signal accuracy test validated.
 _CONFIRM_STEPS = 2
+
+# Minimum long-EMA travel, in ATRs over 20 bars, for the trend to count as "sloping" rather than
+# flat. 0.1 ATR is deliberately low — the goal is to exclude a genuinely FLAT average, not to demand
+# a steep one (a steeper floor would reject the early part of a trend, which is where the money is).
+_SLOPE_MIN_ATR = 0.10
 
 
 def _confirm_trend(technical: TechnicalRead, entry_tf: str) -> tuple[str, str]:
@@ -1554,6 +1569,35 @@ def _deterministic_decision(
                     f"against (or without) the {confirm_name} direction are barely better than a coin flip."
                 )
                 return base
+
+    # --- TREND QUALITY: is the long-term trend actually MOVING, and is strength BUILDING? ---
+    # Both answer a question the existing gates don't. "Price above EMA200" says nothing about
+    # whether that average is going anywhere, and "ADX >= 23" says nothing about whether the trend
+    # is forming or dying. Added 2026-08-03 from a filter review; both are UNVALIDATED live
+    # hypotheses on this book — they are toggles so a week of results can judge them.
+    slope = ind.get("ema_slope")
+    if "trend_slope" not in disable and slope is not None:
+        wrong_way = (direction == Direction.LONG and slope < _SLOPE_MIN_ATR) or (
+            direction == Direction.SHORT and slope > -_SLOPE_MIN_ATR)
+        if wrong_way:
+            base.watch = True
+            flat = abs(slope) < _SLOPE_MIN_ATR
+            base.rationale = (
+                f"Long-term trend is {'FLAT' if flat else 'sloping the other way'} "
+                f"({slope:+.2f} ATR over 20 bars) — price may be on the right side of the long EMA, "
+                f"but the average isn't travelling, so this is drift rather than a trend to join."
+            )
+            return base
+
+    adx_prev = ind.get("adx_prev")
+    if "adx_rising" not in disable and adx_v is not None and adx_prev is not None:
+        if adx_v < adx_prev:
+            base.watch = True
+            base.rationale = (
+                f"Trend strength is FADING (ADX {adx_v} down from {adx_prev}) — the move is losing "
+                "power rather than building. Waiting for strength to turn back up."
+            )
+            return base
 
     # --- market-structure confluence: a pro won't fight clear opposing swing structure ---
     # If the EMA stack points one way but the SWINGS (entry TF AND higher TF) point the other,

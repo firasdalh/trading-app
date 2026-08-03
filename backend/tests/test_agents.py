@@ -102,6 +102,7 @@ def test_orchestrator_arms_pullback_when_overbought_and_not_strong():
     tech = run_technical("TEST", [_uptrend_series()])
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0        # moderate trend (< strong 25) -> stays in the trend path
+    ind["adx_prev"] = 21.0   # keep the snapshot consistent (strength building, not fading)
     ind["rsi14"] = 72.0      # overbought zone (>= 70)
     ind["macd_hist"] = 0.05  # momentum not against (avoid the separate momentum-pullback branch)
     prop = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
@@ -114,6 +115,7 @@ def test_orchestrator_arms_pullback_when_oversold_short_and_not_strong():
     tech = run_technical("TEST", [_downtrend_series()])
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0
+    ind["adx_prev"] = 21.0
     ind["rsi14"] = 28.0      # oversold zone (<= 30)
     ind["macd_hist"] = -0.05
     prop = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
@@ -128,6 +130,7 @@ def test_disable_rsi_extreme_filter_takes_market_instead_of_arming():
     tech = run_technical("TEST", [_uptrend_series()])
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0        # moderate (not strong) -> the rsi_extreme arm path applies
+    ind["adx_prev"] = 21.0
     ind["rsi14"] = 72.0
     ind["macd_hist"] = 0.05
     armed = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
@@ -146,6 +149,7 @@ def test_macd_histogram_rising_lifts_confidence_vs_fading():
         tech = run_technical("TEST", [_uptrend_series()])
         ind = tech.timeframes[0].indicators
         ind["adx"] = 22.0        # moderate -> market entry, confidence not maxed at the cap
+        ind["adx_prev"] = 21.0
         ind["rsi14"] = 55.0      # not extreme -> no pullback arm
         ind["macd_hist"] = hist
         ind["macd_hist_prev"] = hist_prev
@@ -216,6 +220,7 @@ def test_ema200_filter_gates_its_confidence_factor():
     tech = run_technical("TEST", [_uptrend_series()])
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0        # moderate -> market entry, confidence not clamped
+    ind["adx_prev"] = 21.0
     ind["rsi14"] = 55.0
     ind["ema200"] = 90.0     # entry (~140) is above EMA200 -> with the long-term trend -> +0.05
     on = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
@@ -256,6 +261,7 @@ def test_orchestrator_rides_overbought_when_strong_trend():
     tech = run_technical("TEST", [_uptrend_series()])
     ind = tech.timeframes[0].indicators
     ind["adx"] = 35.0        # strong trend
+    ind["adx_prev"] = 33.0   # ...and still building, so the adx_rising gate passes
     ind["rsi14"] = 80.0      # deep overbought
     prop = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
     assert prop.direction == Direction.LONG  # strong trend -> market entry, not armed
