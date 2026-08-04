@@ -249,6 +249,7 @@ export interface PositionView {
   unrealized_pnl: number;
   realized_pnl: number | null;
   source: string | null;
+  opened_at: string | null;   // when it was opened — used to mark the entry CANDLE on the chart
   cost_usd: number | null;
   closed_at: string | null;
 }

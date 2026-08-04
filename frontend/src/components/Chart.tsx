@@ -695,10 +695,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSt]);
 
+  // `positions` is in here so the entry marker follows the trade: it appears the moment a position
+  // opens, its P&L text tracks the poll, and it disappears on close.
   useEffect(() => {
     applyMarkers(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showPb, showStructure]);
+  }, [showPb, showStructure, positions, symbol]);
 
   useEffect(() => {
     applyBand(candlesRef.current);
@@ -827,6 +829,48 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           text: p.label,
         });
       }
+    }
+    // ENTRY marker — pins the open position to the CANDLE it was opened on.
+    //
+    // Kept deliberately spare. The price, P&L, risk and reward are ALL already on screen (header bar
+    // + the entry/SL/TP line labels), so repeating them here would just crowd the candles. The one
+    // thing no other element can show is WHICH BAR you got in on, so that's all this says.
+    //
+    // Coloured with the entry line's blue rather than by profit: the arrow and the horizontal line
+    // then read as one object ("here is your entry, in time AND in price") instead of competing with
+    // the red/green of the candles around it. Live P&L is the header's job.
+    for (const p of positions ?? []) {
+      if (p.symbol.toUpperCase() !== symbol.toUpperCase() || !p.opened_at) continue;
+      // Broker timestamps may arrive without a zone marker; they are UTC, and the candles are too.
+      const iso = /[Zz]|[+-]\d{2}:?\d{2}$/.test(p.opened_at) ? p.opened_at : `${p.opened_at}Z`;
+      const at = Date.parse(iso) / 1000;
+      if (!Number.isFinite(at)) continue;
+      // The candle the entry falls INSIDE: the last one that had already opened by then. Anchoring
+      // to the next bar instead would draw the marker after the fact.
+      let idx = -1;
+      for (let k = 0; k < candles.length; k++) {
+        if (toTime(candles[k]) <= at) idx = k;
+        else break;
+      }
+      if (idx < 0) continue;                       // opened before the loaded history starts
+      const isLong = p.direction === "long";
+      const pnl = p.unrealized_pnl ?? 0;
+      // Round to whole dollars, but keep cents on small numbers — "+$1" for a $0.57 position reads
+      // as a rounding error rather than a real figure.
+      const amount = Math.abs(pnl) >= 10 ? pnl.toFixed(0) : pnl.toFixed(2);
+      markers.push({
+        time: toTime(candles[idx]),
+        // Sit on the side the trade is betting AGAINST, so the arrow points into the move it wants:
+        // a long's arrow sits under the bar pointing up, a short's above it pointing down.
+        position: isLong ? "belowBar" : "aboveBar",
+        // Green/red by live P&L so the bar answers "has price gone my way since I got in?" at a
+        // glance — the one question the blue entry LINE can't answer on its own.
+        color: pnl > 0 ? "#26a69a" : pnl < 0 ? "#ef5350" : "#3b82f6",
+        shape: isLong ? "arrowUp" : "arrowDown",
+        // Short by design: price/risk/reward are already in the header and the line labels, so the
+        // marker carries only what's unique to it — the bar you entered on, and how it's doing.
+        text: `ENTRY ${pnl >= 0 ? "+" : "−"}$${amount.replace("-", "")}`,
+      });
     }
     // lightweight-charts requires markers in ascending time order.
     markers.sort((a, b) => (a.time as number) - (b.time as number));
@@ -1415,6 +1459,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             )}
             <span className="text-neutral-700">|</span>
             {(hasPos || hasProp) && <span className="text-blue-400">— Entry</span>}
+            {/* The arrow is the only thing on the chart that shows WHEN you got in, so name it. */}
+            {hasPos && (
+              <span className="inline-flex items-center gap-1 text-blue-400">
+                {myPos?.direction === "long" ? "▲" : "▼"} Entry candle
+              </span>
+            )}
             {hasArmed && <span className="text-amber-400">— Arm trigger</span>}
             <span className="text-bear">— Stop</span>
             <span className="text-bull">— Target</span>

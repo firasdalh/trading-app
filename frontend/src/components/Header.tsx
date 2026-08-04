@@ -36,9 +36,16 @@ export function Header({ settings, onKillSwitchChange, onOpenSettings }: Props) 
       <header className="border-b border-neutral-800 bg-neutral-900/80 backdrop-blur supports-[backdrop-filter]:bg-neutral-900/60">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-2.5">
           <div className="flex items-center gap-2.5">
-            <span className="grid h-6 w-6 place-items-center rounded-md bg-brand-600 text-[11px] font-bold text-white shadow-card">
-              AI
-            </span>
+            {/* 64px source rendered at 24px so it stays sharp on high-DPI screens. The artwork
+                already has its own rounded card + transparent corners, so no background here. */}
+            <img
+              src="/logo-64.png"
+              alt="AI Trading Desk"
+              width={24}
+              height={24}
+              className="h-6 w-6 shrink-0 rounded-md shadow-card"
+            />
+
             <span className="text-base font-semibold tracking-tight">Trading Desk</span>
             <span
               className={`rounded-md px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${

@@ -578,9 +578,32 @@ def db_positions(session: Session = Depends(get_session)) -> list[PositionView]:
 def live_positions(session: Session = Depends(get_session)) -> list[PositionView]:
     """Open positions reported by the BROKER itself — the real account truth, including
     trades opened directly in MT5/Exness (not just app-opened ones)."""
-    from app.risk.service import live_broker_positions
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+    from app.risk.service import _norm_symbol, live_broker_positions
 
     out = live_broker_positions(session)
+
+    # Backfill the OPEN TIME from our own row when the broker didn't report one. This is what the
+    # chart uses to mark the entry CANDLE (not just the price level), and a broker that omits it
+    # would otherwise leave every marker off. Broker time wins when present — it's the real fill,
+    # and it's the only source for trades opened directly in the terminal.
+    missing = [p for p in out if p.opened_at is None]
+    if missing:
+        rows = session.scalars(
+            select(Position).where(Position.status == PositionStatus.OPEN.value)
+        ).all()
+        by_symbol: dict[str, datetime] = {}
+        for r in rows:
+            if r.opened_at is None:
+                continue
+            key = _norm_symbol(r.symbol)
+            # Several rows can share a symbol; keep the most recent open.
+            if key not in by_symbol or r.opened_at > by_symbol[key]:
+                by_symbol[key] = r.opened_at
+        for p in missing:
+            p.opened_at = by_symbol.get(_norm_symbol(p.symbol))
+
     for i, p in enumerate(out):
         p.id = i + 1
     return out

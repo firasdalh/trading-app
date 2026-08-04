@@ -417,8 +417,29 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 status="open", last_price=float(p.price_current),
                 unrealized_pnl=float(p.profit),
                 cost_usd=self._position_margin(p),
+                # WHEN the position was opened, straight from the broker. Broker-truth positions are
+                # the ones the chart draws from, so without this the UI can't mark the entry CANDLE —
+                # only the price level. Taking it from MT5 (rather than the app's own row) also means
+                # trades opened directly in the terminal get a timestamp too.
+                opened_at=self._position_opened_at(p),
             ))
         return views
+
+    @staticmethod
+    def _position_opened_at(p) -> datetime | None:
+        """Open time as an aware UTC datetime. MT5 reports epoch seconds in ``time`` (and
+        ``time_msc`` in milliseconds); prefer the millisecond field when present. None on anything
+        unexpected — a missing timestamp only costs a chart marker, so it must never raise."""
+        try:
+            msc = getattr(p, "time_msc", 0)
+            if msc:
+                return datetime.fromtimestamp(int(msc) / 1000, tz=timezone.utc)
+            secs = getattr(p, "time", 0)
+            if secs:
+                return datetime.fromtimestamp(int(secs), tz=timezone.utc)
+        except Exception:  # noqa: BLE001 - best-effort; never break the position list
+            pass
+        return None
 
     def _position_margin(self, p) -> float | None:
         """Margin to hold this position in the account currency (USD) — the 'cost to open'.

@@ -280,10 +280,18 @@ _API_INFO = {
 }
 
 
+# index.html must NEVER be cached. Its filename is constant while the bundle it points at is
+# content-hashed (index-<hash>.js), so a stale cached index keeps loading a bundle that no longer
+# exists — the UI silently stays on old code after every rebuild and only a manual hard-refresh
+# fixes it. The hashed assets under /assets are immutable and may cache forever; this one file is
+# the pointer that has to stay fresh.
+_NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
+
+
 @app.get("/", include_in_schema=False)
 def root():
     # Built UI when present (desktop / single-origin); the API info JSON otherwise (dev / API-only).
-    return FileResponse(_INDEX) if _HAS_UI else _API_INFO
+    return FileResponse(_INDEX, headers=_NO_STORE) if _HAS_UI else _API_INFO
 
 
 if _HAS_UI:
@@ -300,4 +308,4 @@ if _HAS_UI:
         candidate = os.path.normpath(os.path.join(_DIST, full_path))
         if full_path and candidate.startswith(_DIST) and os.path.isfile(candidate):
             return FileResponse(candidate)
-        return FileResponse(_INDEX)
+        return FileResponse(_INDEX, headers=_NO_STORE)   # same no-cache rule as "/"
