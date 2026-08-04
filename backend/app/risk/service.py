@@ -343,6 +343,8 @@ def build_limits(session: Session) -> RiskLimits:
         daily_loss_breaker_enabled=rc.daily_loss_breaker_enabled,
         spread_gate_enabled=getattr(rc, "spread_gate_enabled", True),
         max_spread_r_fraction=getattr(rc, "max_spread_r_fraction", 0.25),
+        weekend_block_enabled=getattr(rc, "weekend_block_enabled", True),
+        weekend_block_hours=getattr(rc, "weekend_block_hours", 3.0),
     )
 
 

@@ -46,6 +46,11 @@ _INVALIDATE_LIFE_FRAC = 0.5  # a STALE zombie kill: once an arm is past this fra
 #                            for a while — the JP225 buy_stop / USOIL sell_stop bug was killing those
 #                            SECONDS after arming). Only the combo of "old enough + still wrong" cancels.
 _TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+# Max overshoot past the trigger, as a fraction of the planned risk, before a breakout arm refuses to
+# fire. 0.25 = the fill may cost at most a quarter of R more than budgeted (so real risk <= 1.25x the
+# approved amount). Chosen to tolerate the normal slippage of waiting for the break to confirm while
+# still catching a level that has genuinely run away.
+_MAX_DRIFT_R = 0.25
 
 
 def _cooldown_minutes(timeframe: str) -> int:
@@ -179,10 +184,20 @@ def arm_conditional(
     auto_execute: bool = False, valid_hours: int = _DEFAULT_VALID_HOURS,
     require_close_confirm: bool = True,
 ) -> ConditionalSetup | None:
-    """Arm a conditional setup. Returns None if a duplicate is already armed, the symbol is already
-    open at the broker (never stack a pending on a live position), or the broker won't let us OPEN
-    this symbol/direction (a disabled / close-only instrument would just get stuck re-arming and
-    being vetoed at the trigger)."""
+    """Arm a conditional setup. Returns None if it has NO STOP-LOSS, a duplicate is already armed,
+    the symbol is already open at the broker (never stack a pending on a live position), or the
+    broker won't let us OPEN this symbol/direction (a disabled / close-only instrument would just
+    get stuck re-arming and being vetoed at the trigger)."""
+    # A stopless arm is a ZOMBIE: position size is derived from the stop distance, so the Risk
+    # Manager's first gate vetoes it ("proposal missing entry/stop or not actionable") every single
+    # time it triggers. It then re-arms, triggers, is vetoed again... until it expires, all while
+    # LOOKING active in the panel. Refuse it at the door instead. (ETHUSDm #26 and XAUUSDm #39 both
+    # burned their whole validity window this way; #39 also blocked nothing, so the Hybrid opened
+    # the same idea at market underneath it.)
+    if stop_loss is None:
+        log.info("arm refused — no stop-loss (would be vetoed at every trigger)",
+                 extra={"symbol": symbol, "order_type": order_type, "source": source})
+        return None
     norm = _norm_symbol(symbol)
     for e in active_armed(session):
         if _norm_symbol(e.symbol) == norm and e.direction == direction:
@@ -271,6 +286,38 @@ def _decline(session: Session, s: ConditionalSetup, why: str, *, terminal: bool)
 # Risk Manager) prevents a broken idea from opening.
 
 
+def _drift_too_far(s: ConditionalSetup, ref: float) -> str | None:
+    """Has price run so far past the trigger that opening now would blow the risk budget?
+
+    Size is derived from the PLANNED risk ``|trigger - stop|``, but a breakout arm deliberately waits
+    for ``_CONFIRM_BARS`` closes beyond the trigger before firing, and then fills at MARKET. Every
+    point of that overshoot is added to the real risk while the size stays as budgeted: trigger 100 /
+    stop 99 filling at 100.4 is a 1.4-point loss on a position sized for 1.0 — 40% over the cap the
+    Risk Manager just approved.
+
+    So cap the overshoot. Beyond ``_MAX_DRIFT_R`` of planned R past the trigger the break has already
+    run without us: don't chase our own breakout. NON-terminal — the level may still be worth taking
+    on a pullback, and re-arming keeps that option.
+
+    Only applies to STOP (breakout) orders. A limit arm fills on the FAVOURABLE side of its trigger
+    (a buy_limit fires at or below it), so its drift only ever reduces risk."""
+    if s.order_type not in ("buy_stop", "sell_stop") or s.stop_loss is None:
+        return None
+    planned_r = abs(s.trigger_price - s.stop_loss)
+    if planned_r <= 0:
+        return None
+    # Overshoot = how far BEYOND the trigger price has gone, in the trade's direction.
+    drift = (ref - s.trigger_price) if s.direction == Direction.LONG.value else (s.trigger_price - ref)
+    if drift <= 0:
+        return None                       # at or better than the trigger — nothing to chase
+    frac = drift / planned_r
+    if frac <= _MAX_DRIFT_R:
+        return None
+    return (f"break already ran {frac:.0%} of R past the trigger ({round(ref, 6)} vs "
+            f"{round(s.trigger_price, 6)}) — entering here would risk ~{1 + frac:.1f}x the planned "
+            f"amount; not chasing")
+
+
 def _mechanical_invalidation(s: ConditionalSetup, ref: float) -> tuple[str | None, bool]:
     """Hard, no-judgement invalidations checked at the trigger. Returns ``(reason, terminal)``:
 
@@ -334,6 +381,12 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
     reason, terminal = _mechanical_invalidation(s, ref)
     if reason:
         return _decline(session, s, reason, terminal=terminal)
+
+    # 1b. Don't chase our own breakout: the fill is at market, but the SIZE was budgeted from the
+    #     trigger, so an overshoot silently raises the real risk above the approved cap.
+    drift = _drift_too_far(s, ref)
+    if drift:
+        return _decline(session, s, drift, terminal=False)
 
     # 2. Build the proposal from the ARMED levels (trigger = entry) — the whole point: the R:R is
     #    measured from the trigger, where it is real.
@@ -477,6 +530,19 @@ def check_conditional_setups(session: Session) -> dict:
             continue
 
         broker = get_broker_for(AssetClass(s.asset_class), settings.broker_map)
+
+        # MARKET HOURS: a closed session still returns the LAST tick, so every price test below would
+        # run on a stale Friday quote — an arm could "trigger" on hours-old data and try to open into
+        # the reopen gap. Every other engine (Hybrid / auto-trade / RSI-Over / analysis) already skips
+        # a closed market; this one didn't. Just WAIT — never cancel, because the setup is still
+        # perfectly valid, it simply can't be judged (or filled) until the session reopens.
+        # Conservative on failure: if we can't tell, keep the old behaviour and evaluate.
+        try:
+            if not broker.market_open(s.symbol):
+                continue
+        except Exception:  # noqa: BLE001 - a market-hours lookup failure shouldn't freeze the arm
+            pass
+
         try:
             price = broker.get_quote(s.symbol).price
         except Exception as exc:  # noqa: BLE001

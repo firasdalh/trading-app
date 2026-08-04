@@ -190,7 +190,7 @@ def test_buy_stop_fires_only_after_lower_tf_confirms(db_session, monkeypatch):
     # buy_stop breakout: price tagged the trigger AND the last 2 (lower-TF) closes hold above it -> fires
     s = _arm(db_session, direction="long", order_type="buy_stop", trigger_price=100.0,
              stop_loss=98.0, take_profit=106.0)
-    _stub_market_series(monkeypatch, [99.0] * 59 + [100.5, 101.0])   # last 2 closes above the trigger
+    _stub_market_series(monkeypatch, [99.0] * 59 + [100.2, 100.3])   # last 2 closes above the trigger
     _stub_fire(monkeypatch)                                          # approve + execute the re-check
     out = cond.check_conditional_setups(db_session)
     db_session.refresh(s)
@@ -243,7 +243,7 @@ def test_fresh_arm_past_stop_not_invalidated(db_session, monkeypatch):
 
 def test_trigger_fires_and_opens_on_break(db_session, monkeypatch):
     s = _arm(db_session)
-    _stub_market(monkeypatch, price=78.0)  # below the 78.2 sell-stop trigger
+    _stub_market(monkeypatch, price=78.17)  # just below the 78.2 sell-stop trigger (0.15R of drift)
     _stub_fire(monkeypatch, approved=True)
     out = cond.check_conditional_setups(db_session)
     assert out["triggered"] == 1
@@ -450,7 +450,7 @@ def test_desired_lots_resizes_proposal_on_fire(db_session, monkeypatch):
     import app.risk.service as risk_service
 
     s = _arm(db_session, auto_execute=False, desired_lots=0.07)  # Mode A -> queue for approval
-    _stub_market(monkeypatch, price=78.0)
+    _stub_market(monkeypatch, price=78.17)   # within the drift cap (see _drift_too_far)
     _stub_fire(monkeypatch, approved=True, qty=0.05)  # default size 0.05; user wants 0.07
     monkeypatch.setattr(risk_service, "size_preview",
                         lambda session, record, desired_lots=None: {

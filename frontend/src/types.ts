@@ -334,6 +334,10 @@ export interface SettingsResponse {
     expectancy_window: number;
     spread_gate_enabled: boolean;
     max_spread_r_fraction: number;
+    weekend_block_enabled: boolean;
+    weekend_block_hours: number;
+    weekend_flatten_enabled: boolean;
+    weekend_flatten_hours: number;
   };
   env_kill_switch: boolean;
   env_broker_env: string;
@@ -617,6 +621,32 @@ export interface JournalBreakdown {
   daily: PeriodBreakdown[];
   weekly: PeriodBreakdown[];
   monthly: PeriodBreakdown[];
+}
+
+// Per-symbol report card built from CLOSED trades — the system grading its own results.
+// `verdict` is decided on expectancy_r (profit per unit of risk), NOT win_rate: a symbol winning
+// 35% with 3R winners is good, one winning 60% with 0.3R winners bleeds.
+export type ScoreVerdict = "proven" | "watching" | "weak" | "disable" | "learning";
+export interface SymbolScore {
+  symbol: string;
+  asset_class: string | null;
+  trades: number;
+  wins: number;
+  win_rate: number;
+  expectancy_r: number;
+  total_r: number;
+  total_pnl: number;
+  verdict: ScoreVerdict;
+  reason: string;
+  enabled: boolean;
+  significant: boolean;     // distinguishable from luck?
+}
+export interface ScorecardView {
+  scores: SymbolScore[];
+  min_trades: number;
+  auto_disable: boolean;
+  generated_at: string;
+  warnings: string[];
 }
 
 // Structured (and optionally Arabic) reformatting of a raw AI-review rationale.

@@ -135,6 +135,11 @@ def arm(req: ArmRequest, session: Session = Depends(get_session)) -> Conditional
         valid_hours=req.valid_hours, require_close_confirm=req.require_close_confirm,
     )
     if s is None:
+        if req.stop_loss is None:
+            raise HTTPException(
+                status_code=400,
+                detail="this setup has no stop-loss — position size is derived from the stop, so it "
+                       "would be risk-vetoed every time it triggers. Set a stop and arm it again.")
         raise HTTPException(status_code=409,
                             detail="already armed for this symbol/direction, or the symbol is open")
     return ConditionalSetupView.model_validate(s)

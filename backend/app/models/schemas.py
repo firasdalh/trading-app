@@ -259,6 +259,10 @@ class RiskLimits(BaseModel):
     # stop distance (execution cost as a share of R). When disabled or 0, the gate is skipped.
     spread_gate_enabled: bool = True
     max_spread_r_fraction: float = 0.25
+    # Weekend guard: refuse NEW entries in the hours before the Friday close — a stop can't fill
+    # while the market is shut, so a reopen gap jumps straight over it. Crypto is exempt (24/7).
+    weekend_block_enabled: bool = True
+    weekend_block_hours: float = 3.0
 
 
 class RiskDecision(BaseModel):
@@ -378,6 +382,42 @@ class RiskConfigView(BaseModel):
     # Spread gate (execution-cost guard) — ON by default, unlike the opt-in entry breakers above.
     spread_gate_enabled: bool = True
     max_spread_r_fraction: float = 0.25
+    # Weekend-gap protection. BLOCK is on by default (only ever refuses to open); FLATTEN acts on
+    # live positions, so it stays opt-in.
+    weekend_block_enabled: bool = True
+    weekend_block_hours: float = 3.0
+    weekend_flatten_enabled: bool = False
+    weekend_flatten_hours: float = 1.0
+    # Per-symbol scorecard: judge a symbol only after this many closed trades; warn-only unless
+    # auto-disable is turned on.
+    scorecard_min_trades: int = 30
+    scorecard_auto_disable: bool = False
+
+
+class SymbolScoreView(BaseModel):
+    """One symbol's report card — how its CLOSED trades actually turned out."""
+
+    symbol: str
+    asset_class: str | None = None
+    trades: int
+    wins: int
+    win_rate: float           # the intuitive number
+    expectancy_r: float       # what the verdict is based on (avg profit per unit of risk)
+    total_r: float
+    total_pnl: float
+    verdict: str              # proven | watching | weak | disable | learning
+    reason: str
+    enabled: bool = True
+    significant: bool = False  # distinguishable from luck?
+
+
+class ScorecardView(BaseModel):
+    scores: list[SymbolScoreView] = Field(default_factory=list)
+    min_trades: int = 30
+    auto_disable: bool = False
+    generated_at: datetime
+    # Symbols the evidence says to stop trading and that are still switched on — the warning.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AppSettingsView(BaseModel):

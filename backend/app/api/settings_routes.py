@@ -81,6 +81,14 @@ class RiskUpdateRequest(BaseModel):
     # Spread gate (execution-cost guard): veto entries whose live spread is too big a share of R.
     spread_gate_enabled: bool | None = None
     max_spread_r_fraction: float | None = None
+    # Weekend-gap protection: block new entries before the Friday close, and optionally flatten.
+    weekend_block_enabled: bool | None = None
+    weekend_block_hours: float | None = None
+    weekend_flatten_enabled: bool | None = None
+    weekend_flatten_hours: float | None = None
+    # Per-symbol scorecard: how many closed trades before judging, and warn-only vs auto-disable.
+    scorecard_min_trades: int | None = None
+    scorecard_auto_disable: bool | None = None
 
 
 def _check_phrase(phrase: str | None) -> None:
@@ -254,6 +262,43 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
             log.warning("spread gate loosened", extra={"from": risk.max_spread_r_fraction,
                                                        "to": req.max_spread_r_fraction})
         risk.max_spread_r_fraction = req.max_spread_r_fraction
+
+    # Weekend-gap protection. Turning the BLOCK off re-exposes the book to the one risk a stop can't
+    # cover (the -8.9R UKOILm gap), so it's logged like the other protections. FLATTEN closes live
+    # positions, so enabling it is logged too — the user should see it in the audit trail either way.
+    if req.weekend_block_enabled is not None:
+        risk.weekend_block_enabled = req.weekend_block_enabled
+        if not req.weekend_block_enabled:
+            log.warning("WEEKEND ENTRY GUARD DISABLED — new trades may be carried through the gap")
+    if req.weekend_block_hours is not None:
+        if req.weekend_block_hours < 0:
+            raise HTTPException(status_code=400, detail="weekend_block_hours must be >= 0 (0 = off)")
+        risk.weekend_block_hours = req.weekend_block_hours
+    if req.weekend_flatten_enabled is not None:
+        risk.weekend_flatten_enabled = req.weekend_flatten_enabled
+        log.warning("weekend flatten %s", "ENABLED" if req.weekend_flatten_enabled else "disabled")
+    if req.weekend_flatten_hours is not None:
+        if req.weekend_flatten_hours < 0:
+            raise HTTPException(status_code=400, detail="weekend_flatten_hours must be >= 0 (0 = off)")
+        risk.weekend_flatten_hours = req.weekend_flatten_hours
+
+    # Scorecard. A LOWER min_trades makes the system quicker to condemn a symbol on a small sample,
+    # which is the mistake this threshold exists to prevent — so it's floored and the change logged.
+    if req.scorecard_min_trades is not None:
+        if req.scorecard_min_trades < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="scorecard_min_trades must be >= 10 — judging a symbol on fewer trades than "
+                       "that mistakes a normal losing streak for a broken edge")
+        if req.scorecard_min_trades < risk.scorecard_min_trades:
+            log.warning("scorecard threshold lowered", extra={"from": risk.scorecard_min_trades,
+                                                              "to": req.scorecard_min_trades})
+        risk.scorecard_min_trades = req.scorecard_min_trades
+    if req.scorecard_auto_disable is not None:
+        risk.scorecard_auto_disable = req.scorecard_auto_disable
+        log.warning("scorecard auto-disable %s",
+                    "ENABLED — symbols may be switched off automatically"
+                    if req.scorecard_auto_disable else "disabled (warn only)")
 
     session.commit()
     log.info("risk config updated")

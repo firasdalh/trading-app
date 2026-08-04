@@ -164,10 +164,21 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
             )
         )
     }
+    # Symbols with a setup already ARMED. You have a plan for these waiting at a chosen price, so
+    # opening the SAME idea at market underneath it is a duplicate entry at a worse price — and the
+    # arm is then auto-cancelled ("a position is already open"), silently replacing your planned
+    # entry with the market one. This mirrors the rule arm_conditional already enforces in the other
+    # direction (never arm a symbol that's already open). The XAUUSDm case: armed 18:53 at 4044.2,
+    # Hybrid opened at market 18:59 at 4043.7, the arm was cancelled, the trade lost.
+    from app.agents.conditional import active_armed
+
+    armed_syms = {_norm_symbol(s.symbol) for s in active_armed(session)}
+
     stats["reached_scan"] = True
     candidates: list[tuple[float, WatchItem]] = []
     for it in items:
-        if _norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms:
+        if (_norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms
+                or _norm_symbol(it.symbol) in armed_syms):
             continue
         # Skip a CLOSED market (weekend / holiday / out-of-hours) — no point analysing stale prices or
         # arming a setup that can't fill. Crypto keeps ticking so it stays open.

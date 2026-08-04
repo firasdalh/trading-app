@@ -15,10 +15,10 @@ from sqlalchemy.orm import Session
 
 from app.agents.reflection import latest_reflection, run_reflection
 from app.core.database import get_session
-from app.core.state import get_or_create_settings
+from app.core.state import get_or_create_risk_config, get_or_create_settings
 from app.models.db import Position
 from app.models.enums import PositionStatus
-from app.models.schemas import PositionView, ReflectionReport
+from app.models.schemas import PositionView, ReflectionReport, ScorecardView
 
 router = APIRouter(prefix="/api/journal", tags=["journal"])
 
@@ -336,6 +336,41 @@ def backfill(session: Session = Depends(get_session)) -> BackfillResult:
 @router.post("/reflect", response_model=ReflectionReport)
 def reflect(session: Session = Depends(get_session)) -> ReflectionReport:
     return run_reflection(session)
+
+
+@router.get("/scorecard", response_model=ScorecardView)
+def scorecard(
+    days: int | None = Query(None, ge=1, le=3650,
+                             description="only score trades closed in the last N days"),
+    apply: bool = Query(False, description="also act on the verdict (only does anything when "
+                                           "auto-disable is turned on)"),
+    session: Session = Depends(get_session),
+) -> ScorecardView:
+    """Per-symbol report card built from CLOSED trades — the system grading its own results.
+
+    Read-only by default. ``apply=true`` switches off condemned symbols, but ONLY when
+    ``scorecard_auto_disable`` is enabled; otherwise the verdict is a warning and the call is a
+    no-op, so a stray request can never silently shrink the watchlist."""
+    from app.risk.scorecard import apply_scorecard, build_scorecard
+
+    cfg = get_or_create_risk_config(session)
+    card = build_scorecard(
+        session,
+        min_trades=getattr(cfg, "scorecard_min_trades", 30),
+        auto_disable=getattr(cfg, "scorecard_auto_disable", False),
+        limit_days=days,
+    )
+    if apply:
+        apply_scorecard(session, card)
+        card = build_scorecard(                     # re-read so `enabled` reflects the change
+            session, min_trades=card.min_trades, auto_disable=card.auto_disable, limit_days=days)
+    return ScorecardView(
+        scores=[s.__dict__ for s in card.scores],
+        min_trades=card.min_trades,
+        auto_disable=card.auto_disable,
+        generated_at=card.generated_at,
+        warnings=[f"{s.symbol}: {s.reason}" for s in card.to_disable],
+    )
 
 
 @router.get("/reflection/latest", response_model=ReflectionReport | None)

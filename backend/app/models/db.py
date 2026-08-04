@@ -161,6 +161,24 @@ class RiskConfig(Base):
     spread_gate_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # Max tolerated spread as a fraction of the stop distance (|entry - stop|). 0 = disabled.
     max_spread_r_fraction: Mapped[float] = mapped_column(Float, default=0.25)
+
+    # --- Weekend-gap protection (see app/risk/weekend.py) — the one risk a stop can't cover. ---
+    # BLOCK is ON by default: it only ever refuses to OPEN something, which is pure downside removal.
+    weekend_block_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # How many hours before the Friday close the window starts. 0 = disabled.
+    weekend_block_hours: Mapped[float] = mapped_column(Float, default=3.0)
+    # FLATTEN is OFF by default: closing live positions is an ACTION on your open trades, so it stays
+    # opt-in even though the journal says carrying them is what produced the -8.9R UKOILm loss.
+    weekend_flatten_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    weekend_flatten_hours: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # --- Per-symbol scorecard (app/risk/scorecard.py): the system grading its own results. ---
+    # Minimum CLOSED trades before a symbol is judged at all. 30 keeps a bad run from condemning a
+    # good pair — disabling a working symbol is a worse mistake than carrying a bad one a week longer.
+    scorecard_min_trades: Mapped[int] = mapped_column(Integer, default=30)
+    # WARN-ONLY by default: the scorecard reports its verdict and the user decides. Turning this on
+    # lets it switch off condemned symbols itself.
+    scorecard_auto_disable: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

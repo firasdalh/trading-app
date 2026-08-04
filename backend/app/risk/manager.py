@@ -173,6 +173,23 @@ def evaluate_proposal(
     else:
         checks["spread_ok"] = True
 
+    # --- 1b2. WEEKEND GAP: don't open something that would be carried through the close. ---
+    # A stop-loss is an instruction to exit AT a price; it can only work while the market trades.
+    # Over a weekend price doesn't pass through the stop, it jumps over it — UKOILm #301 was sized to
+    # lose 1R ($49) and lost 8.9R ($434) on the Monday reopen. This is the only risk in the book that
+    # position sizing cannot bound, so the guard is simply not to be in the trade. Crypto is exempt
+    # (24/7, no gap). Blocks NEW entries only — open positions are handled by the flatten setting.
+    from app.risk.weekend import weekend_block_reason
+
+    if limits.weekend_block_enabled:
+        wk = weekend_block_reason(now, limits.weekend_block_hours,
+                                  getattr(proposal.asset_class, "value", proposal.asset_class))
+        checks["weekend_ok"] = wk is None
+        if wk:
+            return _veto(symbol, wk, checks)
+    else:
+        checks["weekend_ok"] = True
+
     # --- 1c. broker tradeability: refuse a setup the broker won't let us OPEN (instrument
     # disabled / close-only, or the wrong direction for a long-only/short-only symbol). Otherwise
     # we'd "approve" a trade that bounces at order time (e.g. Exness has India 50 disabled). ---

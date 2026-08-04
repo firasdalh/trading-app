@@ -343,6 +343,12 @@ export const api = {
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
   journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
   journalBreakdown: () => request<import("../types").JournalBreakdown>("/api/journal/breakdown"),
+  // Per-symbol scorecard. `days` limits it to recently-closed trades; `apply` acts on the verdict
+  // but is a no-op unless auto-disable is turned on server-side.
+  scorecard: (days?: number, apply = false) =>
+    request<import("../types").ScorecardView>(
+      `/api/journal/scorecard?${days ? `days=${days}&` : ""}apply=${apply}`,
+    ),
   detFilters: () => request<import("../types").DetFiltersView>("/api/settings/det-filters"),
   setDetFilters: (disabled: string[]) =>
     request<import("../types").DetFiltersView>("/api/settings/det-filters", {

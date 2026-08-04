@@ -53,6 +53,12 @@ _SQLITE_ADDED_COLUMNS = {
         ("expectancy_window", "INTEGER DEFAULT 10"),
         ("spread_gate_enabled", "BOOLEAN DEFAULT 1"),
         ("max_spread_r_fraction", "FLOAT DEFAULT 0.25"),
+        ("weekend_block_enabled", "BOOLEAN DEFAULT 1"),
+        ("weekend_block_hours", "FLOAT DEFAULT 3.0"),
+        ("weekend_flatten_enabled", "BOOLEAN DEFAULT 0"),
+        ("weekend_flatten_hours", "FLOAT DEFAULT 1.0"),
+        ("scorecard_min_trades", "INTEGER DEFAULT 30"),
+        ("scorecard_auto_disable", "BOOLEAN DEFAULT 0"),
     ],
     "auto_trade_config": [
         ("min_rr", "FLOAT DEFAULT 1.2"),

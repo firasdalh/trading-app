@@ -49,6 +49,7 @@ import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { RsiOverPanel } from "./RsiOverPanel";
 import { EntryFiltersPanel } from "./EntryFiltersPanel";
+import { ScorecardPanel } from "./ScorecardPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
 import { QuickTradePanel } from "./QuickTradePanel";
@@ -618,6 +619,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         </div>
       </div>
 
+      <ScorecardPanel />
       <EntryFiltersPanel />
     </div>
   );

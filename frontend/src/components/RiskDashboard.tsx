@@ -295,6 +295,81 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
           </div>
         </details>
       )}
+
+      {limits && (
+        <details className="rounded-lg border border-neutral-800 bg-neutral-800/30">
+          <summary className="flex cursor-pointer select-none items-center gap-2 px-2.5 py-1.5 text-xs font-semibold text-neutral-300">
+            <span>Weekend gap</span>
+            <StatePill on={limits.weekend_block_enabled || limits.weekend_flatten_enabled} />
+            <span className="font-normal text-neutral-500">— the risk a stop can't cover</span>
+          </summary>
+          <div className="space-y-2 px-2.5 pb-2.5 pt-1">
+            <p className="text-[11px] leading-snug text-neutral-500">
+              A stop only works while the market trades. Over a weekend price doesn't pass through
+              it — it jumps over it. UKOILm was sized to lose 1R and lost 8.9R (−$434) on a Monday
+              reopen. Crypto is exempt (trades 24/7).
+            </p>
+            <label
+              className="flex items-center justify-between gap-2 text-xs"
+              title="Refuse to OPEN new non-crypto trades in the hours before the Friday close."
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="text-neutral-300">No new trades before the close</span>
+                <StatePill on={limits.weekend_block_enabled} />
+              </span>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={limits.weekend_block_enabled}
+                onChange={(e) => saveRisk({ weekend_block_enabled: e.target.checked })}
+              />
+            </label>
+            {limits.weekend_block_enabled && (
+              <NumField
+                label="Stop opening (hours before)"
+                hint="How many hours before the Friday close to stop opening new non-crypto positions. 0 = off."
+                value={limits.weekend_block_hours}
+                step={1}
+                min={0}
+                busy={busy}
+                active={limits.weekend_block_hours > 0}
+                onCommit={(v) => saveRisk({ weekend_block_hours: v })}
+              />
+            )}
+            <label
+              className="flex items-center justify-between gap-2 text-xs"
+              title="CLOSES your open non-crypto positions before the weekend. This acts on live trades."
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="text-neutral-300">Close positions before the weekend</span>
+                <StatePill on={limits.weekend_flatten_enabled} />
+              </span>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={limits.weekend_flatten_enabled}
+                onChange={(e) => saveRisk({ weekend_flatten_enabled: e.target.checked })}
+              />
+            </label>
+            {limits.weekend_flatten_enabled ? (
+              <NumField
+                label="Close (hours before)"
+                hint="How many hours before the Friday close to flatten open non-crypto positions."
+                value={limits.weekend_flatten_hours}
+                step={0.5}
+                min={0}
+                busy={busy}
+                active={limits.weekend_flatten_hours > 0}
+                onCommit={(v) => saveRisk({ weekend_flatten_hours: v })}
+              />
+            ) : (
+              <div className="rounded bg-neutral-700/30 px-2 py-1 text-[11px] text-neutral-500">
+                Off — positions open on Friday are carried through the weekend.
+              </div>
+            )}
+          </div>
+        </details>
+      )}
     </div>
   );
 }

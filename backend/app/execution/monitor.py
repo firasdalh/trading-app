@@ -235,6 +235,46 @@ def fill_realized_pnl_from_broker(session: Session, positions: list[Position]) -
     return filled
 
 
+def flatten_before_weekend(session: Session) -> int:
+    """Close open NON-CRYPTO positions in the final hours before the Friday close. Returns how many.
+
+    The stop cannot protect a position across a closed market — price gaps over it and the trade
+    exits at whatever the reopen prints (UKOILm #301: sized for -1R, realised -8.9R). The only real
+    protection is to be flat. Crypto keeps trading through the weekend, so it is never touched.
+
+    OPT-IN (off by default): unlike every other guard here this one ACTS on live positions rather
+    than merely refusing to open, so it stays the user's explicit choice. Best-effort per position —
+    one failure never stops the rest, since a half-flat book is still better than a full one."""
+    from app.risk.weekend import in_weekend_window
+
+    cfg = get_or_create_risk_config(session)
+    if not getattr(cfg, "weekend_flatten_enabled", False):
+        return 0
+    hours = getattr(cfg, "weekend_flatten_hours", 1.0)
+    now = datetime.now(timezone.utc)
+
+    settings = get_or_create_settings(session)
+    positions = session.scalars(
+        select(Position).where(Position.status == PositionStatus.OPEN.value)
+    ).all()
+    closed = 0
+    for pos in positions:
+        if not in_weekend_window(now, hours, pos.asset_class):
+            continue
+        broker = get_broker_for(AssetClass(pos.asset_class), settings.broker_map)
+        try:
+            price = broker.get_quote(pos.symbol).price
+            _close_position(session, pos, broker, price, "weekend-flat")
+            closed += 1
+            log.warning("closed before the weekend gap",
+                        extra={"symbol": pos.symbol, "position_id": pos.id})
+        except Exception as exc:  # noqa: BLE001 - flatten what we can; never abort the sweep
+            log.warning("weekend flatten failed", extra={"symbol": pos.symbol, "error": str(exc)})
+    if closed:
+        session.commit()
+    return closed
+
+
 def monitor_positions(session: Session) -> dict:
     """One monitoring pass over all open positions. Returns a small summary dict."""
     settings = get_or_create_settings(session)
@@ -284,6 +324,13 @@ def monitor_positions(session: Session) -> dict:
 
     session.commit()
 
+    # Weekend-gap protection: flatten what's left before the close (opt-in; no-op when off).
+    flattened = 0
+    try:
+        flattened = flatten_before_weekend(session)
+    except Exception as exc:  # noqa: BLE001 - never let this break the monitoring loop
+        log.warning("weekend flatten pass failed", extra={"error": str(exc)})
+
     # Account-truth daily-loss guard (realized today + floating vs the RISK.md limit).
     try:
         from app.risk.service import evaluate_daily_pause
@@ -291,4 +338,4 @@ def monitor_positions(session: Session) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.warning("daily pause evaluation failed", extra={"error": str(exc)})
 
-    return {"checked": checked, "closed": closed}
+    return {"checked": checked, "closed": closed + flattened, "weekend_flattened": flattened}
