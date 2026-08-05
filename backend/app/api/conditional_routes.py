@@ -76,6 +76,11 @@ class ConditionalSetupView(BaseModel):
     result_proposal_id: int | None
     last_note: str | None
     desired_lots: float | None
+    # BREAK-AND-RETEST. ``break_level`` set = a two-stage entry: the level must CLOSE-break before
+    # the limit at ``trigger_price`` goes live. ``break_confirmed_at`` tells the two stages apart —
+    # None means "still waiting for the break", a timestamp means "now waiting for the retest".
+    break_level: float | None = None
+    break_confirmed_at: datetime | None = None
     # Live distance to the trigger (armed only; populated by the list route from a fresh quote).
     current_price: float | None = None
     pips_to_trigger: float | None = None   # FX only (None for non-FX); always-available pct below

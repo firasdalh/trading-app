@@ -88,11 +88,14 @@ _SQLITE_ADDED_COLUMNS = {
     "hybrid_config": [
         ("conditional_enabled", "BOOLEAN DEFAULT 1"),
         ("max_armed", "INTEGER DEFAULT 3"),
+        ("min_arm_confidence", "FLOAT DEFAULT 0.62"),
     ],
     "conditional_setups": [
         ("cooldown_until", "DATETIME"),
         ("retries", "INTEGER DEFAULT 0"),
         ("desired_lots", "FLOAT"),
+        ("break_level", "FLOAT"),
+        ("break_confirmed_at", "DATETIME"),
     ],
     "rsi_over_config": [
         ("macd", "BOOLEAN DEFAULT 0"),

@@ -860,6 +860,9 @@ class HybridConfigRequest(BaseModel):
     min_confidence: float | None = Field(None, ge=0.5, le=0.95)   # 50-95%
     conditional_enabled: bool | None = None
     max_armed: int | None = Field(None, ge=0, le=10)
+    # Conviction an ARMED setup must still carry to open unattended. Below it the setup is
+    # queued for approval rather than rejected. 0 = auto-open every arm (the old behaviour).
+    min_arm_confidence: float | None = Field(None, ge=0.0, le=0.95)
 
 
 class HybridView(BaseModel):
@@ -868,6 +871,7 @@ class HybridView(BaseModel):
     min_confidence: float
     conditional_enabled: bool
     max_armed: int
+    min_arm_confidence: float = 0.62
     last_run_at: str | None = None
     last_result: str | None = None
 
@@ -879,7 +883,9 @@ def _hybrid_view(session: Session) -> HybridView:
     return HybridView(
         enabled=cfg.enabled, interval_seconds=cfg.interval_seconds,
         min_confidence=cfg.min_confidence, conditional_enabled=cfg.conditional_enabled,
-        max_armed=cfg.max_armed, last_run_at=_iso_utc(cfg.last_run_at),
+        max_armed=cfg.max_armed,
+        min_arm_confidence=getattr(cfg, "min_arm_confidence", 0.62),
+        last_run_at=_iso_utc(cfg.last_run_at),
         last_result=cfg.last_result,
     )
 
@@ -911,6 +917,11 @@ def hybrid_set_config(req: HybridConfigRequest, session: Session = Depends(get_s
         cfg.conditional_enabled = req.conditional_enabled
     if req.max_armed is not None:
         cfg.max_armed = req.max_armed
+    if req.min_arm_confidence is not None:
+        if req.min_arm_confidence < cfg.min_arm_confidence:
+            log.warning("arm auto-open bar lowered",
+                        extra={"from": cfg.min_arm_confidence, "to": req.min_arm_confidence})
+        cfg.min_arm_confidence = req.min_arm_confidence
     if changed_filter:
         cfg.last_result = None
     session.commit()

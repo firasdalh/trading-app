@@ -152,6 +152,10 @@ class ConditionalSuggestion(BaseModel):
     confidence: float = Field(0.0, ge=0.0, le=1.0)   # projected (re-scored at the trigger)
     rr: float                  # reward:risk measured from the trigger entry
     reason: str = ""
+    # BREAK-AND-RETEST: when set, the level that must CLOSE-break before ``trigger_price`` goes live.
+    # Turns a one-stage "buy the break" into the two-stage "break, then buy the retest" — which skips
+    # the fake breakouts that poke through a level and snap straight back.
+    break_level: float | None = None
 
 
 class TradeProposal(BaseModel):

@@ -101,6 +101,44 @@ def _break_confirmed(broker, s: ConditionalSetup) -> bool:
     return all(c <= s.trigger_price for c in closes)        # sell_stop: break DOWN held
 
 
+_RETEST_CONFIRM_BARS = 2   # closes required BEYOND the level before the break counts as real
+
+
+def _break_held(closes: list[float], level: float, direction: str) -> bool:
+    """Has the level actually broken? The last ``_RETEST_CONFIRM_BARS`` CLOSES must all sit beyond
+    it in the trade's direction.
+
+    Closes, never wicks: a wick through a level is the fake break itself — price poking past to run
+    stops before snapping back. Requiring consecutive closes is what separates "broke" from "touched".
+    """
+    if len(closes) < _RETEST_CONFIRM_BARS:
+        return False
+    last = closes[-_RETEST_CONFIRM_BARS:]
+    if direction == Direction.LONG.value:
+        return all(c > level for c in last)
+    return all(c < level for c in last)
+
+
+def _break_failed(closes: list[float], level: float, direction: str) -> bool:
+    """After a confirmed break, has price CLOSED back on the original side? That's a failed break —
+    the level held after all, so the retest we were waiting for is never coming."""
+    if not closes:
+        return False
+    last = closes[-1]
+    return last <= level if direction == Direction.LONG.value else last >= level
+
+
+def _armed_source(s: ConditionalSetup) -> str:
+    """Journal label for a trade opened from an arm, split by WHO armed it.
+
+    ``Position.source`` answers "how did this trade come about" — and "the auto-pilot armed and fired
+    it unattended" is a different answer from "I picked this level myself". Both used to record plain
+    ``armed``, so the by-source breakdown could show armed trades performing well without revealing
+    whose judgement was behind them. Anything unexpected falls back to ``armed`` rather than
+    inventing a label."""
+    return f"armed_{s.source}" if s.source in ("hybrid", "manual") else "armed"
+
+
 def active_armed(session: Session) -> list[ConditionalSetup]:
     return list(session.scalars(
         select(ConditionalSetup).where(ConditionalSetup.status == ConditionalStatus.ARMED.value)
@@ -182,7 +220,7 @@ def arm_conditional(
     order_type: str, trigger_price: float, stop_loss: float | None, take_profit: float | None,
     confidence: float, rr: float | None, rationale: str = "", source: str = "manual",
     auto_execute: bool = False, valid_hours: int = _DEFAULT_VALID_HOURS,
-    require_close_confirm: bool = True,
+    require_close_confirm: bool = True, break_level: float | None = None,
 ) -> ConditionalSetup | None:
     """Arm a conditional setup. Returns None if it has NO STOP-LOSS, a duplicate is already armed,
     the symbol is already open at the broker (never stack a pending on a live position), or the
@@ -225,7 +263,7 @@ def arm_conditional(
         order_type=order_type, trigger_price=trigger_price, stop_loss=stop_loss,
         take_profit=take_profit, confidence=confidence, rr=rr, rationale=rationale,
         status=ConditionalStatus.ARMED.value, source=source, auto_execute=auto_execute,
-        require_close_confirm=require_close_confirm,
+        require_close_confirm=require_close_confirm, break_level=break_level,
         valid_until=datetime.now(timezone.utc) + timedelta(hours=valid_hours),
     )
     session.add(s)
@@ -421,7 +459,11 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
         take_profit=proposal.take_profit, confidence=proposal.confidence,
         rationale=proposal.rationale, review_decision=proposal.review_decision,
         reasoning={"technical": technical.model_dump(mode="json")} if technical is not None else {},
-        source="armed",  # opened from a triggered armed/conditional break setup
+        # Opened from a triggered armed setup — and WHICH KIND of arm, because they are different
+        # strategies wearing the same label. A hybrid arm is chosen and fired by the auto-pilot; a
+        # manual one is a level you picked and approved. Lumping them together makes the journal say
+        # "armed trades do well" without being able to say whose judgement produced that.
+        source=_armed_source(s),
         risk_decision=decision.decision.value, risk_reason=decision.reason,
         approved_qty=decision.approved_qty, risk_amount=decision.risk_amount,
         status=(ProposalStatus.PENDING_APPROVAL.value if decision.approved
@@ -449,8 +491,25 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
             log.warning("conditional resize failed; using default size",
                         extra={"symbol": s.symbol, "error": str(exc)})
 
+    # 5b. CONVICTION GATE on the auto-open path. Arming a setup is not the same as agreeing to open
+    # it unattended hours later — the Hybrid used to auto-execute EVERY arm that cleared the risk
+    # checks, however marginal its conviction was. Below the bar the setup is NOT rejected: it falls
+    # through to the approval queue, so a thin setup becomes your decision instead of an automatic
+    # trade. (Compared against ``min_arm_confidence``, not the market-entry bar — an arm's confidence
+    # is a projection made at arm time and capped at 0.70, so the two aren't comparable.)
+    auto = s.auto_execute
+    if auto:
+        from app.agents.hybrid import get_or_create_hybrid_config
+
+        min_conf = getattr(get_or_create_hybrid_config(session), "min_arm_confidence", 0.62) or 0.0
+        conf = s.confidence or 0.0
+        if conf < min_conf:
+            auto = False
+            log.info("armed setup below the auto-open bar — queued instead",
+                     extra={"symbol": s.symbol, "confidence": conf, "min": min_conf})
+
     # 6. Auto-execute (Hybrid / Modes B-C) opens now; Mode A queues for the user's approval.
-    if s.auto_execute:
+    if auto:
         from app.execution.executor import ExecutionBlocked, execute_proposal
 
         record.status = ProposalStatus.APPROVED.value
@@ -474,9 +533,17 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
         session.add(s)
         return 0
 
-    # Mode A, manually armed: leave the proposal awaiting the user's approval.
+    # Mode A, manually armed — or an auto setup held back by the conviction gate above: leave the
+    # proposal awaiting the user's approval rather than opening it.
     s.status = ConditionalStatus.TRIGGERED.value
-    s.last_note = "break confirmed → queued for your approval"
+    if s.auto_execute:
+        from app.agents.hybrid import get_or_create_hybrid_config
+
+        mc = getattr(get_or_create_hybrid_config(session), "min_arm_confidence", 0.62)
+        s.last_note = (f"break confirmed → queued for your approval (confidence "
+                       f"{(s.confidence or 0):.0%} is under the {mc:.0%} auto-open bar)")
+    else:
+        s.last_note = "break confirmed → queued for your approval"
     session.add(s)
     log.info("conditional queued for approval", extra={"symbol": s.symbol})
     return 1
@@ -578,6 +645,34 @@ def check_conditional_setups(session: Session) -> dict:
             s.last_note = (f"auto-cancelled — {int(_INVALIDATE_LIFE_FRAC * 100)}%+ through its window and "
                            f"price {round(inval_ref, 6)} is past the stop {round(s.stop_loss, 6)}; the move "
                            "went the other way (thesis broken).")
+            session.add(s)
+            invalidated += 1
+            continue
+
+        # BREAK-AND-RETEST, stage 1: nothing may trigger until the level has actually broken.
+        # Until then the limit at the level is dormant — otherwise it would just be a "buy the dip"
+        # order sitting under resistance, which is the opposite of the intended trade.
+        if s.break_level is not None and s.break_confirmed_at is None:
+            if not _break_held(closes, s.break_level, s.direction):
+                s.last_note = (f"waiting for {s.break_level} to BREAK — needs {_RETEST_CONFIRM_BARS} "
+                               f"{s.timeframe} closes beyond it (no entry until then)")
+                session.add(s)
+                continue
+            s.break_confirmed_at = now
+            s.last_note = (f"break of {s.break_level} confirmed — now waiting for the RETEST back to "
+                           f"{s.trigger_price} to enter")
+            session.add(s)
+            log.info("conditional break confirmed, awaiting retest",
+                     extra={"symbol": s.symbol, "level": s.break_level})
+            continue      # the retest is a separate event; don't fire on the breakout bar itself
+
+        # Stage 2 guard: the break has since FAILED (price closed back through the level), so the
+        # setup we were waiting to buy no longer exists. Cancel rather than sit on a dead premise.
+        if s.break_level is not None and s.break_confirmed_at is not None \
+                and _break_failed(closes, s.break_level, s.direction):
+            s.status = ConditionalStatus.CANCELLED.value
+            s.last_note = (f"auto-cancelled — price closed back through {s.break_level} after breaking "
+                           "it; a failed break, so the retest entry is void")
             session.add(s)
             invalidated += 1
             continue

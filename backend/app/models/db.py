@@ -438,6 +438,15 @@ class HybridConfig(Base):
     # break-entry instead of discarding it; the Monitor re-checks + auto-opens on the trigger.
     conditional_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     max_armed: Mapped[int] = mapped_column(Integer, default=3)            # cap on live armed setups
+    # Confidence an ARMED setup must still carry to open BY ITSELF at its trigger. Below this it is
+    # not rejected — it drops to "queued for your approval", so a marginal setup becomes a decision
+    # rather than an automatic trade.
+    #
+    # Kept separate from ``min_confidence`` because the two numbers are not comparable: a market
+    # entry is scored from live conditions, while an arm's confidence is a PROJECTION made when it
+    # was armed and is capped at 0.70 by the engine. Judging arms against the market bar would gate
+    # out nearly all of them for a reason that has nothing to do with setup quality.
+    min_arm_confidence: Mapped[float] = mapped_column(Float, default=0.62)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)  # short note from the last tick
     updated_at: Mapped[datetime] = mapped_column(
@@ -548,6 +557,20 @@ class ConditionalSetup(Base):
     # User-chosen lot to open at when this fires (None = the Risk Manager's default size). Always
     # re-clamped to the 3% per-trade cap at fire time.
     desired_lots: Mapped[float | None] = mapped_column(Float)
+
+    # --- BREAK-AND-RETEST (two-stage entry) ---
+    # Set ``break_level`` and the setup will not even look at its trigger until price has CLOSED
+    # beyond that level. Only then does ``trigger_price`` (a LIMIT back at the level) become live.
+    #
+    # Buying the first thrust through a level is how you get caught by a fake break — price pokes
+    # through, traps the breakout buyers and snaps back. Waiting for the break to hold and then for
+    # price to come BACK and respect the level from the other side (old resistance acting as new
+    # support) filters those out, and fills at a better price than chasing the break: the stop sits
+    # just under the level either way, so the retest entry risks less and pays more.
+    #
+    # The cost is honest — a break that never retests is a trade missed entirely.
+    break_level: Mapped[float | None] = mapped_column(Float)
+    break_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AgentRun(Base):

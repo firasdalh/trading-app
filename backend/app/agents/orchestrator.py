@@ -146,6 +146,14 @@ DET_FILTERS = [
              "laddered next-TF rule. Measured over 1605 signals: direction accuracy rises from 52 "
              "correct per 100 (a coin flip) to 55, and to 56 once forex is excluded — the only "
              "filter tested that made the edge statistically real. Armed setups are unaffected."},
+    {"key": "break_retest", "label": "Break-and-retest entries",
+     "desc": "For every armed BREAK setup, wait for the level to close-break and then enter on the "
+             "RETEST back at it, instead of buying the first thrust through. A fake break — price "
+             "poking past a level, trapping the breakout buyers and snapping back — never produces a "
+             "retest, so it filters itself out. The entry also moves from beyond the level to AT it "
+             "while the stop stays put, which shrinks the risk and lifts the R:R. The cost is real: "
+             "a break that runs away without coming back is a trade missed. Turn OFF to arm plain "
+             "break-stop orders instead."},
     {"key": "htf_level", "label": "Higher-TF S/R levels",
      "desc": "Respect major 4h/1d support/resistance — don't enter straight into a big-timeframe level (stand aside / wait for the break or pullback)."},
     {"key": "htf_pullback", "label": "Higher-TF pullback (buy the dip)",
@@ -375,7 +383,7 @@ def _htf_pullback_arm(base: "TradeProposal", resume_dir: Direction, ind: dict, t
     base.strategy = "htf_pullback"
     conf = round(min(0.7, 0.45 + 0.25 * technical.confidence), 2)
     base.conditional = _conditional_resumption(resume_dir, px, ind, atr_v,
-                                               _key_levels(technical, tf0, px), conf)
+                                               _key_levels(technical, tf0, px), conf, retest="break_retest" not in disable)
     trend_word = "uptrend" if is_long else "downtrend"
     zone = "oversold" if is_long else "overbought"
     brk = "up" if is_long else "down"
@@ -771,9 +779,52 @@ def _key_levels(technical: TechnicalRead, tf0, entry: float) -> list[float]:
     return out
 
 
+def _as_retest(sugg: ConditionalSuggestion | None, level: float, atr_v: float | None,
+               ref: float) -> ConditionalSuggestion | None:
+    """Convert a break-STOP arm into a two-stage BREAK-AND-RETEST limit arm.
+
+    A stop order parked just past a level fills on precisely the move that traps breakout buyers:
+    price pokes through, runs the stops, and snaps straight back. Waiting for the level to CLOSE-break
+    and then buying the RETEST back at it avoids that, because a fake break never produces a retest —
+    the sequence excludes it, rather than some rule having to detect it.
+
+    Two things improve at once: the fill moves from beyond the level to AT it while the stop stays
+    put, so risk shrinks and R:R rises. The cost is honest — a break that runs away without coming
+    back is a trade missed entirely.
+
+    Returns the ORIGINAL suggestion unchanged when the conversion wouldn't be valid (no ATR, or the
+    retest price would land on the wrong side of the stop/target), so a caller can always use the
+    result. ``None`` in, ``None`` out."""
+    if sugg is None or not atr_v or atr_v <= 0:
+        return sugg
+    is_long = sugg.order_type.startswith("buy")
+    buf = max(0.05 * atr_v, ref * 2e-4)      # fill just off the exact level — wicks rarely tag it cleanly
+    retest = round(level + buf, 6) if is_long else round(level - buf, 6)
+    risk = abs(retest - sugg.stop_loss)
+    # The entry must still sit on the correct side of BOTH the stop and the target.
+    if risk <= 0:
+        return sugg
+    if (retest <= sugg.stop_loss or sugg.take_profit <= retest) if is_long \
+            else (retest >= sugg.stop_loss or sugg.take_profit >= retest):
+        return sugg
+    kind_from = "resistance" if is_long else "support"
+    kind_to = "support" if is_long else "resistance"
+    return ConditionalSuggestion(
+        order_type="buy_limit" if is_long else "sell_limit",
+        trigger_price=retest,
+        stop_loss=sugg.stop_loss,            # unchanged — still beyond the level, which must hold
+        take_profit=sugg.take_profit,
+        confidence=sugg.confidence,
+        rr=round(abs(sugg.take_profit - retest) / risk, 2),
+        break_level=round(level, 6),         # stage 1: must CLOSE-break before the limit goes live
+        reason=(f"Wait for {round(level, 6)} to break, then enter on the RETEST at {retest} "
+                f"(old {kind_from} holding as {kind_to}) — skips the fake break."),
+    )
+
+
 def _conditional_break(
     direction: Direction, entry: float, atr_v: float | None, levels: list[float],
-    target: float, confidence: float, ind: dict | None = None,
+    target: float, confidence: float, ind: dict | None = None, retest: bool = False,
 ) -> ConditionalSuggestion | None:
     """If a key level sits BETWEEN entry and target (blocking the path), suggest a break-entry: a
     stop order just beyond that level, stop on the other side of it, target = the original level.
@@ -829,12 +880,47 @@ def _conditional_break(
             return None
         if direction == Direction.LONG and recent_high is not None and recent_high > block:
             return None
-    return ConditionalSuggestion(
+    sugg = ConditionalSuggestion(
         order_type=order_type, trigger_price=trigger, stop_loss=stop, take_profit=tp,
         confidence=round(confidence, 2), rr=round(rr, 2),
         reason=f"Enter {direction.value} on a confirmed break of {round(block, 5)} "
                f"(blocking level between entry and target).",
     )
+    # Prefer buying the RETEST of the broken level over the thrust through it (see _as_retest).
+    return _as_retest(sugg, block, atr_v, entry) if retest else sugg
+
+
+def _arm_level_break(
+    direction: Direction, px: float, lvl: float, atr_v: float | None,
+    technical: TechnicalRead, tf0, ind: dict, confidence: float, retest: bool = True,
+) -> ConditionalSuggestion | None:
+    """Turn a BLOCKING higher-timeframe level into a break-entry arm.
+
+    When a major 4h/1d level sits in the path, the engine stands aside and its own rationale says it
+    is "waiting for a break" — but nothing was ever armed to catch that break, so the idea was simply
+    dropped. This builds the order that sentence promises: a stop entry just beyond the level, stop
+    back on the far side of it (the level flips role once broken), target the NEXT level out.
+
+    Deliberately reuses ``_conditional_break``, so the arm inherits its guards for free: a minimum
+    R:R measured FROM the trigger, and the failed-break/reclaim check that refuses to arm a level
+    price has already pierced and traded back through (the XAGGBP trap).
+
+    Returns None when there is no sane target beyond the level or the R:R doesn't justify it."""
+    if not atr_v or atr_v <= 0:
+        return None
+    levels = _key_levels(technical, tf0, px)
+    # Target = the next level BEYOND the blocker (that's the room the break is worth trading into);
+    # fall back to a 2-ATR projection when the level is the last one on the chart.
+    if direction == Direction.LONG:
+        beyond = [x for x in levels if x > lvl + 0.25 * atr_v]
+        target = min(beyond) if beyond else lvl + 2.0 * atr_v
+    else:
+        beyond = [x for x in levels if x < lvl - 0.25 * atr_v]
+        target = max(beyond) if beyond else lvl - 2.0 * atr_v
+    # `_conditional_break` looks for a blocker strictly BETWEEN entry and target — pass the level in
+    # explicitly so it is the one selected, whatever else `_key_levels` happens to contain. It also
+    # applies the break-and-retest conversion (see `_as_retest`) when `retest` is on.
+    return _conditional_break(direction, px, atr_v, [lvl], target, confidence, ind, retest)
 
 
 def _conditional_pullback(
@@ -893,7 +979,7 @@ def _conditional_pullback(
 
 def _conditional_resumption(
     direction: Direction, entry: float, ind: dict, atr_v: float | None,
-    levels: list[float], confidence: float,
+    levels: list[float], confidence: float, retest: bool = False,
 ) -> ConditionalSuggestion | None:
     """A momentum pullback isn't a dead end — arm a STOP order at the swing that RESUMES the trend:
     a break above the pullback's swing high (long) or below the swing low (short). It fires only
@@ -931,12 +1017,15 @@ def _conditional_resumption(
     rr = (tp - trigger) / risk if direction == Direction.LONG else (trigger - tp) / risk
     if rr < _MIN_RR_COND:
         return None
-    return ConditionalSuggestion(
+    sugg = ConditionalSuggestion(
         order_type=order_type, trigger_price=trigger, stop_loss=stop, take_profit=tp,
         confidence=round(confidence, 2), rr=round(rr, 2),
         reason=f"Enter {direction.value} when momentum resumes the trend "
                f"(break of the pullback swing {round(swing, 5)}).",
     )
+    # A swing high/low is a level like any other: buy the RETEST of it once broken rather
+    # than the thrust through, so a failed poke past the swing never becomes a trade.
+    return _as_retest(sugg, swing, atr_v, entry) if retest else sugg
 
 
 def _first_level_beyond(direction: Direction, px: float, levels: list[float]) -> float | None:
@@ -950,7 +1039,8 @@ def _first_level_beyond(direction: Direction, px: float, levels: list[float]) ->
 
 def _momentum_action(base: TradeProposal, direction: Direction, ind: dict, tf0,
                      technical: TechnicalRead, atr_v: float | None, px: float,
-                     momentum_ai: bool, symbol: str) -> tuple[str, TradeProposal | None]:
+                     momentum_ai: bool, symbol: str,
+                     retest: bool = False) -> tuple[str, TradeProposal | None]:
     """AI CLASSIFIES the momentum disagreement (healthy_pullback / weak_momentum / probable_reversal
     + evidence + confidence); the DETERMINISTIC engine here maps the class to an action. Returns
     ``(action, proposal)``:
@@ -982,7 +1072,7 @@ def _momentum_action(base: TradeProposal, direction: Direction, ind: dict, tf0,
     if read.category == "weak_momentum":
         base.watch = True
         base.conditional = _conditional_resumption(
-            direction, px, ind, atr_v, _key_levels(technical, tf0, px), conf)
+            direction, px, ind, atr_v, _key_levels(technical, tf0, px), conf, retest)
         note = ("Armed a resumption break to wait for momentum to confirm."
                 if base.conditional is not None else "Waiting for confirmation (no clean break to arm).")
         base.rationale = f"Weak momentum — waiting rather than entering. {note} {tag}"
@@ -1467,7 +1557,7 @@ def _deterministic_decision(
             # AI classifies WHY momentum disagrees; the engine decides enter/arm/reject. When the AI is
             # off / unavailable / low-confidence it returns 'fallback' and we keep the fixed arm below.
             action, decided = _momentum_action(base, Direction.LONG, ind, tf0, technical, atr_v, px,
-                                                momentum_ai, symbol)
+                                                momentum_ai, symbol, "break_retest" not in disable)
             if action == "decided":
                 return decided
             if action != "enter":
@@ -1476,7 +1566,7 @@ def _deterministic_decision(
                 base.watch = True
                 base.conditional = _conditional_resumption(
                     Direction.LONG, px, ind, atr_v, _key_levels(technical, tf0, px),
-                    round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+                    round(min(0.7, 0.45 + 0.25 * technical.confidence), 2), retest="break_retest" not in disable)
                 armed_note = ("Arm a long on a break back up to resume the trend."
                               if base.conditional is not None
                               else "Waiting for momentum to turn back up (no clean break level to arm yet).")
@@ -1490,13 +1580,31 @@ def _deterministic_decision(
         if lvl is not None and "htf_level" not in disable:
             action, decided = _level_action(base, Direction.LONG, lvl, ind, technical, tf0,
                                              priceaction_ai, symbol)
-            if action == "decided":
-                return decided
-            if action == "fallback":
+            if action in ("decided", "fallback"):
+                # ARM THE BREAK. The idea is valid in DIRECTION and blocked only by structure —
+                # exactly what a break-stop is for. Standing aside used to discard it outright even
+                # though the rationale said "waiting for a break"; now the order that sentence
+                # promises actually exists, and fires only if the level gives way.
+                brk = _arm_level_break(Direction.LONG, px, lvl, atr_v, technical, tf0, ind,
+                                       round(min(0.7, 0.45 + 0.25 * technical.confidence), 2),
+                                       retest="break_retest" not in disable)
+                if action == "decided":
+                    if brk is not None and decided is not None:
+                        decided.conditional = brk
+                        decided.rationale += (
+                            f" Armed a {brk.order_type} at {brk.trigger_price} in case it breaks "
+                            f"(~{brk.rr}R from there).")
+                    return decided
                 base.watch = True
+                base.conditional = brk or base.conditional
                 base.rationale = (f"Respecting a higher-timeframe level: major resistance ~{round(lvl, 6)} "
                                   f"just overhead (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
                                   "cleaner pullback before buying into it.")
+                if brk is not None:
+                    base.rationale += (
+                        f" Armed: if {brk.break_level} breaks, enter on the RETEST at "
+                        f"{brk.trigger_price} (stop {brk.stop_loss}, ~{brk.rr}R) — a fake break "
+                        f"never produces a retest, so it filters itself out.")
                 return base
             # action == "enter" (AI: likely_break) -> take the trade THROUGH the level (fall through)
         direction = Direction.LONG
@@ -1514,14 +1622,14 @@ def _deterministic_decision(
         if macd_hist is not None and macd_hist > mom_thresh and "momentum" not in disable:
             px = ind.get("last_close") or 0.0
             action, decided = _momentum_action(base, Direction.SHORT, ind, tf0, technical, atr_v, px,
-                                                momentum_ai, symbol)
+                                                momentum_ai, symbol, "break_retest" not in disable)
             if action == "decided":
                 return decided
             if action != "enter":
                 base.watch = True
                 base.conditional = _conditional_resumption(
                     Direction.SHORT, px, ind, atr_v, _key_levels(technical, tf0, px),
-                    round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+                    round(min(0.7, 0.45 + 0.25 * technical.confidence), 2), retest="break_retest" not in disable)
                 armed_note = ("Arm a short on a break back down to resume the trend."
                               if base.conditional is not None
                               else "Waiting for momentum to turn back down (no clean break level to arm yet).")
@@ -1535,13 +1643,31 @@ def _deterministic_decision(
         if lvl is not None and "htf_level" not in disable:
             action, decided = _level_action(base, Direction.SHORT, lvl, ind, technical, tf0,
                                              priceaction_ai, symbol)
-            if action == "decided":
-                return decided
-            if action == "fallback":
+            if action in ("decided", "fallback"):
+                # ARM THE BREAK. The idea is valid in DIRECTION and blocked only by structure —
+                # exactly what a break-stop is for. Standing aside used to discard it outright even
+                # though the rationale said "waiting for a break"; now the order that sentence
+                # promises actually exists, and fires only if the level gives way.
+                brk = _arm_level_break(Direction.SHORT, px, lvl, atr_v, technical, tf0, ind,
+                                       round(min(0.7, 0.45 + 0.25 * technical.confidence), 2),
+                                       retest="break_retest" not in disable)
+                if action == "decided":
+                    if brk is not None and decided is not None:
+                        decided.conditional = brk
+                        decided.rationale += (
+                            f" Armed a {brk.order_type} at {brk.trigger_price} in case it breaks "
+                            f"(~{brk.rr}R from there).")
+                    return decided
                 base.watch = True
+                base.conditional = brk or base.conditional
                 base.rationale = (f"Respecting a higher-timeframe level: major support ~{round(lvl, 6)} "
                                   f"just below (within {_HTF_LEVEL_ATR:.0f} ATR). Waiting for a break or a "
                                   "cleaner pullback before selling into it.")
+                if brk is not None:
+                    base.rationale += (
+                        f" Armed: if {brk.break_level} breaks, enter on the RETEST at "
+                        f"{brk.trigger_price} (stop {brk.stop_loss}, ~{brk.rr}R) — a fake break "
+                        f"never produces a retest, so it filters itself out.")
                 return base
             # action == "enter" (AI: likely_break) -> take the trade THROUGH the level (fall through)
         direction = Direction.SHORT
@@ -1693,14 +1819,14 @@ def _deterministic_decision(
     if rsi_extreme and not strong_trend and "rsi_extreme" not in disable:
         px = ind.get("last_close") or 0.0
         action, decided = _momentum_action(base, direction, ind, tf0, technical, atr_v, px,
-                                            momentum_ai, symbol)
+                                            momentum_ai, symbol, "break_retest" not in disable)
         if action == "decided":
             return decided
         if action != "enter":
             base.watch = True
             base.conditional = _conditional_resumption(
                 direction, px, ind, atr_v, _key_levels(technical, tf0, px),
-                round(min(0.7, 0.45 + 0.25 * technical.confidence), 2))
+                round(min(0.7, 0.45 + 0.25 * technical.confidence), 2), retest="break_retest" not in disable)
             zone = "overbought" if direction == Direction.LONG else "oversold"
             dip = "dip" if direction == Direction.LONG else "bounce"
             armed_note = (f"Armed a {direction.value} pullback-resumption to join on the {dip}."
@@ -1962,7 +2088,8 @@ def _deterministic_decision(
     # Priority: a break-STOP past a blocking level (valid only after the break); otherwise — whenever
     # the entry sits away from value (not already AT value) — a LIMIT back at value (~EMA20).
     base.conditional = (
-        _conditional_break(direction, entry, atr_v, levels, target, confidence, ind)
+        _conditional_break(direction, entry, atr_v, levels, target, confidence, ind,
+                           retest="break_retest" not in disable)
         or (None if at_value
             else _conditional_pullback(direction, entry, ema20, atr_v, ind, target, confidence))
     )
@@ -2003,7 +2130,8 @@ def _deterministic_decision(
     if at_value and flat_mom and (cross_tf_conflict or weak_trend) and "flat_momentum" not in disable:
         base.watch = True
         px2 = ind.get("last_close") or entry
-        resume = _conditional_resumption(direction, px2, ind, atr_v, _key_levels(technical, tf0, px2), confidence)
+        resume = _conditional_resumption(direction, px2, ind, atr_v,
+                                         _key_levels(technical, tf0, px2), confidence, retest="break_retest" not in disable)
         base.conditional = resume or base.conditional
         armed_note = ("Armed a resumption to enter only when momentum confirms."
                       if base.conditional is not None else "Waiting for momentum to confirm.")

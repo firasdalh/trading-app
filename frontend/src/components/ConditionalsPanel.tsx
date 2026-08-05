@@ -114,6 +114,9 @@ export function ConditionalsPanel({ onSelect }: {
               <span className="text-bull">{fmtPrice(s.take_profit)}</span>
               {s.rr != null ? ` · ~${s.rr.toFixed(1)}R` : ""} · conf {(s.confidence * 100).toFixed(0)}%
             </div>
+            {s.status === "armed" && s.break_level != null && (
+              <RetestStages setup={s} />
+            )}
             {s.status === "armed" && s.current_price != null && (
               <div className="mt-0.5 text-xs tabular-nums text-amber-300/90">
                 now {fmtPrice(s.current_price)} ·{" "}
@@ -139,6 +142,46 @@ export function ConditionalsPanel({ onSelect }: {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Two-stage progress for a BREAK-AND-RETEST arm.
+//
+// These setups do nothing until a level CLOSE-breaks, and only then place their limit back at it.
+// Without this the panel just shows a buy_limit sitting under resistance, which looks like the
+// engine is doing the opposite of what it intends — so the stage has to be visible, not buried in
+// the note text. The completed stage is dimmed, the live one highlighted.
+function RetestStages({ setup }: { setup: ConditionalSetupView }) {
+  const broken = setup.break_confirmed_at != null;
+  const done = "text-neutral-500";
+  const live = "text-amber-300 font-semibold";
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] tabular-nums">
+      <span
+        className={broken ? done : live}
+        title={
+          broken
+            ? `Broke ${localTime(setup.break_confirmed_at)}`
+            : "Nothing can trigger until this level closes through — a wick past it is the fake break itself"
+        }
+      >
+        {broken ? "✓" : "①"} break {fmtPrice(setup.break_level)}
+      </span>
+      <span className="text-neutral-600">→</span>
+      <span
+        className={broken ? live : done}
+        title={
+          broken
+            ? "The break held. Now waiting for price to come back to the level and enter there."
+            : "Entry price once the break is confirmed — dormant until then"
+        }
+      >
+        {broken ? "②" : "②"} retest {fmtPrice(setup.trigger_price)}
+      </span>
+      <span className="text-neutral-500">
+        {broken ? "· waiting for the pullback" : "· not live yet"}
+      </span>
     </div>
   );
 }

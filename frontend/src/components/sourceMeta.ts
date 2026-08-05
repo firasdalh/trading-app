@@ -3,7 +3,12 @@
 export const SOURCE_META: Record<string, { label: string; color: string }> = {
   ai: { label: "AI decision", color: "text-violet-300" },
   rsi_over: { label: "RSI-Over", color: "text-sky-300" },
+  // Armed setups, split by WHO armed them — the auto-pilot's judgement vs your own. Kept in the
+  // same amber family so they still read as one group at a glance. Plain `armed` is pre-split
+  // history (and any arm whose origin wasn't hybrid/manual).
   armed: { label: "Armed break", color: "text-amber-300" },
+  armed_hybrid: { label: "Armed · hybrid", color: "text-amber-300" },
+  armed_manual: { label: "Armed · manual", color: "text-amber-200" },
   hybrid: { label: "Hybrid", color: "text-emerald-300" },
   auto_trade: { label: "Auto-trade", color: "text-fuchsia-300" },
   manual: { label: "Manual", color: "text-neutral-200" },

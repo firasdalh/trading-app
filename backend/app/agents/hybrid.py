@@ -94,6 +94,7 @@ def _arm_from(session: Session, cfg: HybridConfig, armable: list, exclude: str |
             direction=direction, order_type=cond.order_type, trigger_price=cond.trigger_price,
             stop_loss=cond.stop_loss, take_profit=cond.take_profit, confidence=cond.confidence,
             rr=cond.rr, rationale=cond.reason, source="hybrid", auto_execute=True,
+            break_level=getattr(cond, "break_level", None),
         )
         if s is not None:
             armed += 1

@@ -186,6 +186,11 @@ export interface ConditionalSetupView {
   current_price: number | null;     // armed only: live distance to the trigger
   pips_to_trigger: number | null;   // FX only
   pct_to_trigger: number | null;
+  // BREAK-AND-RETEST (two-stage). `break_level` set = the level that must CLOSE-break before the
+  // limit at trigger_price goes live. `break_confirmed_at` separates the stages: null = still
+  // waiting for the break, a timestamp = broken, now waiting for the retest.
+  break_level: number | null;
+  break_confirmed_at: string | null;
 }
 
 export interface AnalyzeResponse {
