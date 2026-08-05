@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "../api/client";
 import { displaySymbol, fmtPrice } from "../format";
+import { useApprovalChime } from "../hooks/useApprovalChime";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { TradeSizer } from "./TradeSizer";
 import type { ProposalView } from "../types";
@@ -62,6 +64,12 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
 
   const items: ProposalView[] = data ?? [];
 
+  // Sound alert when a NEW approval lands. This panel polls in the background while you are
+  // looking at a chart, so a proposal can appear with nothing on screen to draw the eye.
+  const [sound, setSound] = useLocalStorage("pending.sound", true);
+  const ids = useMemo(() => (data ? data.map((p) => p.id) : undefined), [data]);
+  useApprovalChime(ids, sound);
+
   return (
     <div className="card">
       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -81,6 +89,17 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
           {items.length}
         </span>
         <span className="text-xs text-neutral-500">risk-approved setups waiting for you to approve</span>
+        <button
+          onClick={() => setSound((v) => !v)}
+          className={`ml-auto rounded px-1.5 py-0.5 text-xs ${
+            sound ? "text-amber-300 hover:bg-neutral-800" : "text-neutral-600 hover:text-neutral-400"
+          }`}
+          title={sound
+            ? "Sound is ON — a chime plays when a new approval arrives. Click to mute."
+            : "Sound is OFF — new approvals arrive silently. Click to unmute."}
+        >
+          {sound ? "🔔" : "🔕"}
+        </button>
       </div>
 
       {error && (
