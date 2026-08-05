@@ -305,6 +305,26 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
     return build_settings_response(session)
 
 
+class WaitEntryRequest(BaseModel):
+    # ATRs better than the market price to ask for. 0 = off. Capped at 0.5 deliberately: 0.75 LOSES
+    # money in both halves of the backtest (~70% of trades never fill, and the survivors carry a stop
+    # so tight that noise takes them out), so the UI must not let it be set there.
+    atr: float = Field(0.0, ge=0.0, le=0.5)
+
+
+@router.post("/settings/wait-entry", response_model=SettingsResponse)
+def set_wait_entry(req: WaitEntryRequest, session: Session = Depends(get_session)) -> SettingsResponse:
+    """"Wait, don't chase": turn a market entry into a LIMIT arm this many ATRs on the better side.
+
+    The stop is structural and doesn't move, so a better fill both shrinks R and lengthens the run to
+    target. Costs roughly one trade in four (price never comes back). 0 = enter at market."""
+    settings = get_or_create_settings(session)
+    settings.wait_entry_atr = req.atr
+    session.commit()
+    log.warning("wait-entry set", extra={"atr": req.atr, "mode": "limit-arm" if req.atr else "market"})
+    return build_settings_response(session)
+
+
 class TrendOnlyRequest(BaseModel):
     enabled: bool
 

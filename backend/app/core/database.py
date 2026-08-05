@@ -76,6 +76,7 @@ _SQLITE_ADDED_COLUMNS = {
         ("ai_review_enabled", "BOOLEAN DEFAULT 0"),
         ("journal_reset_at", "DATETIME"),
         ("disabled_filters", "TEXT"),
+        ("wait_entry_atr", "FLOAT DEFAULT 0.0"),
     ],
     "watch_items": [
         ("recommended", "BOOLEAN DEFAULT 0"),

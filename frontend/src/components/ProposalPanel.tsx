@@ -11,6 +11,8 @@ import type {
   AiScenarioRead,
   AnalyzeResponse,
   ConditionalSetupView,
+  PositionAdvice,
+  PositionView,
   TimeframeRead,
   TradeEconomics,
   TradeProposal,
@@ -47,6 +49,9 @@ interface Props {
   // The proposal's stored status stays "executed" forever, so this is what tells the panel the
   // position has since closed.
   positionOpen?: boolean | null;
+  // The live position on this pair, when there is one. Lets the panel compare the CURRENT read
+  // against the trade you're actually in ("does the engine still agree with me?").
+  openPosition?: PositionView | null;
   armedSetup?: ConditionalSetupView | null;   // an armed 'wait for the break' setup for this symbol
   busy: boolean;
   equity?: number | null;
@@ -65,7 +70,7 @@ interface Props {
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, onLoadScenarios, scenLevelsShown, onToggleScenLevels }: Props) {
+export function ProposalPanel({ result, status, positionOpen, openPosition, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, onLoadScenarios, scenLevelsShown, onToggleScenLevels }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -169,9 +174,7 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
           )}
           <span className="text-xs text-neutral-400">{proposal.timeframe}</span>
           {result?.analyzed_at && (
-            <span className="text-[11px] text-neutral-500" title={`Last analysed ${localTime(result.analyzed_at)}`}>
-              · analysed {ago(result.analyzed_at)}
-            </span>
+            <AnalysisAge iso={result.analyzed_at} timeframe={proposal.timeframe} />
           )}
           {result?.market_open === false && (
             <span className="rounded bg-warn/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-warn"
@@ -197,6 +200,17 @@ export function ProposalPanel({ result, status, positionOpen, armedSetup, busy, 
           )}
         </div>
       </div>
+
+      {/* FOLLOW-UP: you're already in this pair — does the latest read still back the trade? */}
+      {openPosition && (
+        <FollowUp
+          pos={openPosition}
+          proposal={proposal}
+          analyzedAt={result?.analyzed_at ?? null}
+          onRecheck={onRunAnalysis}
+          analyzing={analyzing}
+        />
+      )}
 
       {/* Already-armed context: this analysis is a FRESH new-trade check, so a "no trade" here does
           NOT contradict a setup that's already armed on this pair. */}
@@ -1046,6 +1060,182 @@ function biasTone(bias: string): string {
   if (bias === "bullish") return "text-bull";
   if (bias === "bearish") return "text-bear";
   return "text-neutral-300";
+}
+
+// FOLLOW-UP on a trade you are already in: does the latest read still back it?
+//
+// The card below is a NEW-ENTRY check — it answers "would I open this now?". That is not the same
+// question as "should I stay in?", and conflating them is how people talk themselves out of good
+// trades. So this states the comparison plainly and marks the one case that genuinely matters:
+// the engine now reading the OPPOSITE direction, i.e. the thesis you entered on has flipped.
+//
+// It never says "close". Exits belong to the position advisor (stop / target / trail), which acts on
+// its own rules; this is context for your decision, not an instruction.
+function FollowUp({
+  pos, proposal, analyzedAt, onRecheck, analyzing,
+}: {
+  pos: PositionView;
+  proposal: TradeProposal;
+  analyzedAt?: string | null;
+  onRecheck?: () => void;
+  analyzing?: boolean;
+}) {
+  const mine = pos.direction.toLowerCase();                 // long | short
+  const now = proposal.direction;                           // long | short | no_trade
+  const agrees = now === mine;
+  const opposed = (now === "long" || now === "short") && now !== mine;
+
+  const tone = opposed
+    ? "border-bear/40 bg-bear/10"
+    : agrees
+      ? "border-bull/40 bg-bull/10"
+      : "border-neutral-700 bg-neutral-800/40";
+  const headline = opposed
+    ? `⚠ The engine now reads ${now.toUpperCase()} — the opposite of your ${mine.toUpperCase()}`
+    : agrees
+      ? `✓ Still reads ${now.toUpperCase()} — the latest analysis agrees with your trade`
+      : "• No fresh setup right now — that is not an exit signal";
+  const detail = opposed
+    ? "The read you entered on has flipped. Worth a hard look: tighten the stop, take part off, or " +
+      "close. It is not automatic — a flip against an open trade often happens mid-pullback."
+    : agrees
+      ? "The direction, trend and momentum still line up the way they did when you opened."
+      : "The engine only says it would not OPEN a new trade here (no clean entry from the current " +
+        "price). Your existing position is managed by its stop, target and the advisor.";
+
+  const pnl = pos.unrealized_pnl ?? 0;
+  return (
+    <div className={`rounded-md border p-2 text-sm ${tone}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-medium">{headline}</span>
+        <span className="flex items-center gap-2">
+          {analyzedAt && <AnalysisAge iso={analyzedAt} timeframe={proposal.timeframe} />}
+          {onRecheck && (
+            <button
+              onClick={onRecheck}
+              disabled={analyzing}
+              className="btn btn-ghost text-xs"
+              title="Re-run the analysis now and compare it against this open trade"
+            >
+              {analyzing ? "Checking…" : "Re-check now"}
+            </button>
+          )}
+        </span>
+      </div>
+      <div className="mt-1 text-neutral-400">{detail}</div>
+
+      {/* The advisor's verdict on the trade you HOLD — the direct answer to "stay or not?", which
+          the new-entry check above can only hint at. Deterministic (no AI), so it costs nothing. */}
+      <AdvisorVerdict symbol={pos.symbol} refreshKey={analyzedAt ?? ""} />
+      <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-neutral-400">
+        <span>
+          You are {mine.toUpperCase()} from <strong className="text-neutral-200">{fmtPrice(pos.entry_price)}</strong>
+        </span>
+        {pos.last_price != null && <span>now {fmtPrice(pos.last_price)}</span>}
+        <span className={pnl >= 0 ? "text-bull" : "text-bear"}>
+          {pnl >= 0 ? "+" : "−"}{fmtUsd(Math.abs(pnl))}
+        </span>
+        {pos.stop_loss != null && <span>stop {fmtPrice(pos.stop_loss)}</span>}
+        {pos.take_profit != null && <span>target {fmtPrice(pos.take_profit)}</span>}
+      </div>
+    </div>
+  );
+}
+
+// The position advisor's read on a trade you already hold.
+//
+// This is the piece the entry analysis genuinely cannot give you: `thesis` is judged against the
+// levels you ACTUALLY entered on, so it answers "is the reason I'm in this still true?" rather than
+// "would I open it again from here?". Deterministic — no LLM, no tokens — so it can be polled freely.
+function AdvisorVerdict({ symbol, refreshKey }: { symbol: string; refreshKey: string }) {
+  const [advice, setAdvice] = useState<PositionAdvice | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .positionAdvice()
+      .then((list) => {
+        if (cancelled) return;
+        setAdvice(list.find((a) => a.symbol.toUpperCase() === symbol.toUpperCase()) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setAdvice(null);   // advisor off / unreachable — just show nothing
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, refreshKey]);
+
+  if (!advice) return null;
+
+  const THESIS: Record<string, { label: string; cls: string }> = {
+    intact: { label: "Thesis intact", cls: "bg-bull/15 text-bull" },
+    weakening: { label: "Thesis weakening", cls: "bg-warn/15 text-warn" },
+    invalidated: { label: "Thesis invalidated", cls: "bg-bear/15 text-bear" },
+    unknown: { label: "Thesis unclear", cls: "bg-neutral-700/60 text-neutral-400" },
+  };
+  const t = THESIS[advice.thesis] ?? THESIS.unknown;
+
+  return (
+    <div className="mt-2 rounded border border-neutral-700/60 bg-neutral-900/40 p-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${t.cls}`}>
+          {t.label}
+        </span>
+        <span className="text-xs font-medium text-neutral-200">{advice.headline}</span>
+        {advice.r_multiple != null && (
+          <span className={`text-[11px] ${advice.r_multiple >= 0 ? "text-bull" : "text-bear"}`}>
+            {advice.r_multiple >= 0 ? "+" : ""}{advice.r_multiple.toFixed(2)}R
+          </span>
+        )}
+        {!advice.has_stop && (
+          <span className="rounded bg-bear/15 px-1.5 py-0.5 text-[10px] font-bold text-bear">
+            NO STOP
+          </span>
+        )}
+      </div>
+      {advice.detail && (
+        <div className="mt-1 text-[11px] leading-snug text-neutral-400">{advice.detail}</div>
+      )}
+      {advice.event_label && (
+        <div className="mt-1 text-[11px] text-warn">
+          ⚠ {advice.event_label}
+          {advice.minutes_to_event != null && ` in ~${advice.minutes_to_event}m`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Bars of the entry timeframe, in minutes — how long one "candle" of context lasts.
+const TF_MINUTES: Record<string, number> = {
+  "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440,
+};
+
+// WHEN this read was taken, and how much to trust it now.
+//
+// A read is only as good as the tape it was taken from. The same card looks identical whether it
+// ran 30 seconds or 3 days ago, so age is shown plainly and COLOURED by how many bars of the entry
+// timeframe have closed since: within ~1 bar nothing has really changed, past ~3 the levels and
+// momentum it cites may simply no longer be true. Hover for the exact local time.
+function AnalysisAge({ iso, timeframe }: { iso: string; timeframe: string }) {
+  const safe = /[Z+]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const mins = Math.max(0, (Date.now() - new Date(safe).getTime()) / 60000);
+  const bar = TF_MINUTES[timeframe] ?? 60;
+  const bars = mins / bar;
+  const tone =
+    bars >= 3 ? "bg-bear/15 text-bear" : bars >= 1 ? "bg-warn/15 text-warn" : "text-neutral-500";
+  const note =
+    bars >= 3 ? " · stale, re-run it" : bars >= 1 ? " · a bar has closed since" : "";
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[11px] ${tone}`}
+      title={`Analysed ${localTime(iso)}${note ? ` — ${Math.floor(bars)} ${timeframe} bar(s) have closed since` : ""}`}
+    >
+      🕐 {ago(iso)}
+      {note}
+    </span>
+  );
 }
 
 function DirectionBadge({ direction }: { direction: string }) {

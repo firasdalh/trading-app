@@ -1354,6 +1354,7 @@ def _deterministic_decision(
     rsi_rej: bool = False, rsi_at_level: bool = False, rsi_pa: bool = False,
     disable: frozenset[str] = frozenset(), momentum_ai: bool = False,
     regime_ai: bool = False, priceaction_ai: bool = False,
+    wait_entry: float = 0.0,
 ) -> TradeProposal:
     # ``disable`` is a BACKTEST-ONLY filter-ablation switch (the live path never passes it): naming a
     # gate ("mtf", "momentum", "structure", "volatility", "divergence", "minrr", "rsi_extreme") skips it, so the
@@ -2014,6 +2015,43 @@ def _deterministic_decision(
         )
         return base
 
+    # WAIT, DON'T CHASE (opt-in; wait_entry == 0 keeps the market entry). Ask for a price this many
+    # ATRs BETTER than here and let the market come to us, as a limit arm rather than a market fill.
+    #
+    # The stop is a structural level and does NOT move with the entry, so a better fill shrinks R —
+    # more size for the same money — while simultaneously lengthening the run to target. Both sides
+    # of the trade improve from the same point of patience.
+    #
+    # The cost is real and is NOT hidden: roughly one trade in four never fills, and those are
+    # skipped entirely. Reusing the conditional system means the arm inherits every existing guard
+    # (re-validation at the trigger, break/stale checks, spread gate, market hours).
+    if wait_entry > 0 and atr_v:
+        is_long = direction == Direction.LONG
+        better = entry - wait_entry * atr_v if is_long else entry + wait_entry * atr_v
+        # The improved price must still sit on the correct side of the stop, or it isn't a trade.
+        if (better > stop) if is_long else (better < stop):
+            risk_w = abs(better - stop)
+            base.watch = True
+            base.conditional = ConditionalSuggestion(
+                order_type="buy_limit" if is_long else "sell_limit",
+                trigger_price=round(better, 6),
+                stop_loss=round(stop, 6),
+                take_profit=round(target, 6),
+                confidence=confidence,
+                rr=round(abs(target - better) / risk_w, 2) if risk_w else 0.0,
+                reason=(f"Waiting for a better {direction.value} entry at {round(better, 6)} "
+                        f"({wait_entry:.2f} ATR below here) instead of paying up at {round(entry, 6)}."),
+            )
+            base.rationale = (
+                f"{direction.value.upper()} setup is valid, but rather than buying at market this "
+                f"arms a limit {wait_entry:.2f} ATR better at {round(better, 6)} — the stop stays at "
+                f"{round(stop, 6)}, so the improved fill cuts the risk from {round(abs(entry - stop), 6)} "
+                f"to {round(risk_w, 6)} and raises the R:R to "
+                f"{round(abs(target - better) / risk_w, 2) if risk_w else 0}. If price never comes "
+                f"back, the trade is skipped."
+            )
+            return base
+
     base.direction = direction
     base.entry = round(entry, 6)
     base.stop_loss = round(stop, 6)
@@ -2093,6 +2131,7 @@ def run_orchestrator(
     disable: frozenset[str] = frozenset(),
     ai_review: bool = True, momentum_ai: bool = False,
     regime_ai: bool = False, priceaction_ai: bool = False,
+    wait_entry: float = 0.0,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -2114,7 +2153,7 @@ def run_orchestrator(
                                        rsi_trend_filter=rsi_trend_filter, rsi_rej=rsi_rej,
                                        rsi_at_level=rsi_at_level, rsi_pa=rsi_pa, disable=disable,
                                        momentum_ai=momentum_ai, regime_ai=regime_ai,
-                                       priceaction_ai=priceaction_ai)
+                                       priceaction_ai=priceaction_ai, wait_entry=wait_entry)
 
     # SuperTrend-band and RSI-Over are purely mechanical strategies — no LLM confirm/veto over them.
     # ai_review=False takes the AI out of the trade decision entirely (the deterministic engine +

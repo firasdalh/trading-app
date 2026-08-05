@@ -27,6 +27,10 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
       technical: v.reasoning?.technical ?? null,
       fundamental: v.reasoning?.fundamental ?? null,
     },
+    // When this analysis actually ran. Only the live analyze call sets `analyzed_at`, so without
+    // this a RESTORED proposal (what you see after a reload, or when switching back to a pair)
+    // showed no time at all — leaving no way to tell whether the read was 2 minutes or 2 days old.
+    analyzed_at: v.created_at,
     risk: {
       decision: (v.risk_decision as "approved" | "resized" | "vetoed") ?? "vetoed",
       approved: ["pending_approval", "approved", "executed"].includes(v.status),
@@ -551,6 +555,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           result={result}
           status={status}
           positionOpen={positionOpen}
+          openPosition={
+            (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null
+          }
           armedSetup={armedForResult}
           busy={actionBusy}
           equity={account?.equity ?? null}

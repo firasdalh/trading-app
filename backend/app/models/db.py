@@ -71,6 +71,20 @@ class AppSettings(Base):
     # Empty = every filter active (current tuned behaviour). Applied to the deterministic engine only.
     disabled_filters: Mapped[list] = mapped_column(JSON, default=list)
 
+    # WAIT, DON'T CHASE — how much BETTER than the market price to ask for, in ATRs. 0 = off (buy at
+    # market, today's behaviour). When set, a market entry becomes a LIMIT arm this far on the
+    # favourable side, reusing the conditional system (and every guard it already has).
+    #
+    # A better fill improves the trade twice over: the stop is a fixed structural level, so entering
+    # closer to it shrinks R (bigger size for the same money) AND lengthens the run to target. Over
+    # 967 replayed signals, 0.25 ATR scored +0.213R per trade out-of-sample vs -0.060R for entering
+    # at market — the only idea tested that did not decay on unseen data. It is still OFF by default:
+    # it was slightly WORSE on the older half, so the edge is real but not proven.
+    #
+    # Do not raise this far. At 0.75 ATR it LOSES money in both halves: ~70% of trades never fill,
+    # and the survivors carry a stop so tight that noise takes them out.
+    wait_entry_atr: Mapped[float] = mapped_column(Float, default=0.0)
+
     # SuperTrend + EMA20-band breakout strategy: a mechanical mode (long above the band in a
     # SuperTrend uptrend / short below it in a downtrend; stop trails the SuperTrend line). When ON it
     # overrides the AI decider. Toggle from the dashboard. OFF by default.

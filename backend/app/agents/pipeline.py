@@ -81,7 +81,9 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
                                 regime_ai=(settings.ai_regime_read and use_llm
                                            and llm_available() and not ai_decides),
                                 priceaction_ai=(settings.ai_priceaction_read and use_llm
-                                                and llm_available() and not ai_decides))
+                                                and llm_available() and not ai_decides),
+                                # "Wait, don't chase": 0 = enter at market (default).
+                                wait_entry=getattr(settings, "wait_entry_atr", 0.0) or 0.0)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
@@ -171,7 +173,9 @@ def analyze_symbol(
                                 regime_ai=(settings.ai_regime_read and use_llm
                                            and llm_available() and not ai_decides),
                                 priceaction_ai=(settings.ai_priceaction_read and use_llm
-                                                and llm_available() and not ai_decides))
+                                                and llm_available() and not ai_decides),
+                                # "Wait, don't chase": 0 = enter at market (default).
+                                wait_entry=getattr(settings, "wait_entry_atr", 0.0) or 0.0)
     if ai_decides:
         from app.agents.ai_decider import ai_decide_trade
         det_proposal = proposal   # keep the deterministic call for the shadow scorecard
