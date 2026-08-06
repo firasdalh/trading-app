@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import type { AssetClass, AutoTradeResult, AutoTradeView } from "../types";
 import { ago, localTime } from "./advisorFormat";
 
@@ -105,17 +106,37 @@ export function AutoTradePanel({
     }
   };
 
+  const [open, setOpen] = useLocalStorage("autotrade.open", false);
   const strategy = cfg?.strategy ?? "scenario";
   const superTrend = strategy === "supertrend";
   const reversal = strategy === "reversal";
 
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-3">
-      <div className="mb-2 flex items-center justify-between">
+      {/* Collapsible: this panel carries a lot of controls (strategy, timeframe, per-pair list,
+          last-run results) that you set once and rarely revisit. Collapsed it still reports the two
+          things that matter at a glance — whether THIS pair is armed, and how many pairs are on. */}
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="mb-2 flex w-full items-center gap-2 text-left"
+        title={open ? "Collapse auto-trade" : "Expand auto-trade"}
+      >
+        <span className="text-xs text-neutral-500">{open ? "▾" : "▸"}</span>
         <span className="text-sm font-semibold text-neutral-200">🤖 Auto-trade — {symbol}</span>
-        <span className="text-[10px] text-neutral-500">paper · AI · risk-gated</span>
-      </div>
+        {on && (
+          <span className="rounded bg-bull/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-bull">
+            on
+          </span>
+        )}
+        {!open && enabledPairs.length > 0 && (
+          <span className="text-[10px] text-neutral-500">
+            {enabledPairs.length} pair{enabledPairs.length === 1 ? "" : "s"} active
+          </span>
+        )}
+        <span className="ml-auto text-[10px] text-neutral-500">paper · AI · risk-gated</span>
+      </button>
 
+      {!open ? null : (<>
       <button
         onClick={toggle}
         disabled={busy}
@@ -293,6 +314,7 @@ export function AutoTradePanel({
             : `Opens the AI's next scenario move at market (never a pending order) at ≥${((cfg?.min_confidence ?? 0.6) * 100).toFixed(0)}% — a quick win, riding to TP/SL, then re-entering after the cooldown. `}
         Won't fire once {maxPos} position{maxPos === 1 ? " is" : "s are"} open. Every risk gate + the kill-switch apply.
       </div>
+      </>)}
     </div>
   );
 }

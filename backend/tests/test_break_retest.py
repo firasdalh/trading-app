@@ -35,9 +35,17 @@ def _arm(session, **kw):
     return s
 
 
-def _market(monkeypatch, closes, price=None):
-    """Feed a close series; the live quote defaults to the last close."""
-    candles = [SimpleNamespace(close=c) for c in closes]
+def _market(monkeypatch, closes, price=None, lows=None, highs=None):
+    """Feed a close series; the live quote defaults to the last close.
+
+    Highs/lows default to the close (a doji) — tests that care about the retest ZONE pass real
+    wicks, since a zone touch is measured on the low/high, not the close."""
+    candles = [
+        SimpleNamespace(close=c,
+                        low=(lows[i] if lows else c),
+                        high=(highs[i] if highs else c))
+        for i, c in enumerate(closes)
+    ]
     broker = SimpleNamespace(
         get_quote=lambda sym: SimpleNamespace(price=price if price is not None else closes[-1]),
         market_open=lambda sym: True,
@@ -342,3 +350,79 @@ def test_manually_armed_trade_is_attributed_to_you(db_session, monkeypatch):
     db_session.refresh(s)
     rec = db_session.get(TradeProposalRecord, s.result_proposal_id)
     assert rec.source == "armed_manual"
+
+
+# --- stage 2 is a ZONE + a CONFIRMING close, not a limit fill -------------------------------------
+
+def test_zone_scales_with_the_setup_risk():
+    """A band, not a line: price rarely returns to an exact price, so a limit on one mostly misses."""
+    assert cond._retest_zone(100.0, 98.0) == 2.0 * cond._RETEST_ZONE_FRAC
+    assert cond._retest_zone(100.0, None) > 0          # no stop -> small fallback band
+    assert cond._retest_zone(100.0, 100.0) > 0         # degenerate stop -> fallback, never zero
+
+
+def test_touching_the_zone_alone_does_not_confirm():
+    """THE POINT. A limit would have filled here. Price came back but has NOT closed back above the
+    level, so the retest may still be failing — commit nothing yet."""
+    bars = [SimpleNamespace(close=99.5, low=99.2, high=100.4)]
+    ok, why = cond._retest_confirmed(bars, LEVEL, "long", 1.0)
+    assert ok is False
+    assert "not yet holding" in why
+
+
+def test_zone_touch_plus_close_back_above_confirms():
+    bars = [
+        SimpleNamespace(close=100.6, low=100.4, high=100.8),   # broke away
+        SimpleNamespace(close=99.9, low=99.6, high=100.7),     # dipped INTO the zone
+        SimpleNamespace(close=100.4, low=99.9, high=100.5),    # closed back above -> defended
+    ]
+    ok, _ = cond._retest_confirmed(bars, LEVEL, "long", 1.0)
+    assert ok is True
+
+
+def test_no_zone_touch_means_no_entry():
+    """Broke and ran without coming back — the trade is missed, by design."""
+    bars = [SimpleNamespace(close=104.0, low=103.5, high=104.5)] * 3
+    ok, why = cond._retest_confirmed(bars, LEVEL, "long", 1.0)
+    assert ok is False and "hasn't come back" in why
+
+
+def test_short_confirmation_is_mirrored():
+    bars = [
+        SimpleNamespace(close=99.4, low=99.2, high=99.6),      # broke down
+        SimpleNamespace(close=100.1, low=99.5, high=100.4),    # popped INTO the zone
+        SimpleNamespace(close=99.6, low=99.4, high=100.2),     # closed back below -> defended
+    ]
+    ok, _ = cond._retest_confirmed(bars, LEVEL, "short", 1.0)
+    assert ok is True
+    # Still above the level on the close -> not confirmed.
+    weak = [SimpleNamespace(close=100.3, low=99.6, high=100.5)]
+    assert cond._retest_confirmed(weak, LEVEL, "short", 1.0)[0] is False
+
+
+def test_failed_retest_never_opens_the_trade(db_session, monkeypatch):
+    """The scenario that motivated this: price retests, then keeps going against the arm. A limit
+    would already be filled and losing; here nothing opened."""
+    s = _arm(db_session, break_confirmed_at=NOW - timedelta(minutes=30))
+    _market(monkeypatch,
+            closes=[100.8, 100.2, 99.7],          # into the zone, then closing BELOW the level
+            lows=[100.5, 99.8, 99.3],
+            highs=[101.0, 100.6, 100.1])
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 0
+
+
+def test_confirmed_retest_opens_and_sizes_off_the_real_price(db_session, monkeypatch):
+    """Waiting for the confirming close means the fill is above the level — sizing must use THAT,
+    not the stale limit price, or the risk to the stop is understated."""
+    s = _arm(db_session, break_confirmed_at=NOW - timedelta(minutes=30))
+    _market(monkeypatch,
+            closes=[100.9, 100.05, 100.45],
+            lows=[100.6, 99.85, 100.0],           # bar 2 dipped into the zone
+            highs=[101.1, 100.5, 100.6])
+    seen: dict = {}
+    monkeypatch.setattr(cond, "_fire",
+                        lambda session, setup, ref: (seen.update(ref=ref), 1)[1])
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 1
+    assert seen["ref"] == 100.45                  # the confirming close, not trigger_price

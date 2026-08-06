@@ -119,6 +119,60 @@ def _break_held(closes: list[float], level: float, direction: str) -> bool:
     return all(c < level for c in last)
 
 
+# How wide the retest ZONE is, as a fraction of the setup's own planned risk (level -> stop).
+# Price almost never returns to an exact price, so a limit sitting on one is mostly a missed trade;
+# a band scaled to the setup's risk adapts to the instrument without needing its ATR stored.
+_RETEST_ZONE_FRAC = 0.35
+# How many recent bars the zone touch may have happened in. The retest and the candle that confirms
+# it are often not the same bar — price dips in, hovers, then pushes back out.
+_RETEST_LOOKBACK = 8
+
+
+def _retest_zone(level: float, stop: float | None) -> float:
+    """Half-width of the retest band around ``level``."""
+    if stop is None or stop == level:
+        return abs(level) * 0.001                    # ~10 bps fallback when there's no stop to scale to
+    return abs(level - stop) * _RETEST_ZONE_FRAC
+
+
+def _retest_confirmed(candles: list, level: float, direction: str, zone: float) -> tuple[bool, str]:
+    """Has price retested the zone AND then CONFIRMED the direction? Returns (ok, why-not).
+
+    Two conditions, because either alone is a trap:
+
+    * TOUCHED — a recent bar traded into the band around the level. A zone, not a line: price rarely
+      returns to an exact price, so a limit order on one mostly just misses the trade.
+    * HELD — the latest bar CLOSED back beyond the level. This is the part a limit order can't do.
+      A limit fills the instant price touches it, which proves nothing: if the retest fails and price
+      keeps going, the fill happens anyway and you are long into the collapse. Requiring a close back
+      on the trade's side means the level was defended before any money is committed.
+
+    The cost is a later, worse entry than a limit would have got — paid to find out whether the
+    "retest" was a pause or the start of the move against you.
+    """
+    if not candles:
+        return False, "no candles"
+    recent = candles[-_RETEST_LOOKBACK:]
+    last = recent[-1]
+    if direction == Direction.LONG.value:
+        touched = any(c.low <= level + zone for c in recent)
+        held = last.close > level
+        if not touched:
+            return False, f"price hasn't come back to the {round(level, 6)} zone yet"
+        if not held:
+            return False, (f"in the retest zone but the last close {round(last.close, 6)} is still "
+                           f"under {round(level, 6)} — not yet holding")
+        return True, ""
+    touched = any(c.high >= level - zone for c in recent)
+    held = last.close < level
+    if not touched:
+        return False, f"price hasn't come back up to the {round(level, 6)} zone yet"
+    if not held:
+        return False, (f"in the retest zone but the last close {round(last.close, 6)} is still "
+                       f"above {round(level, 6)} — not yet holding")
+    return True, ""
+
+
 def _break_failed(closes: list[float], level: float, direction: str) -> bool:
     """After a confirmed break, has price CLOSED back on the original side? That's a failed break —
     the level held after all, so the retest we were waiting for is never coming."""
@@ -431,7 +485,12 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
     technical = _reread_technical(session, s)
     proposal = TradeProposal(
         symbol=s.symbol, asset_class=AssetClass(s.asset_class), timeframe=s.timeframe,
-        direction=Direction(s.direction), entry=s.trigger_price, stop_loss=s.stop_loss,
+        # A break-and-retest setup waits for a CONFIRMING close, so the fill is wherever price
+        # closed — not the limit price it was armed at. Sizing off the stale number would
+        # understate the real risk to the stop.
+        direction=Direction(s.direction),
+        entry=(ref if s.break_level is not None else s.trigger_price),
+        stop_loss=s.stop_loss,
         take_profit=s.take_profit, confidence=s.confidence or 0.6,
         rationale=s.rationale or f"Armed {s.order_type} triggered at {s.trigger_price}.",
         technical=technical,
@@ -619,11 +678,12 @@ def check_conditional_setups(session: Session) -> dict:
         # One candle window per armed symbol/pass (cached): serves BOTH the close-confirm ref and the
         # trend-EMA invalidation below. Enough bars for EMA(50).
         closes: list[float] = []
+        candles: list = []
         try:
-            candles = get_ohlcv_cached(broker, s.symbol, s.timeframe, limit=60).candles
-            closes = [c.close for c in candles] if candles else []
+            candles = get_ohlcv_cached(broker, s.symbol, s.timeframe, limit=60).candles or []
+            closes = [c.close for c in candles]
         except Exception:  # noqa: BLE001 - fall back to the live quote
-            closes = []
+            candles, closes = [], []
 
         ref = price
         if s.require_close_confirm and closes:  # confirm on the latest candle close (avoid wick-driven false breaks)
@@ -677,7 +737,24 @@ def check_conditional_setups(session: Session) -> dict:
             invalidated += 1
             continue
 
-        if not _crossed(s.order_type, ref, s.trigger_price):
+        # BREAK-AND-RETEST, stage 2: the retest must be TOUCHED and then CONFIRMED.
+        #
+        # This deliberately replaces the plain limit test. A limit fills the moment price tags the
+        # level, which proves nothing — if the retest fails and price carries on through, the fill
+        # happens anyway and the trade is opened into the move against it. Here the level has to be
+        # revisited AND defended (a close back on the trade's side) before anything opens.
+        if s.break_level is not None:
+            zone = _retest_zone(s.break_level, s.stop_loss)
+            ok, why = _retest_confirmed(candles, s.break_level, s.direction, zone)
+            if not ok:
+                s.last_note = f"break confirmed — {why}"
+                session.add(s)
+                continue
+            # Entry is where price actually is now, not the stale limit price: waiting for the
+            # confirming close means the fill is above/below the level, and sizing must use the real
+            # number or the risk is understated.
+            ref = closes[-1]
+        elif not _crossed(s.order_type, ref, s.trigger_price):
             continue  # trigger not reached yet — keep waiting
 
         # BREAK CONFIRMATION (stop/breakout orders): the price tagged the trigger, but require the break

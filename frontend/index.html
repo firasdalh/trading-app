@@ -9,6 +9,10 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <!-- The desktop launcher opens an Edge/Chrome APP window (--app=), which takes its title-bar and
+         taskbar icon from the manifest when one exists (and only falls back to the favicon otherwise).
+         Without this the window shows the browser's generic document icon. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0B0B0F" />
     <title>AI Trading Desk</title>
   </head>

@@ -27,6 +27,29 @@ PORT = 8001
 URL = f"http://{HOST}:{PORT}"
 
 
+def _redirect_output_under_pythonw() -> None:
+    """Give the process real stdout/stderr when launched WITHOUT a console.
+
+    The launcher runs this under ``pythonw.exe`` so no black console window appears. But pythonw
+    leaves ``sys.stdout``/``sys.stderr`` as None, and the first uvicorn log line then dies on
+    ``NoneType.write`` — the whole app fails to start, silently, with nothing on screen to say why.
+
+    Point them at a log file instead: output is preserved (and diagnosable) rather than crashing.
+    No-op when a console exists, so running from a terminal behaves exactly as before.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "desktop.log"),
+                   "a", encoding="utf-8", buffering=1)
+    except Exception:  # noqa: BLE001 - read-only dir: fall back to discarding output
+        log = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+
+
 def _run_server() -> None:
     """Run uvicorn in-process. Signal handlers are skipped because we may not be on the main
     thread (uvicorn only installs them on the main thread)."""
@@ -85,6 +108,7 @@ def _ensure_data_dir() -> None:
 
 
 def main() -> None:
+    _redirect_output_under_pythonw()  # FIRST: without a console, the first log line would crash
     _ensure_data_dir()  # must run BEFORE the server imports app.main (reads ./.env, ./db)
     try:
         import webview  # pywebview — native window

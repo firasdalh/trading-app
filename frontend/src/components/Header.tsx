@@ -60,6 +60,22 @@ export function Header({ settings, onKillSwitchChange, onOpenSettings }: Props) 
           </div>
 
           <div className="flex items-center gap-2">
+            {/* The desktop window has no address bar and no Ctrl+Shift+R, so there is otherwise no
+                way to reload after a UI rebuild. index.html is served `no-store`, so an ordinary
+                reload already fetches the current bundle — the cache-buster below is belt-and-braces
+                for any proxy or wrapper that ignores that header. */}
+            <button
+              onClick={() => {
+                const url = new URL(window.location.href);
+                url.searchParams.set("r", Date.now().toString(36));
+                window.location.replace(url.toString());
+              }}
+              className="btn btn-subtle"
+              title="Reload the app (picks up a new build). Open trades and settings are unaffected — everything lives on the server."
+              aria-label="Reload the app"
+            >
+              ↻
+            </button>
             <button onClick={onOpenSettings} className="btn btn-subtle">
               Settings
             </button>

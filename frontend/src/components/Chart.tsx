@@ -71,6 +71,10 @@ export interface ArmedLevel {
   trigger_price: number;
   stop_loss: number | null;
   take_profit: number | null;
+  // BREAK-AND-RETEST (two-stage). `break_level` must CLOSE-break before `trigger_price` — the
+  // retest entry — goes live. `break_confirmed_at` says which stage the setup is in.
+  break_level?: number | null;
+  break_confirmed_at?: string | null;
 }
 
 interface Props {
@@ -1132,7 +1136,26 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     };
     for (const a of mine) {
       const isLong = a.direction === "long";
-      const trigLine = add(a.trigger_price, "#f59e0b", "⚡ Arm · drag");   // amber trigger
+      // BREAK-AND-RETEST: draw the level that has to give way FIRST. Without it the chart shows a
+      // buy-limit sitting under resistance with no explanation — which reads as the engine doing the
+      // opposite of what it intends. Dotted and grey-blue so it's clearly a PRE-condition, not a
+      // price the trade acts on; once broken it turns solid-ish and says so.
+      const broken = a.break_confirmed_at != null;
+      const brkLine = add(
+        a.break_level ?? null,
+        broken ? "#64748b" : "#93c5fd",
+        broken ? "✓ broke — awaiting retest" : "① must break first",
+      );
+      if (brkLine) {
+        brkLine.applyOptions({ lineStyle: LineStyle.Dotted, lineWidth: 1 });
+      }
+      const trigLine = add(
+        a.trigger_price, "#f59e0b",
+        // Name the entry for what it is once a break level exists, so the two amber/blue lines
+        // aren't mistaken for each other.
+        a.break_level != null ? (broken ? "⚡ RETEST entry · drag" : "② retest entry · drag")
+                              : "⚡ Arm · drag",
+      );
       const slLine = add(a.stop_loss, "#ef5350", "⚡ SL · drag");
       const tpLine = add(a.take_profit, "#26a69a", "⚡ TP · drag");
       // Trigger: side vs price isn't fixed (break vs limit), so just require it stay positive.
@@ -1466,6 +1489,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
               </span>
             )}
             {hasArmed && <span className="text-amber-400">— Arm trigger</span>}
+            {/* Only meaningful when a two-stage arm is on this chart, so don't clutter otherwise. */}
+            {(armed ?? []).some(
+              (a) => a.symbol.toUpperCase() === symbol.toUpperCase() && a.break_level != null,
+            ) && <span className="text-blue-300">┈ Must break first</span>}
             <span className="text-bear">— Stop</span>
             <span className="text-bull">— Target</span>
           </div>
