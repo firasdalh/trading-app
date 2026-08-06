@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
+import { AnalysisText } from "./AnalysisText";
 import { ArmSetupButton } from "./ArmSetupButton";
 import { ago, localTime } from "./advisorFormat";
 import { RegimeBadge } from "./RegimeBadge";
@@ -63,6 +64,8 @@ interface Props {
   scenarioBusy?: boolean;
   onLoadScenarios?: () => void;        // opt-in fetch (info-only read costs AI tokens, so it's on demand)
   // Toggle the AI scenario's cited S/R lines on the chart (shared with the chart's own scenario card).
+  // Language the ANALYSIS prose is shown in ("en" | "ar") — a setting, not a per-item toggle.
+  analysisLang?: string;
   scenLevelsShown?: boolean;
   onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
 }
@@ -70,7 +73,7 @@ interface Props {
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, openPosition, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, onLoadScenarios, scenLevelsShown, onToggleScenLevels }: Props) {
+export function ProposalPanel({ result, status, positionOpen, openPosition, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, onLoadScenarios, analysisLang, scenLevelsShown, onToggleScenLevels }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
@@ -278,7 +281,7 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
           </div>
         </div>
       ) : noTrade ? (
-        <StandAsideCard proposal={proposal} />
+        <StandAsideCard proposal={proposal} analysisLang={analysisLang} />
       ) : (
       <div
         className={`rounded-md border p-2 text-sm ${
@@ -393,7 +396,8 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
           note if present (the no-trade rationale now lives in the StandAsideCard). The structured
           AiDecisionCard (when present) replaces the raw rationale wall entirely. */}
       {!ai && !noTrade && reviewNote(proposal.rationale) && (
-        <p className="text-xs leading-relaxed text-neutral-400">{reviewNote(proposal.rationale)}</p>
+        <AnalysisText as="p" text={reviewNote(proposal.rationale)} lang={analysisLang}
+                      className="text-xs leading-relaxed text-neutral-400" />
       )}
 
       {!ai && <ReviewExplanation rationale={proposal.rationale} />}
@@ -484,7 +488,8 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
 // Plain-English card shown when the engine returns NO_TRADE (or "watching"). It reframes the raw
 // "Risk Manager: VETOED / 0%" — which reads like a risk rejection — into what actually happened: the
 // analysis engine chose to stand aside. Shows the engine's reason + a couple of derived "why" points.
-function StandAsideCard({ proposal }: { proposal: TradeProposal }) {
+function StandAsideCard({ proposal, analysisLang }:
+                        { proposal: TradeProposal; analysisLang?: string }) {
   const watching = proposal.watch;
   const tfs = proposal.technical?.timeframes ?? [];
   const entryTf = tfs.find((t) => t.timeframe === proposal.timeframe) ?? tfs[0];
@@ -523,7 +528,8 @@ function StandAsideCard({ proposal }: { proposal: TradeProposal }) {
       </div>
 
       {/* The engine's own reason (plain language). */}
-      <p className="mt-1.5 leading-relaxed text-neutral-100">{proposal.rationale}</p>
+      <AnalysisText as="p" text={proposal.rationale} lang={analysisLang}
+                    className="mt-1.5 leading-relaxed text-neutral-100" />
 
       {points.length > 0 && (
         <ul className="mt-2 space-y-1 text-neutral-300">

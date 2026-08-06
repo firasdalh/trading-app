@@ -51,6 +51,42 @@ _SYSTEM_AR = (
 )
 
 
+_TRANSLATE_SYSTEM = (
+    "You translate automated trading analysis into Arabic (العربية).\n"
+    "Rules:\n"
+    "1. FAITHFUL ONLY. Translate what is written — never add analysis, levels, opinions or advice, "
+    "and never soften or strengthen a verdict.\n"
+    "2. Keep ALL numbers, price levels, percentages, R-multiples and instrument symbols exactly as "
+    "they appear, in Latin digits (e.g. 1.5R, 25460.00, XAUUSDm, ADX 28).\n"
+    "3. Keep it the same length and structure as the original — same sentences, same order.\n"
+    "4. Use professional trading vocabulary a Gulf/MENA trader would recognise.\n"
+    "5. Return ONLY the translated text, with no preamble or notes."
+)
+
+
+class _Translated(BaseModel):
+    text: str = Field(description="The faithfully translated text, nothing else.")
+
+
+def translate_note(text: str, lang: str = "ar") -> str | None:
+    """Faithfully translate a piece of analysis text (advisor note, hybrid summary, rationale).
+
+    Deliberately separate from ``explain_review``: that one RESTRUCTURES a trade review into
+    decision/pros/cons, which suits a proposal but mangles a one-line advisor note. This preserves
+    the original shape and only changes the language.
+
+    Returns None for English (nothing to do), empty input, or when no LLM is configured — the caller
+    then shows the original text rather than an error."""
+    text = (text or "").strip()
+    if not text or lang != "ar":
+        return None
+    out = analyze(system=_TRANSLATE_SYSTEM, user=text, schema=_Translated, max_tokens=1500)
+    if out is None:
+        log.info("translate_note: LLM unavailable/failed")
+        return None
+    return (out.text or "").strip() or None
+
+
 def explain_review(text: str, lang: str = "en") -> ExplainedReview | None:
     """Structure (and, for ``lang='ar'``, translate) a rationale. None if the LLM is unavailable."""
     text = (text or "").strip()

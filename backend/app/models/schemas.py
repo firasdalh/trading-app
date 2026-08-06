@@ -440,6 +440,8 @@ class AppSettingsView(BaseModel):
     disabled_filters: list[str] = []
     # "Wait, don't chase": ATRs better than market to ask for. 0 = enter at market (default).
     wait_entry_atr: float = 0.0
+    # Language the ANALYSIS prose is shown in ("en" | "ar"). UI chrome stays English.
+    analysis_language: str = "en"
     journal_reset_at: datetime | None = None
     live_confirmed_at: datetime | None = None
 

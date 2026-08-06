@@ -85,6 +85,16 @@ class AppSettings(Base):
     # and the survivors carry a stop so tight that noise takes them out.
     wait_entry_atr: Mapped[float] = mapped_column(Float, default=0.0)
 
+    # Language the ANALYSIS is presented in ("en" | "ar"). Chosen once and applied everywhere the
+    # engine explains itself — proposal rationales, position-advisor notes, hybrid summaries — so the
+    # user never has to ask for a translation per item.
+    #
+    # Only the generated PROSE is translated. Numbers, price levels, R-multiples and instrument
+    # symbols stay in Latin digits, and the UI chrome (buttons, labels, tables) stays English: a
+    # trader reads 25460.00 / XAUUSDm / 1.5R the same way in both languages, and translating those
+    # would make the screen harder to scan, not easier.
+    analysis_language: Mapped[str] = mapped_column(String(4), default="en")
+
     # SuperTrend + EMA20-band breakout strategy: a mechanical mode (long above the band in a
     # SuperTrend uptrend / short below it in a downtrend; stop trails the SuperTrend line). When ON it
     # overrides the AI decider. Toggle from the dashboard. OFF by default.
@@ -412,6 +422,19 @@ class AdvisorConfig(Base):
     # under auto_execute, only when flat (winners are managed by the trail, losers by the stop).
     # 0 = disabled.
     max_hold_hours: Mapped[float] = mapped_column(Float, default=0.0)
+    # Ladder profit out in thirds (1/3 at +1.5R, 1/3 at +3R) vs let the WHOLE position run on the
+    # trailing stop.
+    #
+    # The ladder feels prudent and costs you the trades that matter. Across 296 closed trades only
+    # 3% ever exceeded +3R, yet those 9 trades produced +78.6R while the other 97% lost -109.1R —
+    # the whole result rides on a handful of outliers. Banking a third at +1.5R and another at +3R
+    # turns a 10R runner into a blended ~4.8R, i.e. it halves precisely the trades that pay for
+    # everything else, in exchange for a slightly higher win rate.
+    #
+    # Kept ON by default because it is the behaviour every existing trade was opened under; turning
+    # it OFF hands the whole position to the trailing stop (breakeven at +1R, structure/ATR trail
+    # after) so a real trend is uncapped.
+    scale_out_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(

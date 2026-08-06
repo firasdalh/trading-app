@@ -567,6 +567,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           analyzing={analyzing}
           scenario={scenario}
           scenarioBusy={scenarioBusy}
+          analysisLang={settings?.app.analysis_language}
           onLoadScenarios={loadScenarios}
           scenLevelsShown={!!scenLevels}
           onToggleScenLevels={toggleScenLevels}
@@ -612,7 +613,8 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
-          <PositionAdvicePanel refreshSignal={posBump} />
+          <PositionAdvicePanel refreshSignal={posBump}
+                               lang={settings?.app.analysis_language} />
           <PositionsTable
             positions={positions}
             onClose={closePosition}

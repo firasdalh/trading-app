@@ -610,7 +610,8 @@ def _structure_stop(direction: str, ctx: dict, atr: float | None) -> float | Non
 
 def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
                    tranche: int = 0, has_plan: bool = True,
-                   opened_at: datetime | None = None, max_hold_hours: float = 0.0) -> dict | None:
+                   opened_at: datetime | None = None, max_hold_hours: float = 0.0,
+                   scale_out: bool = True) -> dict | None:
     """The bounded, deterministic set of actions the advisor may take autonomously — only
     highest-confidence, RISK-REDUCING moves: close an invalidated trade, attach a protective
     stop, LADDER out partial profit (a third at +1.5R, a third at +3R, or early into a wall), lock
@@ -644,7 +645,11 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
     # 0) LADDERED scale-out — book ~a third at its R milestone, OR early when price banks into a strong
     # opposing level with fading momentum (sell into strength), whichever comes first. Done before the
     # trail/breakeven below (take money off the table first); the executor then de-risks the runner.
-    if plan_risk and last and atr and tranche < 2:
+    # ``scale_out=False`` hands the WHOLE position to the trailing stop instead. Banking a third
+    # at +1.5R and another at +3R caps exactly the outlier trades the book depends on: only 3%
+    # of closed trades ever passed +3R, and those 9 produced +78.6R while the other 97% lost
+    # -109.1R. The ladder trades that tail away for a smoother equity curve.
+    if scale_out and plan_risk and last and atr and tranche < 2:
         profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
         r = profit / plan_risk
         r_trigger = _LADDER_R1 if tranche == 0 else _LADDER_R2
@@ -697,7 +702,11 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
         # LET WINNERS RUN: near the planned target in a strong, intact trend, drop the fixed
         # take-profit and ride a trailing stop — so a real trend isn't capped at ~2R. Risk-neutral:
         # the stop is moved to breakeven-or-better and never loosened. Fires once (TP then gone).
-        if r >= _RUN_R and regime == "trending" and a.thesis == "intact" and p.take_profit is not None:
+        # With the ladder off, the fixed take-profit is the ONLY remaining cap — so lift it as
+        # soon as the trade is meaningfully in profit rather than waiting for ~2R, otherwise
+        # turning the ladder off just swaps one ceiling for another.
+        run_r = _RUN_R if scale_out else _BREAKEVEN_R
+        if r >= run_r and regime == "trending" and a.thesis == "intact" and p.take_profit is not None:
             trail, basis = _trail_stop(d, last, atr, ctx or {}, regime)
             stop = trail if _tightens(d, p.stop_loss, trail) else (p.stop_loss if p.stop_loss is not None else trail)
             return {"action": "run_target", "kind": "run", "stop": round(stop, 5),
@@ -806,7 +815,9 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
 
     now = datetime.now(timezone.utc)
     settings = get_or_create_settings(session)
-    max_hold_hours = get_or_create_advisor_config(session).max_hold_hours or 0.0
+    _adv_cfg = get_or_create_advisor_config(session)
+    max_hold_hours = _adv_cfg.max_hold_hours or 0.0
+    scale_out = getattr(_adv_cfg, "scale_out_enabled", True)
     positions = {p.symbol: p for p in live_broker_positions(session)}
     contexts = contexts or {}
     # A symbol that has gone flat can scale out again next time it's entered.
@@ -830,7 +841,8 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
         tranche, has_plan = _scaled_tranche(session, p.symbol, p.qty, p.direction)
         opened_at = _position_opened_at(session, p.symbol, p.direction)
         decision = _auto_decision(a, p, ctx or {}, plan_risk, tranche=tranche, has_plan=has_plan,
-                                  opened_at=opened_at, max_hold_hours=max_hold_hours)
+                                  opened_at=opened_at, max_hold_hours=max_hold_hours,
+                                  scale_out=scale_out)
         if decision is None:
             continue
         action, kind, reason = decision["action"], decision["kind"], decision["reason"]

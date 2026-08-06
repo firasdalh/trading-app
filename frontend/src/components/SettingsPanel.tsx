@@ -120,6 +120,47 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
         </section>
 
         <section>
+          <div className="mb-2 text-sm font-medium text-neutral-300">Analysis language</div>
+          {/* A setting, not a per-item translate button: analysis you have to ask to translate is
+              analysis you stop reading. Chosen once, applied to every rationale, advisor note and
+              summary. Numbers, levels and symbols stay as they are, and the buttons/labels stay
+              English — a trader reads 25460.00 / XAUUSDm / 1.5R the same way in both languages. */}
+          <div className="flex gap-2">
+            {([
+              { code: "en", label: "English", note: "Original — instant, no AI call" },
+              { code: "ar", label: "العربية", note: "الشروحات بالعربية" },
+            ] as const).map((opt) => {
+              const active = (settings?.app.analysis_language ?? "en") === opt.code;
+              return (
+                <button
+                  key={opt.code}
+                  disabled={busy}
+                  onClick={() => run(() => api.setAnalysisLanguage(opt.code),
+                                     `Analysis language: ${opt.label}.`)}
+                  className={`flex-1 rounded-md border px-3 py-2 text-left text-sm ${
+                    active ? "border-blue-500 bg-blue-500/10" : "border-neutral-700 hover:bg-neutral-800"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium" dir={opt.code === "ar" ? "rtl" : undefined}>
+                      {opt.label}
+                    </span>
+                    {active && <span className="text-xs font-semibold text-bull">ON</span>}
+                  </div>
+                  <div className="text-xs text-neutral-400" dir={opt.code === "ar" ? "rtl" : undefined}>
+                    {opt.note}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-1 text-[11px] text-neutral-500">
+            Applies to the analysis text only — rationales, advisor notes and summaries. Prices,
+            levels and the interface stay as they are.
+          </div>
+        </section>
+
+        <section>
           <div className="mb-2 text-sm font-medium text-neutral-300">Strategy</div>
           <button
             disabled={busy}

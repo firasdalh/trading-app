@@ -322,6 +322,7 @@ export interface SettingsResponse {
     ai_regime_read: boolean;
     ai_priceaction_read: boolean;
     ai_review_enabled: boolean;
+    analysis_language: string;   // 'en' | 'ar' — language the ANALYSIS prose is shown in
     live_confirmed_at: string | null;
   };
   risk: {

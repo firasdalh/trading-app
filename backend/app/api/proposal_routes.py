@@ -83,6 +83,16 @@ class ExplainRequest(BaseModel):
     lang: str = "en"  # "en" | "ar"
 
 
+class TranslateRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+    lang: str = "ar"  # only "ar" does anything; "en" is the source language
+
+
+class TranslateResponse(BaseModel):
+    text: str
+    lang: str
+
+
 class ExplainResponse(BaseModel):
     decision: str
     is_trade: bool
@@ -265,6 +275,25 @@ def explain(req: ExplainRequest) -> ExplainResponse:
         raise HTTPException(status_code=503,
                             detail="explanation unavailable — no AI model configured")
     return ExplainResponse(**out.model_dump(), lang=lang)
+
+
+@router.post("/translate", response_model=TranslateResponse)
+def translate(req: TranslateRequest) -> TranslateResponse:
+    """Translate a piece of analysis text (advisor note, hybrid summary, rationale) into Arabic.
+
+    Kept separate from /explain: that endpoint RESTRUCTURES a trade review into decision/pros/cons,
+    which suits a full proposal but mangles a one-line advisor note. This preserves the original
+    wording and shape and only changes the language. Faithful — numbers, levels and symbols are left
+    exactly as they are."""
+    from app.agents.explain import translate_note
+
+    if req.lang != "ar":
+        return TranslateResponse(text=req.text, lang="en")   # nothing to do
+    out = translate_note(req.text, "ar")
+    if out is None:
+        raise HTTPException(status_code=503,
+                            detail="translation unavailable — no AI model configured")
+    return TranslateResponse(text=out, lang="ar")
 
 
 @router.get("", response_model=list[ProposalView])

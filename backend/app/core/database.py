@@ -41,6 +41,7 @@ _SQLITE_ADDED_COLUMNS = {
     "advisor_config": [
         ("auto_execute", "BOOLEAN DEFAULT 0"),
         ("max_hold_hours", "FLOAT DEFAULT 0"),
+        ("scale_out_enabled", "BOOLEAN DEFAULT 1"),
     ],
     "risk_config": [
         ("daily_loss_breaker_enabled", "BOOLEAN DEFAULT 1"),
@@ -77,6 +78,7 @@ _SQLITE_ADDED_COLUMNS = {
         ("journal_reset_at", "DATETIME"),
         ("disabled_filters", "TEXT"),
         ("wait_entry_atr", "FLOAT DEFAULT 0.0"),
+        ("analysis_language", "VARCHAR(4) DEFAULT 'en'"),
     ],
     "watch_items": [
         ("recommended", "BOOLEAN DEFAULT 0"),

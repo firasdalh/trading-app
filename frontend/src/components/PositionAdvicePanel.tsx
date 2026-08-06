@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { AnalysisText } from "./AnalysisText";
 import { fmtUsd } from "../format";
 import type { AdvisorState, PositionAdvice } from "../types";
 import { actionText, ago, localTime } from "./advisorFormat";
 import { srcLabel, srcColor } from "./sourceMeta";
 
 interface Props {
+  // Language the ANALYSIS prose is shown in ("en" | "ar"), from settings.
+  lang?: string;
   // Bump to force a refresh (e.g. after a position is closed).
   refreshSignal?: number;
 }
@@ -29,7 +32,7 @@ const THESIS: Record<PositionAdvice["thesis"], { text: string; cls: string }> = 
 // cut losers, especially around news. Run on demand, or auto-watch on a set interval.
 // Advisory only: it tells you what to consider; you act via the positions table below. The
 // "Recent actions" timeline lives in its own card (AdvisorActivity), next to the Risk Dashboard.
-export function PositionAdvicePanel({ refreshSignal }: Props) {
+export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
   const [state, setState] = useState<AdvisorState | null>(null);
   const [busy, setBusy] = useState(false);
   const [intervalInput, setIntervalInput] = useState("300");
@@ -301,7 +304,8 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
                       opened {ago(a.opened_at)}
                     </span>
                   )}
-                  <span className="text-sm font-medium">{a.headline}</span>
+                  <AnalysisText text={a.headline} lang={lang}
+                                className="text-sm font-medium" />
                   <span className={`text-[10px] font-semibold uppercase ${th.cls}`}>{th.text}</span>
                   {a.r_multiple != null && (
                     <span
@@ -322,7 +326,8 @@ export function PositionAdvicePanel({ refreshSignal }: Props) {
                     {fmtUsd(a.unrealized_pnl, { sign: true })}
                   </span>
                 </div>
-                <p className="mt-1 text-xs leading-relaxed text-neutral-300">{a.detail}</p>
+                <AnalysisText as="p" text={a.detail} lang={lang}
+                              className="mt-1 text-xs leading-relaxed text-neutral-300" />
                 {a.events_soon && (
                   <div
                     className="mt-1 text-xs text-warn/90"

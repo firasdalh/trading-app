@@ -156,6 +156,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ text, lang }),
     }),
+  // Faithful translation of a piece of analysis prose (advisor note, hybrid summary, rationale).
+  // Unlike explainReview it does NOT restructure — same wording, same shape, different language.
+  translateAnalysis: (text: string, lang: "en" | "ar") =>
+    request<{ text: string; lang: string }>("/api/proposals/translate", {
+      method: "POST",
+      body: JSON.stringify({ text, lang }),
+    }),
+  setAnalysisLanguage: (lang: "en" | "ar") =>
+    request<SettingsResponse>("/api/settings/analysis-language", {
+      method: "POST",
+      body: JSON.stringify({ lang }),
+    }),
   proposals: (opts: { symbol?: string; timeframe?: string; status?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();
     if (opts.symbol) q.set("symbol", opts.symbol);

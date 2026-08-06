@@ -325,6 +325,24 @@ def set_wait_entry(req: WaitEntryRequest, session: Session = Depends(get_session
     return build_settings_response(session)
 
 
+class AnalysisLanguageRequest(BaseModel):
+    lang: str = Field("en", pattern="^(en|ar)$")
+
+
+@router.post("/settings/analysis-language", response_model=SettingsResponse)
+def set_analysis_language(req: AnalysisLanguageRequest,
+                          session: Session = Depends(get_session)) -> SettingsResponse:
+    """Language the engine explains itself in — rationales, advisor notes, hybrid summaries.
+
+    Chosen once, applied everywhere, so nothing has to be translated item by item. Only the prose
+    changes: numbers, levels and symbols stay as they are, and the UI chrome stays English."""
+    settings = get_or_create_settings(session)
+    settings.analysis_language = req.lang
+    session.commit()
+    log.info("analysis language set", extra={"lang": req.lang})
+    return build_settings_response(session)
+
+
 class TrendOnlyRequest(BaseModel):
     enabled: bool
 
@@ -644,6 +662,8 @@ class AdvisorConfigRequest(BaseModel):
     interval_seconds: int | None = Field(None, ge=30, le=3600)
     # Time-based exit: auto-close a stagnant position held this many hours and still flat. 0 = off.
     max_hold_hours: float | None = Field(None, ge=0, le=240)
+    # Ladder out in thirds (True) vs let the whole position ride the trail (False).
+    scale_out_enabled: bool | None = None
 
 
 class AdvisorAction(BaseModel):
@@ -662,6 +682,7 @@ class AdvisorView(BaseModel):
     auto_execute: bool
     interval_seconds: int
     max_hold_hours: float = 0.0
+    scale_out_enabled: bool = True
     last_run_at: str | None = None
     advice: list[PositionAdvice]
     actions: list[AdvisorAction] = []
@@ -686,6 +707,7 @@ def _advisor_view(session: Session, actions: list[dict] | None = None) -> Adviso
     return AdvisorView(
         enabled=cfg.enabled, auto_execute=cfg.auto_execute,
         interval_seconds=cfg.interval_seconds, max_hold_hours=cfg.max_hold_hours or 0.0,
+        scale_out_enabled=getattr(cfg, "scale_out_enabled", True),
         last_run_at=_iso_utc(cfg.last_run_at),
         advice=advise_positions(session),
         actions=[AdvisorAction(**{k: v for k, v in a.items() if k != "asset_class"})
@@ -712,6 +734,11 @@ def advisor_set_config(req: AdvisorConfigRequest, session: Session = Depends(get
         cfg.interval_seconds = req.interval_seconds
     if req.max_hold_hours is not None:
         cfg.max_hold_hours = req.max_hold_hours
+    if req.scale_out_enabled is not None:
+        cfg.scale_out_enabled = req.scale_out_enabled
+        log.warning("advisor scale-out %s",
+                    "ON (ladder thirds out)" if req.scale_out_enabled
+                    else "OFF (whole position rides the trail — winners uncapped)")
     session.commit()
     log.warning("advisor config updated", extra={"enabled": cfg.enabled,
                 "auto_execute": cfg.auto_execute, "interval": cfg.interval_seconds,
