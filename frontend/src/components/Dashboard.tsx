@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { assetLabel, displaySymbol, fmtPrice, fmtUsd } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
@@ -74,7 +74,13 @@ interface Props {
   onSettingsChanged?: () => void;
 }
 
-const TIMEFRAMES = ["15m", "1h", "4h", "1d"];
+// This selector drives BOTH the chart and the analysis/trade the engine produces. 5m and 15m are
+// included so you can drop down to time an entry, but they are marked: measured over 959 signals,
+// 15m lost -0.159R per trade in BOTH halves of the data (the clearest negative result on this book)
+// because the win rate falls AND the fixed spread eats roughly twice as much of a smaller stop. 5m
+// is faster still. 1h is the tested baseline.
+const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
+const FAST_TF = new Set(["5m", "15m"]);
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
 
 export function Dashboard({ settings, onSettingsChanged }: Props) {
@@ -108,6 +114,25 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const [symbols, setSymbols] = useState<string[]>([]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [posBump, setPosBump] = useState(0);
+
+  // FULL SCREEN for the trading view — the position bar AND the chart block (price + RSI + MACD).
+  // Owned here rather than inside <Chart> because the position strip is a sibling component: going
+  // full screen without it would hide your live P&L and the Quick-close button at exactly the moment
+  // you are studying the trade. Tracks `fullscreenchange` so Esc (which never routes through our
+  // button) still leaves the layout correct.
+  const chartWrapRef = useRef<HTMLDivElement>(null);
+  const [chartFull, setChartFull] = useState(false);
+  useEffect(() => {
+    const onChange = () => setChartFull(document.fullscreenElement === chartWrapRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleChartFull = () => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    else void el.requestFullscreen?.().catch(() => {});   // denied -> stay inline
+  };
   const liveQuote = useQuoteSocket(symbol, assetClass);
   const { data: brokerInfo } = usePolling(() => api.brokerInfo(assetClass), 6000, [assetClass]);
   const stBand = !!settings?.app.st_band_mode;
@@ -382,11 +407,19 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           >
             {TIMEFRAMES.map((t) => (
               <option key={t} value={t}>
-                {t}
+                {t}{FAST_TF.has(t) ? " ⚠" : ""}
               </option>
             ))}
           </select>
         </label>
+        {/* Named at the point of use, not buried in a doc: the cost of a fast timeframe is invisible
+            on the chart but decisive in the results. */}
+        {FAST_TF.has(timeframe) && (
+          <span className="self-end pb-2 text-[11px] text-warn"
+                title="Backtested over 959 signals: 15m lost -0.159R per trade in both halves of the data — the win rate drops and the fixed spread eats about twice as much of a smaller stop. Fine for reading price; poor for trading.">
+            ⚠ {timeframe} tested as loss-making — good for timing, not for entries
+          </span>
+        )}
         <button
           onClick={toggleStBand}
           disabled={stBandBusy}
@@ -484,12 +517,38 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
 
       {/* Chart — full width so it gets the whole row (bigger, bordered) */}
       <div className="card border-2 border-neutral-700">
-        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+        {/* Header + position strip + chart all travel together into full screen — see chartWrapRef
+            above. The open-pair pills belong in here: they are how you switch the chart between
+            live trades, and a full-screen chart you cannot switch is a chart you have to leave. */}
+        <div
+          ref={chartWrapRef}
+          className={chartFull ? "flex h-screen flex-col overflow-hidden bg-neutral-950 p-3" : undefined}
+        >
+        <div className="mb-2 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2">
           <span className="text-sm font-semibold">
             {symbol} · {timeframe}
           </span>
           {result?.proposal?.regime && (
             <RegimeBadge regime={result.proposal.regime} strategy={result.proposal.strategy} />
+          )}
+          {/* Full screen only: the real Timeframe dropdown is in the controls bar above, which is
+              off-screen here. Switching timeframe is the single most common thing you do while
+              reading a chart, and having to leave full screen for it defeats the point. */}
+          {chartFull && (
+            <span className="flex items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-900/60 p-0.5">
+              {TIMEFRAMES.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTimeframe(t)}
+                  title={FAST_TF.has(t) ? `${t} — backtested as loss-making for entries; fine for timing` : `Switch the chart to ${t}`}
+                  className={`rounded px-2 py-0.5 text-xs transition ${
+                    t === timeframe ? "bg-brand-600 text-white" : "text-neutral-400 hover:bg-neutral-800 hover:text-white"
+                  }`}
+                >
+                  {t}{FAST_TF.has(t) ? " ⚠" : ""}
+                </button>
+              ))}
+            </span>
           )}
           {/* Open positions — quick-switch the chart between them */}
           {(positions ?? []).length > 0 && (
@@ -543,7 +602,10 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           scenLevels={scenLevels}
           scenLevelsShown={!!scenLevels}
           onToggleScenLevels={toggleScenLevels}
+          isFullscreen={chartFull}
+          onToggleFullscreen={toggleChartFull}
         />
+        </div>
         <p className="mt-2 text-xs text-neutral-500">
           Backtest and paper results do not guarantee live results.
         </p>

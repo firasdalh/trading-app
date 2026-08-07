@@ -4,7 +4,7 @@ import { assetLabel } from "../format";
 import type { AssetClass, BacktestResult } from "../types";
 import { EquityChart } from "./EquityChart";
 
-const TIMEFRAMES = ["15m", "1h", "4h", "1d"];
+const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
 
 // Read a value the Dashboard persisted, so the backtest opens on the pair you were viewing.

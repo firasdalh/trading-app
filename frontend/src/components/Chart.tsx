@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CandlestickData,
   ColorType,
@@ -9,6 +9,7 @@ import {
   ISeriesApi,
   LineData,
   LineStyle,
+  Logical,
   LogicalRange,
   SeriesMarker,
   Time,
@@ -46,6 +47,114 @@ function usePersisted<T>(key: string, initial: T, merge = false) {
     }
   }, [key, v]);
   return [v, setV] as const;
+}
+
+// Drag a floating panel around by its header. The position is remembered: a panel you have to
+// shove out of the way every time you open it is a panel you stop opening.
+//
+// The panel starts anchored with CSS (top-right). On the first drag we switch it to explicit
+// left/top at wherever it currently sits — computing that from its real rectangle, so it doesn't
+// jump on the first pixel of the drag.
+function useDragPanel(key: string, rootRef: React.RefObject<HTMLDivElement | null>) {
+  const [pos, setPos] = usePersisted<{ x: number; y: number } | null>(key, null);
+  const grab = useRef<{ dx: number; dy: number; el: HTMLElement } | null>(null);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    // Buttons living in the header (refresh, close) must still be clickable.
+    if ((e.target as HTMLElement).closest("button")) return;
+    const panel = e.currentTarget.closest("[data-panel]") as HTMLElement | null;
+    const root = rootRef.current;
+    if (!panel || !root) return;
+    const pr = panel.getBoundingClientRect();
+    const rr = root.getBoundingClientRect();
+    grab.current = { dx: e.clientX - pr.left, dy: e.clientY - pr.top, el: panel };
+    setPos({ x: pr.left - rr.left, y: pr.top - rr.top });
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    const g = grab.current;
+    const root = rootRef.current;
+    if (!g || !root) return;
+    const rr = root.getBoundingClientRect();
+    // Always leave a strip of the header reachable. Drag it fully off the edge and the only way
+    // back would be clearing storage.
+    const KEEP = 80;
+    const x = Math.min(Math.max(e.clientX - rr.left - g.dx, KEEP - g.el.offsetWidth), rr.width - KEEP);
+    const y = Math.min(Math.max(e.clientY - rr.top - g.dy, 0), Math.max(0, rr.height - 30));
+    setPos({ x, y });
+  };
+
+  const onPointerUp = (e: React.PointerEvent<HTMLElement>) => {
+    grab.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  return {
+    style: pos ? ({ left: pos.x, top: pos.y, right: "auto", bottom: "auto" } as const) : undefined,
+    moved: pos != null,
+    reset: () => setPos(null),
+    handle: {
+      onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp,
+      onDoubleClick: () => setPos(null),
+    },
+  };
+}
+
+// --- Hand-drawn lines ------------------------------------------------------------------------
+// Lines you draw yourself, kept per PAIR — not per timeframe. A drawing is stored as absolute time
+// + price, so a trendline drawn on the 1h is the same real line on the 5m and the 4h; storing it
+// per timeframe would mean drawing the same level five times over.
+//
+// They live in localStorage, not the database: they're personal chart annotations, they must
+// survive a refresh, and nothing on the server ever needs to read them.
+//
+// Trend lines and pen strokes are painted on a CANVAS over the chart, not added as chart series.
+// A series forces every point onto a candle, which is why lines landed next to where they were
+// drawn instead of on it. On the canvas a point is kept as (time, price) and converted back to
+// pixels each frame: it sits exactly where you put it, tracks pan/zoom, and can curve freely.
+type Drawing =
+  | { id: string; kind: "h"; price: number; color: string }
+  | { id: string; kind: "t"; t1: number; p1: number; t2: number; p2: number; color: string }
+  | { id: string; kind: "f"; pts: { t: number; p: number }[]; color: string };
+
+// Cycled so consecutive drawings are visually separable when several sit close together.
+const DRAW_COLORS = ["#38bdf8", "#f59e0b", "#a78bfa", "#22c55e", "#ef4444"];
+const drawKey = (symbol: string) => `chart.draw.${symbol.toUpperCase()}`;
+const newDrawId = () => `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+function readDrawings(key: string): Drawing[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(parsed) ? (parsed as Drawing[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Deliberately NOT usePersisted(): that hook's key is fixed, and useState's initialiser runs once —
+// with a per-symbol key, switching pairs would write the previous pair's drawings under the new
+// pair's key and lose both. Here the key change re-reads, and every save writes straight through.
+function useDrawings(symbol: string) {
+  const key = drawKey(symbol);
+  const [items, setItems] = useState<Drawing[]>(() => readDrawings(key));
+  useEffect(() => setItems(readDrawings(key)), [key]);
+  const save = useCallback(
+    (next: (prev: Drawing[]) => Drawing[]) => {
+      setItems((prev) => {
+        const out = next(prev);
+        try {
+          localStorage.setItem(key, JSON.stringify(out));
+        } catch {
+          /* storage unavailable — the drawing still shows, it just won't survive a refresh */
+        }
+        return out;
+      });
+    },
+    [key],
+  );
+  return [items, save] as const;
 }
 
 // Decimals an instrument actually uses (EURUSD 5, JPY pairs 3, gold 2, indices ~1), inferred from the
@@ -92,6 +201,9 @@ interface Props {
   // The AI scenario's cited S/R to plot on the chart — lifted to the Dashboard so BOTH the floating
   // scenario card AND the Run-analysis scenario card toggle the same lines. null = hidden.
   scenLevels?: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null;
+  // Full screen (owned by the Dashboard so the position strip is included).
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
   scenLevelsShown?: boolean;
   onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
 }
@@ -359,8 +471,63 @@ function LineSwatch({ dash }: { dash: string }) {
   );
 }
 
-export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, scenLevelsShown, onToggleScenLevels }: Props) {
+// --- Sub-pane sizing -------------------------------------------------------------------------
+// RSI and MACD ship at 120px, but how much room an indicator deserves is a personal call: someone
+// reading divergence wants a tall RSI, someone who just wants the histogram sign wants it short.
+// So the heights are draggable and remembered — resizing a pane every session is a chore nobody
+// keeps doing, and an indicator too cramped to read is an indicator you stop looking at.
+const PANE_MIN = 60;
+const PANE_MAX = 420;
+const PANE_DEFAULT = 120;
+const clampPaneH = (h: number) => Math.min(PANE_MAX, Math.max(PANE_MIN, Math.round(h)));
+
+function storedPaneH(key: string): number {
+  try {
+    const v = Number(localStorage.getItem(key));
+    return Number.isFinite(v) && v > 0 ? clampPaneH(v) : PANE_DEFAULT;
+  } catch {
+    return PANE_DEFAULT;
+  }
+}
+
+// The grab-strip that sits on a pane's TOP edge. Pointer capture (not window listeners) keeps the
+// drag alive when the cursor leaves the 8px strip — which it does immediately on any real drag.
+function PaneResizer({ height, onChange, label }: { height: number; onChange: (h: number) => void; label: string }) {
+  const drag = useRef<{ y: number; h: number } | null>(null);
+  return (
+    <div
+      onPointerDown={(e) => {
+        drag.current = { y: e.clientY, h: height };
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        // The handle IS the top edge, so dragging up must grow the pane downward-anchored.
+        onChange(clampPaneH(d.h - (e.clientY - d.y)));
+      }}
+      onPointerUp={(e) => {
+        drag.current = null;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      onPointerCancel={() => { drag.current = null; }}
+      onDoubleClick={() => onChange(PANE_DEFAULT)}
+      title={`Drag to resize the ${label} pane · double-click to reset`}
+      className="group flex h-2 shrink-0 cursor-ns-resize touch-none items-center justify-center"
+    >
+      <div className="h-[3px] w-10 rounded-full bg-neutral-800 transition group-hover:w-16 group-hover:bg-sky-500" />
+    </div>
+  );
+}
+
+export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, isFullscreen, onToggleFullscreen,
+                        scenLevelsShown, onToggleScenLevels }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Full screen is owned by the Dashboard (the position strip must travel with the chart).
+  const isFull = !!isFullscreen;
+  const toggleFullscreen = () => onToggleFullscreen?.();
+  const [rsiH, setRsiH] = useState(() => storedPaneH("chart.rsiH"));
+  const [macdH, setMacdH] = useState(() => storedPaneH("chart.macdH"));
   const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -407,6 +574,23 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   onSetArmedRef.current = onSetArmedLevels;
   const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null } | null>(null);
 
+  // Hand drawing: the saved set, the stroke in progress, and the canvas it's painted on.
+  const [drawings, saveDrawings] = useDrawings(symbol);
+  const [drawMode, setDrawMode] = useState<"off" | "f" | "t" | "h">("off");
+  const [drawList, setDrawList] = useState(false);
+  const drawModeRef = useRef(drawMode);
+  drawModeRef.current = drawMode;
+  const drawingsRef = useRef<Drawing[]>(drawings);
+  drawingsRef.current = drawings;
+  const drawCanvasRef = useRef<HTMLCanvasElement>(null);
+  const draftRef = useRef<Drawing | null>(null);            // the line/stroke under the cursor
+  const lastPxRef = useRef<{ x: number; y: number } | null>(null);
+  const drawLinesRef = useRef<IPriceLine[]>([]);            // horizontal levels (real price lines)
+  const barTimesRef = useRef<number[]>([]);                 // candle times, for pixel↔time mapping
+  const dirtyRef = useRef(0);                               // bumped to force a repaint
+  // Bumped when a new candle set lands, so drawings re-render against the new bar times.
+  const [dataV, setDataV] = useState(0);
+
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = usePersisted<Record<number, boolean>>(
     "chart.showEma", { 10: true, 20: true, 50: true, 100: false, 200: true }, true);
@@ -421,6 +605,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     "chart.srByTf", { "1h": false, "4h": false, "1d": false });
   const [ctx, setCtx] = useState<MarketContext | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
+  const [ctxAt, setCtxAt] = useState<Date | null>(null);   // when this reading was taken
+  const rootRef = useRef<HTMLDivElement>(null);            // drag frame for the floating panels
+  const ctxDrag = useDragPanel("chart.ctxPos", rootRef);
+  // The price map's S/R ladder, plotted on request. Held as its OWN copy rather than read from
+  // `ctx`, so closing the map panel to actually look at the chart doesn't wipe the levels you just
+  // asked it to draw — which is the whole reason you drew them.
+  type Lv = { price: number; tf: string; tests: number };
+  const [ctxLevels, setCtxLevels] = useState<{ res: Lv[]; sup: Lv[] } | null>(null);
+  const ctxLinesRef = useRef<IPriceLine[]>([]);
   const [scen, setScen] = useState<AiScenarioRead | null>(null);
   const [scenBusy, setScenBusy] = useState(false);
 
@@ -513,6 +706,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       emaLoRef.current = null;
     };
   }, []);
+
+  // Remember the pane heights. Both sub-charts are autoSize, so resizing the wrapper is all it
+  // takes — no manual chart.resize() call, and no re-create on drag.
+  useEffect(() => {
+    try {
+      localStorage.setItem("chart.rsiH", String(rsiH));
+      localStorage.setItem("chart.macdH", String(macdH));
+    } catch {
+      /* private mode / quota — the heights just won't survive a reload */
+    }
+  }, [rsiH, macdH]);
 
   // Create/destroy the RSI sub-pane chart when toggled; sync its time axis to the main chart.
   useEffect(() => {
@@ -623,6 +827,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       .then((series) => {
         if (cancelled || !seriesRef.current || !volumeRef.current) return;
         candlesRef.current = series.candles;
+        // Drawings map pixels↔time through the bar times, so refresh that lookup with the data.
+        barTimesRef.current = series.candles.map((c) => Math.floor(Date.parse(c.ts) / 1000));
+        setDataV((v) => v + 1);
         const candleData: CandlestickData[] = series.candles.map((c) => ({
           time: toTime(c), open: c.open, high: c.high, low: c.low, close: c.close,
         }));
@@ -987,13 +1194,30 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const loadContext = async () => {
     setCtxBusy(true);
     try {
-      setCtx(await api.context(symbol, assetClass));
+      const next = await api.context(symbol, assetClass, timeframe);
+      setCtx(next);
+      setCtxAt(new Date());
+      // If the levels are on the chart, re-plot them from the FRESH read. Leaving the old ones up
+      // next to a new reading is the one genuinely dangerous outcome here — you'd be trading a
+      // level the analysis no longer thinks is there.
+      setCtxLevels((v) => (v ? { res: next.resistance_ladder ?? [], sup: next.support_ladder ?? [] } : v));
     } catch {
       setCtx(null);
     } finally {
       setCtxBusy(false);
     }
   };
+
+  // Re-read automatically when the chart changes underneath the panel. Leaving a 1h reading on
+  // screen after switching to 5m is worse than showing nothing: it looks current, and every number
+  // in it — RSI, MACD, structure, the levels drawn on the chart — belongs to a different chart.
+  const loadCtxRef = useRef(loadContext);
+  loadCtxRef.current = loadContext;
+  const ctxOpenRef = useRef(false);
+  ctxOpenRef.current = ctx != null;
+  useEffect(() => {
+    if (ctxOpenRef.current) void loadCtxRef.current();
+  }, [symbol, timeframe, assetClass]);
 
   const loadScenarios = async () => {
     setScenBusy(true);
@@ -1064,6 +1288,33 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (!same(scenLevels.resistance, inv)) add(scenLevels.resistance, "#f59e0b", "🟠 Resistance");
     if (!same(scenLevels.support, inv)) add(scenLevels.support, "#26a69a", "🟢 Support");
   }, [scenLevels]);
+
+  // The price map's own S/R ladder, plotted on request. Each label carries the timeframe it came
+  // from and how many times it's been tested — a level tested 5 times is a wall you fade, a fresh
+  // one breaks easily, and that difference decides whether you trade the break or the rejection.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    ctxLinesRef.current.forEach((l) => series.removePriceLine(l));
+    ctxLinesRef.current = [];
+    if (!ctxLevels) return;
+    const strength = (n: number) => (n >= 4 ? "strong" : n >= 2 ? "moderate" : "fresh");
+    const add = (lv: Lv, i: number, up: boolean) => {
+      ctxLinesRef.current.push(
+        series.createPriceLine({
+          price: lv.price,
+          color: up ? "#f59e0b" : "#26a69a",
+          lineWidth: lv.tests >= 4 ? 3 : 2,           // thicker = more tested = harder wall
+          lineStyle: i === 0 ? LineStyle.Solid : LineStyle.Dashed,   // solid = the one in play
+          axisLabelVisible: true,
+          title: `${up ? "R" : "S"}${i + 1} ${lv.tf.toUpperCase()} · ${strength(lv.tests)} ${lv.tests}x`,
+        }),
+      );
+    };
+    ctxLevels.res.forEach((lv, i) => add(lv, i, true));
+    ctxLevels.sup.forEach((lv, i) => add(lv, i, false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctxLevels, symbol, timeframe]);
 
   // Open-position overlay (solid lines) — drawn from live broker positions for THIS symbol,
   // so an open trade's entry/SL/TP stays on the chart regardless of the current proposal.
@@ -1183,6 +1434,213 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
   }, [armed, symbol]);
 
+  // --- pixel ↔ (time, price) -------------------------------------------------------------------
+  // The vertical axis is exact: the series converts price↔y directly. The horizontal one is not —
+  // lightweight-charts only maps times that ARE bars. So we go through the "logical" axis (a
+  // fractional bar index, which accepts values between bars and past the last one) and interpolate
+  // against the bar times. That's what buys sub-candle precision: a point lands mid-candle if
+  // that's where you drew it, instead of jumping to the nearest bar.
+  const logicalOfTime = (t: number): number | null => {
+    const ts = barTimesRef.current;
+    const n = ts.length;
+    if (n < 2) return null;
+    if (t <= ts[0]) return (t - ts[0]) / Math.max(1, ts[1] - ts[0]);
+    if (t >= ts[n - 1]) return n - 1 + (t - ts[n - 1]) / Math.max(1, ts[n - 1] - ts[n - 2]);
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (ts[mid] <= t) lo = mid;
+      else hi = mid;
+    }
+    return lo + (t - ts[lo]) / Math.max(1, ts[hi] - ts[lo]);
+  };
+
+  const timeOfLogical = (l: number): number | null => {
+    const ts = barTimesRef.current;
+    const n = ts.length;
+    if (n < 2) return null;
+    if (l <= 0) return Math.round(ts[0] + l * Math.max(1, ts[1] - ts[0]));
+    if (l >= n - 1) return Math.round(ts[n - 1] + (l - (n - 1)) * Math.max(1, ts[n - 1] - ts[n - 2]));
+    const i = Math.floor(l);
+    return Math.round(ts[i] + (l - i) * Math.max(1, ts[i + 1] - ts[i]));
+  };
+
+  const xOfTime = (t: number): number | null => {
+    const l = logicalOfTime(t);
+    if (l == null) return null;
+    const x = chartRef.current?.timeScale().logicalToCoordinate(l as Logical);
+    return x == null ? null : Number(x);
+  };
+
+  const timeOfX = (x: number): number | null => {
+    const l = chartRef.current?.timeScale().coordinateToLogical(x);
+    return l == null ? null : timeOfLogical(Number(l));
+  };
+
+  // Repaint the overlay. Cheap enough to run on every frame the view changes: a few hundred
+  // line segments on a canvas the size of the chart.
+  const paintOverlay = () => {
+    const canvas = drawCanvasRef.current;
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    const cont = containerRef.current;
+    if (!canvas || !chart || !series || !cont) return;
+    const cw = cont.clientWidth;
+    const ch = cont.clientHeight;
+    if (cw <= 0 || ch <= 0) return;
+
+    // Back the canvas at device resolution — at 1× a diagonal line on a HiDPI screen looks like a
+    // staircase, which is most of what reads as "not smooth".
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
+      canvas.width = Math.round(cw * dpr);
+      canvas.height = Math.round(ch * dpr);
+      canvas.style.width = `${cw}px`;
+      canvas.style.height = `${ch}px`;
+    }
+    const g = canvas.getContext("2d");
+    if (!g) return;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, cw, ch);
+
+    // Keep ink off the price and time axes.
+    const plotW = cw - (chart.priceScale("right").width() || 0);
+    const plotH = ch - (chart.timeScale().height() || 0);
+    g.save();
+    g.beginPath();
+    g.rect(0, 0, plotW, plotH);
+    g.clip();
+    g.lineCap = "round";
+    g.lineJoin = "round";
+
+    const yOf = (p: number): number | null => {
+      const y = series.priceToCoordinate(p);
+      return y == null ? null : Number(y);
+    };
+
+    const items = draftRef.current ? [...drawingsRef.current, draftRef.current] : drawingsRef.current;
+    for (const d of items) {
+      if (d.kind === "h") continue;   // drawn as a real price line so it gets an axis label
+      g.strokeStyle = d.color;
+      g.lineWidth = 2;
+
+      if (d.kind === "f") {
+        const pts: { x: number; y: number }[] = [];
+        for (const pt of d.pts) {
+          const x = xOfTime(pt.t);
+          const y = yOf(pt.p);
+          if (x != null && y != null) pts.push({ x, y });
+        }
+        if (pts.length < 2) {
+          if (pts.length === 1) {
+            g.beginPath();
+            g.arc(pts[0].x, pts[0].y, 1.5, 0, Math.PI * 2);
+            g.fillStyle = d.color;
+            g.fill();
+          }
+          continue;
+        }
+        // Curve through the midpoints instead of joining raw samples corner to corner: the same
+        // trick every drawing app uses, and the difference between an ink stroke and a zig-zag.
+        g.beginPath();
+        g.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length - 1; i++) {
+          g.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
+        }
+        g.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+        g.stroke();
+        continue;
+      }
+
+      const x1 = xOfTime(d.t1);
+      const x2 = xOfTime(d.t2);
+      const y1 = yOf(d.p1);
+      const y2 = yOf(d.p2);
+      if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
+      g.beginPath();
+      g.moveTo(x1, y1);
+      g.lineTo(x2, y2);
+      g.stroke();
+      // Dashed projection to the right edge: a trendline that stops in the past can't show WHERE
+      // price will meet it. Dashed, so it stays clear which part you actually drew.
+      if (x2 > x1 && x2 < plotW) {
+        const slope = (y2 - y1) / (x2 - x1);
+        g.save();
+        g.setLineDash([5, 4]);
+        g.globalAlpha = 0.7;
+        g.beginPath();
+        g.moveTo(x2, y2);
+        g.lineTo(plotW, y2 + slope * (plotW - x2));
+        g.stroke();
+        g.restore();
+      }
+    }
+    g.restore();
+  };
+
+  // Horizontal levels stay real price lines: they span the full width and print their price on the
+  // axis, which a canvas stroke would have to reimplement.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    drawLinesRef.current.forEach((l) => series.removePriceLine(l));
+    drawLinesRef.current = drawings
+      .filter((d): d is Extract<Drawing, { kind: "h" }> => d.kind === "h")
+      .map((d) =>
+        series.createPriceLine({
+          price: d.price, color: d.color, lineWidth: 2, lineStyle: LineStyle.Solid,
+          axisLabelVisible: true, title: "✏️",
+        }),
+      );
+  }, [drawings, symbol, timeframe, dataV]);
+
+  // Repaint whenever the picture could have moved. There is no single "view changed" event in
+  // lightweight-charts — panning, zooming, autoscale and dragging the price axis are all separate
+  // — so we watch a cheap signature of the view each frame and redraw only when it differs.
+  useEffect(() => {
+    let raf = 0;
+    let sig = "";
+    const tick = () => {
+      const chart = chartRef.current;
+      const series = seriesRef.current;
+      const cont = containerRef.current;
+      if (chart && series && cont) {
+        const r = chart.timeScale().getVisibleLogicalRange();
+        const next = [
+          r?.from, r?.to,
+          series.coordinateToPrice(0), series.coordinateToPrice(cont.clientHeight),
+          cont.clientWidth, cont.clientHeight, dirtyRef.current,
+        ].join("|");
+        if (next !== sig) {
+          sig = next;
+          paintOverlay();
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    dirtyRef.current += 1;   // saved set changed — repaint even if the view is still
+  }, [drawings, dataV, symbol, timeframe]);
+
+  // Esc drops the tool and any half-drawn stroke.
+  useEffect(() => {
+    if (drawMode === "off") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      draftRef.current = null;
+      dirtyRef.current += 1;
+      setDrawMode("off");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawMode]);
+
   // Drag the SL/TP line directly on the chart to adjust it, committing to the broker on drop. The
   // handlers read live state from refs, so they're attached once. While dragging we turn off chart
   // scroll/scale so the pane doesn't pan, and the positions-poll rebuild is skipped (guard above).
@@ -1217,7 +1675,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     const onMove = (e: MouseEvent) => {
       const drag = dragRef.current;
       if (!drag) {
-        container.style.cursor = handleAt(e) ? "ns-resize" : "";
+        // While a drawing tool is armed the cursor is a crosshair and lines aren't grabbable —
+        // otherwise clicking to place a point next to an SL would drag the SL instead.
+        container.style.cursor = drawModeRef.current !== "off" ? "crosshair" : handleAt(e) ? "ns-resize" : "";
         return;
       }
       const price = yToPrice(e);
@@ -1228,6 +1688,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     };
 
     const onDown = (e: MouseEvent) => {
+      if (drawModeRef.current !== "off") return;
       const handle = handleAt(e);
       if (!handle) return;
       dragRef.current = handle;
@@ -1265,6 +1726,75 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     };
   }, []);
 
+  // --- drawing gestures ------------------------------------------------------------------------
+  // Press–drag–release for both tools. The earlier click-then-click trendline gave no feedback
+  // between the two clicks; dragging shows the line following the cursor the whole way.
+  const atPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const price = seriesRef.current?.coordinateToPrice(y);
+    const t = timeOfX(x);
+    if (price == null || t == null) return null;
+    return { x, y, t, p: Number(price) };
+  };
+
+  const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (drawMode === "off") return;
+    const at = atPointer(e);
+    if (!at) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const color = DRAW_COLORS[drawings.length % DRAW_COLORS.length];
+    if (drawMode === "h") {
+      saveDrawings((prev) => [...prev, { id: newDrawId(), kind: "h", price: at.p, color }]);
+      setDrawMode("off");
+      return;
+    }
+    draftRef.current =
+      drawMode === "f"
+        ? { id: newDrawId(), kind: "f", pts: [{ t: at.t, p: at.p }], color }
+        : { id: newDrawId(), kind: "t", t1: at.t, p1: at.p, t2: at.t, p2: at.p, color };
+    lastPxRef.current = { x: at.x, y: at.y };
+    paintOverlay();
+  };
+
+  const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const d = draftRef.current;
+    if (!d) return;
+    const at = atPointer(e);
+    if (!at) return;
+    if (d.kind === "f") {
+      // Drop samples under 2px apart: the pointer fires far faster than the hand moves, and the
+      // extra points are pure jitter that the curve would faithfully reproduce as wobble.
+      const last = lastPxRef.current;
+      if (last && Math.hypot(at.x - last.x, at.y - last.y) < 2) return;
+      lastPxRef.current = { x: at.x, y: at.y };
+      d.pts.push({ t: at.t, p: at.p });
+    } else if (d.kind === "t") {
+      d.t2 = at.t;
+      d.p2 = at.p;
+    }
+    paintOverlay();
+  };
+
+  const onDrawUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const d = draftRef.current;
+    draftRef.current = null;
+    lastPxRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (!d) return;
+    // A stray click that never became a line is a mis-click, not a drawing.
+    const tooSmall =
+      (d.kind === "f" && d.pts.length < 2) || (d.kind === "t" && d.t1 === d.t2 && d.p1 === d.p2);
+    dirtyRef.current += 1;
+    if (tooSmall) {
+      paintOverlay();
+      return;
+    }
+    saveDrawings((prev) => [...prev, d]);
+    setDrawMode("off");
+  };
+
   const change = legend ? legend.close - legend.open : 0;
   const changePct = legend && legend.open ? (change / legend.open) * 100 : 0;
 
@@ -1283,7 +1813,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   };
 
   return (
-    <div className="relative">
+    <div ref={rootRef} className={`relative${isFull ? " flex min-h-0 flex-1 flex-col" : ""}`}>
       <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-1.5">
         {EMA_CONFIG.map(({ period, color }) => (
           <button
@@ -1363,6 +1893,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         >
           {ctxBusy ? "…" : "🗺️ Read"}
         </button>
+        {/* Only appears once the map has drawn levels — the way to clear them after you've closed
+            the panel to look at the chart. */}
+        {ctxLevels && (
+          <button
+            onClick={() => setCtxLevels(null)}
+            className="rounded bg-sky-950/60 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white"
+            title="Hide the price map's support/resistance levels"
+          >
+            📍 Levels ✕
+          </button>
+        )}
         <button
           onClick={loadScenarios}
           disabled={scenBusy}
@@ -1378,28 +1919,174 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         >
           ⊹ Recenter
         </button>
+
+        {/* Hand-drawn lines: arm a tool, click the chart. Saved per pair and kept until deleted. */}
+        <span className="ml-1 flex items-center gap-1 border-l border-neutral-800 pl-2">
+          {([
+            ["f", "🖊 Pen", "Free hand — press and drag to draw any shape, exactly like a pen on paper."],
+            ["t", "╱ Trend", "Trend line — press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
+            ["h", "─ Level", "Level — one click puts a horizontal line across the whole chart, with its price on the axis."],
+          ] as const).map(([mode, label, tip]) => (
+            <button
+              key={mode}
+              onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode((m) => (m === mode ? "off" : mode)); }}
+              className={`rounded px-2 py-0.5 text-xs transition ${drawMode === mode ? "bg-sky-600 text-white" : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"}`}
+              title={tip}
+            >
+              {label}
+            </button>
+          ))}
+          {drawings.length > 0 && (
+            <button
+              onClick={() => setDrawList((v) => !v)}
+              className={`rounded px-2 py-0.5 text-xs transition ${drawList ? "bg-neutral-700 text-white" : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"}`}
+              title={`${drawings.length} saved drawing${drawings.length === 1 ? "" : "s"} on ${symbol} — open to review or delete`}
+            >
+              📐 {drawings.length}
+            </button>
+          )}
+        </span>
       </div>
 
       {ctx && (
-        <div className="absolute right-2 top-10 z-30 max-h-[580px] w-[22rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 text-xs shadow-xl">
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="font-semibold text-sky-300">🗺️ Price map — {ctx.symbol}</span>
-            <button onClick={() => setCtx(null)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
+        <div
+          data-panel
+          style={ctxDrag.style}
+          className="absolute right-2 top-10 z-30 max-h-[580px] w-[22rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 text-xs shadow-xl"
+        >
+          {/* Grab anywhere on this header bar to move the panel; double-click it to snap back. */}
+          <div
+            {...ctxDrag.handle}
+            // Sticky: the panel scrolls, and a grab handle that scrolls out of reach is no handle.
+            className="sticky -top-3 z-10 -mx-3 -mt-3 mb-1.5 flex cursor-move touch-none select-none items-center justify-between border-b border-neutral-800 bg-neutral-900/95 px-3 py-2"
+            title="Drag to move this panel · double-click to snap it back to the corner"
+          >
+            {/* The timeframe is part of the title: the same pair reads completely differently on
+                5m and 4h, so a reading without its timeframe is ambiguous. */}
+            <span className="font-semibold text-sky-300">
+              <span className="mr-1 text-neutral-600">⠿</span>🗺️ Price map — {ctx.symbol}
+              <span className="ml-1 rounded bg-sky-950/70 px-1.5 py-0.5 text-[10px] text-sky-300">
+                {ctx.timeframe}
+              </span>
+            </span>
+            <span className="flex items-center gap-2">
+              {ctxDrag.moved && (
+                <button
+                  onClick={ctxDrag.reset}
+                  className="rounded px-1 text-neutral-600 hover:bg-neutral-800 hover:text-neutral-200"
+                  title="Snap back to the top-right corner"
+                >
+                  ⇱
+                </button>
+              )}
+              {/* The reading is a snapshot of a moving market, so it always says WHEN it was taken —
+                  a stale read looks identical to a fresh one otherwise. */}
+              {ctxAt && (
+                <span className="text-[10px] text-neutral-500" title={ctxAt.toLocaleString()}>
+                  read {ctxAt.toLocaleTimeString()}
+                </span>
+              )}
+              <button
+                onClick={loadContext}
+                disabled={ctxBusy}
+                className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-sky-300 disabled:opacity-50"
+                title="Re-read the chart now — recomputes every factor and the levels from the latest candles"
+              >
+                {ctxBusy ? "…" : "↻"}
+              </button>
+              <button onClick={() => setCtx(null)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
+            </span>
           </div>
-          <div className="mb-2 rounded bg-neutral-800/60 px-2 py-1 text-center text-sm font-semibold">
+          <div className="mb-1 rounded bg-neutral-800/60 px-2 py-1 text-center text-sm font-semibold">
             {ctx.overall_bias}
           </div>
-          <table className="mb-2 w-full">
-            <tbody>
-              {ctx.scorecard.map((s) => (
-                <tr key={s.factor} className="align-top">
-                  <td className="py-0.5 pr-1 text-neutral-500">{s.signal}</td>
-                  <td className="py-0.5 pr-2 font-medium text-neutral-300">{s.factor}</td>
-                  <td className="py-0.5 text-neutral-400">{s.note}</td>
-                </tr>
+          {/* The count of which way each factor leans — readable in two seconds, before you read
+              the rows properly. */}
+          {ctx.tally && (
+            <div className="mb-2 text-center text-[11px] text-neutral-500">{ctx.tally}</div>
+          )}
+
+          {/* Timeframe comparison, above the detail: whether you're with or against the bigger
+              picture changes whether the setup below is even worth taking. */}
+          {(ctx.tf_compare?.length ?? 0) > 0 && (
+            <div className="mb-2 rounded border border-neutral-800 bg-neutral-800/20 p-1.5">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+                Timeframe check
+              </div>
+              {ctx.tf_compare!.map((r) => (
+                <div key={r.tf} className="flex items-baseline gap-1.5 py-0.5">
+                  <span>{r.signal}</span>
+                  <span
+                    className={`w-14 shrink-0 font-semibold ${r.is_chart ? "text-sky-300" : "text-neutral-300"}`}
+                  >
+                    {r.tf}
+                    {r.is_chart && <span className="ml-0.5 text-[9px] text-neutral-500">chart</span>}
+                  </span>
+                  <span
+                    className={`w-14 shrink-0 font-medium ${
+                      r.verdict === "bullish" ? "text-bull" : r.verdict === "bearish" ? "text-bear" : "text-neutral-500"
+                    }`}
+                  >
+                    {r.verdict}
+                  </span>
+                  <span className="min-w-0 flex-1 text-[11px] text-neutral-500">{r.note}</span>
+                </div>
               ))}
-            </tbody>
-          </table>
+              {ctx.alignment && (
+                <div
+                  className={`mt-1 border-t border-neutral-800 pt-1 font-medium ${
+                    ctx.alignment.startsWith("ALIGNED")
+                      ? "text-bull"
+                      : ctx.alignment.startsWith("CONFLICTED")
+                        ? "text-bear"
+                        : "text-amber-300"
+                  }`}
+                >
+                  {ctx.alignment}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Every factor states its reading AND which side that reading argues for. A number on
+              its own ("RSI 72") is trivia; "72 and falling — buyers ran out" is a trade. */}
+          <div className="mb-2 space-y-1.5">
+            {ctx.scorecard.map((s) => {
+              const side = s.implies?.startsWith("supports LONG")
+                ? "text-bull"
+                : s.implies?.startsWith("supports SHORT")
+                  ? "text-bear"
+                  : "text-neutral-500";
+              return (
+                <div key={s.factor} className="rounded bg-neutral-800/30 px-2 py-1">
+                  <div className="flex items-baseline gap-1.5">
+                    <span>{s.signal}</span>
+                    <span className="font-semibold text-neutral-200">{s.factor}</span>
+                    <span className="text-neutral-400">{s.note}</span>
+                  </div>
+                  {s.implies && <div className={`mt-0.5 pl-5 font-medium ${side}`}>→ {s.implies}</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* "Trade the break of the nearest level" is only actionable if you can SEE the levels. */}
+          {((ctx.resistance_ladder?.length ?? 0) > 0 || (ctx.support_ladder?.length ?? 0) > 0) && (
+            <button
+              onClick={() =>
+                setCtxLevels((v) =>
+                  v ? null : { res: ctx.resistance_ladder ?? [], sup: ctx.support_ladder ?? [] },
+                )
+              }
+              className={`mb-2 w-full rounded border py-1 font-medium transition ${
+                ctxLevels
+                  ? "border-sky-600 bg-sky-950/50 text-sky-200"
+                  : "border-neutral-700 text-neutral-300 hover:border-sky-700 hover:text-sky-200"
+              }`}
+            >
+              {ctxLevels ? "📍 Hide these levels" : "📍 Show these levels on the chart"}
+            </button>
+          )}
           {ctx.scenarios.length > 0 && (
             <div className="mb-2 space-y-1 border-t border-neutral-800 pt-1.5">
               <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Scenarios</div>
@@ -1417,7 +2104,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             </div>
           )}
           {ctx.invalidation && <div className="mb-2 text-amber-300">⚠ {ctx.invalidation}</div>}
-          <div className="border-t border-neutral-800 pt-1.5 text-[10px] text-neutral-600">
+          <div className="border-t border-neutral-800 pt-1.5 text-[10px] leading-relaxed text-neutral-600">
+            {/* The dots mean WHICH SIDE, not good/bad. Without saying so, a red RSI reads as a
+                warning against a short when it is in fact the argument for one. */}
+            🟢 argues for a LONG · 🔴 argues for a SHORT · 🟡 no directional edge.
+            <br />
             Info only — it does NOT change the engine's decision; it's for your Mode‑A call.
           </div>
         </div>
@@ -1439,31 +2130,125 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         </div>
       )}
 
-      {legend && (
-        <div className="pointer-events-none absolute left-2 top-9 z-10 flex gap-2 text-xs tabular-nums">
-          <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.open)}</span></span>
-          <span className="text-neutral-400">H<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.high)}</span></span>
-          <span className="text-neutral-400">L<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.low)}</span></span>
-          <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.close)}</span></span>
-          <span className={change >= 0 ? "text-bull" : "text-bear"}>
-            {change >= 0 ? "+" : ""}{fmtPrice(change)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
-          </span>
+      {/* Review + delete. Every drawing is listed with what it is and where, so you can remove one
+          precisely — a chart you can only clear wholesale is one you stop annotating. */}
+      {drawList && drawings.length > 0 && (
+        <div className="absolute right-2 top-10 z-40 max-h-[420px] w-[19rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 text-xs shadow-xl">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-semibold text-sky-300">📐 My drawings — {symbol}</span>
+            <button onClick={() => setDrawList(false)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
+          </div>
+          <ul className="space-y-1">
+            {drawings.map((d) => (
+              <li key={d.id} className="flex items-center gap-2 rounded bg-neutral-800/50 px-2 py-1">
+                <span className="h-0.5 w-4 shrink-0 rounded" style={{ backgroundColor: d.color }} />
+                <span className="min-w-0 flex-1 truncate text-neutral-300">
+                  {d.kind === "h" ? (
+                    <>Level <span className="tabular-nums text-neutral-100">{fmtPrice(d.price)}</span></>
+                  ) : d.kind === "t" ? (
+                    <>
+                      Trend{" "}
+                      <span className="tabular-nums text-neutral-100">{fmtPrice(d.p1)} → {fmtPrice(d.p2)}</span>
+                      <span className="ml-1 text-neutral-500">{new Date(d.t1 * 1000).toLocaleDateString()}</span>
+                    </>
+                  ) : (
+                    <>
+                      Drawing{" "}
+                      <span className="text-neutral-500">{d.pts.length} pts</span>
+                      <span className="ml-1 text-neutral-500">
+                        {d.pts.length ? new Date(d.pts[0].t * 1000).toLocaleDateString() : ""}
+                      </span>
+                    </>
+                  )}
+                </span>
+                <button
+                  onClick={() => saveDrawings((prev) => prev.filter((x) => x.id !== d.id))}
+                  className="shrink-0 rounded px-1 text-neutral-500 hover:bg-bear/20 hover:text-bear"
+                  title="Delete this drawing"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button
+            onClick={() => { saveDrawings(() => []); setDrawList(false); }}
+            className="mt-2 w-full rounded border border-neutral-700 py-1 text-neutral-400 hover:border-bear/60 hover:text-bear"
+          >
+            Delete all {drawings.length}
+          </button>
+          <p className="mt-2 text-[10px] leading-snug text-neutral-500">
+            Saved on this device for {symbol}, on every timeframe, until you delete them.
+          </p>
         </div>
       )}
 
-      {dragHint && (
-        <div
-          className={`pointer-events-none absolute left-1/2 top-9 z-20 -translate-x-1/2 rounded px-2 py-1 text-xs font-semibold text-white shadow ${
-            dragHint.label === "SL" ? "bg-bear/90" : dragHint.label === "TP" ? "bg-bull/90" : "bg-amber-500/90"
-          }`}
+      {/* The OHLC readout, the drag hint and the full-screen button are anchored to the CHART, not
+          to the component. Anchoring them to the component meant guessing the toolbar's height —
+          and the moment the toolbar wrapped to a second row, that row landed on top of the OHLC
+          numbers. A wrapping toolbar now just pushes the chart (and everything on it) down. */}
+      <div className={`relative${isFull ? " min-h-0 flex-1" : ""}`}>
+        {legend && (
+          <div className="pointer-events-none absolute left-2 top-2 z-10 flex gap-2 text-xs tabular-nums">
+            <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.open)}</span></span>
+            <span className="text-neutral-400">H<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.high)}</span></span>
+            <span className="text-neutral-400">L<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.low)}</span></span>
+            <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.close)}</span></span>
+            <span className={change >= 0 ? "text-bull" : "text-bear"}>
+              {change >= 0 ? "+" : ""}{fmtPrice(change)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
+            </span>
+          </div>
+        )}
+
+        {dragHint && (
+          <div
+            className={`pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded px-2 py-1 text-xs font-semibold text-white shadow ${
+              dragHint.label === "SL" ? "bg-bear/90" : dragHint.label === "TP" ? "bg-bull/90" : "bg-amber-500/90"
+            }`}
+          >
+            {dragHint.label} → {fmtPrice(dragHint.price)}{" "}
+            {dragHint.pos && usdAtLevel(dragHint.pos, dragHint.price) && (
+              <span>({usdAtLevel(dragHint.pos, dragHint.price)})</span>
+            )}
+          </div>
+        )}
+
+        {/* Says exactly which click comes next — a tool that's armed but silent gets forgotten,
+            and the next click on the chart then becomes a surprise. */}
+        {drawMode !== "off" && (
+          <div className="pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded bg-sky-600/90 px-2 py-1 text-xs font-semibold text-white shadow">
+            {drawMode === "h"
+              ? "Click the price for your level"
+              : drawMode === "f"
+                ? "Press and drag to draw"
+                : "Press at the start, drag to the end, release"}
+            <span className="ml-2 font-normal text-sky-100/80">Esc to cancel</span>
+          </div>
+        )}
+
+        {/* Sits over the chart's top-right corner (clear of the ~72px price axis) rather than at
+            the end of the toolbar, where it was one more chip competing for a row that wraps. */}
+        <button
+          onClick={toggleFullscreen}
+          className="absolute right-[78px] top-1.5 z-20 rounded border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-xs text-neutral-300 shadow backdrop-blur-sm transition hover:border-sky-600 hover:bg-neutral-800 hover:text-white"
+          title={isFull ? "Exit full screen (Esc)" : "Full screen — price, RSI and MACD together"}
         >
-          {dragHint.label} → {fmtPrice(dragHint.price)}{" "}
-          {dragHint.pos && usdAtLevel(dragHint.pos, dragHint.price) && (
-            <span>({usdAtLevel(dragHint.pos, dragHint.price)})</span>
-          )}
-        </div>
-      )}
-      <div ref={containerRef} className="h-[600px] w-full" />
+          {isFull ? "⤡ Exit" : "⛶ Full screen"}
+        </button>
+
+        <div ref={containerRef} className={isFull ? "h-full w-full" : "h-[600px] w-full"} />
+
+        {/* The ink layer. Transparent to the mouse unless a tool is armed, so the crosshair, the
+            SL/TP drags and panning all behave normally the rest of the time. */}
+        <canvas
+          ref={drawCanvasRef}
+          onPointerDown={onDrawDown}
+          onPointerMove={onDrawMove}
+          onPointerUp={onDrawUp}
+          onPointerCancel={onDrawUp}
+          className={`absolute inset-0 z-10 ${drawMode === "off" ? "pointer-events-none" : "cursor-crosshair touch-none"}`}
+        />
+      </div>
       {(() => {
         const hasPos = !!myPos;
         const hasProp = !!proposal && proposal.direction !== "no_trade" && !hasPos;
@@ -1498,21 +2283,29 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           </div>
         );
       })()}
+      {/* Each pane keeps its dragged height in full screen too, so the price chart (flex-1) simply
+          absorbs whatever height the indicators don't claim. */}
       {showRsi && (
-        <div className="relative mt-1">
-          <span className="pointer-events-none absolute left-2 top-1 z-10 text-xs text-purple-300">RSI 14</span>
-          <div ref={rsiContainerRef} className="h-[120px] w-full" />
-        </div>
+        <>
+          <PaneResizer height={rsiH} onChange={setRsiH} label="RSI" />
+          <div className="relative shrink-0" style={{ height: rsiH }}>
+            <span className="pointer-events-none absolute left-2 top-1 z-10 text-xs text-purple-300">RSI 14</span>
+            <div ref={rsiContainerRef} className="h-full w-full" />
+          </div>
+        </>
       )}
       {showMacd && (
-        <div className="relative mt-1">
-          <span className="pointer-events-none absolute left-2 top-1 z-10 flex gap-2 text-xs">
-            <span className="text-neutral-400">MACD 12 26 9</span>
-            <span className="text-blue-300">MACD</span>
-            <span className="text-amber-400">signal</span>
-          </span>
-          <div ref={macdContainerRef} className="h-[120px] w-full" />
-        </div>
+        <>
+          <PaneResizer height={macdH} onChange={setMacdH} label="MACD" />
+          <div className="relative shrink-0" style={{ height: macdH }}>
+            <span className="pointer-events-none absolute left-2 top-1 z-10 flex gap-2 text-xs">
+              <span className="text-neutral-400">MACD 12 26 9</span>
+              <span className="text-blue-300">MACD</span>
+              <span className="text-amber-400">signal</span>
+            </span>
+            <div ref={macdContainerRef} className="h-full w-full" />
+          </div>
+        </>
       )}
     </div>
   );

@@ -50,9 +50,12 @@ export const api = {
     ),
 
   // Plain-language "where is price + do RSI/volume/ATR confirm?" read for the current pair.
-  context: (symbol: string, assetClass: AssetClass) =>
+  // `timeframe` is the chart being read — every candle-derived factor is computed on it, so the
+  // reading describes the chart you're looking at rather than always the 1h.
+  context: (symbol: string, assetClass: AssetClass, timeframe = "1h") =>
     request<import("../types").MarketContext>(
-      `/api/market/context?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+      `/api/market/context?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}` +
+        `&timeframe=${encodeURIComponent(timeframe)}`,
     ),
 
   // AI two-scenario read (ranked + scored + why-primary). INFO only. Falls back to deterministic.

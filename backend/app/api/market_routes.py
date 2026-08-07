@@ -87,14 +87,18 @@ def market_levels(
 def market_context(
     symbol: str = Query(...),
     asset_class: AssetClass = Query(AssetClass.STOCK),
+    timeframe: str = Query("1h"),
     session: Session = Depends(get_session),
 ) -> dict:
     """Plain-language 'where is price on the map + do RSI/volume/ATR confirm?' read (INFO only — it
     does not gate trades). Reads multi-TF S/R, the regression channel, and HH/HL structure, then gives
-    a short-term + medium-term lean and a level to watch — for the user's Mode-A approve/reject call."""
+    a short-term + medium-term lean and a level to watch — for the user's Mode-A approve/reject call.
+
+    ``timeframe`` is the chart being read: every candle-derived reading is computed on it, so the
+    analysis matches the chart in front of you instead of always describing the 1h."""
     from app.agents.context import build_context
 
-    ctx = build_context(session, symbol, asset_class)
+    ctx = build_context(session, symbol, asset_class, timeframe)
     if ctx is None:
         raise HTTPException(status_code=503, detail="market context unavailable (no data)")
     return ctx

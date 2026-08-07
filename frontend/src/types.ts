@@ -421,8 +421,11 @@ export interface MarketContext {
   symbol: string;
   price: number;
   timeframe: string;
-  nearest_resistance: { price: number; tf: string; kind: string } | null;
-  nearest_support: { price: number; tf: string; kind: string } | null;
+  nearest_resistance: { price: number; tf: string; kind: string; tests?: number } | null;
+  nearest_support: { price: number; tf: string; kind: string; tests?: number } | null;
+  // The next 2–3 levels each way, nearest first — what the "show levels" button plots.
+  resistance_ladder?: { price: number; tf: string; tests: number }[];
+  support_ladder?: { price: number; tf: string; tests: number }[];
   structure: string;
   choch: boolean;
   channel: string | null;
@@ -431,7 +434,13 @@ export interface MarketContext {
   atr: string | null;
   price_action: string;
   volume_trend: string;
-  scorecard: { factor: string; signal: string; note: string }[];
+  // `implies` says which SIDE the reading argues for — a number without that is just trivia.
+  scorecard: { factor: string; signal: string; note: string; implies?: string }[];
+  tally?: string;
+  // The chart's timeframe plus the two above it, each with the same four reads and a verdict,
+  // and one sentence on whether they agree.
+  tf_compare?: { tf: string; is_chart: boolean; verdict: string; votes: number; signal: string; note: string }[];
+  alignment?: string | null;
   overall_bias: string;
   scenarios: { prob: string; label: string; text: string }[];
   invalidation: string | null;
