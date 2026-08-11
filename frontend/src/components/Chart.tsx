@@ -19,7 +19,7 @@ import {
 import { api } from "../api/client";
 import { ScenarioCard } from "./ScenarioCard";
 import { fmtPrice } from "../format";
-import type { AiScenarioRead, AssetClass, Candle, MarketContext, PositionView, TradeProposal } from "../types";
+import type { AiScenarioRead, AssetClass, BreakPlan, Candle, MarketContext, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
 // Persist a small chart UI toggle across refreshes AND pair changes (localStorage-backed useState).
@@ -49,15 +49,48 @@ function usePersisted<T>(key: string, initial: T, merge = false) {
   return [v, setV] as const;
 }
 
+// --- Local time on the chart -------------------------------------------------------------------
+// The backend sends real UTC (verified against the broker feed), and lightweight-charts renders
+// every UTCTimestamp as UTC — it has no timezone support at all. So a trader in UTC+4 sees an axis
+// four hours behind their own clock, which makes "did this happen during the London session?" a
+// mental arithmetic problem on every glance.
+//
+// The fix is to hand the library UTC-plus-local-offset, so its UTC rendering lands on local wall
+// clock. Everything the library draws — axis labels, the crosshair time, marker positions — then
+// reads in the trader's own time.
+//
+// The offset is taken PER TIMESTAMP rather than once, because getTimezoneOffset() reports the
+// offset in force on THAT date. Bars either side of a daylight-saving change each get the right
+// one; a single constant would slide half the history by an hour twice a year.
+const utcToDisp = (utcSec: number): number => utcSec - new Date(utcSec * 1000).getTimezoneOffset() * 60;
+const dispToUtc = (dispSec: number): number => dispSec + new Date(dispSec * 1000).getTimezoneOffset() * 60;
+
+// What to tell the user their axis is in, e.g. "Asia/Dubai (UTC+4)".
+const TZ_LABEL = (() => {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+    const hrs = -new Date().getTimezoneOffset() / 60;
+    const abs = Math.abs(hrs);
+    return `${zone} (UTC${hrs < 0 ? "−" : "+"}${Number.isInteger(abs) ? abs : abs.toFixed(1)})`;
+  } catch {
+    return "your local time";
+  }
+})();
+
 // Drag a floating panel around by its header. The position is remembered: a panel you have to
 // shove out of the way every time you open it is a panel you stop opening.
 //
 // The panel starts anchored with CSS (top-right). On the first drag we switch it to explicit
 // left/top at wherever it currently sits — computing that from its real rectangle, so it doesn't
 // jump on the first pixel of the drag.
+// It also resizes, from a corner grip. A panel that only moves still forces you to scroll a long
+// reading through a short window; on a full-screen chart there is plenty of room to just make it
+// bigger. Size is stored alongside position, so both survive a reload.
 function useDragPanel(key: string, rootRef: React.RefObject<HTMLDivElement | null>) {
-  const [pos, setPos] = usePersisted<{ x: number; y: number } | null>(key, null);
+  type Box = { x: number; y: number; w?: number; h?: number };
+  const [pos, setPos] = usePersisted<Box | null>(key, null);
   const grab = useRef<{ dx: number; dy: number; el: HTMLElement } | null>(null);
+  const size = useRef<{ x0: number; y0: number; w0: number; h0: number; el: HTMLElement } | null>(null);
 
   const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {
     // Buttons living in the header (refresh, close) must still be clickable.
@@ -68,7 +101,7 @@ function useDragPanel(key: string, rootRef: React.RefObject<HTMLDivElement | nul
     const pr = panel.getBoundingClientRect();
     const rr = root.getBoundingClientRect();
     grab.current = { dx: e.clientX - pr.left, dy: e.clientY - pr.top, el: panel };
-    setPos({ x: pr.left - rr.left, y: pr.top - rr.top });
+    setPos((p) => ({ ...p, x: pr.left - rr.left, y: pr.top - rr.top }));
     e.currentTarget.setPointerCapture(e.pointerId);
     e.preventDefault();
   };
@@ -83,7 +116,7 @@ function useDragPanel(key: string, rootRef: React.RefObject<HTMLDivElement | nul
     const KEEP = 80;
     const x = Math.min(Math.max(e.clientX - rr.left - g.dx, KEEP - g.el.offsetWidth), rr.width - KEEP);
     const y = Math.min(Math.max(e.clientY - rr.top - g.dy, 0), Math.max(0, rr.height - 30));
-    setPos({ x, y });
+    setPos((p) => ({ ...p, x, y }));
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLElement>) => {
@@ -91,15 +124,73 @@ function useDragPanel(key: string, rootRef: React.RefObject<HTMLDivElement | nul
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
+  // --- corner grip: resize from the bottom-right ---
+  const onResizeDown = (e: React.PointerEvent<HTMLElement>) => {
+    const panel = e.currentTarget.closest("[data-panel]") as HTMLElement | null;
+    const root = rootRef.current;
+    if (!panel || !root) return;
+    const pr = panel.getBoundingClientRect();
+    const rr = root.getBoundingClientRect();
+    size.current = { x0: e.clientX, y0: e.clientY, w0: pr.width, h0: pr.height, el: panel };
+    // Pin the current position too: once an explicit size is set, a right-anchored panel would
+    // otherwise grow leftwards, away from the grip you're dragging.
+    setPos({ x: pr.left - rr.left, y: pr.top - rr.top, w: pr.width, h: pr.height });
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const onResizeMove = (e: React.PointerEvent<HTMLElement>) => {
+    const s = size.current;
+    const root = rootRef.current;
+    if (!s || !root) return;
+    const rr = root.getBoundingClientRect();
+    const left = s.el.getBoundingClientRect().left - rr.left;
+    const top = s.el.getBoundingClientRect().top - rr.top;
+    const w = Math.min(Math.max(s.w0 + (e.clientX - s.x0), 240), Math.max(240, rr.width - left - 4));
+    const h = Math.min(Math.max(s.h0 + (e.clientY - s.y0), 140), Math.max(140, rr.height - top - 4));
+    setPos((p) => ({ x: p?.x ?? left, y: p?.y ?? top, w, h }));
+  };
+
+  const onResizeUp = (e: React.PointerEvent<HTMLElement>) => {
+    size.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
   return {
-    style: pos ? ({ left: pos.x, top: pos.y, right: "auto", bottom: "auto" } as const) : undefined,
+    // maxHeight is cleared once an explicit height exists, otherwise the Tailwind max-h-[…] cap
+    // would silently ignore anything you drag past it.
+    style: pos
+      ? ({
+          left: pos.x, top: pos.y, right: "auto", bottom: "auto",
+          ...(pos.w ? { width: pos.w } : {}),
+          ...(pos.h ? { height: pos.h, maxHeight: "none" } : {}),
+        } as const)
+      : undefined,
     moved: pos != null,
     reset: () => setPos(null),
     handle: {
       onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp,
       onDoubleClick: () => setPos(null),
     },
+    resize: {
+      onPointerDown: onResizeDown, onPointerMove: onResizeMove,
+      onPointerUp: onResizeUp, onPointerCancel: onResizeUp,
+    },
   };
+}
+
+// The corner grip itself. Sticky so it stays reachable at the bottom of a panel that scrolls.
+function PanelGrip({ resize }: { resize: Record<string, unknown> }) {
+  return (
+    <div className="sticky bottom-0 -mb-2 flex justify-end pt-1">
+      <div
+        {...resize}
+        title="Drag to resize this panel"
+        className="h-3.5 w-3.5 shrink-0 cursor-nwse-resize touch-none rounded-sm border-b-2 border-r-2 border-neutral-600 transition hover:border-sky-500"
+      />
+    </div>
+  );
 }
 
 // --- Hand-drawn lines ------------------------------------------------------------------------
@@ -608,16 +699,30 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [ctxAt, setCtxAt] = useState<Date | null>(null);   // when this reading was taken
   const rootRef = useRef<HTMLDivElement>(null);            // drag frame for the floating panels
   const ctxDrag = useDragPanel("chart.ctxPos", rootRef);
+  const scenDrag = useDragPanel("chart.scenPos", rootRef);
   // The price map's S/R ladder, plotted on request. Held as its OWN copy rather than read from
   // `ctx`, so closing the map panel to actually look at the chart doesn't wipe the levels you just
   // asked it to draw — which is the whole reason you drew them.
   type Lv = { price: number; tf: string; tests: number };
   const [ctxLevels, setCtxLevels] = useState<{ res: Lv[]; sup: Lv[] } | null>(null);
   const ctxLinesRef = useRef<IPriceLine[]>([]);
+  // Break plans plotted on request — each side is independent, so you can look at just the one
+  // you're actually considering instead of six lines at once.
+  const [ctxPlans, setCtxPlans] = useState<{ side: "up" | "down"; plan: BreakPlan }[]>([]);
+  const planLinesRef = useRef<IPriceLine[]>([]);
   const [scen, setScen] = useState<AiScenarioRead | null>(null);
   const [scenBusy, setScenBusy] = useState(false);
 
-  const toTime = (c: Candle) => Math.floor(Date.parse(c.ts) / 1000) as UTCTimestamp;
+  // Every candle-derived time on this chart goes through here, so the whole chart shares one
+  // clock. Mixing shifted and unshifted values would put markers on the wrong bars.
+  //
+  // The zone marker is forced on: the API sends "…Z" today, but a serializer change that dropped
+  // it would make Date.parse read the string as LOCAL, and the resulting whole-hours error would
+  // look like plausible data rather than a bug.
+  const toTime = (c: Candle) => {
+    const iso = /[Zz]|[+-]\d{2}:?\d{2}$/.test(c.ts) ? c.ts : `${c.ts}Z`;
+    return utcToDisp(Math.floor(Date.parse(iso) / 1000)) as UTCTimestamp;
+  };
 
   // Create the main chart + series once.
   useEffect(() => {
@@ -828,7 +933,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         if (cancelled || !seriesRef.current || !volumeRef.current) return;
         candlesRef.current = series.candles;
         // Drawings map pixels↔time through the bar times, so refresh that lookup with the data.
-        barTimesRef.current = series.candles.map((c) => Math.floor(Date.parse(c.ts) / 1000));
+        barTimesRef.current = series.candles.map((c) => toTime(c) as number);
         setDataV((v) => v + 1);
         const candleData: CandlestickData[] = series.candles.map((c) => ({
           time: toTime(c), open: c.open, high: c.high, low: c.low, close: c.close,
@@ -1054,7 +1159,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       if (p.symbol.toUpperCase() !== symbol.toUpperCase() || !p.opened_at) continue;
       // Broker timestamps may arrive without a zone marker; they are UTC, and the candles are too.
       const iso = /[Zz]|[+-]\d{2}:?\d{2}$/.test(p.opened_at) ? p.opened_at : `${p.opened_at}Z`;
-      const at = Date.parse(iso) / 1000;
+      const at = utcToDisp(Date.parse(iso) / 1000);   // same clock as toTime(), so the compare below holds
       if (!Number.isFinite(at)) continue;
       // The candle the entry falls INSIDE: the last one that had already opened by then. Anchoring
       // to the next bar instead would draw the marker after the fact.
@@ -1201,6 +1306,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       // next to a new reading is the one genuinely dangerous outcome here — you'd be trading a
       // level the analysis no longer thinks is there.
       setCtxLevels((v) => (v ? { res: next.resistance_ladder ?? [], sup: next.support_ladder ?? [] } : v));
+      // Same rule for the break plans: re-point them at the fresh numbers, and drop a side the new
+      // read no longer offers rather than leaving its old trigger sitting on the chart.
+      setCtxPlans((prev) =>
+        prev.flatMap(({ side }): { side: "up" | "down"; plan: BreakPlan }[] => {
+          const fresh = side === "up" ? next.breakout_up : next.breakdown;
+          return fresh ? [{ side, plan: fresh }] : [];
+        }),
+      );
     } catch {
       setCtx(null);
     } finally {
@@ -1215,20 +1328,27 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   loadCtxRef.current = loadContext;
   const ctxOpenRef = useRef(false);
   ctxOpenRef.current = ctx != null;
+  const loadScenRef = useRef<() => Promise<void>>(async () => {});
+  const scenOpenRef = useRef(false);
+  scenOpenRef.current = scen != null;
   useEffect(() => {
     if (ctxOpenRef.current) void loadCtxRef.current();
+    if (scenOpenRef.current) void loadScenRef.current();
   }, [symbol, timeframe, assetClass]);
 
-  const loadScenarios = async () => {
+  // `force` is only ever true from the ↻ button. Opening the panel and switching timeframes reuse
+  // the server's cached reads, so moving 1h → 15m → 1h → 4h costs nothing.
+  const loadScenarios = async (force = false) => {
     setScenBusy(true);
     try {
-      setScen(await api.scenarios(symbol, assetClass));
+      setScen(await api.scenarios(symbol, assetClass, timeframe, force));
     } catch {
       setScen(null);
     } finally {
       setScenBusy(false);
     }
   };
+  loadScenRef.current = () => loadScenarios(false);
 
   // Live quote -> update the last candle.
   useEffect(() => {
@@ -1315,6 +1435,28 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     ctxLevels.sup.forEach((lv, i) => add(lv, i, false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctxLevels, symbol, timeframe]);
+
+  // The break plans: trigger / target / stop for each side. Coloured by ROLE (amber trigger, green
+  // target, red stop) rather than by side, so a line's colour always means the same thing; the ▲/▼
+  // prefix and the line style say which plan it belongs to.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    planLinesRef.current.forEach((l) => series.removePriceLine(l));
+    planLinesRef.current = [];
+    for (const { side, plan } of ctxPlans) {
+      const up = side === "up";
+      const tag = up ? "▲" : "▼";
+      const style = up ? LineStyle.Solid : LineStyle.Dashed;
+      const add = (price: number, color: string, title: string) =>
+        planLinesRef.current.push(
+          series.createPriceLine({ price, color, lineWidth: 2, lineStyle: style, axisLabelVisible: true, title }),
+        );
+      add(plan.trigger, "#f59e0b", `${tag} Trigger · ${plan.strength} ${plan.tests}x · ${plan.rr}:1`);
+      add(plan.target, "#26a69a", `${tag} Target`);
+      add(plan.stop, "#ef5350", `${tag} Stop`);
+    }
+  }, [ctxPlans, symbol, timeframe]);
 
   // Open-position overlay (solid lines) — drawn from live broker positions for THIS symbol,
   // so an open trade's entry/SL/TP stays on the chart regardless of the current proposal.
@@ -1466,8 +1608,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     return Math.round(ts[i] + (l - i) * Math.max(1, ts[i + 1] - ts[i]));
   };
 
-  const xOfTime = (t: number): number | null => {
-    const l = logicalOfTime(t);
+  // Drawings are STORED in true UTC and converted at the boundary. Storing display time would peg
+  // a line to whatever offset was in force when it was drawn — it would jump an hour at a
+  // daylight-saving change, or land on the wrong bar entirely if the machine's timezone changed.
+  const xOfTime = (utcSec: number): number | null => {
+    const l = logicalOfTime(utcToDisp(utcSec));
     if (l == null) return null;
     const x = chartRef.current?.timeScale().logicalToCoordinate(l as Logical);
     return x == null ? null : Number(x);
@@ -1475,7 +1620,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   const timeOfX = (x: number): number | null => {
     const l = chartRef.current?.timeScale().coordinateToLogical(x);
-    return l == null ? null : timeOfLogical(Number(l));
+    if (l == null) return null;
+    const disp = timeOfLogical(Number(l));
+    return disp == null ? null : dispToUtc(disp);
   };
 
   // Repaint the overlay. Cheap enough to run on every frame the view changes: a few hundred
@@ -1885,10 +2032,18 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         >
           EMA20 H/L
         </button>
+        {/* States the clock the axis is in. Without it, "is 14:00 my time or the broker's?" is a
+            question you can only answer by counting candles back from now. */}
+        <span
+          className="ml-auto cursor-default rounded px-1.5 py-0.5 text-[10px] text-neutral-600"
+          title={`Chart times are shown in ${TZ_LABEL} — your computer's clock, not the broker's server time.`}
+        >
+          🕐 {TZ_LABEL}
+        </span>
         <button
           onClick={loadContext}
           disabled={ctxBusy}
-          className="ml-auto rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
+          className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
           title="Read: plain-language 'where is price on the map (S/R, channel, structure) + do RSI/volume/ATR confirm?' analysis for this pair. Info only — it does NOT change the engine's decision; it's for your Mode-A call."
         >
           {ctxBusy ? "…" : "🗺️ Read"}
@@ -1904,11 +2059,23 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             📍 Levels ✕
           </button>
         )}
+        {ctxPlans.length > 0 && (
+          <button
+            onClick={() => setCtxPlans([])}
+            className="rounded bg-sky-950/60 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white"
+            title="Hide the break plan lines (trigger / target / stop)"
+          >
+            🎯 Plan ✕
+          </button>
+        )}
         <button
-          onClick={loadScenarios}
+          // Explicitly force=false. Passing loadScenarios directly would hand it the click event,
+          // which is truthy — every press of this button would then bypass the cache and pay for a
+          // fresh run.
+          onClick={() => void loadScenarios(false)}
           disabled={scenBusy}
           className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-violet-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
-          title="AI scenarios: the AI reasons out TWO ranked, scored forward scenarios (anchored to the real S/R + structure) and explains why the chosen one is more likely. Info only — it does NOT change the engine's decision."
+          title="AI scenarios: the AI reasons out TWO ranked, scored forward scenarios (anchored to the real S/R + structure) and explains why the chosen one is more likely. Reuses a cached read for up to 15 minutes. Info only — it does NOT change the engine's decision."
         >
           {scenBusy ? "…" : "🤖 Scenarios"}
         </button>
@@ -2096,6 +2263,43 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
                   <span className="text-neutral-400"> — {s.text}</span>
                 </div>
               ))}
+
+              {/* Numbers in a paragraph are something you have to picture; on the chart you can
+                  see at a glance whether the trigger is reachable and whether the target has a
+                  wall sitting in front of it. Each side toggles alone — six lines at once, for a
+                  plan you've already discarded, is just clutter. */}
+              {(ctx.breakout_up || ctx.breakdown) && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {(() => {
+                    const entries: { side: "up" | "down"; plan: BreakPlan; label: string }[] = [];
+                    if (ctx.breakout_up) entries.push({ side: "up", plan: ctx.breakout_up, label: "▲ Break-up plan" });
+                    if (ctx.breakdown) entries.push({ side: "down", plan: ctx.breakdown, label: "▼ Break-down plan" });
+                    return entries.map(({ side, plan, label }) => {
+                      const on = ctxPlans.some((p) => p.side === side);
+                      return (
+                        <button
+                          key={side}
+                          onClick={() =>
+                            setCtxPlans((prev) =>
+                              prev.some((p) => p.side === side)
+                                ? prev.filter((p) => p.side !== side)
+                                : [...prev, { side, plan }],
+                            )
+                          }
+                          title={`Plot trigger ${fmtPrice(plan.trigger)}, target ${fmtPrice(plan.target)} and stop ${fmtPrice(plan.stop)} on the chart (${plan.rr}:1)`}
+                          className={`rounded border px-2 py-0.5 font-medium transition ${
+                            on
+                              ? "border-sky-600 bg-sky-950/50 text-sky-200"
+                              : "border-neutral-700 text-neutral-300 hover:border-sky-700 hover:text-sky-200"
+                          }`}
+                        >
+                          {on ? `Hide ${label.slice(2)}` : label}
+                        </button>
+                      );
+                    });
+                  })()}
+                </div>
+              )}
             </div>
           )}
           {ctx.playbook && (
@@ -2111,22 +2315,76 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             <br />
             Info only — it does NOT change the engine's decision; it's for your Mode‑A call.
           </div>
+          <PanelGrip resize={ctxDrag.resize} />
         </div>
       )}
 
       {scen && (
-        <div className="absolute left-2 top-10 z-30 max-h-[580px] w-[23rem] overflow-y-auto rounded-lg border border-violet-800/60 bg-neutral-900/95 p-3 shadow-xl">
-          <button
-            onClick={() => setScen(null)}
-            className="absolute right-2 top-2 text-neutral-500 hover:text-neutral-200"
-            title="Close"
+        <div
+          data-panel
+          style={scenDrag.style}
+          className="absolute left-2 top-10 z-30 flex max-h-[580px] w-[23rem] flex-col overflow-y-auto rounded-lg border border-violet-800/60 bg-neutral-900/95 p-3 shadow-xl"
+        >
+          {/* The close ✕ used to float over the card's own title; a real header bar gives it a home
+              AND gives the panel something to be dragged by. */}
+          <div
+            {...scenDrag.handle}
+            className="sticky -top-3 z-10 -mx-3 -mt-3 mb-2 flex shrink-0 cursor-move touch-none select-none items-center justify-between border-b border-violet-900/50 bg-neutral-900/95 px-3 py-2 text-xs"
+            title="Drag to move this panel · double-click to snap it back"
           >
-            ✕
-          </button>
+            <span className="font-semibold text-violet-300">
+              <span className="mr-1 text-neutral-600">⠿</span>🤖 AI scenarios
+              {/* The AI reasons on ONE chart, over a horizon that chart implies. Which one is not
+                  something you can infer from the prose, so it's stamped on the title. */}
+              {scen.timeframe && (
+                <span className="ml-1 rounded bg-violet-950/70 px-1.5 py-0.5 text-[10px] text-violet-300">
+                  {scen.timeframe}
+                </span>
+              )}
+            </span>
+            <span className="flex items-center gap-2">
+              {/* When the model actually reasoned — not when this panel fetched it. A 14-minute-old
+                  read served from cache would otherwise render as "just now". */}
+              {scen.computed_at && (
+                <span
+                  className={`text-[10px] ${scen.cached ? "text-neutral-600" : "text-neutral-500"}`}
+                  title={
+                    `Analysed ${new Date(scen.computed_at).toLocaleString()}` +
+                    (scen.cached
+                      ? ` · reused from cache, no tokens spent. Recomputed on demand in about ${Math.max(0, Math.round((scen.expires_in_sec ?? 0) / 60))} min, or hit ↻ now.`
+                      : " · freshly reasoned")
+                  }
+                >
+                  {scen.cached && "⟳ "}
+                  {new Date(scen.computed_at).toLocaleTimeString()}
+                  {scen.cached && (scen.age_sec ?? 0) >= 60 && ` · ${Math.round((scen.age_sec ?? 0) / 60)}m ago`}
+                </span>
+              )}
+              <button
+                onClick={() => void loadScenarios(true)}
+                disabled={scenBusy}
+                className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-violet-300 disabled:opacity-50"
+                title="Re-run the AI now for this chart and timeframe. This ignores the 15-minute cache and spends tokens — switching timeframes reuses the cache for free."
+              >
+                {scenBusy ? "…" : "↻"}
+              </button>
+              {scenDrag.moved && (
+                <button
+                  onClick={scenDrag.reset}
+                  className="rounded px-1 text-neutral-600 hover:bg-neutral-800 hover:text-neutral-200"
+                  title="Snap back to its default place and size"
+                >
+                  ⇱
+                </button>
+              )}
+              <button onClick={() => setScen(null)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
+            </span>
+          </div>
           <ScenarioCard read={scen} levelsShown={scenLevelsShown}
                         onShowLevels={() => onToggleScenLevels?.(
                           scen ? { support: scen.nearest_support ?? null, resistance: scen.nearest_resistance ?? null,
                                    target: scen.target ?? null, invalidation: scen.invalidation_price ?? null } : null)} />
+          <PanelGrip resize={scenDrag.resize} />
         </div>
       )}
 

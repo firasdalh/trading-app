@@ -417,6 +417,16 @@ export interface HybridState {
 }
 
 // Plain-language "where is price on the map + confirm" read (GET /api/market/context).
+// A break scenario with real numbers: where it triggers, where it goes, where it's wrong.
+export interface BreakPlan {
+  trigger: number;
+  target: number;
+  stop: number;
+  rr: number;
+  tests: number;
+  strength: string;
+}
+
 export interface MarketContext {
   symbol: string;
   price: number;
@@ -426,6 +436,9 @@ export interface MarketContext {
   // The next 2–3 levels each way, nearest first — what the "show levels" button plots.
   resistance_ladder?: { price: number; tf: string; tests: number }[];
   support_ladder?: { price: number; tf: string; tests: number }[];
+  // The two break scenarios as tradeable numbers — what the "show on chart" buttons plot.
+  breakout_up?: BreakPlan | null;
+  breakdown?: BreakPlan | null;
   structure: string;
   choch: boolean;
   channel: string | null;
@@ -464,6 +477,12 @@ export interface AiScenario {
 export interface AiScenarioRead {
   symbol: string;
   price: number;
+  timeframe?: string;     // the chart the AI reasoned on — stamped so a read can't be misattributed
+  computed_at?: string;   // when the model actually reasoned (NOT when this response was served)
+  cached?: boolean;       // true = reused from the server cache, no tokens spent
+  age_sec?: number;       // how old the cached read is
+  expires_in_sec?: number;// when it will next be recomputed on demand
+  ttl_sec?: number;
   source: "ai" | "deterministic";
   headline: string;
   primary: string;        // label of the more-likely scenario

@@ -108,6 +108,8 @@ def market_context(
 def market_scenarios(
     symbol: str = Query(...),
     asset_class: AssetClass = Query(AssetClass.STOCK),
+    timeframe: str = Query("1h"),
+    force: bool = Query(False, description="bypass the 15-minute cache and spend tokens on a fresh run"),
     session: Session = Depends(get_session),
 ) -> dict:
     """AI SCENARIO read (INFO only): the LLM reasons out TWO ranked, scored forward scenarios anchored
@@ -116,7 +118,7 @@ def market_scenarios(
     are the model's judgement (they vary run-to-run) — a lean, not a measurement."""
     from app.agents.scenarios import ai_scenarios
 
-    out = ai_scenarios(session, symbol, asset_class)
+    out = ai_scenarios(session, symbol, asset_class, timeframe, force)
     if out is None:
         raise HTTPException(status_code=503, detail="scenarios unavailable (no data)")
     return out

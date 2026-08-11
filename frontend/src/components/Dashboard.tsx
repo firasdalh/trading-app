@@ -550,6 +550,32 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
               ))}
             </span>
           )}
+          {/* Full screen only: the ★ Favourites row lives above the chart card, which is off-screen
+              here. Favourites are how you move between the pairs you actually watch, so without
+              them full screen is a one-pair view you have to leave to change pair.
+              Compact on purpose — no × remove button. Removing a favourite is a housekeeping
+              action, not something you do mid-read, and every extra × is a mis-click that silently
+              drops a pair from the list. */}
+          {chartFull && favorites.length > 0 && (
+            <span className="flex flex-wrap items-center gap-1">
+              <span className="text-xs text-neutral-500">★</span>
+              {favorites.map((f) => {
+                const active = f.symbol === symbol && f.assetClass === assetClass;
+                return (
+                  <button
+                    key={`${f.assetClass}-${f.symbol}`}
+                    onClick={() => openFavorite(f)}
+                    title={`Switch the chart to ${f.symbol} · ${f.assetClass}`}
+                    className={`rounded-full px-2 py-0.5 text-xs transition ${
+                      active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                    }`}
+                  >
+                    {f.symbol}
+                  </button>
+                );
+              })}
+            </span>
+          )}
           {/* Open positions — quick-switch the chart between them */}
           {(positions ?? []).length > 0 && (
             <span className="flex flex-wrap items-center gap-1.5">

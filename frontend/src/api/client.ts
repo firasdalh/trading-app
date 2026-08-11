@@ -59,9 +59,14 @@ export const api = {
     ),
 
   // AI two-scenario read (ranked + scored + why-primary). INFO only. Falls back to deterministic.
-  scenarios: (symbol: string, assetClass: AssetClass) =>
+  // Also timeframe-scoped: the AI reasons over the same chart you're reading, and its horizon
+  // ("next few hours" vs "next few weeks") depends on which one that is.
+  // `force` bypasses the server's 15-minute cache. Left false, switching timeframes back and forth
+  // costs nothing — the reads are already computed and just get handed back.
+  scenarios: (symbol: string, assetClass: AssetClass, timeframe = "1h", force = false) =>
     request<import("../types").AiScenarioRead>(
-      `/api/market/scenarios?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+      `/api/market/scenarios?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}` +
+        `&timeframe=${encodeURIComponent(timeframe)}${force ? "&force=true" : ""}`,
     ),
 
   // Shadow scorecard — AI vs deterministic head-to-head (auto-grades pending on GET).

@@ -15,6 +15,7 @@ Boundaries (deliberate):
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -143,7 +144,9 @@ def _deterministic_fallback(ctx: dict) -> dict:
                "market structure sets the primary direction and momentum/level position decides whether "
                "a pullback or an immediate continuation is more likely from here.")
     return {
-        "symbol": ctx["symbol"], "price": ctx["price"], "source": "deterministic",
+        "symbol": ctx["symbol"], "price": ctx["price"],
+        "timeframe": ctx.get("timeframe", "1h"), "source": "deterministic",
+        "computed_at": datetime.now(timezone.utc).isoformat(), "cached": False,
         "headline": ctx.get("overall_bias", ""), "primary": out[0]["label"] if out else "", "why_primary": why,
         "scenarios": out, "invalidation": ctx.get("invalidation"),
         "nearest_support": (ctx.get("nearest_support") or {}).get("price"),
@@ -155,7 +158,8 @@ def _deterministic_fallback(ctx: dict) -> dict:
     }
 
 
-def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict | None:
+def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass,
+                 timeframe: str = "1h", force: bool = False) -> dict | None:
     """Two AI-reasoned, ranked, scored forward scenarios anchored to the deterministic map read.
 
     Returns None only when there's no market data at all. When the LLM is unavailable OR the call
@@ -165,12 +169,21 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
     caller, so repeat reads within the window cost no tokens. The cheap deterministic fallback isn't
     cached (so it's retried / upgraded to the AI read as soon as the LLM is available again).
     """
-    key = (symbol.upper(), asset_class.value)
+    # The timeframe is part of the cache key. Without it a 1h read cached a minute ago would be
+    # handed back for a 15m request — the panel would look updated while showing another chart's
+    # analysis, which is the hardest kind of wrong to notice.
+    key = (symbol.upper(), asset_class.value, timeframe)
     hit = _CACHE.get(key)
-    if hit is not None and (time.monotonic() - hit[0]) < _TTL_SEC:
-        return hit[1]
+    if hit is not None and not force:
+        age = time.monotonic() - hit[0]
+        if age < _TTL_SEC:
+            # Served without touching the model. Flagged as cached and stamped with its real age so
+            # the UI can say WHEN it was reasoned — a 14-minute-old read that renders as "just now"
+            # is a read you'd trust more than it deserves.
+            return {**hit[1], "cached": True, "age_sec": int(age),
+                    "expires_in_sec": int(_TTL_SEC - age)}
 
-    ctx = build_context(session, symbol, asset_class)
+    ctx = build_context(session, symbol, asset_class, timeframe)
     if ctx is None:
         return None
     if not llm_available():
@@ -179,8 +192,15 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
     # Build a compact, factual snapshot for the model — all numbers come from the deterministic read.
     # We feed FACTS only (no pre-made scenarios); the AI creates its own scenarios from them.
     sc = "; ".join(f"{s['factor']} {s['signal']} ({s['note']})" for s in ctx.get("scorecard", []))
+    tf_read = ctx.get("timeframe", timeframe)
+    # State the real timeframe. A model told "1h" while being fed 15m numbers reasons on the wrong
+    # horizon — it will talk about moves playing out over days when the chart spans hours.
+    horizon = {"5m": "the next few hours", "15m": "the rest of the session",
+               "1h": "the next 1-3 days", "4h": "the next 1-2 weeks",
+               "1d": "the next few weeks"}.get(tf_read, "the near term")
     user = (
-        f"SYMBOL: {symbol}  PRICE: {ctx['price']}  (timeframe 1h, with 4h/1d context)\n"
+        f"SYMBOL: {symbol}  PRICE: {ctx['price']}  (timeframe {tf_read}, with higher-timeframe context)\n"
+        f"SCENARIO HORIZON: reason over {horizon} — the scale this timeframe actually resolves on.\n"
         f"NEAREST RESISTANCE: {_lvl(ctx.get('nearest_resistance'))}\n"
         f"NEAREST SUPPORT: {_lvl(ctx.get('nearest_support'))}\n"
         f"STRUCTURE: {ctx.get('structure')}  (change-of-character: {ctx.get('choch')})\n"
@@ -203,7 +223,10 @@ def ai_scenarios(session: Session, symbol: str, asset_class: AssetClass) -> dict
     log.info("ai scenarios", extra={"symbol": symbol, "primary": primary,
                                      "probs": [s["prob"] for s in scen]})
     result = {
-        "symbol": symbol, "price": ctx["price"], "source": "ai",
+        "symbol": symbol, "price": ctx["price"], "timeframe": tf_read, "source": "ai",
+        # When the model actually reasoned. Every later cache hit carries this same stamp.
+        "computed_at": datetime.now(timezone.utc).isoformat(), "cached": False,
+        "ttl_sec": _TTL_SEC,
         "headline": read.headline, "primary": primary, "why_primary": read.why_primary,
         "scenarios": scen, "invalidation": read.invalidation or ctx.get("invalidation"),
         # The exact S/R levels the AI reasoned over (it was fed these) — so the UI can plot them.
