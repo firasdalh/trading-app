@@ -104,6 +104,43 @@ def market_context(
     return ctx
 
 
+@router.get("/market/keylevels")
+def market_key_levels(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Daily reference levels for the chart: prior day / prior week high-low, today's open and
+    yesterday's close.
+
+    These come from DAILY candles, which the chart itself never loads — a 5m chart's 400 bars don't
+    reach back a week. The engine already scores against the prior day/week levels in its htf_level
+    filter, so drawing them makes visible what is already shaping its decisions.
+    """
+    from app.agents.indicators import reference_levels
+    from app.brokers.registry import get_broker_for
+    from app.core.state import get_or_create_settings
+    from app.data.ohlcv_cache import get_ohlcv_cached
+
+    settings = get_or_create_settings(session)
+    broker = get_broker_for(asset_class, settings.broker_map)
+    try:
+        daily = get_ohlcv_cached(broker, symbol, "1d", 60)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"key levels unavailable: {exc}") from exc
+    candles = list(daily.candles) if daily else []
+    if not candles:
+        raise HTTPException(status_code=503, detail="key levels unavailable (no daily data)")
+
+    out = dict(reference_levels(candles))
+    # The last daily bar is the CURRENT (still forming) day, so its open is today's open and the
+    # bar before it holds yesterday's close.
+    out["today_open"] = round(candles[-1].open, 6)
+    if len(candles) >= 2:
+        out["prior_close"] = round(candles[-2].close, 6)
+    return out
+
+
 @router.get("/market/scenarios")
 def market_scenarios(
     symbol: str = Query(...),

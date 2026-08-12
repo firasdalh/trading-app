@@ -417,6 +417,17 @@ export interface HybridState {
 }
 
 // Plain-language "where is price on the map + confirm" read (GET /api/market/context).
+// Daily reference levels (GET /api/market/keylevels) — the ones desks watch and the engine's
+// htf_level filter already scores against.
+export interface KeyLevels {
+  prior_day_high?: number;
+  prior_day_low?: number;
+  prior_week_high?: number;
+  prior_week_low?: number;
+  today_open?: number;
+  prior_close?: number;
+}
+
 // A break scenario with real numbers: where it triggers, where it goes, where it's wrong.
 export interface BreakPlan {
   trigger: number;

@@ -58,6 +58,13 @@ export const api = {
         `&timeframe=${encodeURIComponent(timeframe)}`,
     ),
 
+  // Daily reference levels (prior day/week high-low, today's open, yesterday's close). Daily data
+  // the chart never loads itself — 400 bars of 5m don't reach back a week.
+  keyLevels: (symbol: string, assetClass: AssetClass) =>
+    request<import("../types").KeyLevels>(
+      `/api/market/keylevels?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+    ),
+
   // AI two-scenario read (ranked + scored + why-primary). INFO only. Falls back to deterministic.
   // Also timeframe-scoped: the AI reasons over the same chart you're reading, and its horizon
   // ("next few hours" vs "next few weeks") depends on which one that is.
@@ -296,6 +303,21 @@ export const api = {
   // Conditional ('armed' / pending) setups.
   conditionals: () =>
     request<import("../types").ConditionalSetupView[]>("/api/conditionals"),
+
+  // Quick-arm from a line drawn on the chart: stop/target derived, confirmed on a candle CLOSE
+  // beyond the line, then auto-opened through the normal Risk Manager.
+  quickArm: (body: {
+    symbol: string;
+    asset_class: AssetClass;
+    timeframe: string;
+    direction: "long" | "short";
+    trigger_price: number;
+    valid_hours?: number;
+  }) =>
+    request<import("../types").ConditionalSetupView>("/api/conditionals/quick", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   armConditional: (body: {
     symbol: string; asset_class: string; timeframe: string; direction: string;
     order_type: string; trigger_price: number; stop_loss?: number | null;

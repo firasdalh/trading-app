@@ -196,7 +196,13 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
   const { data: account } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
   const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
   // Armed conditional setups — overlaid on the chart (trigger/SL/TP) for the charted symbol.
-  const { data: conditionals } = usePolling(() => api.conditionals(), 10000, []);
+  // condKey forces an immediate re-poll after a quick-arm, so the new trigger/SL/TP lines show up
+  // at once instead of on the next 10-second tick.
+  const [condKey, setCondKey] = useState(0);
+  // Live indicator read for the charted position, computed inside Chart (that's where the
+  // candles are) and shown in the strip above it.
+  const [pulse, setPulse] = useState<import("./Chart").Pulse | null>(null);
+  const { data: conditionals } = usePolling(() => api.conditionals(), 10000, [condKey]);
   const armedLevels = (conditionals ?? []).filter((c) => c.status === "armed");
 
   const closePosition = async (p: { symbol: string; asset_class: string }) => {
@@ -607,6 +613,7 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
         {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close */}
         <ChartPositionBar
           pos={(positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null}
+          pulse={pulse}
           onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class })}
         />
         <Chart
@@ -630,6 +637,9 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
           onToggleScenLevels={toggleScenLevels}
           isFullscreen={chartFull}
           onToggleFullscreen={toggleChartFull}
+          onArmed={() => setCondKey((v) => v + 1)}
+          onOpened={() => setPosBump((v) => v + 1)}
+          onPulse={setPulse}
         />
         </div>
         <p className="mt-2 text-xs text-neutral-500">

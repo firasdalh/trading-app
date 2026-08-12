@@ -18,8 +18,8 @@ import {
 } from "lightweight-charts";
 import { api } from "../api/client";
 import { ScenarioCard } from "./ScenarioCard";
-import { fmtPrice } from "../format";
-import type { AiScenarioRead, AssetClass, BreakPlan, Candle, MarketContext, PositionView, TradeProposal } from "../types";
+import { fmtPrice, fmtUsd } from "../format";
+import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
 // Persist a small chart UI toggle across refreshes AND pair changes (localStorage-backed useState).
@@ -62,11 +62,24 @@ function usePersisted<T>(key: string, initial: T, merge = false) {
 // The offset is taken PER TIMESTAMP rather than once, because getTimezoneOffset() reports the
 // offset in force on THAT date. Bars either side of a daylight-saving change each get the right
 // one; a single constant would slide half the history by an hour twice a year.
-const utcToDisp = (utcSec: number): number => utcSec - new Date(utcSec * 1000).getTimezoneOffset() * 60;
-const dispToUtc = (dispSec: number): number => dispSec + new Date(dispSec * 1000).getTimezoneOffset() * 60;
+// Bar length per timeframe, for the candle-close countdown.
+const TF_MINUTES: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440 };
+
+// Which clock the axis is written in. In "utc" mode the shift is the identity, so the chart shows
+// broker/UTC time and the day separators land on 00:00 of the axis itself.
+//
+// This changes LABELS ONLY. Every price level — PDH/PDL, S/R, break plans — is measured over the
+// 00:00 UTC trading day regardless, so a level is the same number for every trader on earth no
+// matter which clock they read. Timezone is a display choice, not an analytical one.
+let TZ_MODE: "local" | "utc" = "local";
+const utcToDisp = (utcSec: number): number =>
+  TZ_MODE === "utc" ? utcSec : utcSec - new Date(utcSec * 1000).getTimezoneOffset() * 60;
+const dispToUtc = (dispSec: number): number =>
+  TZ_MODE === "utc" ? dispSec : dispSec + new Date(dispSec * 1000).getTimezoneOffset() * 60;
 
 // What to tell the user their axis is in, e.g. "Asia/Dubai (UTC+4)".
-const TZ_LABEL = (() => {
+function tzLabel(mode: "local" | "utc"): string {
+  if (mode === "utc") return "UTC · broker day";
   try {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
     const hrs = -new Date().getTimezoneOffset() / 60;
@@ -75,7 +88,7 @@ const TZ_LABEL = (() => {
   } catch {
     return "your local time";
   }
-})();
+}
 
 // Drag a floating panel around by its header. The position is remembered: a panel you have to
 // shove out of the way every time you open it is a panel you stop opening.
@@ -297,6 +310,13 @@ interface Props {
   onToggleFullscreen?: () => void;
   scenLevelsShown?: boolean;
   onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
+  // Fired after a quick-arm so the Dashboard re-pulls the armed list and the new line appears.
+  onArmed?: () => void;
+  // Fired after a quick trade so the Dashboard re-pulls live positions immediately.
+  onOpened?: () => void;
+  // Live indicator read for the charted symbol's open position, lifted so the position strip above
+  // the chart can show it. Computed here because this is where the candles already live.
+  onPulse?: (p: Pulse | null) => void;
 }
 
 const EMA_CONFIG = [
@@ -375,6 +395,64 @@ function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
     macd[i] !== null && signal[i] !== null ? (macd[i] as number) - (signal[i] as number) : null,
   );
   return { macd, signal, hist };
+}
+
+// Wilder ATR — the unit everything else is measured in, so a stop distance means the same thing on
+// bitcoin as on oil.
+function atrCalc(candles: Candle[], period = 14): number | null {
+  if (candles.length < period + 1) return null;
+  const tr = (i: number) => {
+    const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
+    return Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+  };
+  let atr = 0;
+  for (let i = 1; i <= period; i++) atr += tr(i);
+  atr /= period;
+  for (let i = period + 1; i < candles.length; i++) atr = (atr * (period - 1) + tr(i)) / period;
+  return atr;
+}
+
+// Wilder ADX with the directional indicators. ADX alone says only "is there a trend"; +DI vs −DI
+// says WHOSE trend it is, and a position holder needs both — a strengthening trend running against
+// you is the worst case on the board and looks identical to the best case without the DI split.
+function adxCalc(candles: Candle[], period = 14): { adx: number; prev: number; plusDI: number; minusDI: number } | null {
+  const n = candles.length;
+  if (n < period * 3) return null;
+  const tr: number[] = [], pDM: number[] = [], mDM: number[] = [];
+  for (let i = 1; i < n; i++) {
+    const h = candles[i].high, l = candles[i].low;
+    const ph = candles[i - 1].high, pl = candles[i - 1].low, pc = candles[i - 1].close;
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+    const up = h - ph, dn = pl - l;
+    pDM.push(up > dn && up > 0 ? up : 0);
+    mDM.push(dn > up && dn > 0 ? dn : 0);
+  }
+  // Wilder's running sum: seed with the first `period`, then subtract 1/period of the running
+  // total each bar. Not a simple moving average — using one would drift from every other platform.
+  const smooth = (a: number[]) => {
+    const out = new Array<number>(a.length).fill(NaN);
+    let s = 0;
+    for (let i = 0; i < period; i++) s += a[i];
+    out[period - 1] = s;
+    for (let i = period; i < a.length; i++) { s = s - s / period + a[i]; out[i] = s; }
+    return out;
+  };
+  const trS = smooth(tr), pS = smooth(pDM), mS = smooth(mDM);
+  const dx: number[] = [];
+  for (let i = period - 1; i < tr.length; i++) {
+    const t = trS[i];
+    if (!t) { dx.push(0); continue; }
+    const pdi = (100 * pS[i]) / t, mdi = (100 * mS[i]) / t;
+    const sum = pdi + mdi;
+    dx.push(sum ? (100 * Math.abs(pdi - mdi)) / sum : 0);
+  }
+  if (dx.length < period + 1) return null;
+  let adx = dx.slice(0, period).reduce((x, y) => x + y, 0) / period;
+  let prev = adx;
+  for (let i = period; i < dx.length; i++) { prev = adx; adx = (adx * (period - 1) + dx[i]) / period; }
+  const last = tr.length - 1;
+  const t = trS[last] || 1;
+  return { adx, prev, plusDI: (100 * pS[last]) / t, minusDI: (100 * mS[last]) / t };
 }
 
 // SuperTrend (ATR bands that flip with trend). Returns, per bar, the line value and direction
@@ -540,6 +618,183 @@ function structureSwings(candles: Candle[], w = 3): StructPoint[] {
   return out;
 }
 
+// CHANGE OF CHARACTER: the first swing that contradicts the structure the market was in — an
+// uptrend (HH/HL) printing a Lower Low, or a downtrend (LH/LL) printing a Higher High.
+//
+// Derived from the swing labels rather than recomputed, so what's marked on the chart is exactly
+// the sequence the HH/HL/LH/LL labels show. Only flips are returned: a downtrend that keeps making
+// lower lows has no change of character, however far it falls.
+// A trend is only "up" once BOTH a higher high and a higher low exist (mirror for down), and it
+// only breaks on the opposite extreme: an uptrend ends at a Lower LOW, not merely at a Lower High.
+// A single failed push is not a change of character — flagging every label flip would mark
+// "HH, LH, HH, LH" twice, in what is plainly still an uptrend.
+function chochPoints(sw: StructPoint[]): { i: number; bullish: boolean }[] {
+  const out: { i: number; bullish: boolean }[] = [];
+  let trend: "up" | "down" | null = null;
+  let sawHH = false;
+  let sawHL = false;
+  let sawLH = false;
+  let sawLL = false;
+  for (const p of sw) {
+    if (trend === "up" && p.label === "LL") {
+      out.push({ i: p.i, bullish: false });            // uptrend broke — structure turned down
+      trend = "down";
+      sawHH = sawHL = false;
+    } else if (trend === "down" && p.label === "HH") {
+      out.push({ i: p.i, bullish: true });             // downtrend broke — structure turned up
+      trend = "up";
+      sawLH = sawLL = false;
+    }
+    if (p.label === "HH") sawHH = true;
+    if (p.label === "HL") sawHL = true;
+    if (p.label === "LH") sawLH = true;
+    if (p.label === "LL") sawLL = true;
+    if (trend === null) {
+      if (sawHH && sawHL) trend = "up";
+      else if (sawLH && sawLL) trend = "down";
+    }
+  }
+  return out;
+}
+
+// MACD DIVERGENCE: price makes a higher high while MACD makes a lower one (bearish), or price makes
+// a lower low while MACD makes a higher one (bullish). Compared at SWING points, not bar to bar —
+// divergence is a statement about the peaks of a move, and comparing raw bars would fire constantly
+// on noise. Returns the two swing bars that form it so both can be marked.
+function macdDivergences(candles: Candle[], lookback = 60): { a: number; b: number; bullish: boolean }[] {
+  if (candles.length < 40) return [];
+  const { macd } = macdCalc(candles.map((c) => c.close));
+  const sw = structureSwings(candles).filter((p) => p.i >= candles.length - lookback);
+  const out: { a: number; b: number; bullish: boolean }[] = [];
+  for (const kind of [true, false]) {                       // true = highs (bearish), false = lows
+    const pts = sw.filter((p) => p.high === kind);
+    for (let k = 1; k < pts.length; k++) {
+      const a = pts[k - 1];
+      const b = pts[k];
+      const ma = macd[a.i];
+      const mb = macd[b.i];
+      if (ma == null || mb == null) continue;
+      if (kind && b.price > a.price && mb < ma) out.push({ a: a.i, b: b.i, bullish: false });
+      if (!kind && b.price < a.price && mb > ma) out.push({ a: a.i, b: b.i, bullish: true });
+    }
+  }
+  // Keep only the LATEST of each direction. A divergence from forty bars ago either played out or
+  // failed — either way it is history, and leaving it marked buries the one that is still live.
+  const latest: { a: number; b: number; bullish: boolean }[] = [];
+  for (const dir of [true, false]) {
+    const hits = out.filter((d) => d.bullish === dir);
+    if (hits.length) latest.push(hits.reduce((x, y) => (y.b > x.b ? y : x)));
+  }
+  return latest;
+}
+
+// --- position pulse ---------------------------------------------------------------------------
+// A live read for a trade you are ALREADY IN, which is a different question from whether to enter.
+// Entry asks "is this a good setup"; holding asks "is it still working, or is it turning on me". So
+// every reading here is judged AGAINST YOUR SIDE — the same ADX is support for a short and a threat
+// for a long, and printing the raw number leaves you doing that translation on every glance.
+export type PulseItem = { label: string; value: string; verdict: "with" | "against" | "flat"; tip: string };
+export type Pulse = {
+  items: PulseItem[];
+  withCount: number;
+  againstCount: number;
+  rMultiple: number | null;   // profit in R — the only P&L unit comparable across pairs
+  stopAtr: number | null;     // how far the stop sits in ATR: under ~1 is inside normal noise
+};
+
+export function positionPulse(candles: Candle[], pos: PositionView): Pulse | null {
+  if (candles.length < 60) return null;
+  const long = pos.direction === "long";
+  const closes = candles.map((c) => c.close);
+  const items: PulseItem[] = [];
+  const side = (bullish: boolean): "with" | "against" => (bullish === long ? "with" : "against");
+
+  // 1) Trend strength AND ownership.
+  const adx = adxCalc(candles);
+  if (adx) {
+    const strong = adx.adx >= 25;
+    const rising = adx.adx > adx.prev;
+    const bullTrend = adx.plusDI > adx.minusDI;
+    items.push({
+      label: "Trend",
+      value: `ADX ${adx.adx.toFixed(0)}${rising ? "↑" : "↓"} ${bullTrend ? "+DI" : "−DI"}`,
+      verdict: !strong ? "flat" : side(bullTrend),
+      tip: !strong
+        ? `ADX ${adx.adx.toFixed(0)} — no real trend either way; expect chop, and don't expect a target to be reached quickly.`
+        : `ADX ${adx.adx.toFixed(0)} and ${rising ? "rising" : "falling"}, with ${bullTrend ? "buyers" : "sellers"} in control — ${side(bullTrend) === "with" ? "running in your favour" : "running against you"}.`,
+    });
+  }
+
+  // 2) Momentum, and crucially whether it is still building.
+  const { hist } = macdCalc(closes);
+  const h = hist[hist.length - 1];
+  const hPrev = hist[hist.length - 2];
+  if (h != null && hPrev != null) {
+    const bullish = h > 0;
+    const expanding = Math.abs(h) > Math.abs(hPrev);
+    items.push({
+      label: "Momentum",
+      value: `MACD ${bullish ? "+" : "−"} ${expanding ? "building" : "fading"}`,
+      verdict: side(bullish) === "with" ? (expanding ? "with" : "flat") : "against",
+      tip: side(bullish) === "with"
+        ? expanding
+          ? "Momentum is on your side and still building — the reason to hold rather than bank early."
+          : "Still your side, but fading. This is where a winner stalls: consider tightening or taking part off."
+        : "Momentum has flipped against you — the earliest of these four to turn, and worth acting on.",
+    });
+  }
+
+  // 3) RSI, read as room-to-run rather than overbought/oversold in the abstract.
+  const rsiArr = rsiCalc(closes);
+  const r = rsiArr[rsiArr.length - 1];
+  const rPrev = rsiArr[rsiArr.length - 2];
+  if (r != null) {
+    const rising = rPrev != null && r > rPrev;
+    const stretched = long ? r >= 70 : r <= 30;
+    items.push({
+      label: "RSI",
+      value: `${r.toFixed(0)}${rising ? "↑" : "↓"}`,
+      verdict: stretched ? "flat" : side(rising),
+      tip: stretched
+        ? `RSI ${r.toFixed(0)} — stretched in your favour. Good for you so far, but a poor place to ADD, and a common spot to give profit back.`
+        : `RSI ${r.toFixed(0)} and ${rising ? "rising" : "falling"} — ${side(rising) === "with" ? "pressure still on your side" : "pressure moving against you"}.`,
+    });
+  }
+
+  // 4) Structure — slowest to turn, so the most meaningful when it does.
+  const sw = structureSwings(candles);
+  const lastSw = sw[sw.length - 1];
+  if (lastSw) {
+    const bullish = lastSw.label === "HH" || lastSw.label === "HL";
+    const flipped = chochPoints(sw).slice(-1)[0];
+    const recentFlip = flipped != null && flipped.i >= candles.length - 12 && flipped.bullish !== long;
+    items.push({
+      label: "Structure",
+      value: recentFlip ? `${lastSw.label} · CHoCH` : lastSw.label,
+      verdict: recentFlip ? "against" : side(bullish),
+      tip: recentFlip
+        ? "A change of character just printed AGAINST your side — the swing sequence has broken. This is the strongest exit signal of the four."
+        : `Swings are still making ${bullish ? "higher highs / higher lows" : "lower highs / lower lows"} — ${side(bullish) === "with" ? "structure is holding for you" : "structure is against you"}.`,
+    });
+  }
+
+  const withCount = items.filter((i) => i.verdict === "with").length;
+  const againstCount = items.filter((i) => i.verdict === "against").length;
+
+  // Profit in R. Dollars don't compare across pairs or sizes; R does, and every rule you have
+  // ("bank a third at 1.5R") is written in it.
+  const risk = pos.stop_loss != null ? Math.abs(pos.entry_price - pos.stop_loss) : null;
+  const last = pos.last_price ?? closes[closes.length - 1];
+  const rMultiple = risk && risk > 0
+    ? (long ? last - pos.entry_price : pos.entry_price - last) / risk
+    : null;
+
+  const atr = atrCalc(candles);
+  const stopAtr = atr && atr > 0 && pos.stop_loss != null ? Math.abs(last - pos.stop_loss) / atr : null;
+
+  return { items, withCount, againstCount, rMultiple, stopAtr };
+}
+
 // The dollar P&L an open position would show AT a given price level (e.g. its SL or TP). Derived
 // from the live floating P&L per price unit — which already encodes lot size, contract size and
 // FX conversion — so it's exact in the account currency. Empty until price moves off entry (the
@@ -612,7 +867,7 @@ function PaneResizer({ height, onChange, label }: { height: number; onChange: (h
 }
 
 export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, isFullscreen, onToggleFullscreen,
-                        scenLevelsShown, onToggleScenLevels }: Props) {
+                        scenLevelsShown, onToggleScenLevels, onArmed, onOpened, onPulse }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   // Full screen is owned by the Dashboard (the position strip must travel with the chart).
   const isFull = !!isFullscreen;
@@ -667,7 +922,19 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   // Hand drawing: the saved set, the stroke in progress, and the canvas it's painted on.
   const [drawings, saveDrawings] = useDrawings(symbol);
-  const [drawMode, setDrawMode] = useState<"off" | "f" | "t" | "h">("off");
+  const [drawMode, setDrawMode] = useState<"off" | "f" | "t" | "h" | "arm" | "trade">("off");
+  // Quick market trade. The clicked price is the STOP, not the entry — the entry is wherever the
+  // market is when you press the button, and the stop is the only number you actually get to choose.
+  // It is also the number the Risk Manager sizes from, so choosing it IS choosing your risk.
+  const [tradeDraft, setTradeDraft] = useState<{ stop: number; dir: "long" | "short"; y: number } | null>(null);
+  const [tradePrev, setTradePrev] = useState<{ entry: number; stop_loss: number; take_profit: number; approved: boolean; max_lots: number; risk_amount: number; reason: string } | null>(null);
+  const [tradeBusy, setTradeBusy] = useState(false);
+  const [tradeErr, setTradeErr] = useState<string | null>(null);
+  // A quick-arm line waiting for you to pick a side. Held until confirmed: placing a line that
+  // opens a real trade on one stray click is not a mistake worth being able to make.
+  const [armDraft, setArmDraft] = useState<{ price: number; y: number } | null>(null);
+  const [armBusy, setArmBusy] = useState(false);
+  const [armErr, setArmErr] = useState<string | null>(null);
   const [drawList, setDrawList] = useState(false);
   const drawModeRef = useRef(drawMode);
   drawModeRef.current = drawMode;
@@ -681,6 +948,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const dirtyRef = useRef(0);                               // bumped to force a repaint
   // Bumped when a new candle set lands, so drawings re-render against the new bar times.
   const [dataV, setDataV] = useState(0);
+  // Bumped to re-pull candles from the broker — used when a bar rolls over, so the synthesized new
+  // candle is replaced by the broker's authoritative one (true open, volume, any ticks we missed).
+  const [reloadTick, setReloadTick] = useState(0);
+  // Timestamp (ms) of the last rollover refetch. Throttles retries: the broker may not have printed
+  // the new bar the instant the clock says so, and a single attempt that lands too early would
+  // leave the chart stuck on the old candle — exactly the bug this is here to fix.
+  const rollRef = useRef(0);
+  const ROLL_RETRY_MS = 8000;
+  const viewKeyRef = useRef("");   // which chart the view was last reset for
 
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = usePersisted<Record<number, boolean>>(
@@ -694,12 +970,35 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [showChannel, setShowChannel] = usePersisted("chart.showChannel", false);
   const [showSR, setShowSR] = usePersisted<Record<string, boolean>>(
     "chart.srByTf", { "1h": false, "4h": false, "1d": false });
+  // --- extra overlays, all off by default so nobody's chart changes without asking ---
+  const [ovl, setOvl] = usePersisted<Record<string, boolean>>(
+    "chart.overlays",
+    // `days` defaults ON — knowing where one day ends and the next begins is orientation, not
+    // analysis, and without it a 1h chart is an undifferentiated run of candles.
+    { pd: false, pw: false, open: false, sessions: false, rr: false, div: false, choch: false, days: true },
+    true,
+  );
+  const [ovlOpen, setOvlOpen] = useState(false);
+  // Set synchronously so every conversion below this line — candles, markers, drawings, countdown,
+  // separators — uses one clock within a single render. A useEffect would leave the first paint on
+  // the previous mode.
+  const [tzMode, setTzMode] = usePersisted<"local" | "utc">("chart.tzMode", "local");
+  TZ_MODE = tzMode;
+  const [keyLv, setKeyLv] = useState<KeyLevels | null>(null);
+  const keyLinesRef = useRef<IPriceLine[]>([]);
+  const bgCanvasRef = useRef<HTMLCanvasElement>(null);   // sessions + R:R zones, painted BEHIND price
+  // Countdown to the candle close. `frac` is how much of the bar REMAINS, which is what drives the
+  // colour — 30 seconds means something very different on a 5m bar than on a 4h one.
+  const [barLeft, setBarLeft] = useState<{ text: string; left: number; frac: number } | null>(null);
+
   const [ctx, setCtx] = useState<MarketContext | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
   const [ctxAt, setCtxAt] = useState<Date | null>(null);   // when this reading was taken
   const rootRef = useRef<HTMLDivElement>(null);            // drag frame for the floating panels
   const ctxDrag = useDragPanel("chart.ctxPos", rootRef);
   const scenDrag = useDragPanel("chart.scenPos", rootRef);
+  const armDrag = useDragPanel("chart.armPos", rootRef);
+  const tradeDrag = useDragPanel("chart.tradePos", rootRef);
   // The price map's S/R ladder, plotted on request. Held as its OWN copy rather than read from
   // `ctx`, so closing the map panel to actually look at the chart doesn't wipe the levels you just
   // asked it to draw — which is the whole reason you drew them.
@@ -961,18 +1260,25 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
-        // Show the most recent ~110 bars (not all 400) so candles are big and the price scale
-        // hugs current price — much less dead space than fitContent(). Pan/zoom still works.
-        const ts = chartRef.current?.timeScale();
-        const n = candleData.length;
-        if (ts && n) {
-          const VISIBLE = 110;
-          ts.setVisibleLogicalRange({ from: Math.max(0, n - VISIBLE), to: n + 6 });
+        // Reset the view ONLY when this is a different chart. The same loader also runs on a bar
+        // rollover, and snapping the zoom back every time a candle closes would rip the view out
+        // from under anyone examining older bars.
+        const viewKey = `${symbol}|${assetClass}|${timeframe}`;
+        if (viewKeyRef.current !== viewKey) {
+          viewKeyRef.current = viewKey;
+          // Show the most recent ~110 bars (not all 400) so candles are big and the price scale
+          // hugs current price — much less dead space than fitContent(). Pan/zoom still works.
+          const ts = chartRef.current?.timeScale();
+          const n = candleData.length;
+          if (ts && n) {
+            const VISIBLE = 110;
+            ts.setVisibleLogicalRange({ from: Math.max(0, n - VISIBLE), to: n + 6 });
+          }
+          // Re-fit the price (y) axis to the NEW pair. autoScale gets turned OFF the moment the user
+          // drags the price axis, and stays off — which otherwise leaves the next pair's candles
+          // off-screen behind a pinned scale (e.g. BNB at 588 hidden under a 10000+ range).
+          seriesRef.current.priceScale().applyOptions({ autoScale: true });
         }
-        // Re-fit the price (y) axis to the NEW pair. autoScale gets turned OFF the moment the user
-        // drags the price axis, and stays off — which otherwise leaves the next pair's candles
-        // off-screen behind a pinned scale (e.g. BNB at 588 hidden under a 10000+ range).
-        seriesRef.current.priceScale().applyOptions({ autoScale: true });
       })
       .catch(() => {
         // Don't leave the PREVIOUS pair's chart up when this one fails to load — clear it so it's
@@ -999,7 +1305,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, assetClass, timeframe]);
+    // tzMode is a dependency: every bar time is re-derived through utcToDisp, so switching clocks
+    // has to rebuild the series rather than leave old timestamps on screen under a new label.
+  }, [symbol, assetClass, timeframe, reloadTick, tzMode]);
 
   useEffect(() => {
     applyEmas(candlesRef.current);
@@ -1144,6 +1452,36 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           shape: "circle",
           text: p.label,
         });
+      }
+    }
+    // CHANGE OF CHARACTER — the bar where the swing sequence first contradicts the trend it was in
+    // (an uptrend printing a Lower Low, a downtrend printing a Higher High). The engine already
+    // scores this; on the chart it's the difference between "the trend may be turning" as a claim
+    // and as a place you can see.
+    if (ovl.choch) {
+      for (const c of chochPoints(structureSwings(candles))) {
+        markers.push({
+          time: toTime(candles[c.i]),
+          position: c.bullish ? "belowBar" : "aboveBar",
+          color: "#f59e0b",
+          shape: c.bullish ? "arrowUp" : "arrowDown",
+          text: "CHoCH",
+        });
+      }
+    }
+    // DIVERGENCE — price made a higher high while MACD made a lower one (or the mirror). The
+    // earliest warning there is that a move is running on fumes.
+    if (ovl.div) {
+      for (const d of macdDivergences(candles)) {
+        for (const i of [d.a, d.b]) {
+          markers.push({
+            time: toTime(candles[i]),
+            position: d.bullish ? "belowBar" : "aboveBar",
+            color: d.bullish ? "#22c55e" : "#f43f5e",
+            shape: "square",
+            text: i === d.b ? (d.bullish ? "Bull div" : "Bear div") : "",
+          });
+        }
       }
     }
     // ENTRY marker — pins the open position to the CANDLE it was opened on.
@@ -1350,17 +1688,46 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   };
   loadScenRef.current = () => loadScenarios(false);
 
-  // Live quote -> update the last candle.
+  // Live quote -> update the last candle, OR open a new one when the bar period has elapsed.
+  //
+  // Candles were only ever loaded on symbol/timeframe change, and this handler only ever mutated
+  // the LAST bar. So once an hour rolled over, the 1h candle just kept growing forever and the new
+  // one never appeared until a manual refresh — the chart silently stopped being a chart.
   useEffect(() => {
     if (!liveQuote || !seriesRef.current || !lastBarRef.current) return;
     const bar = lastBarRef.current;
+    const barSec = (TF_MINUTES[timeframe] ?? 0) * 60;
+    const nowDisp = utcToDisp(Date.now() / 1000);
+    const nextStart = (bar.time as number) + barSec;
+
+    if (barSec > 0 && nowDisp >= nextStart) {
+      // Re-pull from the broker so the new bar is the real one, not our guess. Throttled so a
+      // burst of ticks in the first second doesn't fire a dozen identical refetches.
+      if (Date.now() - rollRef.current > ROLL_RETRY_MS) {
+        rollRef.current = Date.now();
+        setReloadTick((v) => v + 1);
+      }
+      // Only draw a provisional bar when we're exactly ONE period late. Further behind means a
+      // weekend, a closed session or a sleeping laptop — inventing candles across that gap would
+      // fabricate price history. In that case just wait for the refetch.
+      if (nowDisp < nextStart + barSec) {
+        const fresh: CandlestickData = {
+          time: nextStart as UTCTimestamp,
+          open: liveQuote.price, high: liveQuote.price, low: liveQuote.price, close: liveQuote.price,
+        };
+        lastBarRef.current = fresh;
+        seriesRef.current.update(fresh);
+      }
+      return;
+    }
+
     const updated: CandlestickData = {
       ...bar, close: liveQuote.price,
       high: Math.max(bar.high, liveQuote.price), low: Math.min(bar.low, liveQuote.price),
     };
     lastBarRef.current = updated;
     seriesRef.current.update(updated);
-  }, [liveQuote]);
+  }, [liveQuote, timeframe]);
 
   // Proposal entry/stop/target overlay lines (dashed). Suppressed once an actual position
   // exists for this symbol — the solid position lines are then the source of truth (avoids
@@ -1576,6 +1943,90 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
   }, [armed, symbol]);
 
+  // Daily reference levels. Fetched only when a toggle that needs them is on, so a trader who
+  // never turns them on never pays for the extra daily fetch.
+  const needKeyLv = ovl.pd || ovl.pw || ovl.open;
+  useEffect(() => {
+    if (!needKeyLv) return;
+    let dead = false;
+    api.keyLevels(symbol, assetClass)
+      .then((k) => { if (!dead) setKeyLv(k); })
+      .catch(() => { if (!dead) setKeyLv(null); });
+    return () => { dead = true; };
+  }, [symbol, assetClass, needKeyLv]);
+
+  // Draw them dotted and muted on purpose: these are levels you judge price AGAINST, not levels
+  // the engine is trading, so they must not compete with the position and plan lines.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    keyLinesRef.current.forEach((l) => series.removePriceLine(l));
+    keyLinesRef.current = [];
+    if (!keyLv) return;
+    const add = (price: number | undefined, color: string, title: string) => {
+      if (price == null || !Number.isFinite(price)) return;
+      keyLinesRef.current.push(
+        series.createPriceLine({
+          price, color, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title,
+        }),
+      );
+    };
+    if (ovl.pd) {
+      add(keyLv.prior_day_high, "#93c5fd", "PDH");
+      add(keyLv.prior_day_low, "#93c5fd", "PDL");
+    }
+    if (ovl.pw) {
+      add(keyLv.prior_week_high, "#c4b5fd", "PWH");
+      add(keyLv.prior_week_low, "#c4b5fd", "PWL");
+    }
+    if (ovl.open) {
+      add(keyLv.today_open, "#fbbf24", "Open");
+      add(keyLv.prior_close, "#a3a3a3", "Prev close");
+    }
+  }, [keyLv, ovl.pd, ovl.pw, ovl.open, symbol, timeframe]);
+
+  // Time left on the current candle. The playbook keeps saying "a wick through a level is not a
+  // break — wait for the close"; without knowing whether that close is 40 seconds or 40 minutes
+  // away, the advice can't be acted on.
+  useEffect(() => {
+    const mins = TF_MINUTES[timeframe];
+    if (!mins) { setBarLeft(null); return; }
+    const tick = () => {
+      const times = barTimesRef.current;
+      if (!times.length) { setBarLeft(null); return; }
+      // barTimesRef holds DISPLAY time, so compare it against a display-time "now".
+      const nowDisp = utcToDisp(Date.now() / 1000);
+      const left = Math.round(times[times.length - 1] + mins * 60 - nowDisp);
+      if (left <= 0) {
+        // The bar's time is up. Pull the new one even if no tick has arrived — on a quiet pair the
+        // quote handler above may not fire for minutes, and the chart would sit on a stale candle.
+        //
+        // Back off hard once the bar is several periods overdue: that isn't a slow broker, it's a
+        // closed session or a weekend, and there is no new candle coming to poll for.
+        const overdue = -left;
+        const retryMs = overdue > 3 * mins * 60 ? 60_000 : ROLL_RETRY_MS;
+        if (Date.now() - rollRef.current > retryMs) {
+          rollRef.current = Date.now();
+          setReloadTick((v) => v + 1);
+        }
+        setBarLeft(null);
+        return;
+      }
+      if (left > mins * 60) { setBarLeft(null); return; }               // stale feed / clock skew
+      const h = Math.floor(left / 3600);
+      const m = Math.floor((left % 3600) / 60);
+      const s = left % 60;
+      setBarLeft({
+        text: h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : m > 0 ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`,
+        left,
+        frac: left / (mins * 60),
+      });
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [timeframe, dataV]);
+
   // --- pixel ↔ (time, price) -------------------------------------------------------------------
   // The vertical axis is exact: the series converts price↔y directly. The horizontal one is not —
   // lightweight-charts only maps times that ARE bars. So we go through the "logical" axis (a
@@ -1623,6 +2074,139 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (l == null) return null;
     const disp = timeOfLogical(Number(l));
     return disp == null ? null : dispToUtc(disp);
+  };
+
+  // Session bands + risk/reward zones, painted on the canvas UNDER the candles.
+  const paintBackground = () => {
+    const canvas = bgCanvasRef.current;
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    const cont = containerRef.current;
+    if (!canvas || !chart || !series || !cont) return;
+    const cw = cont.clientWidth;
+    const ch = cont.clientHeight;
+    if (cw <= 0 || ch <= 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
+      canvas.width = Math.round(cw * dpr);
+      canvas.height = Math.round(ch * dpr);
+      canvas.style.width = `${cw}px`;
+      canvas.style.height = `${ch}px`;
+    }
+    const g = canvas.getContext("2d");
+    if (!g) return;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, cw, ch);
+    const plotW = cw - (chart.priceScale("right").width() || 0);
+    const plotH = ch - (chart.timeScale().height() || 0);
+    g.save();
+    g.beginPath();
+    g.rect(0, 0, plotW, plotH);
+    g.clip();
+
+    // --- day separators -------------------------------------------------------------------------
+    // A dotted line wherever the calendar day changes, labelled with the date. On a 1h chart the
+    // gap between two lines is exactly one day of candles, so "the last 24" needs no counting.
+    //
+    // Skipped on the daily chart and above, where every candle IS a day and a line between each
+    // pair would just be noise.
+    if (ovl.days && (TF_MINUTES[timeframe] ?? 0) > 0 && (TF_MINUTES[timeframe] ?? 0) < 1440) {
+      const times = barTimesRef.current;
+      let prevKey = "";
+      let lastLabelX = -Infinity;
+      g.font = "10px system-ui, -apple-system, sans-serif";
+      for (let i = 0; i < times.length; i++) {
+        // The TRADING day (00:00 UTC), not the viewer's local midnight. The daily candles, PDH/PDL,
+        // the weekly levels and the engine's htf_level filter are all computed on this boundary, so
+        // splitting the chart anywhere else makes the blocks disagree with every level drawn on it —
+        // which is exactly how "previous day high" ended up pointing at a different day's high.
+        const d = new Date(dispToUtc(times[i]) * 1000);
+        const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+        if (i > 0 && key !== prevKey) {
+          const x = xOfTime(dispToUtc(times[i]));
+          if (x != null && x >= 0 && x <= plotW) {
+            const px = Math.round(x) + 0.5;   // half-pixel so a 1px line stays crisp
+            g.save();
+            g.strokeStyle = "rgba(163,163,163,0.30)";
+            g.lineWidth = 1;
+            g.setLineDash([3, 4]);
+            g.beginPath();
+            g.moveTo(px, 0);
+            g.lineTo(px, plotH);
+            g.stroke();
+            g.restore();
+            // Only label when there's room — zoomed out, dates would otherwise overprint.
+            if (px - lastLabelX > 64) {
+              lastLabelX = px;
+              g.fillStyle = "rgba(212,212,212,0.65)";
+              // Formatted in UTC so the label names the session day the line opens, not whatever
+              // local date that instant happens to fall on.
+              g.fillText(
+                d.toLocaleDateString(undefined, {
+                  weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
+                }),
+                px + 4, 11,
+              );
+            }
+          }
+        }
+        prevKey = key;
+      }
+    }
+
+    // --- trading sessions ---------------------------------------------------------------------
+    // Drawn per BAR rather than as one rectangle per day: bars are unevenly spaced across weekends
+    // and holidays, so a band computed from times alone would drift off the candles it describes.
+    if (ovl.sessions) {
+      const times = barTimesRef.current;
+      const bs = chart.timeScale().options().barSpacing || 6;
+      for (let i = 0; i < times.length; i++) {
+        // Sessions are fixed in UTC, so the bar must be converted BACK out of display time before
+        // its hour is read. Taking the hour off display time buckets by the trader's local clock
+        // instead, which slides every band by their UTC offset — 4 hours here, so "London" would
+        // have been painted over the middle of Asia.
+        const hour = new Date(dispToUtc(times[i]) * 1000).getUTCHours();
+        const band =
+          hour < 8 ? "rgba(56,189,248,0.05)"                    // Asia
+            : hour < 13 ? "rgba(167,139,250,0.06)"              // London
+              : hour < 16 ? "rgba(251,191,36,0.08)"             // London/NY overlap — the busiest window
+                : hour < 21 ? "rgba(34,197,94,0.05)"            // New York
+                  : null;
+        if (!band) continue;
+        const x = xOfTime(dispToUtc(times[i]));
+        if (x == null || x < -bs || x > plotW + bs) continue;
+        g.fillStyle = band;
+        g.fillRect(x - bs / 2, 0, bs, plotH);
+      }
+    }
+
+    // --- risk / reward zones ------------------------------------------------------------------
+    // Area, not lines: R:R stops being arithmetic and becomes "is the green block bigger than the
+    // red one?" — and a target with another wall sitting inside it becomes obvious.
+    if (ovl.rr) {
+      const zones: { entry: number; stop: number | null; target: number | null }[] = [];
+      if (myPos) zones.push({ entry: myPos.entry_price, stop: myPos.stop_loss ?? null, target: myPos.take_profit ?? null });
+      else if (proposal && proposal.direction !== "no_trade" && proposal.entry != null) {
+        zones.push({ entry: proposal.entry, stop: proposal.stop_loss ?? null, target: proposal.take_profit ?? null });
+      }
+      for (const a of (armed ?? []).filter((x) => x.symbol.toUpperCase() === symbol.toUpperCase())) {
+        zones.push({ entry: a.trigger_price, stop: a.stop_loss ?? null, target: a.take_profit ?? null });
+      }
+      for (const z of zones) {
+        const yE = series.priceToCoordinate(z.entry);
+        if (yE == null) continue;
+        const band = (price: number | null, color: string) => {
+          if (price == null) return;
+          const y = series.priceToCoordinate(price);
+          if (y == null) return;
+          g.fillStyle = color;
+          g.fillRect(0, Math.min(Number(yE), Number(y)), plotW, Math.abs(Number(y) - Number(yE)));
+        };
+        band(z.stop, "rgba(239,83,80,0.10)");
+        band(z.target, "rgba(38,166,154,0.10)");
+      }
+    }
+    g.restore();
   };
 
   // Repaint the overlay. Cheap enough to run on every frame the view changes: a few hundred
@@ -1761,6 +2345,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         ].join("|");
         if (next !== sig) {
           sig = next;
+          paintBackground();
           paintOverlay();
         }
       }
@@ -1772,8 +2357,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   }, []);
 
   useEffect(() => {
-    dirtyRef.current += 1;   // saved set changed — repaint even if the view is still
-  }, [drawings, dataV, symbol, timeframe]);
+    dirtyRef.current += 1;   // saved set / overlays changed — repaint even if the view is still
+  }, [drawings, dataV, symbol, timeframe, ovl, positions, proposal, armed]);
 
   // Esc drops the tool and any half-drawn stroke.
   useEffect(() => {
@@ -1890,6 +2475,30 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (drawMode === "off") return;
     const at = atPointer(e);
     if (!at) return;
+    if (drawMode === "trade") {
+      const dec = inferDecimals(candlesRef.current);
+      const stop = Number(at.p.toFixed(dec));
+      const mkt = liveQuote?.price ?? lastBarRef.current?.close
+        ?? candlesRef.current[candlesRef.current.length - 1]?.close;
+      if (mkt == null) return;
+      // The side is DERIVED, never asked. A stop below the market can only belong to a long and a
+      // stop above it can only belong to a short — offering both would be offering an impossible
+      // ticket that the API would reject anyway.
+      setTradeErr(null);
+      setTradePrev(null);
+      setTradeDraft({ stop, dir: stop < mkt ? "long" : "short", y: at.y });
+      setDrawMode("off");
+      return;
+    }
+    if (drawMode === "arm") {
+      setArmErr(null);
+      // Round to the instrument's real precision. A pixel maps to a price like 4346.2509924, and
+      // arming at that is both unreadable and meaningless — the broker doesn't quote that finely.
+      const dec = inferDecimals(candlesRef.current);
+      setArmDraft({ price: Number(at.p.toFixed(dec)), y: at.y });
+      setDrawMode("off");
+      return;
+    }
     e.currentTarget.setPointerCapture(e.pointerId);
     const color = DRAW_COLORS[drawings.length % DRAW_COLORS.length];
     if (drawMode === "h") {
@@ -1940,6 +2549,67 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
     saveDrawings((prev) => [...prev, d]);
     setDrawMode("off");
+  };
+
+  // Size the ticket BEFORE it is placed. A market order fills instantly, so the lots and the dollar
+  // risk have to be on screen while the decision is still reversible — not discovered afterwards.
+  useEffect(() => {
+    if (!tradeDraft) return;
+    let dead = false;
+    api
+      .manualPreview({
+        symbol, asset_class: assetClass, direction: tradeDraft.dir,
+        stop_loss: tradeDraft.stop, timeframe,
+      })
+      .then((p) => { if (!dead) setTradePrev(p); })
+      .catch((e) => { if (!dead) setTradeErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, "") : String(e)); });
+    return () => { dead = true; };
+  }, [tradeDraft, symbol, assetClass, timeframe]);
+
+  // Recompute the pulse whenever the position or the candles move. Driven off the 4-second
+  // positions poll rather than every tick — these are bar-based readings, so a per-tick recompute
+  // would spend work to produce the same numbers.
+  const onPulseRef = useRef(onPulse);
+  onPulseRef.current = onPulse;
+  useEffect(() => {
+    const p = (positions ?? []).find((x) => x.symbol.toUpperCase() === symbol.toUpperCase());
+    onPulseRef.current?.(p ? positionPulse(candlesRef.current, p) : null);
+  }, [positions, symbol, timeframe, dataV]);
+
+  const submitTrade = async () => {
+    if (!tradeDraft) return;
+    setTradeBusy(true);
+    setTradeErr(null);
+    try {
+      await api.manualTrade({
+        symbol, asset_class: assetClass, direction: tradeDraft.dir,
+        stop_loss: tradeDraft.stop, timeframe, execute: true,
+      });
+      setTradeDraft(null);
+      setTradePrev(null);
+      onOpened?.();
+    } catch (err) {
+      setTradeErr(err instanceof Error ? err.message.replace(/^\d+:\s*/, "") : String(err));
+    } finally {
+      setTradeBusy(false);
+    }
+  };
+
+  const submitArm = async (direction: "long" | "short") => {
+    if (!armDraft) return;
+    setArmBusy(true);
+    setArmErr(null);
+    try {
+      await api.quickArm({
+        symbol, asset_class: assetClass, timeframe, direction, trigger_price: armDraft.price,
+      });
+      setArmDraft(null);
+      onArmed?.();          // pull the armed list so the trigger/SL/TP lines appear straight away
+    } catch (err) {
+      setArmErr(err instanceof Error ? err.message.replace(/^\d+:\s*/, "") : String(err));
+    } finally {
+      setArmBusy(false);
+    }
   };
 
   const change = legend ? legend.close - legend.open : 0;
@@ -2032,14 +2702,97 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         >
           EMA20 H/L
         </button>
+        {/* Grouped in a popover rather than added as six more chips: the toolbar is already at the
+            limit, and another row of toggles makes every one of them harder to find. */}
+        <span className="relative">
+          <button
+            onClick={() => setOvlOpen((v) => !v)}
+            className={`rounded px-2 py-0.5 text-xs transition ${
+              Object.values(ovl).some(Boolean) || ovlOpen
+                ? "bg-neutral-700 text-white"
+                : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"
+            }`}
+            title="Extra overlays: prior day/week levels, today's open, session shading, risk/reward zones, divergence and change-of-character markers"
+          >
+            📊 Overlays{Object.values(ovl).filter(Boolean).length > 0 ? ` ${Object.values(ovl).filter(Boolean).length}` : ""}
+          </button>
+          {ovlOpen && (
+            <div className="absolute left-0 top-7 z-40 w-[17rem] rounded-lg border border-neutral-700 bg-neutral-900/95 p-2 text-xs shadow-xl">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="font-semibold text-sky-300">📊 Overlays</span>
+                <button onClick={() => setOvlOpen(false)} className="text-neutral-500 hover:text-neutral-200">✕</button>
+              </div>
+              {([
+                ["days", "Day separators", "A dotted line + date at each TRADING day start (00:00 UTC) — the same boundary the daily candle, PDH/PDL and the engine use, so the block between two lines is exactly the day those levels describe. On the 1h chart that is 24 candles. Hidden on the daily chart, where every candle is already a day."],
+                ["pd", "Prior day high / low", "PDH & PDL — yesterday's range. The engine's htf_level filter already scores against these."],
+                ["pw", "Prior week high / low", "PWH & PWL — last completed week's range."],
+                ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
+                ["sessions", "Session shading", "Asia / London / New York tinted on your local clock. Breaks in thin hours fail far more often."],
+                ["rr", "Risk / reward zones", "Shades entry→stop red and entry→target green for positions, proposals and armed setups."],
+                ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
+                ["choch", "Change of character", "Marks where the swing sequence first contradicts the trend it was in."],
+              ] as const).map(([k, label, tip]) => (
+                <label key={k} className="flex cursor-pointer items-start gap-2 rounded px-1 py-1 hover:bg-neutral-800/60" title={tip}>
+                  <input
+                    type="checkbox"
+                    checked={!!ovl[k]}
+                    onChange={() => setOvl((p) => ({ ...p, [k]: !p[k] }))}
+                    className="mt-0.5 accent-sky-500"
+                  />
+                  <span className="text-neutral-300">{label}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </span>
+
         {/* States the clock the axis is in. Without it, "is 14:00 my time or the broker's?" is a
             question you can only answer by counting candles back from now. */}
-        <span
-          className="ml-auto cursor-default rounded px-1.5 py-0.5 text-[10px] text-neutral-600"
-          title={`Chart times are shown in ${TZ_LABEL} — your computer's clock, not the broker's server time.`}
+        <button
+          onClick={() => setTzMode((m) => (m === "local" ? "utc" : "local"))}
+          className={`ml-auto rounded px-1.5 py-0.5 text-[10px] transition hover:bg-neutral-800 ${
+            tzMode === "utc" ? "text-sky-400" : "text-neutral-600 hover:text-neutral-300"
+          }`}
+          title={
+            tzMode === "utc"
+              ? "Axis is in UTC / broker time — day separators fall on 00:00, matching what other traders see. Click to switch back to your own clock."
+              : `Axis is in ${tzLabel("local")} — your computer's clock. Price levels are UNAFFECTED: PDH/PDL and every other level are measured over the 00:00 UTC trading day either way, so they match every other trader. Click to show the axis in UTC instead.`
+          }
         >
-          🕐 {TZ_LABEL}
-        </span>
+          🕐 {tzLabel(tzMode)}
+        </button>
+        {/* Candle-close countdown. "Wait for the close, not the wick" is only actionable if you know
+            how long that is — so this reads as a traffic light rather than a number you have to
+            interpret. Graded on the FRACTION of the bar left, not raw seconds: 30s is nearly a whole
+            5m bar's decision window but a rounding error on the 4h.
+              green  — over half the bar left, nothing to do yet
+              amber  — final quarter, get ready
+              red    — final tenth, this is the decision moment (pulses inside 10 seconds)
+            The filling underline shows the same thing without reading any digits. */}
+        {barLeft && (() => {
+          const tone =
+            barLeft.frac > 0.5
+              ? { cls: "border-emerald-700/50 bg-emerald-900/25 text-emerald-300", icon: "⏱" }
+              : barLeft.frac > 0.25
+                ? { cls: "border-sky-700/50 bg-sky-900/25 text-sky-300", icon: "⏱" }
+                : barLeft.frac > 0.1
+                  ? { cls: "border-amber-600/60 bg-amber-900/30 text-amber-300", icon: "⏳" }
+                  : { cls: "border-rose-600/70 bg-rose-900/40 text-rose-300", icon: "🔔" };
+          return (
+            <span
+              className={`relative flex items-center gap-1 overflow-hidden rounded border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${tone.cls}${
+                barLeft.left <= 10 ? " animate-pulse" : ""
+              }`}
+              title={`${barLeft.text} until the current ${timeframe} candle closes. A wick through a level is not a break — the close is what counts.`}
+            >
+              {tone.icon} {barLeft.text}
+              <span
+                className="absolute bottom-0 left-0 h-[2px] bg-current opacity-80 transition-all duration-1000 ease-linear"
+                style={{ width: `${Math.round((1 - barLeft.frac) * 100)}%` }}
+              />
+            </span>
+          );
+        })()}
         <button
           onClick={loadContext}
           disabled={ctxBusy}
@@ -2093,6 +2846,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             ["f", "🖊 Pen", "Free hand — press and drag to draw any shape, exactly like a pen on paper."],
             ["t", "╱ Trend", "Trend line — press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
             ["h", "─ Level", "Level — one click puts a horizontal line across the whole chart, with its price on the axis."],
+            ["arm", "⚡ Arm", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
+            ["trade", "▶ Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance at the 3% risk cap."],
           ] as const).map(([mode, label, tip]) => (
             <button
               key={mode}
@@ -2477,10 +3232,137 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           <div className="pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded bg-sky-600/90 px-2 py-1 text-xs font-semibold text-white shadow">
             {drawMode === "h"
               ? "Click the price for your level"
-              : drawMode === "f"
-                ? "Press and drag to draw"
-                : "Press at the start, drag to the end, release"}
+              : drawMode === "trade"
+                ? "Click where your STOP goes — it opens at market from there"
+                : drawMode === "arm"
+                  ? "Click the price to arm — the trade opens on a candle CLOSE beyond it"
+                : drawMode === "f"
+                  ? "Press and drag to draw"
+                  : "Press at the start, drag to the end, release"}
             <span className="ml-2 font-normal text-sky-100/80">Esc to cancel</span>
+          </div>
+        )}
+
+        {/* Quick market trade. Shows the sized ticket first — a market order cannot be taken back,
+            so the lots and the dollar risk belong on screen BEFORE the button, not after the fill. */}
+        {tradeDraft && (() => {
+          const long = tradeDraft.dir === "long";
+          const blocked = tradePrev && !tradePrev.approved;
+          return (
+            <div
+              data-panel
+              className="absolute left-1/2 z-30 w-[20rem] -translate-x-1/2 rounded-lg border border-sky-700/70 bg-neutral-900/95 p-3 text-xs shadow-xl"
+              style={{
+                top: Math.max(8, Math.min(tradeDraft.y - 60, (containerRef.current?.clientHeight ?? 600) - 210)),
+                ...(tradeDrag.style ?? {}),
+                ...(tradeDrag.moved ? { transform: "none" } : {}),
+              }}
+            >
+              <div
+                {...tradeDrag.handle}
+                className="mb-1.5 flex cursor-move touch-none select-none items-center justify-between"
+                title="Drag to move · double-click to snap back"
+              >
+                <span className={`font-semibold ${long ? "text-bull" : "text-bear"}`}>
+                  <span className="mr-1 text-neutral-600">⠿</span>
+                  {long ? "▲ Buy now" : "▼ Sell now"} · stop {fmtPrice(tradeDraft.stop)}
+                </span>
+                <button onClick={() => { setTradeDraft(null); setTradePrev(null); }} className="text-neutral-500 hover:text-neutral-200">✕</button>
+              </div>
+
+              {!tradePrev && !tradeErr && <div className="py-2 text-center text-neutral-500">sizing…</div>}
+
+              {tradePrev && (
+                <table className="mb-2 w-full text-neutral-400">
+                  <tbody>
+                    <tr><td className="py-0.5">Entry</td><td className="text-right tabular-nums text-neutral-200">market ≈ {fmtPrice(tradePrev.entry)}</td></tr>
+                    <tr><td className="py-0.5">Stop</td><td className="text-right tabular-nums text-bear">{fmtPrice(tradePrev.stop_loss)}</td></tr>
+                    <tr><td className="py-0.5">Target</td><td className="text-right tabular-nums text-bull">{fmtPrice(tradePrev.take_profit)}</td></tr>
+                    <tr><td className="py-0.5">Size</td><td className="text-right tabular-nums text-neutral-200">{tradePrev.max_lots} lots</td></tr>
+                    <tr><td className="py-0.5">Risk</td><td className="text-right tabular-nums text-neutral-200">{fmtUsd(tradePrev.risk_amount)}</td></tr>
+                  </tbody>
+                </table>
+              )}
+
+              {/* The Risk Manager's own words when it refuses — never paraphrased, and never
+                  overridable from here. */}
+              {blocked && (
+                <div className="mb-2 rounded bg-bear/15 px-2 py-1 leading-snug text-bear">
+                  Risk Manager blocked this: {tradePrev?.reason}
+                </div>
+              )}
+              {tradeErr && <div className="mb-2 rounded bg-bear/15 px-2 py-1 text-bear">{tradeErr}</div>}
+
+              <button
+                onClick={() => void submitTrade()}
+                disabled={tradeBusy || !tradePrev || !!blocked}
+                className={`w-full rounded py-1.5 font-semibold disabled:opacity-40 ${
+                  long ? "bg-bull/25 text-bull hover:bg-bull/35" : "bg-bear/25 text-bear hover:bg-bear/35"
+                }`}
+              >
+                {tradeBusy ? "…" : blocked ? "Blocked by risk" : long
+                  ? `▲ Buy ${tradePrev?.max_lots ?? ""} lots at market`
+                  : `▼ Sell ${tradePrev?.max_lots ?? ""} lots at market`}
+              </button>
+              <p className="mt-1.5 text-[10px] leading-snug text-neutral-500">
+                Fills immediately at the market. Size comes from your stop at the 3% cap — move the
+                stop to change the size. Target defaults to 2R and both are draggable afterwards.
+              </p>
+            </div>
+          );
+        })()}
+
+        {/* Confirm the side before anything is armed. The suggested direction follows the line's
+            position relative to price — above = break upward = long — but both buttons are always
+            offered, because a break down through a level you drew above price is a real trade too. */}
+        {armDraft && (
+          <div
+            data-panel
+            // bg-neutral-900/95, NOT /97: Tailwind's default opacity scale stops at 95, so /97
+            // generates no rule at all and the panel renders fully transparent.
+            className="absolute left-1/2 z-30 w-[19rem] -translate-x-1/2 rounded-lg border border-amber-700/70 bg-neutral-900/95 p-3 text-xs shadow-xl"
+            style={{
+              top: Math.max(8, Math.min(armDraft.y - 60, (containerRef.current?.clientHeight ?? 600) - 190)),
+              ...(armDrag.style ?? {}),   // a dragged position wins over the click-anchored default
+              ...(armDrag.moved ? { transform: "none" } : {}),
+            }}
+          >
+            {/* Draggable by its title bar — it opens next to where you clicked, which is often
+                exactly the candles you need to see to decide. */}
+            <div
+              {...armDrag.handle}
+              className="mb-1 flex cursor-move touch-none select-none items-center justify-between"
+              title="Drag to move · double-click to snap back to the click point"
+            >
+              <span className="font-semibold text-amber-300">
+                <span className="mr-1 text-neutral-600">⠿</span>⚡ Arm at {fmtPrice(armDraft.price)}
+              </span>
+              <button onClick={() => setArmDraft(null)} className="text-neutral-500 hover:text-neutral-200">✕</button>
+            </div>
+            <p className="mb-2 leading-snug text-neutral-400">
+              Opens only when a <strong className="text-neutral-200">candle closes</strong> beyond this
+              line — a wick through it does nothing. Stop and target are derived from ATR and can be
+              dragged afterwards. The Risk Manager sizes it and applies every gate at the trigger.
+            </p>
+            {armErr && <div className="mb-2 rounded bg-bear/15 px-2 py-1 text-bear">{armErr}</div>}
+            <div className="flex gap-2">
+              <button
+                onClick={() => void submitArm("long")}
+                disabled={armBusy}
+                className="flex-1 rounded bg-bull/20 py-1.5 font-semibold text-bull hover:bg-bull/30 disabled:opacity-50"
+                title="Open a LONG when a candle closes ABOVE this line"
+              >
+                {armBusy ? "…" : "▲ Long on break up"}
+              </button>
+              <button
+                onClick={() => void submitArm("short")}
+                disabled={armBusy}
+                className="flex-1 rounded bg-bear/20 py-1.5 font-semibold text-bear hover:bg-bear/30 disabled:opacity-50"
+                title="Open a SHORT when a candle closes BELOW this line"
+              >
+                {armBusy ? "…" : "▼ Short on break down"}
+              </button>
+            </div>
           </div>
         )}
 
@@ -2494,7 +3376,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           {isFull ? "⤡ Exit" : "⛶ Full screen"}
         </button>
 
-        <div ref={containerRef} className={isFull ? "h-full w-full" : "h-[600px] w-full"} />
+        {/* Session bands and risk/reward zones paint BEHIND the candles. The chart's own background
+            is transparent, so a canvas underneath shows through — tinting on top would recolour the
+            candles themselves, which is the one thing that must stay true. */}
+        <canvas ref={bgCanvasRef} className="pointer-events-none absolute inset-0 z-0" />
+        <div ref={containerRef} className={`relative z-[1] ${isFull ? "h-full w-full" : "h-[600px] w-full"}`} />
 
         {/* The ink layer. Transparent to the mouse unless a tool is armed, so the crosshair, the
             SL/TP drags and panning all behave normally the rest of the time. */}

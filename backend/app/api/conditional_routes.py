@@ -51,6 +51,19 @@ class ArmRequest(BaseModel):
     require_close_confirm: bool = True
 
 
+class QuickArmRequest(BaseModel):
+    """One line on the chart + a direction. Everything else is derived."""
+
+    symbol: str
+    asset_class: str
+    timeframe: str = "1h"
+    direction: str                      # "long" | "short"
+    trigger_price: float
+    stop_loss: float | None = None      # omit -> ATR stop, same rule as a manual ticket
+    take_profit: float | None = None    # omit -> default R multiple
+    valid_hours: int = Field(12, ge=1, le=168)
+
+
 class ConditionalSetupView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -147,6 +160,79 @@ def arm(req: ArmRequest, session: Session = Depends(get_session)) -> Conditional
                        "would be risk-vetoed every time it triggers. Set a stop and arm it again.")
         raise HTTPException(status_code=409,
                             detail="already armed for this symbol/direction, or the symbol is open")
+    return ConditionalSetupView.model_validate(s)
+
+
+@router.post("/quick", response_model=ConditionalSetupView)
+def quick_arm(req: QuickArmRequest, session: Session = Depends(get_session)) -> ConditionalSetupView:
+    """Arm from a single line drawn on the chart: break it, close beyond it, and the trade opens.
+
+    Everything except the line and the direction is derived — the stop from ATR (the same rule a
+    manual ticket uses) and the target from the default R multiple. Both are editable on the chart
+    afterwards by dragging, exactly like any other armed setup.
+
+    Deliberate differences from the engine's own arms:
+
+    * ``require_close_confirm`` is forced ON. The whole point of the line is "one candle CLOSES past
+      it", and a wick-triggered fill is the single most common way a break trade loses.
+    * ``auto_execute`` is forced ON, even in Mode A. You drew the line and chose the side, so asking
+      you to approve the same decision again at the trigger is a second click for no new information
+      — and the trigger usually fires when you are not watching, which is the reason to arm at all.
+
+    What does NOT change: the Risk Manager still sizes the position from the stop distance and still
+    applies every gate (exposure, daily loss, spread, session, correlation) at the moment it fires.
+    Arming never bypasses risk — it only decides WHEN the question gets asked.
+    """
+    from app.api.proposal_routes import _DEFAULT_TARGET_R, _auto_stop_distance
+    from app.models.enums import AssetClass, ConditionalOrderType
+
+    direction = (req.direction or "").lower()
+    if direction not in ("long", "short"):
+        raise HTTPException(status_code=422, detail="direction must be 'long' or 'short'")
+    trigger = float(req.trigger_price)
+    if trigger <= 0:
+        raise HTTPException(status_code=422, detail="the arming line needs a positive price")
+
+    try:
+        ac = AssetClass(req.asset_class)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"unknown asset class {req.asset_class!r}") from None
+
+    # Stop first: without one the Risk Manager cannot size, and arm_conditional refuses it outright.
+    stop = req.stop_loss
+    if stop is None:
+        dist = _auto_stop_distance(session, req.symbol, ac, req.timeframe, trigger)
+        stop = trigger - dist if direction == "long" else trigger + dist
+    if direction == "long" and not stop < trigger:
+        raise HTTPException(status_code=422, detail="for a LONG the stop must be BELOW the line")
+    if direction == "short" and not stop > trigger:
+        raise HTTPException(status_code=422, detail="for a SHORT the stop must be ABOVE the line")
+
+    target = req.take_profit
+    if target is None:
+        risk = abs(trigger - stop)
+        target = trigger + _DEFAULT_TARGET_R * risk if direction == "long" else trigger - _DEFAULT_TARGET_R * risk
+
+    # A break in the trade's own direction: long above the line, short below it.
+    order_type = (ConditionalOrderType.BUY_STOP.value if direction == "long"
+                  else ConditionalOrderType.SELL_STOP.value)
+    rr = abs(target - trigger) / abs(trigger - stop) if trigger != stop else None
+
+    s = arm_conditional(
+        session, symbol=req.symbol, asset_class=req.asset_class, timeframe=req.timeframe,
+        direction=direction, order_type=order_type, trigger_price=trigger,
+        stop_loss=round(stop, 6), take_profit=round(target, 6),
+        # Confidence 1.0: you placed this line yourself, so it must not be filtered out by the
+        # hybrid's min-arm-confidence gate, which exists to judge the ENGINE's own suggestions.
+        confidence=1.0, rr=round(rr, 2) if rr else None,
+        rationale=f"Manual quick-arm from the chart at {trigger:g} — opens on a candle CLOSE beyond the line.",
+        source="manual", auto_execute=True,
+        valid_hours=req.valid_hours, require_close_confirm=True,
+    )
+    if s is None:
+        raise HTTPException(
+            status_code=409,
+            detail="already armed for this symbol/direction, or the symbol is already open")
     return ConditionalSetupView.model_validate(s)
 
 
