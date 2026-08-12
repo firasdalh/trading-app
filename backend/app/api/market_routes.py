@@ -6,6 +6,8 @@ to run against a non-paper broker and respects the kill-switch.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -102,6 +104,47 @@ def market_context(
     if ctx is None:
         raise HTTPException(status_code=503, detail="market context unavailable (no data)")
     return ctx
+
+
+@router.get("/market/events")
+def market_events(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    hours: int = Query(24, ge=1, le=72),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Economic-calendar events that move THIS instrument, from now out to ``hours`` ahead.
+
+    Which countries matter is derived from the symbol (EURUSD -> EU + US, JP225 -> JP, oil -> US),
+    so the list is what could move the chart in front of you rather than a generic world calendar.
+
+    Read-only and advisory: the engine already blacks out trading around high-impact events via the
+    fundamental agent's stand-aside windows. This endpoint only surfaces the same data so you can
+    see it coming.
+    """
+    from app.data.providers import get_calendar_provider
+
+    now = datetime.now(timezone.utc)
+    try:
+        events = get_calendar_provider().get_events(
+            symbol, lookahead_hours=hours, include_medium=True, asset_class=asset_class.value)
+    except Exception as exc:  # noqa: BLE001 — the calendar is advisory; never break the chart over it
+        return {"symbol": symbol, "events": [], "error": str(exc)}
+
+    out = []
+    for e in events:
+        when = e.when if e.when.tzinfo else e.when.replace(tzinfo=timezone.utc)
+        mins = (when - now).total_seconds() / 60.0
+        # Keep a short lookback: an event that fired 20 minutes ago is still why price is moving.
+        if mins < -60 or mins > hours * 60:
+            continue
+        out.append({
+            "label": e.label, "when": when.isoformat(), "importance": e.importance,
+            "country": e.country, "minutes_away": round(mins),
+            "forecast": e.forecast, "previous": e.previous, "actual": e.actual,
+        })
+    out.sort(key=lambda x: x["minutes_away"])
+    return {"symbol": symbol, "events": out}
 
 
 @router.get("/market/keylevels")

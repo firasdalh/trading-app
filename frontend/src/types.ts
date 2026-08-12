@@ -417,6 +417,24 @@ export interface HybridState {
 }
 
 // Plain-language "where is price on the map + confirm" read (GET /api/market/context).
+// Economic calendar for one instrument (GET /api/market/events). Advisory only — the engine's own
+// stand-aside windows already gate trading around high-impact releases.
+export interface MarketEvent {
+  label: string;
+  when: string;            // ISO UTC
+  importance: string;      // low | medium | high
+  country: string;
+  minutes_away: number;    // negative = already released
+  forecast: number | null;
+  previous: number | null;
+  actual: number | null;
+}
+export interface MarketEvents {
+  symbol: string;
+  events: MarketEvent[];
+  error?: string;
+}
+
 // Daily reference levels (GET /api/market/keylevels) — the ones desks watch and the engine's
 // htf_level filter already scores against.
 export interface KeyLevels {

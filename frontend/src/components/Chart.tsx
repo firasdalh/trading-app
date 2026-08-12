@@ -19,7 +19,7 @@ import {
 import { api } from "../api/client";
 import { ScenarioCard } from "./ScenarioCard";
 import { fmtPrice, fmtUsd } from "../format";
-import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, PositionView, TradeProposal } from "../types";
+import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
 // Persist a small chart UI toggle across refreshes AND pair changes (localStorage-backed useState).
@@ -63,6 +63,9 @@ function usePersisted<T>(key: string, initial: T, merge = false) {
 // offset in force on THAT date. Bars either side of a daylight-saving change each get the right
 // one; a single constant would slide half the history by an hour twice a year.
 // Bar length per timeframe, for the candle-close countdown.
+// How many of the most recent swing pivots get an HH/HL/LH/LL label. All of them is unreadable.
+const STRUCT_LABELS = 8;
+
 const TF_MINUTES: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440 };
 
 // Which clock the axis is written in. In "utc" mode the shift is the identity, so the chart shows
@@ -817,6 +820,66 @@ function LineSwatch({ dash }: { dash: string }) {
   );
 }
 
+// A toolbar dropdown. Fifteen always-visible indicator chips read as noise and pushed the real
+// actions (Read, Arm, Trade) onto a second row; folded into three menus they read as a menu bar,
+// and the count on each one still says at a glance what's switched on.
+function ToolMenu({
+  label, count, open, onToggle, children, width = "w-56",
+}: {
+  label: string; count: number; open: boolean; onToggle: () => void;
+  children: React.ReactNode; width?: string;
+}) {
+  return (
+    <span className="relative">
+      <button
+        onClick={onToggle}
+        className={`rounded-md px-2 py-0.5 text-xs transition ${
+          open ? "bg-neutral-700 text-white" : count > 0 ? "bg-neutral-800 text-neutral-200" : "text-neutral-500 hover:bg-neutral-800/60"
+        }`}
+      >
+        {label}{count > 0 ? ` ${count}` : ""} <span className="text-[9px] opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className={`absolute left-0 top-7 z-40 ${width} rounded-lg border border-neutral-700 bg-neutral-900/95 p-1.5 text-xs shadow-xl`}>
+          {children}
+        </div>
+      )}
+    </span>
+  );
+}
+
+// One row inside a ToolMenu.
+//
+// Deliberately a <button> with a DRAWN checkbox, not a <label> wrapping an <input>. A label fires
+// the handler twice for a single click — once from the click itself, then again from the label
+// forwarding activation to its nested input, which bubbles straight back up. Two toggles cancel
+// out, so the row simply never ticked. `pointer-events-none` on the input does not help: it blocks
+// direct hits on the box, not the label's forwarding.
+function MenuItem({
+  on, onClick, children, tip, dot,
+}: { on: boolean; onClick: () => void; children: React.ReactNode; tip?: string; dot?: string }) {
+  return (
+    <button
+      type="button"
+      role="menuitemcheckbox"
+      aria-checked={on}
+      onClick={onClick}
+      title={tip}
+      className="flex w-full cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-neutral-800/70"
+    >
+      <span
+        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border text-[9px] font-bold leading-none transition ${
+          on ? "border-sky-500 bg-sky-500 text-neutral-950" : "border-neutral-600 text-transparent"
+        }`}
+      >
+        ✓
+      </span>
+      {dot && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: dot }} />}
+      <span className={on ? "text-neutral-100" : "text-neutral-400"}>{children}</span>
+    </button>
+  );
+}
+
 // --- Sub-pane sizing -------------------------------------------------------------------------
 // RSI and MACD ship at 120px, but how much room an indicator deserves is a personal call: someone
 // reading divergence wants a tall RSI, someone who just wants the histogram sign wants it short.
@@ -956,7 +1019,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // leave the chart stuck on the old candle — exactly the bug this is here to fix.
   const rollRef = useRef(0);
   const ROLL_RETRY_MS = 8000;
-  const viewKeyRef = useRef("");   // which chart the view was last reset for
+  const viewKeyRef = useRef("");     // which chart the view was last reset for
+  const candlesKeyRef = useRef("");  // which symbol|timeframe candlesRef currently holds
 
   const [legend, setLegend] = useState<Legend | null>(null);
   const [showEma, setShowEma] = usePersisted<Record<number, boolean>>(
@@ -978,7 +1042,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     { pd: false, pw: false, open: false, sessions: false, rr: false, div: false, choch: false, days: true },
     true,
   );
-  const [ovlOpen, setOvlOpen] = useState(false);
+  // Which toolbar menu is open (only one at a time — two dropdowns overlapping is worse than
+  // the chips they replaced).
+  const [menu, setMenu] = useState<null | "ema" | "ind" | "lv">(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   // Set synchronously so every conversion below this line — candles, markers, drawings, countdown,
   // separators — uses one clock within a single render. A useEffect would leave the first paint on
   // the previous mode.
@@ -986,10 +1053,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   TZ_MODE = tzMode;
   const [keyLv, setKeyLv] = useState<KeyLevels | null>(null);
   const keyLinesRef = useRef<IPriceLine[]>([]);
-  const bgCanvasRef = useRef<HTMLCanvasElement>(null);   // sessions + R:R zones, painted BEHIND price
+  const bgCanvasRef = useRef<HTMLCanvasElement>(null);   // day separators + R:R zones, behind price
   // Countdown to the candle close. `frac` is how much of the bar REMAINS, which is what drives the
   // colour — 30 seconds means something very different on a 5m bar than on a 4h one.
   const [barLeft, setBarLeft] = useState<{ text: string; left: number; frac: number } | null>(null);
+  const [events, setEvents] = useState<MarketEvent[] | null>(null);
+  const [evOpen, setEvOpen] = useState(false);
 
   const [ctx, setCtx] = useState<MarketContext | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
@@ -1231,6 +1300,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       .then((series) => {
         if (cancelled || !seriesRef.current || !volumeRef.current) return;
         candlesRef.current = series.candles;
+        candlesKeyRef.current = `${symbol}|${timeframe}`;   // what candlesRef actually holds
         // Drawings map pixels↔time through the bar times, so refresh that lookup with the data.
         barTimesRef.current = series.candles.map((c) => toTime(c) as number);
         setDataV((v) => v + 1);
@@ -1444,7 +1514,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       }
     }
     if (showStructure) {
-      for (const p of structureSwings(candles)) {
+      // Only the most recent swings. Labelling all ~25 pivots in 400 bars carpeted the candles, and
+      // the structure that matters for a decision is the last few — older HH/LL are history you can
+      // already see in the shape of the chart.
+      for (const p of structureSwings(candles).slice(-STRUCT_LABELS)) {
         markers.push({
           time: toTime(candles[p.i]),
           position: p.high ? "aboveBar" : "belowBar",
@@ -1943,6 +2016,20 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
   }, [armed, symbol]);
 
+  // Today's economic calendar for this instrument. Refreshed every 10 minutes: the events don't
+  // change, but the countdown to them does, and "CPI in 6 minutes" is a different fact from
+  // "CPI today". The server caches the upstream call for an hour, so this costs nothing.
+  useEffect(() => {
+    let dead = false;
+    const pull = () =>
+      api.marketEvents(symbol, assetClass, 24)
+        .then((r) => { if (!dead) setEvents(r.events ?? []); })
+        .catch(() => { if (!dead) setEvents(null); });
+    void pull();
+    const id = window.setInterval(pull, 600_000);
+    return () => { dead = true; window.clearInterval(id); };
+  }, [symbol, assetClass]);
+
   // Daily reference levels. Fetched only when a toggle that needs them is on, so a trader who
   // never turns them on never pays for the extra daily fetch.
   const needKeyLv = ovl.pd || ovl.pw || ovl.open;
@@ -2112,9 +2199,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // pair would just be noise.
     if (ovl.days && (TF_MINUTES[timeframe] ?? 0) > 0 && (TF_MINUTES[timeframe] ?? 0) < 1440) {
       const times = barTimesRef.current;
-      let prevKey = "";
-      let lastLabelX = -Infinity;
       g.font = "10px system-ui, -apple-system, sans-serif";
+
+      // Collect the boundaries first, WITH how many bars each day contains. Labels then go to the
+      // biggest days first rather than to whichever comes first left-to-right.
+      //
+      // Left-to-right was actively wrong: Sunday's reopen is a 2-candle stub, so its separator sits
+      // ~25px before Monday's. First-come labelling printed "Sun" and then suppressed "Mon" for
+      // being too close — hiding a full trading day to keep a two-bar remnant.
+      const bounds: { px: number; date: Date; bars: number }[] = [];
+      let prevKey = "";
       for (let i = 0; i < times.length; i++) {
         // The TRADING day (00:00 UTC), not the viewer's local midnight. The daily candles, PDH/PDL,
         // the weekly levels and the engine's htf_level filter are all computed on this boundary, so
@@ -2124,37 +2218,48 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
         if (i > 0 && key !== prevKey) {
           const x = xOfTime(dispToUtc(times[i]));
-          if (x != null && x >= 0 && x <= plotW) {
-            const px = Math.round(x) + 0.5;   // half-pixel so a 1px line stays crisp
-            g.save();
-            g.strokeStyle = "rgba(163,163,163,0.30)";
-            g.lineWidth = 1;
-            g.setLineDash([3, 4]);
-            g.beginPath();
-            g.moveTo(px, 0);
-            g.lineTo(px, plotH);
-            g.stroke();
-            g.restore();
-            // Only label when there's room — zoomed out, dates would otherwise overprint.
-            if (px - lastLabelX > 64) {
-              lastLabelX = px;
-              g.fillStyle = "rgba(212,212,212,0.65)";
-              // Formatted in UTC so the label names the session day the line opens, not whatever
-              // local date that instant happens to fall on.
-              g.fillText(
-                d.toLocaleDateString(undefined, {
-                  weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
-                }),
-                px + 4, 11,
-              );
-            }
-          }
+          if (x != null && x >= 0 && x <= plotW) bounds.push({ px: Math.round(x) + 0.5, date: d, bars: 0 });
         }
+        if (bounds.length) bounds[bounds.length - 1].bars++;
         prevKey = key;
+      }
+
+      // Lines for every boundary — those are cheap and never collide.
+      g.save();
+      g.strokeStyle = "rgba(163,163,163,0.30)";
+      g.lineWidth = 1;
+      g.setLineDash([3, 4]);
+      for (const b of bounds) {
+        g.beginPath();
+        g.moveTo(b.px, 0);        // half-pixel offset above keeps a 1px line crisp
+        g.lineTo(b.px, plotH);
+        g.stroke();
+      }
+      g.restore();
+
+      // Labels by day size, biggest first, each claiming 64px of room.
+      const claimed: number[] = [];
+      g.fillStyle = "rgba(212,212,212,0.65)";
+      for (const b of [...bounds].sort((a, c) => c.bars - a.bars)) {
+        if (claimed.some((x) => Math.abs(x - b.px) < 64)) continue;
+        claimed.push(b.px);
+        // Formatted in UTC so the label names the session day the line opens, not whatever local
+        // date that instant happens to fall on.
+        g.fillText(
+          b.date.toLocaleDateString(undefined, {
+            weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
+          }),
+          b.px + 4, 11,
+        );
       }
     }
 
     // --- trading sessions ---------------------------------------------------------------------
+    // Full-height tint, three cool colours, as originally built. The amber overlap band that got
+    // added later is deliberately NOT here: warm tones at low opacity over a near-black chart read
+    // as dirty olive, which is what made this look muddy. Blue/violet/green sit cleanly over black
+    // at the same opacity, so New York simply runs 13:00-21:00 and swallows the overlap.
+    //
     // Drawn per BAR rather than as one rectangle per day: bars are unevenly spaced across weekends
     // and holidays, so a band computed from times alone would drift off the candles it describes.
     if (ovl.sessions) {
@@ -2164,19 +2269,19 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         // Sessions are fixed in UTC, so the bar must be converted BACK out of display time before
         // its hour is read. Taking the hour off display time buckets by the trader's local clock
         // instead, which slides every band by their UTC offset — 4 hours here, so "London" would
-        // have been painted over the middle of Asia.
+        // have been painted over the middle of Asia. (Kept from the later fix: this was wrong in
+        // the first version, and it is a correctness bug rather than a look.)
         const hour = new Date(dispToUtc(times[i]) * 1000).getUTCHours();
         const band =
           hour < 8 ? "rgba(56,189,248,0.05)"                    // Asia
             : hour < 13 ? "rgba(167,139,250,0.06)"              // London
-              : hour < 16 ? "rgba(251,191,36,0.08)"             // London/NY overlap — the busiest window
-                : hour < 21 ? "rgba(34,197,94,0.05)"            // New York
-                  : null;
+              : hour < 21 ? "rgba(34,197,94,0.05)"              // New York (incl. the London overlap)
+                : null;
         if (!band) continue;
         const x = xOfTime(dispToUtc(times[i]));
         if (x == null || x < -bs || x > plotW + bs) continue;
         g.fillStyle = band;
-        g.fillRect(x - bs / 2, 0, bs, plotH);
+        g.fillRect(x - bs / 2, 0, bs + 1, plotH);
       }
     }
 
@@ -2359,6 +2464,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     dirtyRef.current += 1;   // saved set / overlays changed — repaint even if the view is still
   }, [drawings, dataV, symbol, timeframe, ovl, positions, proposal, armed]);
+
+  // Close an open toolbar menu on any outside click. Without this the dropdown stays up while you
+  // work on the chart, which is exactly the clutter the menus were meant to remove.
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!toolbarRef.current?.contains(e.target as Node)) setMenu(null);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [menu]);
 
   // Esc drops the tool and any half-drawn stroke.
   useEffect(() => {
@@ -2572,6 +2688,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const onPulseRef = useRef(onPulse);
   onPulseRef.current = onPulse;
   useEffect(() => {
+    // Only read candles that belong to THIS chart. On a pair switch the positions poll can land
+    // before the new candles do, and computing ADX for BTCUSD off oil's bars would produce a
+    // confident, completely wrong verdict on a live trade. Blank until the data matches.
+    if (candlesKeyRef.current !== `${symbol}|${timeframe}`) {
+      onPulseRef.current?.(null);
+      return;
+    }
     const p = (positions ?? []).find((x) => x.symbol.toUpperCase() === symbol.toUpperCase());
     onPulseRef.current?.(p ? positionPulse(candlesRef.current, p) : null);
   }, [positions, symbol, timeframe, dataV]);
@@ -2631,120 +2754,165 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   return (
     <div ref={rootRef} className={`relative${isFull ? " flex min-h-0 flex-1 flex-col" : ""}`}>
-      <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-1.5">
-        {EMA_CONFIG.map(({ period, color }) => (
-          <button
-            key={period}
-            onClick={() => setShowEma((s) => ({ ...s, [period]: !s[period] }))}
-            className={`rounded-md px-2 py-0.5 text-xs transition ${showEma[period] ? "bg-neutral-700 text-white" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-            style={showEma[period] ? { color } : undefined}
-          >
-            EMA {period}
-          </button>
-        ))}
-        <button
-          onClick={() => setShowRsi((v) => !v)}
-          className={`rounded-md px-2 py-0.5 text-xs transition ${showRsi ? "bg-neutral-700 text-purple-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-        >
-          RSI
-        </button>
-        <button
-          onClick={() => setShowMacd((v) => !v)}
-          className={`rounded-md px-2 py-0.5 text-xs transition ${showMacd ? "bg-neutral-700 text-blue-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-        >
-          MACD
-        </button>
-        <button
-          onClick={() => setShowSt((v) => !v)}
-          className={`rounded-md px-2 py-0.5 text-xs transition ${showSt ? "bg-neutral-700 text-emerald-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-          title="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red band = downtrend (resistance)"
-        >
-          SuperTrend
-        </button>
-        <button
-          onClick={() => setShowPb((v) => !v)}
-          className={`rounded-md px-2 py-0.5 text-xs transition ${showPb ? "bg-neutral-700 text-amber-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-          title="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70."
-        >
-          Pullback
-        </button>
-        <button
-          onClick={() => setShowStructure((v) => !v)}
-          className={`rounded-md px-2 py-0.5 text-xs transition ${showStructure ? "bg-neutral-700 text-sky-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-          title="Market structure: labels swing pivots HH / HL (green = bullish structure) and LH / LL (red = bearish). Higher-highs + higher-lows = uptrend; lower-highs + lower-lows = downtrend — the same swing map the engine reads."
-        >
-          Structure
-        </button>
-        <button
-          onClick={() => setShowChannel((v) => !v)}
-          className={`rounded-md px-2 py-0.5 text-xs transition ${showChannel ? "bg-neutral-700 text-violet-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-          title="Regression channel: the algorithmic diagonal trend line (mid) + dynamic resistance (upper) / support (lower) bands. Objective, reproducible version of a hand-drawn trend line/channel. Shown for your read; tested and NOT used to gate trades (it hurt a trend-following engine — in a trend, price rides & breaks the upper band)."
-        >
-          Channel
-        </button>
-        {(["1h", "4h", "1d"] as const).map((tf) => {
-          const onCls = { "1h": "text-slate-300", "4h": "text-amber-300", "1d": "text-red-300" }[tf];
+      <div ref={toolbarRef} className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-1.5">
+        {/* Three menus instead of fifteen chips. The counts keep "what is on" visible without
+            every option being permanently on screen. */}
+        <ToolMenu label="📈 EMA" count={EMA_CONFIG.filter(({ period }) => showEma[period]).length}
+                  open={menu === "ema"} onToggle={() => setMenu((m) => (m === "ema" ? null : "ema"))} width="w-40">
+          {EMA_CONFIG.map(({ period, color }) => (
+            <MenuItem key={period} on={!!showEma[period]} dot={color}
+                      onClick={() => setShowEma((x) => ({ ...x, [period]: !x[period] }))}>
+              EMA {period}
+            </MenuItem>
+          ))}
+        </ToolMenu>
+
+        <ToolMenu label="📊 Indicators"
+                  count={[showRsi, showMacd, showSt, showPb, showStructure, showChannel].filter(Boolean).length}
+                  open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))}>
+          <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI pane</MenuItem>
+          <MenuItem on={showMacd} onClick={() => setShowMacd((v) => !v)} dot="#3b82f6">MACD pane</MenuItem>
+          <MenuItem on={showSt} onClick={() => setShowSt((v) => !v)} dot="#26a69a"
+                    tip="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red = downtrend (resistance)">
+            SuperTrend
+          </MenuItem>
+          <MenuItem on={showPb} onClick={() => setShowPb((v) => !v)} dot="#f59e0b"
+                    tip="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70.">
+            Pullback signals
+          </MenuItem>
+          <MenuItem on={showStructure} onClick={() => setShowStructure((v) => !v)} dot="#38bdf8"
+                    tip="Market structure: labels swing pivots HH / HL (bullish) and LH / LL (bearish) — the same swing map the engine reads. Only the most recent swings are labelled, so older ones don't carpet the chart.">
+            Structure (HH/HL)
+          </MenuItem>
+          <MenuItem on={showChannel} onClick={() => setShowChannel((v) => !v)} dot="#a78bfa"
+                    tip="Regression channel: the algorithmic trend line (mid) + dynamic resistance/support bands. Shown for your read; tested and NOT used to gate trades.">
+            Regression channel
+          </MenuItem>
+        </ToolMenu>
+
+        <ToolMenu label="📍 Levels"
+                  count={(["1h", "4h", "1d"] as const).filter((tf) => showSR[tf]).length
+                         + (showBand ? 1 : 0) + Object.values(ovl).filter(Boolean).length}
+                  open={menu === "lv"} onToggle={() => setMenu((m) => (m === "lv" ? null : "lv"))} width="w-72">
+          <div className="px-1.5 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            Support / resistance
+          </div>
+          {(["1h", "4h", "1d"] as const).map((tf) => (
+            <MenuItem key={tf} on={!!showSR[tf]} onClick={() => setShowSR((x) => ({ ...x, [tf]: !x[tf] }))}
+                      dot={{ "1h": "#94a3b8", "4h": "#f59e0b", "1d": "#f87171" }[tf]}
+                      tip={`Swing levels from the ${tf} chart. R = resistance, S = support.`}>
+              {tf.toUpperCase()} support / resistance
+            </MenuItem>
+          ))}
+          <MenuItem on={showBand} onClick={() => setShowBand((v) => !v)} dot="#22d3ee"
+                    tip="EMA20 of highs / lows = a band around price. The SuperTrend Strategy enters on a close BEYOND this band.">
+            EMA20 high/low band
+          </MenuItem>
+          <div className="mt-1 border-t border-neutral-800 px-1.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            Overlays
+          </div>
+          {([
+            ["days", "Day separators", "A dotted line + date at each TRADING day start (00:00 UTC) — the same boundary the daily candle, PDH/PDL and the engine use. On the 1h chart that block is one day of candles."],
+            ["pd", "Prior day high / low", "PDH & PDL — yesterday's range. The engine's htf_level filter already scores against these."],
+            ["pw", "Prior week high / low", "PWH & PWL — last completed week's range."],
+            ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
+            ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
+            ["rr", "Risk / reward zones", "Shades entry→stop red and entry→target green for positions, proposals and armed setups."],
+            ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
+            ["choch", "Change of character", "Marks where the swing sequence first contradicts the trend it was in."],
+          ] as const).map(([k, lbl, tip]) => (
+            <MenuItem key={k} on={!!ovl[k]} onClick={() => setOvl((x) => ({ ...x, [k]: !x[k] }))} tip={tip}>
+              {lbl}
+            </MenuItem>
+          ))}
+        </ToolMenu>
+
+        {/* Economic calendar. The headline is the NEXT high-impact release and how long until it —
+            "in 34m" is what changes a decision; "there is news today" doesn't. */}
+        {events && (() => {
+          // Minutes are recomputed from the timestamp on every render, NOT read from the
+          // server's `minutes_away`. That field is a snapshot from fetch time and the calendar is
+          // only re-pulled every 10 minutes, so trusting it left the countdown up to ten minutes
+          // wrong — and showed an event that had already fired as still ahead. The 1-second bar
+          // timer re-renders this component, so a locally derived figure stays live for free.
+          const mins = (e: MarketEvent) => Math.round((Date.parse(e.when) - Date.now()) / 60000);
+          const upcoming = events.filter((e) => mins(e) >= 0);
+          const highs = upcoming.filter((e) => e.importance.toLowerCase() === "high");
+          const next = highs[0];
+          const imminent = next != null && mins(next) <= 60;
+          const soon = next != null && mins(next) <= 240;
+          const label = next
+            ? `${next.label.replace(/^[A-Z]{2}:\s*/, "").slice(0, 22)} ${mins(next) < 60 ? `${mins(next)}m` : `${Math.round(mins(next) / 60)}h`}`
+            : upcoming.length
+              ? `${upcoming.length} minor`
+              : "clear";
           return (
-            <button
-              key={tf}
-              onClick={() => setShowSR((s) => ({ ...s, [tf]: !s[tf] }))}
-              className={`rounded-md px-2 py-0.5 text-xs transition ${showSR[tf] ? `bg-neutral-700 ${onCls}` : "text-neutral-500 hover:bg-neutral-800/60"}`}
-              title={`${tf.toUpperCase()} support/resistance — swing levels from the ${tf} chart (${{ "1h": "slate", "4h": "amber", "1d": "red — strongest" }[tf]}). R = resistance, S = support.`}
-            >
-              {tf.toUpperCase()} S/R
-            </button>
+            <span className="relative">
+              <button
+                onClick={() => setEvOpen((v) => !v)}
+                className={`rounded px-1.5 py-0.5 text-[11px] transition ${
+                  imminent
+                    ? "animate-pulse bg-bear/25 text-bear"
+                    : soon
+                      ? "bg-warn/20 text-warn"
+                      : next
+                        ? "bg-neutral-800 text-neutral-300"
+                        : "text-neutral-600 hover:bg-neutral-800"
+                }`}
+                title={
+                  next
+                    ? `Next high-impact release for ${symbol}: ${next.label} in ${mins(next)} min. Spreads widen and stops get run around these — the engine already stands aside, and so should a manual entry.`
+                    : `No high-impact releases ahead today for ${symbol}. ${upcoming.length} lower-impact items.`
+                }
+              >
+                📅 {label}
+              </button>
+              {evOpen && (
+                <div className="absolute left-0 top-7 z-40 max-h-80 w-[21rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-2 text-xs shadow-xl">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="font-semibold text-sky-300">📅 Today — {symbol}</span>
+                    <button onClick={() => setEvOpen(false)} className="text-neutral-500 hover:text-neutral-200">✕</button>
+                  </div>
+                  {events.length === 0 && <div className="py-2 text-neutral-500">Nothing scheduled for this instrument.</div>}
+                  {events.map((e, i) => {
+                    const away = mins(e);
+                    const past = away < 0;
+                    const high = e.importance.toLowerCase() === "high";
+                    return (
+                      <div key={i} className={`flex items-baseline gap-2 rounded px-1 py-1 ${past ? "opacity-50" : ""}`}>
+                        <span className="w-12 shrink-0 tabular-nums text-neutral-400">
+                          {new Date(e.when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                        <span className={`w-8 shrink-0 text-[10px] font-semibold ${high ? "text-bear" : "text-neutral-500"}`}>
+                          {high ? "HIGH" : "med"}
+                        </span>
+                        <span className="min-w-0 flex-1 text-neutral-300">
+                          {e.label}
+                          {/* Forecast vs previous is the whole point: the SURPRISE moves price,
+                              not the number itself. */}
+                          {(e.forecast != null || e.previous != null) && (
+                            <span className="ml-1 text-neutral-500">
+                              {e.actual != null ? `actual ${e.actual} · ` : ""}
+                              {e.forecast != null ? `f/c ${e.forecast}` : ""}
+                              {e.previous != null ? ` · prev ${e.previous}` : ""}
+                            </span>
+                          )}
+                        </span>
+                        <span className="shrink-0 tabular-nums text-neutral-600">
+                          {past ? "done" : away < 60 ? `${away}m` : `${Math.round(away / 60)}h`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <p className="mt-1 border-t border-neutral-800 pt-1 text-[10px] leading-snug text-neutral-500">
+                    Times in your clock. The engine already stands aside around HIGH-impact releases —
+                    this is so a manual entry doesn't walk into one.
+                  </p>
+                </div>
+              )}
+            </span>
           );
-        })}
-        <button
-          onClick={() => setShowBand((v) => !v)}
-          className={`rounded-md px-2 py-0.5 text-xs transition ${showBand ? "bg-neutral-700 text-cyan-300" : "text-neutral-500 hover:bg-neutral-800/60"}`}
-          title="EMA20 of highs / lows = a band around price. The SuperTrend Strategy enters on a candle close BEYOND this band in the SuperTrend direction."
-        >
-          EMA20 H/L
-        </button>
-        {/* Grouped in a popover rather than added as six more chips: the toolbar is already at the
-            limit, and another row of toggles makes every one of them harder to find. */}
-        <span className="relative">
-          <button
-            onClick={() => setOvlOpen((v) => !v)}
-            className={`rounded px-2 py-0.5 text-xs transition ${
-              Object.values(ovl).some(Boolean) || ovlOpen
-                ? "bg-neutral-700 text-white"
-                : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"
-            }`}
-            title="Extra overlays: prior day/week levels, today's open, session shading, risk/reward zones, divergence and change-of-character markers"
-          >
-            📊 Overlays{Object.values(ovl).filter(Boolean).length > 0 ? ` ${Object.values(ovl).filter(Boolean).length}` : ""}
-          </button>
-          {ovlOpen && (
-            <div className="absolute left-0 top-7 z-40 w-[17rem] rounded-lg border border-neutral-700 bg-neutral-900/95 p-2 text-xs shadow-xl">
-              <div className="mb-1 flex items-center justify-between">
-                <span className="font-semibold text-sky-300">📊 Overlays</span>
-                <button onClick={() => setOvlOpen(false)} className="text-neutral-500 hover:text-neutral-200">✕</button>
-              </div>
-              {([
-                ["days", "Day separators", "A dotted line + date at each TRADING day start (00:00 UTC) — the same boundary the daily candle, PDH/PDL and the engine use, so the block between two lines is exactly the day those levels describe. On the 1h chart that is 24 candles. Hidden on the daily chart, where every candle is already a day."],
-                ["pd", "Prior day high / low", "PDH & PDL — yesterday's range. The engine's htf_level filter already scores against these."],
-                ["pw", "Prior week high / low", "PWH & PWL — last completed week's range."],
-                ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
-                ["sessions", "Session shading", "Asia / London / New York tinted on your local clock. Breaks in thin hours fail far more often."],
-                ["rr", "Risk / reward zones", "Shades entry→stop red and entry→target green for positions, proposals and armed setups."],
-                ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
-                ["choch", "Change of character", "Marks where the swing sequence first contradicts the trend it was in."],
-              ] as const).map(([k, label, tip]) => (
-                <label key={k} className="flex cursor-pointer items-start gap-2 rounded px-1 py-1 hover:bg-neutral-800/60" title={tip}>
-                  <input
-                    type="checkbox"
-                    checked={!!ovl[k]}
-                    onChange={() => setOvl((p) => ({ ...p, [k]: !p[k] }))}
-                    className="mt-0.5 accent-sky-500"
-                  />
-                  <span className="text-neutral-300">{label}</span>
-                </label>
-              ))}
-            </div>
-          )}
-        </span>
+        })()}
 
         {/* States the clock the axis is in. Without it, "is 14:00 my time or the broker's?" is a
             question you can only answer by counting candles back from now. */}
@@ -3381,6 +3549,26 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             candles themselves, which is the one thing that must stay true. */}
         <canvas ref={bgCanvasRef} className="pointer-events-none absolute inset-0 z-0" />
         <div ref={containerRef} className={`relative z-[1] ${isFull ? "h-full w-full" : "h-[600px] w-full"}`} />
+
+        {/* Key for the session bands. One small legend rather than a name written inside every
+            block: on a 1h chart there are three sessions a day and several days on screen, so
+            in-place labels would repeat a dozen times to say something you only need told once.
+            The swatches use the band hues at a readable opacity — the hue is what identifies a
+            session, and at the bands' own 5% a swatch this size would be invisible. */}
+        {ovl.sessions && (
+          <div className="pointer-events-none absolute bottom-8 left-2 z-10 flex items-center gap-2.5 rounded bg-neutral-950/70 px-2 py-1 text-[10px] text-neutral-400">
+            {([
+              ["Asia", "rgba(56,189,248,0.75)", "Tokyo / Sydney — 00:00-08:00 UTC. Thinnest liquidity; breaks here fail most often."],
+              ["London", "rgba(167,139,250,0.75)", "08:00-13:00 UTC. The first big-volume session of the day."],
+              ["New York", "rgba(34,197,94,0.75)", "13:00-21:00 UTC, and it overlaps London until 16:00 — the busiest window of the day."],
+            ] as const).map(([name, colour, tip]) => (
+              <span key={name} className="flex items-center gap-1" title={tip}>
+                <span className="h-2.5 w-3.5 rounded-sm" style={{ backgroundColor: colour }} />
+                {name}
+              </span>
+            ))}
+          </div>
+        )}
 
         {/* The ink layer. Transparent to the mouse unless a tool is armed, so the crosshair, the
             SL/TP drags and panning all behave normally the rest of the time. */}

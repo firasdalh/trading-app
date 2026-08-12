@@ -67,7 +67,8 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
     ai_decides = (review_on and use_llm and llm_available() and not settings.st_band_mode and not rsi_over)
     reads = (use_llm if read_llm is None else read_llm) and review_on and not ai_decides
     technical = run_technical(symbol, series, use_llm=reads)
-    fundamental = run_fundamental(symbol, now=now, use_llm=(use_llm if read_llm is None else read_llm))
+    fundamental = run_fundamental(symbol, now=now, use_llm=(use_llm if read_llm is None else read_llm),
+                                  asset_class=asset_class.value)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
@@ -159,7 +160,9 @@ def analyze_symbol(
     ai_decides = ((review_on or force_ai_decide) and use_llm and llm_available()
                   and not st_band_eff and not rsi_over)
     technical = run_technical(symbol, series, use_llm=use_llm and (review_on or force_ai_decide) and not ai_decides)
-    fundamental = run_fundamental(symbol, now=now, use_llm=use_llm)  # AI kept for fundamentals
+    # asset_class reaches the calendar so a single-stock ticker resolves to the US calendar —
+    # without it AAPLm matched no country and got no news blackout at all.
+    fundamental = run_fundamental(symbol, now=now, use_llm=use_llm, asset_class=asset_class.value)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,

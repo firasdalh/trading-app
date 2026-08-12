@@ -58,6 +58,12 @@ export const api = {
         `&timeframe=${encodeURIComponent(timeframe)}`,
     ),
 
+  // Economic-calendar events that move THIS instrument (countries derived from the symbol).
+  marketEvents: (symbol: string, assetClass: AssetClass, hours = 24) =>
+    request<import("../types").MarketEvents>(
+      `/api/market/events?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}&hours=${hours}`,
+    ),
+
   // Daily reference levels (prior day/week high-low, today's open, yesterday's close). Daily data
   // the chart never loads itself — 400 bars of 5m don't reach back a week.
   keyLevels: (symbol: string, assetClass: AssetClass) =>

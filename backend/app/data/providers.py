@@ -64,7 +64,8 @@ class EconomicCalendarProvider(ABC):
 
     @abstractmethod
     def get_events(self, symbol: str, lookahead_hours: int = 24,
-                   include_medium: bool = False) -> list[CalendarEvent]: ...
+                   include_medium: bool = False,
+                   asset_class: str | None = None) -> list[CalendarEvent]: ...
 
 
 class SentimentProvider(ABC):
@@ -96,7 +97,8 @@ class StubCalendarProvider(EconomicCalendarProvider):
         self._events = events or []
 
     def get_events(self, symbol: str, lookahead_hours: int = 24,
-                   include_medium: bool = False) -> list[CalendarEvent]:
+                   include_medium: bool = False,
+                   asset_class: str | None = None) -> list[CalendarEvent]:
         return list(self._events)
 
 
@@ -115,7 +117,19 @@ class StubSentimentProvider(SentimentProvider):
 _CCY_TO_COUNTRY = {
     "USD": "US", "EUR": "EU", "JPY": "JP", "GBP": "GB", "AUD": "AU",
     "CAD": "CA", "CHF": "CH", "NZD": "NZ", "CNY": "CN",
+    # The exotics the broker actually lists. Without these, crosses like NOKDKK and BTCZAR
+    # resolved to no country and so to an empty calendar — which reads exactly like a quiet day.
+    "CNH": "CN", "CZK": "CZ", "DKK": "DK", "HUF": "HU", "PLN": "PL", "SGD": "SG",
+    "ZAR": "ZA", "NOK": "NO", "SEK": "SE", "TRY": "TR", "MXN": "MX", "HKD": "HK",
+    "KRW": "KR", "THB": "TH", "INR": "IN",
 }
+
+# Majors whose own macro is what moves a crypto pair. A crypto cross with no fiat leg (ETHBTC) has
+# no national calendar of its own, but both legs still react to US rates and inflation.
+_CRYPTO_TOKENS = (
+    "BTC", "ETH", "XRP", "LTC", "BCH", "ADA", "SOL", "DOGE", "DOT", "LINK",
+    "AVAX", "MATIC", "BNB", "TRX", "XLM", "ATOM", "UNI", "ETC", "FIL", "NEAR",
+)
 _METAL_PREFIXES = ("XAU", "XAG", "XPT", "XPD")
 
 # Stock-index symbols carry no currency code, so map them to the country whose macro events
@@ -127,6 +141,17 @@ _INDEX_COUNTRY = {
     "UK100": "GB", "FTSE": "GB",
     "JP225": "JP", "JPN225": "JP", "NIK": "JP",
     "AUS200": "AU", "ASX": "AU",
+    "HK50": "HK", "HSI": "HK", "IN50": "IN", "NIFTY": "IN", "CN50": "CN", "CHINA": "CN",
+    "DXY": "US",   # the dollar index: US macro by definition
+}
+
+# Energy symbols carry no currency code either ("USOILm" contains no "USD"), so they matched nothing
+# and returned an empty calendar — which also meant the fundamental agent's news-blackout windows
+# never applied to an oil trade. Crude and gas are priced in dollars and moved by US macro (CPI,
+# FOMC, EIA inventories), so US is the calendar that matters, Brent included.
+_ENERGY_TOKENS = {
+    "USOIL": "US", "UKOIL": "US", "WTI": "US", "XTI": "US", "XBR": "US", "BRENT": "US",
+    "CRUDE": "US", "NGAS": "US", "XNG": "US", "NATGAS": "US",
 }
 
 
@@ -152,23 +177,53 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
         self.stand_aside_minutes = stand_aside_minutes
         self._cache: dict[str, tuple[datetime, list[CalendarEvent]]] = {}
 
-    def _countries(self, symbol: str) -> list[str]:
-        s = "".join(ch for ch in symbol.upper() if ch.isalpha())
+    def _countries(self, symbol: str, asset_class: str | None = None) -> list[str]:
+        # Two forms, because they are matched against different things. Currency codes are letters,
+        # so digits are stripped to stop "US30" reading as a USD pair. Index and energy tickers ARE
+        # partly digits — matching those against the stripped string turned "JP225M" into "JPM", so
+        # every entry in _INDEX_COUNTRY silently matched nothing and index trades came back with an
+        # empty calendar (and therefore no news blackout).
+        raw = symbol.upper()
+        s = "".join(ch for ch in raw if ch.isalpha())
         countries: list[str] = []
+        # Currencies are matched as the pair's LEGS (first three letters, next three), not as a
+        # substring anywhere. "ETHBTC" contains "THB" straddling the two halves, so an anywhere
+        # match handed an Ethereum cross the Thai calendar. A currency only counts where a currency
+        # can actually sit.
+        # The quote currency is the LAST three letters, not always characters 3-6: "AAVEUSD" has a
+        # four-letter base, so a fixed slice missed its USD. The broker's trailing "m" is dropped
+        # first or it would eat the final letter of the quote.
+        core = s[:-1] if s.endswith("M") and len(s) > 4 else s
+        legs = {core[:3], core[-3:]} if len(core) >= 3 else set()
         for ccy, country in _CCY_TO_COUNTRY.items():
-            if ccy in s and country not in countries:
+            if ccy in legs and country not in countries:
                 countries.append(country)
         if any(s.startswith(p) or p in s for p in _METAL_PREFIXES) and "US" not in countries:
             countries.append("US")
         # Stock indices: add the country whose macro calendar drives them.
         for token, country in _INDEX_COUNTRY.items():
-            if token in s and country not in countries:
+            if token in raw and country not in countries:
                 countries.append(country)
+        # Energy: same idea, and the reason oil used to come back with an empty calendar.
+        for token, country in _ENERGY_TOKENS.items():
+            if token in raw and country not in countries:
+                countries.append(country)
+        if not countries:
+            # Last resorts, only when nothing above matched.
+            # A single-stock ticker carries no country in its name at all, and this broker lists US
+            # equities — so CPI and FOMC are its calendar. Crypto crosses with no fiat leg key off
+            # US rates too. Guessing wrong here costs a few irrelevant rows; guessing NOTHING costs
+            # the news blackout entirely, which is the far worse error.
+            if (asset_class or "").lower() == "stock":
+                countries.append("US")
+            elif any(t in raw for t in _CRYPTO_TOKENS):
+                countries.append("US")
         return countries
 
     def get_events(self, symbol: str, lookahead_hours: int = 24,
-                   include_medium: bool = False) -> list[CalendarEvent]:
-        countries = self._countries(symbol)
+                   include_medium: bool = False,
+                   asset_class: str | None = None) -> list[CalendarEvent]:
+        countries = self._countries(symbol, asset_class)
         if not countries:
             return []
         cache_key = ",".join(sorted(countries)) + ("|med" if include_medium else "")

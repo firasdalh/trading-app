@@ -132,9 +132,9 @@ def _high_impact_windows(events: list[CalendarEvent], now: datetime) -> list[Eve
     return windows
 
 
-def _deterministic_read(symbol: str, now: datetime) -> FundamentalRead:
+def _deterministic_read(symbol: str, now: datetime, asset_class: str | None = None) -> FundamentalRead:
     sentiment = get_sentiment_provider().get_sentiment(symbol)
-    events = get_calendar_provider().get_events(symbol)
+    events = get_calendar_provider().get_events(symbol, asset_class=asset_class)
     news = get_news_provider().get_news(symbol, limit=5)
 
     # Directional bias: prefer real economic-surprise from released events; else sentiment.
@@ -171,13 +171,14 @@ _FUND_CACHE: dict[str, tuple[float, FundamentalRead]] = {}
 _FUND_TTL_SEC = 30 * 60  # refresh the macro read every ~30 min
 
 
-def run_fundamental(symbol: str, now: datetime | None = None, use_llm: bool = True) -> FundamentalRead:
+def run_fundamental(symbol: str, now: datetime | None = None, use_llm: bool = True,
+                    asset_class: str | None = None) -> FundamentalRead:
     now = now or datetime.now(timezone.utc)
 
     if use_llm and llm_available():
         # Calendar events are cheap (no tokens) + drive the stand-aside windows, so fetch them every
         # call and ALWAYS recompute the windows fresh — only the LLM bias read below is cached.
-        events = get_calendar_provider().get_events(symbol)
+        events = get_calendar_provider().get_events(symbol, asset_class=asset_class)
         key = symbol.upper()
         hit = _FUND_CACHE.get(key)
         if hit is not None and (time.monotonic() - hit[0]) < _FUND_TTL_SEC:
@@ -205,6 +206,6 @@ def run_fundamental(symbol: str, now: datetime | None = None, use_llm: bool = Tr
             log.info("fundamental read via LLM", extra={"symbol": symbol, "bias": result.bias.value})
             return result
 
-    read = _deterministic_read(symbol, now)
+    read = _deterministic_read(symbol, now, asset_class)
     log.info("fundamental read deterministic", extra={"symbol": symbol, "bias": read.bias.value})
     return read
