@@ -636,6 +636,25 @@ def build_context(session: Session, symbol: str, asset_class: AssetClass,
                "the break is worth waiting for." if (var is not None and var <= 0.85) else "")
         )
 
+    # --- rejection score -------------------------------------------------------------------------
+    # "Will price be REFUSED here?" — a question the trend read cannot answer. Information only: it
+    # scores and explains, and gates nothing. Best-effort, because a scoring bug must never be able
+    # to take down the map read that the rest of the panel depends on.
+    rejection = None
+    try:
+        from app.agents.indicators import reference_levels
+        from app.agents.rejection import score_rejection
+
+        daily = candle_by_tf.get("1d") or []
+        rejection = score_rejection(
+            cs,
+            levels=[lv for lvs in all_levels.values() for lv in lvs],
+            key_levels=reference_levels(daily) if daily else {},
+            swings={"swing_high": ind.get("swing_high"), "swing_low": ind.get("swing_low")},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rejection score failed", extra={"symbol": symbol, "error": str(exc)})
+
     # --- key observations + summary paragraph ---
     bullets = []
     if near_res:
@@ -675,6 +694,7 @@ def build_context(session: Session, symbol: str, asset_class: AssetClass,
         "price_action": price_action, "volume_trend": volume_trend,
         "scorecard": scorecard, "tally": tally, "overall_bias": overall_bias,
         "tf_compare": tf_compare, "alignment": alignment,
+        "rejection": rejection,
         "scenarios": scenarios, "invalidation": invalidation, "playbook": playbook,
         "short_term": short, "medium_term": medium, "watch": watch,
         "bullets": bullets, "summary": summary,

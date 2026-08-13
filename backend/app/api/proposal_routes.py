@@ -122,6 +122,11 @@ class ManualPreviewResponse(BaseModel):
     max_lots: float       # the Risk Manager's 3%-capped size (the "max" the ticket can suggest)
     risk_amount: float    # $ risked at that size
     reason: str
+    # Live ask-bid. `entry` above is the MID, but a market order fills at the ask (long) or the bid
+    # (short) and is then marked against the other side — so a brand-new position shows minus one
+    # full spread before price has moved at all. Surfacing it turns "why did I open at -$5?" into a
+    # number you saw before you pressed the button.
+    spread: float | None = None
 
 
 def _build_manual_proposal(req: "ManualTradeRequest", session: Session):
@@ -191,11 +196,23 @@ def manual_trade_preview(req: ManualTradeRequest, session: Session = Depends(get
 
     proposal = _build_manual_proposal(req, session)
     decision = assess(session, proposal)
+
+    spread = None
+    try:
+        from app.brokers.registry import get_broker_for
+        from app.core.state import get_or_create_settings
+        broker = get_broker_for(req.asset_class, get_or_create_settings(session).broker_map)
+        getter = getattr(broker, "spread", None)
+        spread = getter(req.symbol) if callable(getter) else None
+    except Exception:  # noqa: BLE001 — advisory only; never block a preview over it
+        spread = None
+
     return ManualPreviewResponse(
         entry=proposal.entry, stop_loss=proposal.stop_loss, take_profit=proposal.take_profit or 0.0,
         auto_levels=req.stop_loss is None, approved=decision.approved,
         max_lots=round(decision.approved_qty or 0.0, 2),
         risk_amount=round(decision.risk_amount or 0.0, 2), reason=decision.reason,
+        spread=round(spread, 8) if spread else None,
     )
 
 

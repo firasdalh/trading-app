@@ -990,7 +990,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // market is when you press the button, and the stop is the only number you actually get to choose.
   // It is also the number the Risk Manager sizes from, so choosing it IS choosing your risk.
   const [tradeDraft, setTradeDraft] = useState<{ stop: number; dir: "long" | "short"; y: number } | null>(null);
-  const [tradePrev, setTradePrev] = useState<{ entry: number; stop_loss: number; take_profit: number; approved: boolean; max_lots: number; risk_amount: number; reason: string } | null>(null);
+  const [tradePrev, setTradePrev] = useState<{ entry: number; stop_loss: number; take_profit: number; approved: boolean; max_lots: number; risk_amount: number; reason: string; spread: number | null } | null>(null);
   const [tradeBusy, setTradeBusy] = useState(false);
   const [tradeErr, setTradeErr] = useState<string | null>(null);
   // A quick-arm line waiting for you to pick a side. Held until confirmed: placing a line that
@@ -1063,6 +1063,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [ctx, setCtx] = useState<MarketContext | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
   const [ctxAt, setCtxAt] = useState<Date | null>(null);   // when this reading was taken
+  // Panel visibility is SEPARATE from having the data. The map is deterministic and costs no
+  // tokens, so it loads in the background to feed the toolbar's rejection chip; opening the
+  // panel is then instant, and the chip is visible without going looking for it.
+  const [ctxOpen, setCtxOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);            // drag frame for the floating panels
   const ctxDrag = useDragPanel("chart.ctxPos", rootRef);
   const scenDrag = useDragPanel("chart.scenPos", rootRef);
@@ -1738,7 +1742,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const loadCtxRef = useRef(loadContext);
   loadCtxRef.current = loadContext;
   const ctxOpenRef = useRef(false);
-  ctxOpenRef.current = ctx != null;
+  ctxOpenRef.current = ctx != null;   // refresh whenever we HOLD a read, open or not
   const loadScenRef = useRef<() => Promise<void>>(async () => {});
   const scenOpenRef = useRef(false);
   scenOpenRef.current = scen != null;
@@ -2015,6 +2019,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       }
     }
   }, [armed, symbol]);
+
+  // Load the map in the background on every pair/timeframe change. It is fully deterministic —
+  // no LLM, no tokens — and the server caches the candles it needs for 12s, so this costs a couple
+  // of local MT5 reads and makes the rejection chip present without being asked for.
+  useEffect(() => {
+    const t = window.setTimeout(() => { void loadCtxRef.current(); }, 400);
+    return () => window.clearTimeout(t);
+  }, [symbol, assetClass, timeframe]);
 
   // Today's economic calendar for this instrument. Refreshed every 10 minutes: the events don't
   // change, but the countdown to them does, and "CPI in 6 minutes" is a different fact from
@@ -2672,14 +2684,21 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     if (!tradeDraft) return;
     let dead = false;
-    api
-      .manualPreview({
-        symbol, asset_class: assetClass, direction: tradeDraft.dir,
-        stop_loss: tradeDraft.stop, timeframe,
-      })
-      .then((p) => { if (!dead) setTradePrev(p); })
-      .catch((e) => { if (!dead) setTradeErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, "") : String(e)); });
-    return () => { dead = true; };
+    const pull = () =>
+      api
+        .manualPreview({
+          symbol, asset_class: assetClass, direction: tradeDraft.dir,
+          stop_loss: tradeDraft.stop, timeframe,
+        })
+        .then((p) => { if (!dead) setTradePrev(p); })
+        .catch((e) => { if (!dead) setTradeErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, "") : String(e)); });
+    void pull();
+    // Re-price every 2 seconds while the panel is open. It was fetched ONCE before, so if you spent
+    // thirty seconds deciding where the stop went, you confirmed against a thirty-second-old quote
+    // and the fill landed somewhere else. The size depends on the entry too, so a stale entry means
+    // a stale lot count, not just a stale number on screen.
+    const id = window.setInterval(pull, 2000);
+    return () => { dead = true; window.clearInterval(id); };
   }, [tradeDraft, symbol, assetClass, timeframe]);
 
   // Recompute the pulse whenever the position or the candles move. Driven off the 4-second
@@ -2827,6 +2846,29 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           ))}
         </ToolMenu>
 
+        {/* Rejection score, on the chart rather than buried in the map panel. A score you have to
+            go looking for is a score you don't use. Click it to open the full breakdown. */}
+        {ctx?.rejection && ctx.rejection.band !== "none" && (
+          <button
+            onClick={() => setCtxOpen(true)}
+            className={`rounded px-1.5 py-0.5 text-[11px] font-semibold tabular-nums transition ${
+              ctx.rejection.band === "high"
+                ? "animate-pulse bg-amber-500/25 text-amber-300"
+                : ctx.rejection.band === "valid"
+                  ? "bg-sky-500/20 text-sky-300"
+                  : "bg-neutral-800 text-neutral-400"
+            }`}
+            title={`${ctx.rejection.verdict}
+
+Scored ${ctx.rejection.score} of ${ctx.rejection.max}: ` +
+                   Object.entries(ctx.rejection.groups).map(([g, v]) => `${g} ${v.got}/${v.max}`).join(", ") +
+                   `.
+Click for the full breakdown. Info only — it gates nothing.`}
+          >
+            {ctx.rejection.direction === "short" ? "▼" : "▲"} Rejection {ctx.rejection.score}/{ctx.rejection.max}
+          </button>
+        )}
+
         {/* Economic calendar. The headline is the NEXT high-impact release and how long until it —
             "in 34m" is what changes a decision; "there is news today" doesn't. */}
         {events && (() => {
@@ -2962,9 +3004,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           );
         })()}
         <button
-          onClick={loadContext}
+          onClick={() => { setCtxOpen((v) => !v); if (!ctx) void loadContext(); }}
           disabled={ctxBusy}
-          className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
+          className={`rounded px-2 py-0.5 text-xs disabled:opacity-50 ${ctxOpen ? "bg-neutral-700 text-white" : "bg-neutral-800/50 text-sky-300 hover:bg-neutral-700 hover:text-white"}`}
           title="Read: plain-language 'where is price on the map (S/R, channel, structure) + do RSI/volume/ATR confirm?' analysis for this pair. Info only — it does NOT change the engine's decision; it's for your Mode-A call."
         >
           {ctxBusy ? "…" : "🗺️ Read"}
@@ -3038,7 +3080,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         </span>
       </div>
 
-      {ctx && (
+      {ctx && ctxOpen && (
         <div
           data-panel
           style={ctxDrag.style}
@@ -3084,7 +3126,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
               >
                 {ctxBusy ? "…" : "↻"}
               </button>
-              <button onClick={() => setCtx(null)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
+              <button onClick={() => setCtxOpen(false)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
             </span>
           </div>
           <div className="mb-1 rounded bg-neutral-800/60 px-2 py-1 text-center text-sm font-semibold">
@@ -3094,6 +3136,84 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
               the rows properly. */}
           {ctx.tally && (
             <div className="mb-2 text-center text-[11px] text-neutral-500">{ctx.tally}</div>
+          )}
+
+          {/* REJECTION SCORE — "will price be refused here?", which the trend read can't answer.
+              Grouped bars rather than one number, because WHERE the points came from is the whole
+              point: 5/19 earned entirely from wick shape is a wick, and 5/19 earned from location
+              plus a structure break is the start of something. */}
+          {ctx.rejection && (
+            <div
+              className={`mb-2 rounded border p-1.5 ${
+                ctx.rejection.band === "high"
+                  ? "border-amber-600/70 bg-amber-950/25"
+                  : ctx.rejection.band === "valid"
+                    ? "border-sky-700/60 bg-sky-950/25"
+                    : "border-neutral-800 bg-neutral-800/20"
+              }`}
+            >
+              <div className="mb-1 flex items-baseline justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+                  Rejection · {ctx.rejection.direction === "short" ? "sellers refusing" : "buyers refusing"}
+                </span>
+                <span
+                  className={`text-sm font-bold tabular-nums ${
+                    ctx.rejection.band === "high" ? "text-amber-300"
+                      : ctx.rejection.band === "valid" ? "text-sky-300" : "text-neutral-400"
+                  }`}
+                >
+                  {ctx.rejection.score}/{ctx.rejection.max}
+                </span>
+              </div>
+
+              {/* Group bars, in the order that actually earns money: location first, momentum last. */}
+              <div className="mb-1 space-y-0.5">
+                {(["location", "rejection", "structure", "momentum", "volume"] as const).map((g) => {
+                  const v = ctx.rejection!.groups[g];
+                  if (!v) return null;
+                  const pct = v.max ? (v.got / v.max) * 100 : 0;
+                  return (
+                    <div key={g} className="flex items-center gap-1.5">
+                      <span className="w-16 shrink-0 text-[10px] capitalize text-neutral-500">{g}</span>
+                      <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
+                        <span
+                          className={`block h-full rounded-full ${pct >= 60 ? "bg-sky-500" : pct > 0 ? "bg-neutral-500" : ""}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </span>
+                      <span className="w-7 shrink-0 text-right text-[10px] tabular-nums text-neutral-500">
+                        {v.got}/{v.max}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className={`mb-1 ${ctx.rejection.band === "none" ? "text-neutral-500" : "text-neutral-300"}`}>
+                {ctx.rejection.verdict}
+              </div>
+
+              {/* Only what actually fired — a list of things that didn't happen is noise. */}
+              <div className="flex flex-wrap gap-1">
+                {ctx.rejection.parts.filter((p) => p.hit).map((p, i) => (
+                  <span key={i} className="rounded bg-neutral-800/70 px-1.5 py-0.5 text-[10px] text-neutral-300">
+                    +{p.points} {p.label}
+                  </span>
+                ))}
+              </div>
+
+              <p className="mt-1 text-[10px] leading-snug text-neutral-600">
+                Info only — scores and explains, gates nothing. Weights are a first guess and are not
+                yet validated on a holdout backtest.
+              </p>
+            </div>
+          )}
+
+          {!ctx.rejection && (
+            <div className="mb-2 rounded border border-neutral-800 bg-neutral-800/20 p-1.5 text-[11px] text-neutral-500">
+              <span className="font-semibold uppercase tracking-wide">Rejection</span> — none right now.
+              No candle here is refusing price with a meaningful tail, so there is nothing to score.
+            </div>
           )}
 
           {/* Timeframe comparison, above the detail: whether you're with or against the bigger
@@ -3443,7 +3563,37 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
               {tradePrev && (
                 <table className="mb-2 w-full text-neutral-400">
                   <tbody>
-                    <tr><td className="py-0.5">Entry</td><td className="text-right tabular-nums text-neutral-200">market ≈ {fmtPrice(tradePrev.entry)}</td></tr>
+                    <tr>
+                      <td className="py-0.5">Entry</td>
+                      <td className="text-right tabular-nums text-neutral-200">
+                        market ≈ {fmtPrice(tradePrev.entry)}
+                        <span className="ml-1 text-[10px] text-neutral-500">live</span>
+                      </td>
+                    </tr>
+                    {/* The cost of crossing the spread, in dollars, BEFORE you press the button.
+                        `entry` is the mid; a market order fills at the ask (long) or bid (short) and
+                        is marked against the other side, so a new position opens down one full
+                        spread with price completely unchanged. That is the "-$5 the moment it
+                        opened" — not slippage, and not a bug. Dollar value is derived from the
+                        Risk Manager's own numbers: risk_amount over the stop distance gives $ per
+                        price unit, so it already accounts for lot size and contract value. */}
+                    {tradePrev.spread != null && tradePrev.spread > 0 && (() => {
+                      const dist = Math.abs(tradePrev.entry - tradePrev.stop_loss);
+                      const perUnit = dist > 0 ? tradePrev.risk_amount / dist : 0;
+                      const cost = tradePrev.spread * perUnit;
+                      const pctOfRisk = tradePrev.risk_amount > 0 ? (cost / tradePrev.risk_amount) * 100 : 0;
+                      return (
+                        <tr>
+                          <td className="py-0.5">Spread</td>
+                          <td className={`text-right tabular-nums ${pctOfRisk >= 15 ? "text-warn" : "text-neutral-400"}`}>
+                            {fmtPrice(tradePrev.spread)}
+                            <span className="ml-1" title="You open at roughly minus this much, before price moves at all. Shown as a share of the risk you're taking — above ~15% the spread is eating a serious part of the trade.">
+                              ≈ −{fmtUsd(cost)} on open ({pctOfRisk.toFixed(0)}% of risk)
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })()}
                     <tr><td className="py-0.5">Stop</td><td className="text-right tabular-nums text-bear">{fmtPrice(tradePrev.stop_loss)}</td></tr>
                     <tr><td className="py-0.5">Target</td><td className="text-right tabular-nums text-bull">{fmtPrice(tradePrev.take_profit)}</td></tr>
                     <tr><td className="py-0.5">Size</td><td className="text-right tabular-nums text-neutral-200">{tradePrev.max_lots} lots</td></tr>
@@ -3473,8 +3623,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
                   : `▼ Sell ${tradePrev?.max_lots ?? ""} lots at market`}
               </button>
               <p className="mt-1.5 text-[10px] leading-snug text-neutral-500">
-                Fills immediately at the market. Size comes from your stop at the 3% cap — move the
-                stop to change the size. Target defaults to 2R and both are draggable afterwards.
+                Fills immediately at the market, re-priced every 2s while this is open. Size comes
+                from your stop at the 3% cap — move the stop to change the size. Target defaults to
+                2R and both are draggable afterwards.
               </p>
             </div>
           );

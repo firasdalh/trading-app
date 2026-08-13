@@ -435,6 +435,19 @@ export interface MarketEvents {
   error?: string;
 }
 
+// Rejection score — "will price be REFUSED here?", which the trend read can't answer.
+// Information only: it scores and explains, and gates nothing.
+export interface RejectionRead {
+  direction: "short" | "long";
+  score: number;
+  max: number;
+  band: "none" | "weak" | "valid" | "high";
+  verdict: string;
+  parts: { group: string; points: number; max: number; label: string; hit: boolean }[];
+  groups: Record<string, { got: number; max: number }>;
+  vwap: number | null;
+}
+
 // Daily reference levels (GET /api/market/keylevels) — the ones desks watch and the engine's
 // htf_level filter already scores against.
 export interface KeyLevels {
@@ -483,6 +496,7 @@ export interface MarketContext {
   // and one sentence on whether they agree.
   tf_compare?: { tf: string; is_chart: boolean; verdict: string; votes: number; signal: string; note: string }[];
   alignment?: string | null;
+  rejection?: RejectionRead | null;
   overall_bias: string;
   scenarios: { prob: string; label: string; text: string }[];
   invalidation: string | null;

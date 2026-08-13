@@ -4,6 +4,8 @@ Plain Python (no pandas dependency) so it's trivially testable and fast on small
 """
 from __future__ import annotations
 
+from datetime import timezone
+
 from app.models.schemas import Candle
 
 
@@ -112,6 +114,35 @@ def failed_break(candles: list[Candle], lookback: int = 4, prior_window: int = 2
         out["fbreak_bear"] = 1.0   # poked above prior resistance, closed back below = bull trap
     if swept_low < prior_low and last_close > prior_low:
         out["fbreak_bull"] = 1.0   # poked below prior support, closed back above = bear trap
+    return out
+
+
+def session_vwap(candles: list[Candle]) -> list[float | None]:
+    """Volume-weighted average price, re-anchored at each TRADING day (00:00 UTC).
+
+    VWAP is the reference institutions actually execute against, which is why price so often stalls
+    or reverses at it — it is the day's "fair value". It resets daily: a VWAP dragged across a week
+    is an average of prices nobody is trading around any more.
+
+    IMPORTANT CAVEAT for this data feed: MT5 gives ``tick_volume`` (the number of price CHANGES in
+    the bar), not traded contracts. So this is a tick-weighted average, and it tracks real VWAP well
+    when activity and volume move together — which is usually, but not always. Treat it as a good
+    approximation, not the exchange's official VWAP.
+    """
+    out: list[float | None] = []
+    day: tuple[int, int, int] | None = None
+    pv = 0.0   # running sum of typical-price x volume
+    vv = 0.0   # running sum of volume
+    for c in candles:
+        ts = c.ts if c.ts.tzinfo else c.ts.replace(tzinfo=timezone.utc)
+        key = (ts.year, ts.month, ts.day)
+        if key != day:
+            day, pv, vv = key, 0.0, 0.0
+        typical = (c.high + c.low + c.close) / 3.0
+        w = c.volume if c.volume and c.volume > 0 else 1.0   # flat weight if the feed gives none
+        pv += typical * w
+        vv += w
+        out.append(pv / vv if vv else None)
     return out
 
 

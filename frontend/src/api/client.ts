@@ -171,6 +171,7 @@ export const api = {
       max_lots: number;
       risk_amount: number;
       reason: string;
+      spread: number | null;
     }>("/api/proposals/manual/preview", { method: "POST", body: JSON.stringify(body) }),
   explainReview: (text: string, lang: "en" | "ar") =>
     request<ExplainedReview>("/api/proposals/explain", {
