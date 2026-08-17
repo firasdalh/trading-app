@@ -9,6 +9,10 @@ export function EntryFiltersPanel() {
   const [cfg, setCfg] = useState<DetFiltersView | null>(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);   // collapsed by default — advanced/rarely-touched controls
+  // MUST sit with the other hooks, above the `if (!cfg) return null` below. Declared after that
+  // early return it only ran once config had loaded, so the hook COUNT changed between renders —
+  // React error #310, and a blank panel.
+  const [showOff, setShowOff] = useState(false);
 
   useEffect(() => {
     api.detFilters().then(setCfg).catch(() => {});
@@ -32,7 +36,6 @@ export function EntryFiltersPanel() {
   };
 
   const active = cfg.filters.length - cfg.disabled.length;
-  const [showOff, setShowOff] = useState(false);
 
   return (
     <div className="card">
