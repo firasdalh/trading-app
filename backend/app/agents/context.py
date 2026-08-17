@@ -470,17 +470,87 @@ def build_context(session: Session, symbol: str, asset_class: AssetClass,
         volat_impl = "normal conditions — no special adjustment needed"
     rows.append({"factor": "Volatility", "signal": SIG["warn"], "note": volat_note, "implies": volat_impl})
 
+    # --- neutral factors ask the timeframe above -------------------------------------------------
+    # A factor that reads flat on your chart is usually not flat one rung up — 1h structure can be
+    # "ranging" while the 4h is plainly making higher highs. Dropping those from the count threw
+    # away real information and made the tally look thinner than the evidence actually was.
+    #
+    # So a 🟡 directional factor re-asks the immediate higher timeframe, and votes on that answer,
+    # labelled with where it came from. Deliberately ONE rung only: keep climbing and every symbol
+    # eventually finds some timeframe that agrees with something, which is how you talk yourself
+    # into a trade.
+    #
+    # Volume and Volatility never fall back — they are not neutral for lack of evidence, they are
+    # structurally non-directional (they say whether to BELIEVE a move, not which way it goes).
+    _FALLBACK = {"Structure", "Trend", "Momentum", "MACD", "RSI"}
+
+    def _higher_vote(factor: str, tfx: str) -> tuple[str, str] | None:
+        """Re-read one factor on `tfx`. Returns (signal, plain-English verdict) or None if flat there too."""
+        t = next((x for x in tech.timeframes if x.timeframe == tfx), None)
+        if t is None:
+            return None
+        i = t.indicators
+        bull: bool | None = None
+        if factor == "Structure":
+            st = i.get("structure")
+            bull = True if (st and st > 0.5) else False if (st and st < -0.5) else None
+        elif factor == "Trend":
+            e20x, e50x = i.get("ema20"), i.get("ema50")
+            bull = True if (e20x and e50x and e20x > e50x) else False if (e20x and e50x and e20x < e50x) else None
+        elif factor == "MACD":
+            h = i.get("macd_hist")
+            bull = True if (h is not None and h > 0) else False if (h is not None and h < 0) else None
+        elif factor == "RSI":
+            rr, rp = i.get("rsi14"), i.get("rsi14_prev")
+            if rr is not None and rp is not None and rr != rp:
+                bull = rr > rp
+        elif factor == "Momentum":
+            cs2 = candle_by_tf.get(tfx) or []
+            if len(cs2) >= 3:
+                e20x, e50x = i.get("ema20"), i.get("ema50")
+                up2 = bool(e20x and e50x and e20x > e50x)
+                last3 = cs2[-3:]
+                committing = sum(1 for c in last3 if (c.close > c.open) == up2) >= 2
+                bull = up2 if committing else None
+        if bull is None:
+            return None
+        side = LONG if bull else SHORT
+        return ("bull" if bull else "bear",
+                f"{side} — flat on the {entry_tf}, so read on the {tfx} instead, which is "
+                f"{'bullish' if bull else 'bearish'}")
+
+    if higher_tfs:
+        up_tf = higher_tfs[0]
+        for r in rows:
+            if r["factor"] not in _FALLBACK or r["signal"] != SIG["warn"]:
+                continue
+            got = _higher_vote(r["factor"], up_tf)
+            if not got:
+                continue
+            sig, implies = got
+            r["signal"] = SIG[sig]
+            r["implies"] = implies
+            r["note"] = f"{r['note']} · flat here → voted on {up_tf}"
+            r["from_tf"] = up_tf
+
     scorecard = rows
 
     # A one-line tally so the panel can be read in two seconds before reading it properly.
     n_long = sum(1 for r in rows if r["implies"].startswith("supports LONG"))
     n_short = sum(1 for r in rows if r["implies"].startswith("supports SHORT"))
-    if n_long > n_short:
-        tally = f"{n_long} of {len(rows)} factors lean LONG vs {n_short} short"
-    elif n_short > n_long:
-        tally = f"{n_short} of {len(rows)} factors lean SHORT vs {n_long} long"
+    # Report the NEUTRALS explicitly. "3 of 8 factors lean SHORT" read as though eight rows were
+    # polled and four went missing — but Volume and Volatility never vote (they say whether to
+    # believe a move, not which way), and any directional row can land on 🟡. Saying "3 short, 1
+    # long, 4 no edge" is the same information without implying a 3-vs-5 defeat.
+    n_flat = len(rows) - n_long - n_short
+    lean = ("LONG" if n_long > n_short else "SHORT" if n_short > n_long else None)
+    counts = f"{n_short} short · {n_long} long · {n_flat} no edge"
+    if lean:
+        tally = f"leans {lean} — {counts} (of {len(rows)} factors)"
+    elif n_long or n_short:
+        tally = f"evenly split — {counts}: no edge either way"
     else:
-        tally = f"evenly split — {n_long} long vs {n_short} short: no edge either way"
+        tally = f"no directional read — all {len(rows)} factors are neutral"
 
     # --- timeframe comparison: this chart vs the two above it -----------------------------------
     # Trading against the higher timeframes is the most expensive habit there is, and it's invisible

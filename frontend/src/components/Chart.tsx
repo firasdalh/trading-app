@@ -400,6 +400,32 @@ function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
   return { macd, signal, hist };
 }
 
+// Session VWAP, re-anchored at each TRADING day (00:00 UTC) — the same boundary as the day
+// separators and PDH/PDL, so the line resets where the chart says a new day starts.
+//
+// Mirrors the backend's session_vwap() deliberately: the rejection score reads VWAP for its
+// location points, and a chart line that disagreed with the score would be worse than no line.
+//
+// CAVEAT: MT5 gives tick_volume (count of price changes), not contracts, so this is tick-weighted.
+// It tracks real VWAP closely when activity and volume move together — usually, not always.
+function vwapCalc(candles: Candle[]): (number | null)[] {
+  const out: (number | null)[] = [];
+  let day = "";
+  let pv = 0;
+  let vv = 0;
+  for (const c of candles) {
+    const d = new Date(Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(c.ts) ? c.ts : `${c.ts}Z`));
+    const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+    if (key !== day) { day = key; pv = 0; vv = 0; }
+    const typical = (c.high + c.low + c.close) / 3;
+    const w = c.volume > 0 ? c.volume : 1;   // flat weight when the feed gives none
+    pv += typical * w;
+    vv += w;
+    out.push(vv ? pv / vv : null);
+  }
+  return out;
+}
+
 // Wilder ATR — the unit everything else is measured in, so a stop distance means the same thing on
 // bitcoin as on oil.
 function atrCalc(candles: Candle[], period = 14): number | null {
@@ -945,6 +971,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const stRef = useRef<ISeriesApi<"Line"> | null>(null);  // SuperTrend (ONE line, per-point colour)
   const emaHiRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of highs (upper band)
   const emaLoRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of lows (lower band)
+  const vwapRef = useRef<ISeriesApi<"Line"> | null>(null);   // session VWAP
   const chanMidRef = useRef<ISeriesApi<"Line"> | null>(null);   // regression channel mid (trend line)
   const chanUpRef = useRef<ISeriesApi<"Line"> | null>(null);    // upper band (dynamic resistance)
   const chanLoRef = useRef<ISeriesApi<"Line"> | null>(null);    // lower band (dynamic support)
@@ -1039,7 +1066,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     "chart.overlays",
     // `days` defaults ON — knowing where one day ends and the next begins is orientation, not
     // analysis, and without it a 1h chart is an undifferentiated run of candles.
-    { pd: false, pw: false, open: false, sessions: false, rr: false, div: false, choch: false, days: true },
+    { pd: false, pw: false, open: false, sessions: false, vwap: false, rr: false, div: false, choch: false, days: true },
     true,
   );
   // Which toolbar menu is open (only one at a time — two dropdowns overlapping is worse than
@@ -1144,6 +1171,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     emaHiRef.current = chart.addLineSeries({
       color: "#22d3ee", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
       lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    vwapRef.current = chart.addLineSeries({
+      // Dashed and amber: a reference line you judge price against, not a signal line.
+      color: "#fbbf24", lineWidth: 2, lineStyle: LineStyle.Dashed,
+      priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+      title: "VWAP",
     });
     emaLoRef.current = chart.addLineSeries({
       color: "#f97316", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
@@ -1384,9 +1417,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   }, [symbol, assetClass, timeframe, reloadTick, tzMode]);
 
   useEffect(() => {
+    // ovl.vwap is a dependency too: applyEmas draws the VWAP line, so without it the toggle would
+    // do nothing until the next candle reload.
     applyEmas(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showEma]);
+  }, [showEma, ovl.vwap]);
 
   useEffect(() => {
     applySuperTrend(candlesRef.current);
@@ -1414,6 +1449,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (!candles.length) return;
     const closes = candles.map((c) => c.close);
     const times = candles.map(toTime);
+    if (vwapRef.current) {
+      const vw = ovl.vwap ? vwapCalc(candles) : [];
+      vwapRef.current.setData(
+        vw.flatMap((v, i) => (v == null ? [] : [{ time: times[i], value: v } as LineData])),
+      );
+    }
     for (const { period } of EMA_CONFIG) {
       const lineSeries = emaRefs.current[period];
       if (!lineSeries) continue;
@@ -2835,6 +2876,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             ["pd", "Prior day high / low", "PDH & PDL — yesterday's range. The engine's htf_level filter already scores against these."],
             ["pw", "Prior week high / low", "PWH & PWL — last completed week's range."],
             ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
+            ["vwap", "Session VWAP", "Volume-weighted average price, reset each trading day — the level institutions execute against, and the same one the rejection score uses for its location points."],
             ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
             ["rr", "Risk / reward zones", "Shades entry→stop red and entry→target green for positions, proposals and armed setups."],
             ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
@@ -3272,6 +3314,16 @@ Click for the full breakdown. Info only — it gates nothing.`}
                   <div className="flex items-baseline gap-1.5">
                     <span>{s.signal}</span>
                     <span className="font-semibold text-neutral-200">{s.factor}</span>
+                    {/* Flag a borrowed vote right next to the name. Buried in the note it read as a
+                        local reading, which is the one thing it must never look like. */}
+                    {s.from_tf && (
+                      <span
+                        className="rounded bg-amber-950/60 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-400"
+                        title={`Flat on this chart, so this factor's vote was read on the ${s.from_tf} instead.`}
+                      >
+                        via {s.from_tf}
+                      </span>
+                    )}
                     <span className="text-neutral-400">{s.note}</span>
                   </div>
                   {s.implies && <div className={`mt-0.5 pl-5 font-medium ${side}`}>→ {s.implies}</div>}

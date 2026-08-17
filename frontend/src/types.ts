@@ -490,7 +490,9 @@ export interface MarketContext {
   price_action: string;
   volume_trend: string;
   // `implies` says which SIDE the reading argues for — a number without that is just trivia.
-  scorecard: { factor: string; signal: string; note: string; implies?: string }[];
+  // `from_tf` is set when the factor was flat on the chart's timeframe and its vote was read one
+  // rung up instead — a borrowed vote must never look like a local one.
+  scorecard: { factor: string; signal: string; note: string; implies?: string; from_tf?: string }[];
   tally?: string;
   // The chart's timeframe plus the two above it, each with the same four reads and a verdict,
   // and one sentence on whether they agree.
