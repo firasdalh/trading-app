@@ -51,6 +51,10 @@ _TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d"
 # approved amount). Chosen to tolerate the normal slippage of waiting for the break to confirm while
 # still catching a level that has genuinely run away.
 _MAX_DRIFT_R = 0.25
+# Floor for the reward:risk measured AT THE FILL. Mirrors the orchestrator's own
+# _MIN_RR_COND: an arm is only worth taking for its R:R, so if the fill has eaten it the
+# trade has lost its reason to exist.
+_MIN_RR_FILL = 1.5
 
 
 def _cooldown_minutes(timeframe: str) -> int:
@@ -391,8 +395,15 @@ def _drift_too_far(s: ConditionalSetup, ref: float) -> str | None:
     run without us: don't chase our own breakout. NON-terminal — the level may still be worth taking
     on a pullback, and re-arming keeps that option.
 
-    Only applies to STOP (breakout) orders. A limit arm fills on the FAVOURABLE side of its trigger
-    (a buy_limit fires at or below it), so its drift only ever reduces risk."""
+    Only applies to STOP (breakout) orders, and the reason is the SIZING, not the price: a stop arm
+    is sized from the stale trigger (``entry=s.trigger_price``), so every point of overshoot is real
+    risk the Risk Manager never approved.
+
+    A retest arm is sized from the actual fill (``entry=ref``), so drift does not inflate its risk —
+    what drift destroys there is the REWARD:RISK, and that is caught by the explicit R:R re-check at
+    the trigger instead. Widening this guard to limit arms was tried and measured worse: on the live
+    journal it blocked 7 arms worth -$13.55 (including the single +$163 winner) where the R:R check
+    blocked 4 worth -$123.69 and kept the winner."""
     if s.order_type not in ("buy_stop", "sell_stop") or s.stop_loss is None:
         return None
     planned_r = abs(s.trigger_price - s.stop_loss)
@@ -479,6 +490,25 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
     drift = _drift_too_far(s, ref)
     if drift:
         return _decline(session, s, drift, terminal=False)
+
+    # 1c. Re-check the REWARD:RISK at the price we would actually fill at, not the one we armed at.
+    #     The drift guard caps how far past the trigger we will chase, but even an allowed overshoot
+    #     moves the entry toward the target and away from the stop, squeezing R:R from both ends: at
+    #     the 0.25R cap a planned 2.0:1 arrives as 1.4:1. The setup was only worth taking because of
+    #     its R:R, so that number has to still hold at the fill or the reason to be here is gone.
+    if s.stop_loss is not None and s.take_profit is not None:
+        fill = ref if s.break_level is not None else s.trigger_price
+        risk_now = abs(fill - s.stop_loss)
+        reward_now = abs(s.take_profit - fill)
+        if risk_now > 0:
+            rr_now = reward_now / risk_now
+            if rr_now < _MIN_RR_FILL:
+                return _decline(
+                    session, s,
+                    f"reward:risk collapsed to {rr_now:.2f} at the fill ({round(fill, 6)} vs stop "
+                    f"{round(s.stop_loss, 6)}, target {round(s.take_profit, 6)}) — armed for a much "
+                    f"better price; not taking a {rr_now:.2f}:1 trade",
+                    terminal=False)
 
     # 2. Build the proposal from the ARMED levels (trigger = entry) — the whole point: the R:R is
     #    measured from the trigger, where it is real.
