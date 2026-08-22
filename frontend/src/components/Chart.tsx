@@ -999,6 +999,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     line: IPriceLine;
     price: number;          // the handle's current price
     validate: (p: number) => boolean;
+    why: string;            // shown when a drop is refused, so a rejection is never silent
     commit: (p: number) => void;
   };
   const handlesRef = useRef<DragHandle[]>([]);
@@ -1009,6 +1010,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   onSetSlTpRef.current = onSetSlTp;
   onSetArmedRef.current = onSetArmedLevels;
   const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null } | null>(null);
+  const [dragErr, setDragErr] = useState<string | null>(null);
 
   // Hand drawing: the saved set, the stroke in progress, and the canvas it's painted on.
   const [drawings, saveDrawings] = useDrawings(symbol);
@@ -1976,17 +1978,27 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL ${slUsd}`.trim() : `${arrow} entry`);
       const slLine = be ? null : add(p.stop_loss, "#ef5350", `SL ${slUsd} · drag`.trim());
       const tpLine = add(p.take_profit, "#26a69a", `TP ${tpUsd} · drag`.trim());
+      // Levels are validated against the CURRENT PRICE, not the entry.
+      //
+      // Against the entry, a long's stop could never be placed above it — so you could never
+      // protect a single dollar of an open profit, which is the main reason to drag a stop at all.
+      // Entry is not what makes a level valid; being on the right side of the MARKET is. A long's
+      // stop at or above the price stops out instantly, and its target at or below fills instantly.
+      // Trailing a stop into profit is now allowed, because it is a legitimate thing to want.
+      const mkt = () => p.last_price ?? p.entry_price;
       if (slLine && p.stop_loss != null) {
         handlesRef.current.push({
-          key: "pos-sl", label: "SL", refPos: p, line: slLine, price: p.stop_loss,
-          validate: (x) => (isLong ? x < p.entry_price : x > p.entry_price),
+          key: `pos-sl-${p.id ?? p.symbol}`, label: "SL", refPos: p, line: slLine, price: p.stop_loss,
+          validate: (x) => (isLong ? x < mkt() : x > mkt()),
+          why: `a ${p.direction} stop must stay ${isLong ? "below" : "above"} the current price — it would trigger immediately`,
           commit: (x) => onSetSlTpRef.current?.(x, p.take_profit ?? null),
         });
       }
       if (tpLine && p.take_profit != null) {
         handlesRef.current.push({
-          key: "pos-tp", label: "TP", refPos: p, line: tpLine, price: p.take_profit,
-          validate: (x) => (isLong ? x > p.entry_price : x < p.entry_price),
+          key: `pos-tp-${p.id ?? p.symbol}`, label: "TP", refPos: p, line: tpLine, price: p.take_profit,
+          validate: (x) => (isLong ? x > mkt() : x < mkt()),
+          why: `a ${p.direction} target must stay ${isLong ? "above" : "below"} the current price — it would fill immediately`,
           commit: (x) => onSetSlTpRef.current?.(p.stop_loss ?? null, x),
         });
       }
@@ -2041,6 +2053,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         handlesRef.current.push({
           key: `armed-${a.id}-trigger`, label: "Trigger", refPos: null, line: trigLine,
           price: a.trigger_price, validate: (x) => x > 0,
+          why: "a trigger must be a positive price",
           commit: (x) => onSetArmedRef.current?.(a.id, { trigger_price: x }),
         });
       }
@@ -2048,6 +2061,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         handlesRef.current.push({
           key: `armed-${a.id}-sl`, label: "SL", refPos: null, line: slLine, price: a.stop_loss,
           validate: (x) => (isLong ? x < a.trigger_price : x > a.trigger_price),
+          // An arm has no market position yet, so its levels are judged against the TRIGGER —
+          // the price it will enter at — which is the right reference here.
+          why: `an armed ${a.direction} stop must sit ${isLong ? "below" : "above"} the trigger`,
           commit: (x) => onSetArmedRef.current?.(a.id, { stop_loss: x }),
         });
       }
@@ -2055,6 +2071,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         handlesRef.current.push({
           key: `armed-${a.id}-tp`, label: "TP", refPos: null, line: tpLine, price: a.take_profit,
           validate: (x) => (isLong ? x > a.trigger_price : x < a.trigger_price),
+          why: `an armed ${a.direction} target must sit ${isLong ? "above" : "below"} the trigger`,
           commit: (x) => onSetArmedRef.current?.(a.id, { take_profit: x }),
         });
       }
@@ -2529,6 +2546,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     return () => window.removeEventListener("mousedown", onDown);
   }, [menu]);
 
+  // Clear a rejected-drag message after a few seconds — it is a nudge, not a state to sit in.
+  useEffect(() => {
+    if (!dragErr) return;
+    const t = window.setTimeout(() => setDragErr(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [dragErr]);
+
   // Esc drops the tool and any half-drawn stroke.
   useEffect(() => {
     if (drawMode === "off") return;
@@ -2606,8 +2630,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       container.style.cursor = "";
       const price = dragPriceRef.current;
       setDragHint(null);
-      // Reject a wrong-side level; the line snaps back to the stored value on the next poll.
-      if (price == null || !drag.validate(price)) return;
+      if (price == null) return;
+      // A refused drop must SAY so. Previously it returned silently and left the line sitting at
+      // the dropped price until the next 4-second poll rebuilt it — so a rejected drag looked
+      // exactly like an accepted one, and you would walk away believing a stop or target had moved
+      // when the broker still had the old one. Snap it back at once and explain why.
+      if (!drag.validate(price)) {
+        drag.line.applyOptions({ price: drag.price });
+        setDragErr(`${drag.label} not moved — ${drag.why}.`);
+        return;
+      }
       drag.commit(price);
     };
 
@@ -3563,6 +3595,12 @@ Click for the full breakdown. Info only — it gates nothing.`}
             {dragHint.pos && usdAtLevel(dragHint.pos, dragHint.price) && (
               <span>({usdAtLevel(dragHint.pos, dragHint.price)})</span>
             )}
+          </div>
+        )}
+
+        {dragErr && (
+          <div className="pointer-events-none absolute left-1/2 top-9 z-30 max-w-[26rem] -translate-x-1/2 rounded bg-bear/90 px-2.5 py-1.5 text-xs font-medium text-white shadow-lg">
+            ⚠ {dragErr}
           </div>
         )}
 
