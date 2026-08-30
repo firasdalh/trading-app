@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { SettingsResponse } from "../types";
 
@@ -12,6 +12,35 @@ interface Props {
 // Surfaces a persistent red banner whenever live auto-execution (Mode C) is active.
 export function Header({ settings, onKillSwitchChange, onOpenSettings }: Props) {
   const [busy, setBusy] = useState(false);
+  // Two-step power off: the first click arms it, the second does it. A single click on a control
+  // that stops trade management is too easy to hit by accident.
+  const [armed, setArmed] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 5000);   // don't leave it armed to be hit later
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  const powerOff = async () => {
+    if (!armed) { setArmed(true); return; }
+    setStopping(true);
+    try {
+      const r = await api.appShutdown();
+      // The server exits right after replying, so this is the last thing the UI can say.
+      document.body.innerHTML =
+        `<div style="font:15px system-ui;padding:3rem;text-align:center;color:#a3a3a3;background:#0a0a0a;height:100vh">` +
+        `<div style="font-size:2rem;margin-bottom:1rem">⏻</div>` +
+        `<div style="color:#e5e5e5;font-weight:600;margin-bottom:.5rem">AI Trading Desk is stopped</div>` +
+        `<div>${r.open_positions > 0 ? `${r.open_positions} open position(s) and ` : ""}${r.armed_setups} armed setup(s) are no longer being managed.<br>` +
+        `Broker-side stop-losses still stand.</div>` +
+        `<div style="margin-top:1.5rem;font-size:13px">To start it again, run <b>Start AI Trading Desk.bat</b>.</div></div>`;
+    } catch {
+      setStopping(false);
+      setArmed(false);
+    }
+  };
+
 
   const env = settings?.app.broker_env ?? "paper";
   const isLive = env === "live";
@@ -88,6 +117,20 @@ export function Header({ settings, onKillSwitchChange, onOpenSettings }: Props) 
               }`}
             >
               {effectiveKill ? "● Kill-switch engaged — release" : "Kill-switch"}
+            </button>
+
+            {/* Power off. Closing the app WINDOW deliberately leaves the backend running -- it is
+                what monitors open positions, moves stops to breakeven, honours the daily-loss
+                breaker and fires armed setups. So the only way to actually stop it was a .bat file
+                outside the app. This is that switch, with the consequence stated: two clicks, and
+                the second one names what stops being managed. */}
+            <button
+              onClick={() => void powerOff()}
+              disabled={stopping}
+              className={`btn ${armed ? "border border-bear bg-bear/20 text-bear" : "btn-subtle"}`}
+              title="Shut the app down completely (backend included). Your broker-side stop-losses stay in place, but nothing else is managed while it is off."
+            >
+              {stopping ? "Shutting down…" : armed ? "⏻ Confirm shutdown" : "⏻"}
             </button>
           </div>
         </div>

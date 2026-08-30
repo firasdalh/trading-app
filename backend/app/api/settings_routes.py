@@ -861,6 +861,50 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
             "stop_loss": req.stop_loss, "take_profit": req.take_profit}
 
 
+@router.post("/app/shutdown", tags=["safety"])
+def app_shutdown(session: Session = Depends(get_session)) -> dict:
+    """Stop the whole desktop app (backend included) cleanly.
+
+    Closing the app WINDOW deliberately leaves the backend running — it is what monitors open
+    positions, moves stops to breakeven, honours the daily-loss breaker and fires armed setups.
+    This is the switch for actually turning it off, so the one action that stops all of that is
+    explicit rather than a side effect of closing a window.
+
+    Reports what will stop being managed so the caller can warn before committing: with the app
+    off, broker-side stop-losses still stand but nothing else does.
+    """
+    import os
+    import threading
+    import time
+
+    from sqlalchemy import func
+
+    from app.models.db import ConditionalSetup
+    from app.models.enums import ConditionalStatus
+    from app.risk.service import live_broker_positions
+
+    try:
+        open_positions = len(live_broker_positions(session) or [])
+    except Exception:  # noqa: BLE001 — never block the shutdown on a broker read
+        open_positions = -1
+    armed = session.scalar(
+        select(func.count()).select_from(ConditionalSetup)
+        .where(ConditionalSetup.status == ConditionalStatus.ARMED.value)
+    ) or 0
+
+    log.warning("app shutdown requested from the UI",
+                extra={"open_positions": open_positions, "armed": armed})
+
+    # Exit AFTER the response is on the wire — killing the process inline would drop the connection
+    # and the UI could never tell the difference between "stopped" and "crashed".
+    def _stop() -> None:
+        time.sleep(0.4)
+        os._exit(0)
+
+    threading.Thread(target=_stop, daemon=True).start()
+    return {"status": "stopping", "open_positions": open_positions, "armed_setups": armed}
+
+
 @router.post("/execution/flatten", tags=["safety"])
 def flatten(session: Session = Depends(get_session)) -> dict:
     """Close ALL open positions immediately (kill-switch flatten)."""

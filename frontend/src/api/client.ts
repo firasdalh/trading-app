@@ -44,6 +44,13 @@ export const api = {
   riskState: () => request<RiskState>("/api/risk/state"),
   resumeTrading: () => request<RiskState>("/api/risk/resume", { method: "POST" }),
 
+  // Stop the whole app, backend included. Closing the window does NOT do this on purpose -- the
+  // backend is what keeps managing open trades -- so this is the explicit off switch.
+  appShutdown: () =>
+    request<{ status: string; open_positions: number; armed_setups: number }>(
+      "/api/app/shutdown", { method: "POST" },
+    ),
+
   ohlcv: (symbol: string, assetClass: AssetClass, timeframe: string, limit = 200) =>
     request<OHLCVSeries>(
       `/api/market/ohlcv?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}&timeframe=${timeframe}&limit=${limit}`,
