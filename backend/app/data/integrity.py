@@ -142,6 +142,28 @@ def sanitize_candles(candles: list[Candle], *, max_range_atr: float = _MAX_RANGE
     return out, repaired
 
 
+# --- log each distinct finding once, not on every fetch ------------------------------------------
+# The same 200-bar window is re-fetched every scan, so an old spike or an ordinary session gap was
+# re-reported on EVERY pass: ~25,000 WARNINGs in six days, overwhelmingly repeats of findings that
+# had already been logged. The checks themselves are right; only the repetition is noise. A finding
+# is now logged the first time it is seen and again only after it goes quiet for a while.
+import time as _time
+
+_SEEN: dict[tuple, float] = {}
+_REPEAT_AFTER_S = 6 * 3600
+
+
+def _first_time(key: tuple) -> bool:
+    now = _time.monotonic()
+    last = _SEEN.get(key)
+    _SEEN[key] = now
+    if len(_SEEN) > 5000:            # bounded: symbols x timeframes x signatures, never unbounded
+        cutoff = now - _REPEAT_AFTER_S
+        for k in [k for k, t in _SEEN.items() if t < cutoff]:
+            _SEEN.pop(k, None)
+    return last is None or (now - last) >= _REPEAT_AFTER_S
+
+
 def repair_and_log(symbol: str, timeframe: str, series: OHLCVSeries) -> OHLCVSeries:
     """Repair the clearest corruption on a fresh series and log it; return the series to actually use.
     Soft issues that can't be safely repaired (gaps/stale) are logged but left intact."""
@@ -151,13 +173,18 @@ def repair_and_log(symbol: str, timeframe: str, series: OHLCVSeries) -> OHLCVSer
         log.warning("integrity repair failed", extra={"symbol": symbol, "tf": timeframe, "error": str(exc)})
         return series
     if repaired:
-        log.warning("data-feed REPAIRED before funnel", extra={"symbol": symbol, "timeframe": timeframe,
-                    "repaired": dict(Counter(r.kind for r in repaired)), "sample": repaired[0].detail})
+        # Repair ALWAYS happens; only the log line is deduplicated. Keyed on the exact bars repaired,
+        # so a genuinely new spike still logs immediately.
+        if _first_time(("repaired", symbol, timeframe, tuple(r.detail for r in repaired))):
+            log.warning("data-feed REPAIRED before funnel", extra={"symbol": symbol, "timeframe": timeframe,
+                        "repaired": dict(Counter(r.kind for r in repaired)), "sample": repaired[0].detail})
         series = OHLCVSeries(symbol=series.symbol, timeframe=series.timeframe, candles=fixed_candles)
     soft = [i for i in check_candles(list(series.candles)) if i.kind in ("gap", "stale")]
     if soft:
-        log.warning("data-feed integrity (soft, not repaired)", extra={"symbol": symbol,
-                    "timeframe": timeframe, "counts": dict(Counter(i.kind for i in soft))})
+        counts = dict(Counter(i.kind for i in soft))
+        if _first_time(("soft", symbol, timeframe, tuple(sorted(counts.items())))):
+            log.warning("data-feed integrity (soft, not repaired)", extra={"symbol": symbol,
+                        "timeframe": timeframe, "counts": counts})
     return series
 
 

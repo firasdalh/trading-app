@@ -40,3 +40,6 @@ Thumbs.db
 # ---- Logs ----
 *.log
 logs/
+
+# Rotated desktop log (desktop.py keeps one previous file). *.log alone misses the .1 suffix.
+*.log.1

@@ -289,7 +289,7 @@ def _open_reversal_move(session: Session, symbol: str, ac: str, tf: str, technic
         return None
     if _open_market(session, prop, dec) is not None:
         log.warning("auto-trade opened (reversal)",
-                    extra={"symbol": symbol, "dir": direction.value, "level": round(level, 6)})
+                    extra={"symbol": symbol, "dir": direction.value, "price_level": round(level, 6)})
         return {"symbol": symbol, "opened": direction.value,
                 "note": f"reversal off {kind} → {round(target, 6)} (~${potential:.0f})"}
     return None

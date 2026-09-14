@@ -357,8 +357,38 @@ class Mt5BrokerAdapter(BrokerAdapter):
             return mt5.ORDER_FILLING_IOC
         return getattr(mt5, "ORDER_FILLING_RETURN", 2)
 
+    def algo_trading_allowed(self) -> tuple[bool, str | None]:
+        """Will MT5 accept an automated order right now? Returns (allowed, reason-if-not).
+
+        Two independent switches can block it, and the connection stays perfectly healthy either way:
+        the terminal's "Algo Trading" toolbar button (``terminal_info().trade_allowed``) and the
+        account-level expert permission (``account_info().trade_expert``). With either off, every
+        order is refused with "AutoTrading disabled by client" -- on 2026-09-09 seven orders were
+        refused in two minutes while the status panel said "connected".
+
+        Fails OPEN on a read error: a flaky info call must never block trading on its own.
+        """
+        mt5 = self._mt5
+        try:
+            term = mt5.terminal_info()
+            if term is not None and not getattr(term, "trade_allowed", True):
+                return False, ("MT5 'Algo Trading' is switched OFF in the terminal -- turn on the "
+                               "Algo Trading button in the MT5 toolbar")
+            acct = mt5.account_info()
+            if acct is not None and not getattr(acct, "trade_expert", True):
+                return False, "this MT5 account does not permit automated (expert) trading"
+        except Exception:  # noqa: BLE001
+            return True, None
+        return True, None
+
     def submit_order(self, request: OrderRequest) -> OrderResult:
         mt5 = self._mt5
+        # Check before sending: an order MT5 is guaranteed to refuse still costs a round trip and
+        # reports a vague "disabled by client". Saying which switch is off tells you what to click.
+        allowed, why = self.algo_trading_allowed()
+        if not allowed:
+            log.warning("order blocked: algo trading disabled", extra={"symbol": request.symbol, "reason": why})
+            return OrderResult(status=OrderStatus.REJECTED, error=why)
         try:
             sym = self._resolve_symbol(request.symbol)
             info = self._symbol_info(sym)

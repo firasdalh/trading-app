@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { api } from "../api/client";
+import { usePolling } from "../hooks/usePolling";
 import { fmtUsd } from "../format";
 import type { AccountState, PositionView, RiskState, SettingsResponse } from "../types";
 
@@ -25,6 +27,10 @@ function Stat({ label, value, valueClass = "", title }: {
 // plus a prominent banner when trading is paused or the kill-switch is engaged. Pulls the numbers a
 // trader watches up to the top instead of leaving them only in the Risk panel at the bottom.
 export function AccountBar({ account, risk, settings, positions }: Props) {
+  // Poll whether MT5 will actually accept automated orders. Every 30s is plenty: the switch is
+  // flipped by hand in the terminal, and the cost of noticing 30s late is one refused order.
+  const { data: mt5 } = usePolling(() => api.mt5Status(), 30000, []);
+  const algoOff = mt5?.connected && mt5.algo_trading === false;
   const equity = account?.equity ?? null;
   const realized = account?.daily_realized_pnl ?? risk?.realized_pnl ?? 0;
   const floating = positions && positions.length
@@ -54,6 +60,15 @@ export function AccountBar({ account, risk, settings, positions }: Props) {
 
   return (
     <div className="space-y-2">
+      {/* The loudest banner on the page, on purpose: with Algo Trading off in MT5 the app still
+          looks connected and healthy, yet the hybrid, armed setups, auto-trader and quick trades
+          all fail on submit. On 2026-09-09 seven orders were refused in two minutes that way. */}
+      {algoOff && (
+        <div className="rounded-md border border-bear bg-bear/15 px-3 py-2 text-sm font-semibold text-bear">
+          ⛔ MT5 is refusing automated orders — {mt5?.algo_trading_reason ?? "Algo Trading is disabled"}.
+          <span className="ml-1 font-normal">No new trade can open until it is switched back on.</span>
+        </div>
+      )}
       {(ks || paused) && (
         <div
           className={`rounded-md border px-3 py-2 text-sm font-medium ${

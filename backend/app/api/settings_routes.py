@@ -504,8 +504,12 @@ def _try_mt5_connect() -> dict:
     try:
         broker = Mt5BrokerAdapter()
         acct = broker.get_account()
+        allowed, why = broker.algo_trading_allowed()
         return {"connected": True, "is_paper": broker.is_paper,
-                "equity": acct.equity, "cash": acct.cash, "open_positions": acct.open_positions}
+                "equity": acct.equity, "cash": acct.cash, "open_positions": acct.open_positions,
+                # "connected" alone is misleading: the terminal can be connected with Algo Trading
+                # off, in which case nothing automated can trade. Report it separately.
+                "algo_trading": allowed, "algo_trading_reason": why}
     except BrokerError as exc:
         return {"connected": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001

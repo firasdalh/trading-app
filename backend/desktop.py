@@ -27,6 +27,10 @@ PORT = 8001
 URL = f"http://{HOST}:{PORT}"
 
 
+# Rotate desktop.log at startup once it passes this size (one previous file is kept).
+_LOG_ROTATE_BYTES = 50 * 1024 * 1024
+
+
 def _redirect_output_under_pythonw() -> None:
     """Give the process real stdout/stderr when launched WITHOUT a console.
 
@@ -39,9 +43,20 @@ def _redirect_output_under_pythonw() -> None:
     """
     if sys.stdout is not None and sys.stderr is not None:
         return
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "desktop.log")
+    # Rotate on launch. The file was opened in append mode and never trimmed, so it only ever grew
+    # (469 MB by mid-September). Keeping ONE previous file preserves the run you might need to
+    # debug -- the one that just crashed -- without letting history accumulate forever.
     try:
-        log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "desktop.log"),
-                   "a", encoding="utf-8", buffering=1)
+        if os.path.getsize(path) > _LOG_ROTATE_BYTES:
+            prev = path + ".1"
+            if os.path.exists(prev):
+                os.remove(prev)
+            os.replace(path, prev)
+    except OSError:
+        pass   # missing file, or locked by a second instance -- just keep appending
+    try:
+        log = open(path, "a", encoding="utf-8", buffering=1)
     except Exception:  # noqa: BLE001 - read-only dir: fall back to discarding output
         log = open(os.devnull, "w", encoding="utf-8")
     if sys.stdout is None:

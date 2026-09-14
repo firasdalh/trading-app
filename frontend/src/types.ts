@@ -641,6 +641,10 @@ export interface Mt5Status {
   login?: number | null;
   server?: string | null;
   error?: string;
+  // Connected is not the same as able to trade: MT5's "Algo Trading" button can be off while the
+  // connection is fine, and then every automated order is refused.
+  algo_trading?: boolean;
+  algo_trading_reason?: string | null;
 }
 
 export interface ReflectionReport {

@@ -753,7 +753,7 @@ def check_conditional_setups(session: Session) -> dict:
                            f"{s.trigger_price} to enter")
             session.add(s)
             log.info("conditional break confirmed, awaiting retest",
-                     extra={"symbol": s.symbol, "level": s.break_level})
+                     extra={"symbol": s.symbol, "break_level": s.break_level})
             continue      # the retest is a separate event; don't fire on the breakout bar itself
 
         # Stage 2 guard: the break has since FAILED (price closed back through the level), so the
