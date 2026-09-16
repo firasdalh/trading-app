@@ -137,7 +137,16 @@ _WALL_BREAK_BONUS = 0.06
 # gate/penalty in the engine. Order = the pro's entry-quality priority (structure first, R:R last).
 DET_FILTERS = [
     {"key": "structure", "label": "Market structure",
-     "desc": "BOS / CHoCH / higher-high-higher-low confluence — refuse a trade that fights the swing structure."},
+     "desc": "Refuse a trade when the swing structure of BOTH the entry and the highest timeframe points "
+             "against it (lower highs/lows for a long)."},
+    {"key": "trend_age", "label": "Skip late trends",
+     "desc": "Don't join a trend at market once it is more than a day old (24 bars on 1h since its "
+             "SuperTrend flip). On the honest replay late entries were the biggest single leak: young "
+             "trends made money in both halves of the year, trends older than a day lost it."},
+    {"key": "target_floor", "label": "Let trend winners run (3R target)",
+     "desc": "Place a trend trade's take-profit at least 3R away instead of banking at the nearest "
+             "level (~2R). On the honest replay every target from 2.5R to 4R beat the level target in "
+             "all four time periods: trend trades pay through a few big runs, and a 2R cap cut them off."},
     {"key": "mtf", "label": "Higher-timeframe trend",
      "desc": "Trade WITH the immediate higher timeframe (15m→1h, 1h→4h, 4h→1d); don't fight the next TF up (no confluence → stand aside)."},
     {"key": "daily_align", "label": "Daily / big-picture trend must agree",
@@ -203,8 +212,6 @@ DET_FILTERS = [
      "desc": "Stand aside in a chaotic volatility expansion with no trend (whipsaw zone)."},
     {"key": "wall", "label": "S/R wall + volume",
      "desc": "Penalise chasing into a nearby S/R wall; reward a volume-backed break behind the entry."},
-    {"key": "session", "label": "Session / liquidity",
-     "desc": "Lean into the liquid trading sessions; discount thin-hour entries (wider spreads, more noise / lower quality)."},
     {"key": "minrr", "label": "Minimum reward:risk",
      "desc": "Require a minimum R:R at market entry, else arm the better-priced break/pullback."},
 ]
@@ -289,6 +296,20 @@ _CONFIRM_STEPS = 2
 # flat. 0.1 ATR is deliberately low — the goal is to exclude a genuinely FLAT average, not to demand
 # a steep one (a steeper floor would reject the early part of a trend, which is where the money is).
 _SLOPE_MIN_ATR = 0.10
+
+# A trend older than this many entry-TF bars (counted from the last SuperTrend flip in the trade's
+# direction) is too late to join at market. On the faithful (no look-ahead) replay of a year of 1h
+# data, trend entries lose steadily with age: young legs made +0.07R/trade in BOTH halves of the year,
+# legs older than a day lost -0.09R (-0.25R out-of-sample). Every cut from 15 to 30 bars held up on
+# unseen data (a plateau, not a fitted spike); 24 = one trading day on the 1h book.
+_TREND_AGE_MAX_BARS = 24
+
+# Minimum distance of a trend trade's take-profit, in R. The level-based target mostly landed near 2R,
+# which caps exactly the runs a trend book lives on. On the faithful replay (Hybrid-gated trend trades,
+# each replayed along its real price path) the result rose steadily with the target — 2.5R, 3R, 3.5R,
+# 4R all beat the level target, in every one of 4 time folds — so this is a property of the trades, not
+# a tuned number. 3R sits mid-plateau; the level logic still applies beyond it (capped at _RR_MAX).
+_TARGET_MIN_R = 3.0
 
 
 def _confirm_trend(technical: TechnicalRead, entry_tf: str) -> tuple[str, str]:
@@ -1759,6 +1780,23 @@ def _deterministic_decision(
         )
         return base
 
+    # --- LATE-TREND gate: the engine confirms a trend so thoroughly (EMA stack on the entry TF, the
+    # next TF up and the daily, ADX, aligned structure) that by the time everything agrees the move is
+    # often a day or more old — and old legs are where it lost. Only when SuperTrend points WITH the
+    # trade does its age measure the trend; pointing against, the count is a pullback's age and says
+    # nothing about lateness. No flip inside the loaded window means the leg is older than the window.
+    st_dir, st_age = ind.get("supertrend_dir"), ind.get("supertrend_bars_since_flip")
+    if "trend_age" not in disable and st_dir:
+        with_trade = (st_dir > 0) == (direction == Direction.LONG)
+        if with_trade and (st_age is None or st_age > _TREND_AGE_MAX_BARS):
+            age_txt = f"{st_age:.0f} bars old" if st_age is not None else "older than the loaded history"
+            base.rationale = (
+                f"Late trend: this {direction.value} leg is {age_txt} (SuperTrend flip), past the "
+                f"{_TREND_AGE_MAX_BARS}-bar limit. Late entries into mature trends were the engine's "
+                "biggest leak on the honest backtest — waiting for a fresh leg instead of joining this one."
+            )
+            return base
+
     # Trend ALIGNMENT grade (the "A+ / clear direction" score) — how cleanly every TF + signal stacks.
     align = _trend_alignment(technical, ind, direction)
     base.alignment = align
@@ -2043,17 +2081,12 @@ def _deterministic_decision(
         regime_ok = (direction == Direction.LONG and entry >= e200) or \
                     (direction == Direction.SHORT and entry <= e200)
         conf += 0.05 if regime_ok else -0.05
-    # Market structure: aligned swings (HH/HL for a long, LH/LL for a short) add real conviction;
-    # trading against structure or right after a change-of-character (CHoCH) subtracts it. This is
-    # the chart-reader's "is price action actually confirming this?" check.
-    if "structure" not in disable:
-        if struct != "range":
-            aligned = (direction == Direction.LONG and struct == "up") or (
-                direction == Direction.SHORT and struct == "down"
-            )
-            conf += 0.1 if aligned else -0.1
-        if ind.get("choch"):
-            conf -= 0.1
+    # NOTE: swing-structure alignment (+0.1 aligned / -0.1 against), a fresh CHoCH (-0.1) and the
+    # session-liquidity nudge (+0.05 active / -0.10 thin) were REMOVED from confidence (2026-09-16).
+    # On the faithful replay each pointed the WRONG way in both halves of the year: trades with aligned
+    # structure, no CHoCH and an active session did worse, because all three reward a trend that is
+    # already obvious — i.e. late. With them in, the Hybrid's confidence gate and its "take the highest
+    # confidence" ranking selected the most mature trends. The structure HARD gate above is unchanged.
     # RSI divergence: regular divergence AGAINST the trade is exhaustion (down-weight); hidden
     # divergence WITH the trade is continuation confirmation (up-weight).
     if "divergence" not in disable:
@@ -2065,17 +2098,10 @@ def _deterministic_decision(
     # conviction even when a setup forms.
     if regime == "volatile" and "volatility" not in disable:
         conf -= 0.1
-    # Session/liquidity: lean into the liquid windows, discount thin hours (noise, wide spreads).
-    # Thin-hour entries validated as materially lower-quality (backtest: ~+0.10R vs ~+0.24R in
-    # active/normal, and it holds in- AND out-of-sample), and their real spread/slippage cost is
-    # under-modelled — so the thin discount is DOUBLED to -0.10. This is a soft filter: a strong thin
-    # setup still clears the confidence bar; a marginal one now falls below it (esp. the 70% Hybrid gate).
+    # Session is still REPORTED in the rationale, but no longer scored — see the NOTE above. (The old
+    # "thin hours lose" backtest that justified the -0.10 was one of the look-ahead runs.) Real spread
+    # cost in thin hours is policed by the live spread gate instead.
     session_q, _session_note = _session_quality(asset_class, symbol, now)
-    if "session" not in disable:
-        if session_q == "active":
-            conf += 0.05
-        elif session_q == "thin":
-            conf -= 0.10
     # Trend ALIGNMENT: a fully-stacked trend (every TF + strength + momentum agree) is the clearest,
     # highest-conviction direction — lean in. (The base factors only check the single highest TF, so
     # full multi-TF agreement is extra edge.) Modest bonus so it ranks A+ setups up without inflating.
@@ -2179,6 +2205,12 @@ def _deterministic_decision(
                 f"back, the trade is skipped."
             )
             return base
+
+    # TARGET FLOOR (see _TARGET_MIN_R): give the trend room. The level logic above still picks a further
+    # level when there is one; this only lifts a target that would have banked the move too early.
+    if "target_floor" not in disable and abs(target - entry) < _TARGET_MIN_R * risk:
+        target = entry + _TARGET_MIN_R * risk if direction == Direction.LONG else entry - _TARGET_MIN_R * risk
+        struct_note += f"; lifted to {_TARGET_MIN_R:.0f}R — trend winners need room"
 
     base.direction = direction
     base.entry = round(entry, 6)

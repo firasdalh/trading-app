@@ -487,9 +487,22 @@ def test_trend_trade_carries_alignment():
 def test_target_capped_at_resistance():
     # Moderate trend (ADX 22): risk = 1.5*ATR(2) = 3; raw 2R target = 106; resistance 105 (1.67R,
     # above the 1.5R floor but below 2R) caps the target there.
+    # (level logic in isolation — the 3R target floor is covered by test_target_floor_lifts_a_2r_target)
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h",
+                                _multi_tf("up", "up", resistance=105.0, adx=22.0), _fund(), now=NOW,
+                                disable=frozenset({"target_floor"}))
+    assert p.direction == Direction.LONG and p.take_profit == 105.0
+
+
+def test_target_floor_lifts_a_2r_target():
+    """Same setup with the floor on: a level at ~1.67R is too close for a trend trade — the target goes
+    to entry + 3R (risk 3 -> 109) so the winner has room to run."""
     p = _deterministic_decision("X", AssetClass.FOREX, "1h",
                                 _multi_tf("up", "up", resistance=105.0, adx=22.0), _fund(), now=NOW)
-    assert p.direction == Direction.LONG and p.take_profit == 105.0
+    assert p.direction == Direction.LONG
+    risk = abs(p.entry - p.stop_loss)
+    assert abs((p.take_profit - p.entry) / risk - 3.0) < 1e-6
+    assert "lifted to 3R" in p.rationale
 
 
 def test_too_little_room_to_resistance_vetoes():
@@ -712,14 +725,17 @@ def test_session_quality():
     assert _session_quality(AssetClass.INDEX, "US500m", datetime(2026, 1, 5, 2, tzinfo=timezone.utc))[0] == "thin"
 
 
-def test_session_weighting_lifts_confidence_in_liquid_window():
+def test_session_no_longer_moves_confidence():
+    """The active/thin session nudge was removed: on the look-ahead-free replay thin-hour trend entries
+    did BETTER, not worse. The session is still named in the rationale, just not scored."""
     t = _tech_ext("up", entry=104.0, ema20=100.0, atr_v=2.0)
     active = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(),
                                      now=datetime(2026, 1, 5, 13, tzinfo=timezone.utc))  # overlap
     thin = _deterministic_decision("X", AssetClass.FOREX, "1h", t, _fund(),
                                    now=datetime(2026, 1, 5, 23, tzinfo=timezone.utc))    # dead zone
     assert active.direction == Direction.LONG and thin.direction == Direction.LONG
-    assert active.confidence > thin.confidence
+    assert active.confidence == thin.confidence
+    assert "thin session" in thin.rationale
 
 
 # ---- analytics enhancements: divergence, institutional levels, key-level targets ----
@@ -773,5 +789,6 @@ def test_target_snaps_to_prior_day_high():
         TimeframeRead(timeframe="1d", trend="up", indicators={"prior_day_high": 104.0},
                       support_levels=[], resistance_levels=[]),
     ])
-    p = _deterministic_decision("X", AssetClass.FOREX, "1h", tech, _fund(), now=NOW)
+    p = _deterministic_decision("X", AssetClass.FOREX, "1h", tech, _fund(), now=NOW,
+                                disable=frozenset({"target_floor"}))  # level logic in isolation
     assert p.direction == Direction.LONG and p.take_profit == 104.0  # capped at the institutional level

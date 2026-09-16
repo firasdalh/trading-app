@@ -25,6 +25,20 @@ def _series_uptrend(n=200, start=100.0, step=0.3) -> OHLCVSeries:
     return OHLCVSeries(symbol="UP", timeframe="1h", candles=candles)
 
 
+def _series_uptrend_with_dips(n=200, start=100.0, step=0.3, every=40, dip=3, drop=2.0) -> OHLCVSeries:
+    """An uptrend that shakes out every ``every`` bars. A straight line has no SuperTrend flip, so
+    every bar of it is a leg older than the history — which the late-trend gate rightly skips. Real
+    trends restart after pullbacks; the dips give the engine fresh legs to join."""
+    candles = []
+    price = start
+    for i in range(n):
+        o = price
+        price += -drop if (i % every) >= every - dip else step
+        candles.append(Candle(ts=NOW + timedelta(hours=i), open=o, high=max(o, price) + 0.1,
+                              low=min(o, price) - 0.1, close=price, volume=1000))
+    return OHLCVSeries(symbol="UP", timeframe="1h", candles=candles)
+
+
 def _series_flat(n=200, price=100.0) -> OHLCVSeries:
     candles = [
         Candle(ts=NOW + timedelta(hours=i), open=price, high=price + 0.05,
@@ -47,7 +61,7 @@ def test_backtest_runs_and_reports_structure():
 
 
 def test_uptrend_produces_long_trades_and_profit():
-    res = run_backtest("UP", AssetClass.STOCK, _series_uptrend(step=0.5), _limits())
+    res = run_backtest("UP", AssetClass.STOCK, _series_uptrend_with_dips(), _limits())
     # A persistent uptrend should generate at least one long trade.
     assert res.metrics.total_trades >= 1
     assert all(t.direction.value in ("long", "short") for t in res.trades)

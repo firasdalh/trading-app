@@ -652,6 +652,49 @@ function SetupSignals({ proposal, standAside, onToggleScenLevels, scenLevelsShow
   // Absolute RSI zone — always reported, even with no trade direction (fixes "76 = normal range").
   const rsiZone = rsi == null ? null : rsi >= 70 ? "overbought" : rsi <= 30 ? "oversold" : "normal";
 
+  // TIMING — how old the move is. Mirrors the engine: a leg more than TREND_AGE_MAX_BARS past its
+  // SuperTrend flip is skipped (late entries were the biggest leak on the honest backtest), and a young
+  // leg on the next timeframe up (≤ FRESH_HTF_LEG_BARS) is what the Hybrid ranks first.
+  const TREND_AGE_MAX_BARS = 24;   // orchestrator._TREND_AGE_MAX_BARS
+  const FRESH_HTF_LEG_BARS = 6;    // hybrid._FRESH_HTF_LEG_BARS
+  const legOf = (indicators: Record<string, unknown> | undefined) => {
+    const stDir = indicators?.["supertrend_dir"] as number | undefined;
+    const age = indicators?.["supertrend_bars_since_flip"] as number | undefined;
+    if (!dir || stDir == null || stDir === 0) return null;
+    return { withTrade: (stDir > 0) === (dir === "long"), age: age ?? null };
+  };
+  const leg = legOf(ind);
+  const htfLeg = legOf(macro?.indicators);
+  const timing: { label: string; value: string; tone?: string; verdict: V; note: string }[] = [];
+  if (leg) {
+    const late = leg.withTrade && (leg.age == null || leg.age > TREND_AGE_MAX_BARS);
+    timing.push({
+      label: `Trend age (${proposal.timeframe})`,
+      value: !leg.withTrade ? "pullback leg" : leg.age == null ? "very old" : `${leg.age.toFixed(0)} bars`,
+      tone: late ? "text-bear" : leg.withTrade ? "text-bull" : undefined,
+      verdict: late ? "bad" : leg.withTrade ? "good" : "neutral",
+      note: !leg.withTrade
+        ? "SuperTrend points against this trade — it's a pullback entry, so the trend's age doesn't apply."
+        : late
+          ? `More than ${TREND_AGE_MAX_BARS} bars since the flip — a late entry into a mature move, the engine's biggest historical leak.`
+          : "A young leg — the part of a trend that paid on the honest backtest.",
+    });
+  }
+  if (htfLeg && macro) {
+    const fresh = htfLeg.withTrade && htfLeg.age != null && htfLeg.age <= FRESH_HTF_LEG_BARS;
+    timing.push({
+      label: `${macro.timeframe} leg`,
+      value: !htfLeg.withTrade ? "against" : htfLeg.age == null ? "very old" : `${htfLeg.age.toFixed(0)} bars`,
+      tone: fresh ? "text-bull" : undefined,
+      verdict: fresh ? "good" : "neutral",
+      note: fresh
+        ? `The ${macro.timeframe} trend just turned this way — the strongest group on the backtest; the Hybrid opens these first.`
+        : !htfLeg.withTrade
+          ? `The ${macro.timeframe} SuperTrend still points the other way.`
+          : `${htfLeg.age == null ? "A long-running" : `${htfLeg.age.toFixed(0)} bars into the`} ${macro.timeframe} leg — fine, just not fresh.`,
+    });
+  }
+
   const factors: { label: string; value: string; tone?: string; verdict: V; note: string }[] = [
     {
       label: "Entry-TF trend",
@@ -673,6 +716,7 @@ function SetupSignals({ proposal, standAside, onToggleScenLevels, scenLevelsShow
           ? `Agrees with the ${dirWord} — confluence.`
           : "Sideways — neither helps nor blocks.",
     },
+    ...timing,
     {
       label: "Trend strength (ADX)",
       value: rg

@@ -70,9 +70,14 @@ _RSI_OB_EXIT = 70.0         # RSI overbought (long) rolling back = fading into t
 _RSI_OS_EXIT = 30.0         # RSI oversold (short) rolling back = fading into the wall
 _RUN_R = 1.8               # near the ~2R target in a strong intact trend, let the winner RUN:
 #                            drop the fixed take-profit and ride a trailing stop instead of capping
-# TIME-STOP: only close a stagnant trade that is still roughly FLAT (a winner is managed by the trail,
-# a loser by its stop). "Flat" = the trade hasn't moved more than this many R either way.
-_TIME_STOP_FLAT_R = 0.5
+# TIME-STOP ("not working"): past the max hold, close a trade that is still below this many R. A trend
+# entry that is right usually shows it within half a day; one that hasn't is more often a loser in slow
+# motion. Replayed along each trade's real path on the faithful backtest, exiting at ~12 bars below
+# +0.25R beat holding in every one of 4 time folds (bars 10-14 and thresholds 0-0.3R all agreed), and
+# edged out the old "only when flat (|R| < 0.5)" rule — it also cuts the drifting losers. BUT once the
+# engine's 3R target floor went in, the time-stop added no reliable gain on top (both act on the trades
+# that go nowhere), so it stays opt-in and OFF by default.
+_TIME_STOP_MIN_R = 0.25
 _PARTIAL_DONE: set[str] = set()  # symbols already scaled this position (reset when it goes flat)
 
 # --- hysteresis + cooldown so auto-execute doesn't thrash ---
@@ -608,6 +613,27 @@ def _structure_stop(direction: str, ctx: dict, atr: float | None) -> float | Non
     return (swing - buf) if direction == "long" else (swing + buf)
 
 
+def _time_stop_decision(p, ctx: dict, plan_risk: float | None, opened_at: datetime | None,
+                        max_hold_hours: float) -> dict | None:
+    """Close a trade held past ``max_hold_hours`` that still hasn't worked (below _TIME_STOP_MIN_R).
+
+    Needs the open time, a risk reference and a price — a terminal-opened trade (no app row) is left
+    alone. A trade that has worked is not touched: its target and stop manage it."""
+    last = (ctx or {}).get("last") or p.last_price
+    if not (max_hold_hours and max_hold_hours > 0 and opened_at is not None and plan_risk and last):
+        return None
+    held_h = (datetime.now(timezone.utc) - _aware(opened_at)).total_seconds() / 3600.0
+    if held_h < max_hold_hours:
+        return None
+    profit = (last - p.entry_price) if p.direction == "long" else (p.entry_price - last)
+    r = profit / plan_risk
+    if r >= _TIME_STOP_MIN_R:
+        return None
+    return {"action": "close", "kind": "time_stop",
+            "reason": (f"held {held_h:.0f}h and still not working ({r:+.2f}R, needs "
+                       f"{_TIME_STOP_MIN_R:+.2f}R) — closing it rather than waiting for the stop")}
+
+
 def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
                    tranche: int = 0, has_plan: bool = True,
                    opened_at: datetime | None = None, max_hold_hours: float = 0.0,
@@ -629,18 +655,10 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
     d = p.direction
     regime = (ctx or {}).get("regime") or "moderate"
 
-    # Time-stop: a trade held past the max hold that's STILL roughly flat (neither target nor stop has
-    # resolved it) is dead money tying up the exposure slot — close it. Only when we know the open time
-    # AND a risk reference AND price; a winner (past +flat R) rides the trail, a loser its stop.
-    if max_hold_hours and max_hold_hours > 0 and opened_at is not None and plan_risk and last:
-        held_h = (datetime.now(timezone.utc) - _aware(opened_at)).total_seconds() / 3600.0
-        if held_h >= max_hold_hours:
-            profit = (last - p.entry_price) if d == "long" else (p.entry_price - last)
-            r = profit / plan_risk
-            if abs(r) < _TIME_STOP_FLAT_R:
-                return {"action": "close", "kind": "time_stop",
-                        "reason": (f"held {held_h:.0f}h and still flat ({r:+.1f}R) — closing the "
-                                   "stagnant trade to free the slot")}
+    # Time-stop: a trade held past the max hold that still hasn't worked (see _time_stop_decision).
+    ts = _time_stop_decision(p, ctx, plan_risk, opened_at, max_hold_hours)
+    if ts is not None:
+        return ts
 
     # 0) LADDERED scale-out — book ~a third at its R milestone, OR early when price banks into a strong
     # opposing level with fading momentum (sell into strength), whichever comes first. Done before the
@@ -795,11 +813,14 @@ def _clear_db_take_profit(session: Session, symbol: str) -> None:
 
 
 def _auto_execute(session: Session, advice: list[PositionAdvice],
-                  contexts: dict[str, dict] | None = None) -> list[dict]:
+                  contexts: dict[str, dict] | None = None, only_time_stop: bool = False) -> list[dict]:
     """Act on the bounded auto-decisions. Hard safety gates: kill switch halts everything; live
     brokers require this session's live-confirmation; paper acts freely. Closing requires the
     invalidation to persist (hysteresis) and is rate-limited per symbol (cooldown); protective
-    stop moves act immediately (they only ever reduce risk)."""
+    stop moves act immediately (they only ever reduce risk).
+
+    ``only_time_stop`` runs the time-stop and nothing else — the stop moves (breakeven / trail) that
+    come with full auto-execute cost the live book, so the time-stop is usable without them."""
     from app.brokers.registry import get_broker_for
     from app.core.state import (
         get_or_create_settings,
@@ -840,9 +861,12 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
         plan_risk = _plan_risk(session, a.symbol, (ctx or {}).get("atr"), a.direction)
         tranche, has_plan = _scaled_tranche(session, p.symbol, p.qty, p.direction)
         opened_at = _position_opened_at(session, p.symbol, p.direction)
-        decision = _auto_decision(a, p, ctx or {}, plan_risk, tranche=tranche, has_plan=has_plan,
-                                  opened_at=opened_at, max_hold_hours=max_hold_hours,
-                                  scale_out=scale_out)
+        if only_time_stop:
+            decision = _time_stop_decision(p, ctx or {}, plan_risk, opened_at, max_hold_hours)
+        else:
+            decision = _auto_decision(a, p, ctx or {}, plan_risk, tranche=tranche, has_plan=has_plan,
+                                      opened_at=opened_at, max_hold_hours=max_hold_hours,
+                                      scale_out=scale_out)
         if decision is None:
             continue
         action, kind, reason = decision["action"], decision["kind"], decision["reason"]
@@ -947,7 +971,14 @@ def run_advisor(session: Session) -> dict:
     cfg = get_or_create_advisor_config(session)
     cfg.last_run_at = datetime.now(timezone.utc)
 
-    actions = _auto_execute(session, advice, contexts) if cfg.auto_execute else []
+    if cfg.auto_execute:
+        actions = _auto_execute(session, advice, contexts)
+    elif (cfg.max_hold_hours or 0) > 0:
+        # The time-stop is its own opt-in (max hold > 0) — it doesn't need, and shouldn't drag in,
+        # the rest of auto-execute.
+        actions = _auto_execute(session, advice, contexts, only_time_stop=True)
+    else:
+        actions = []
 
     actionable = [a for a in advice if a.severity in ("warn", "danger")]
     for a in actionable:

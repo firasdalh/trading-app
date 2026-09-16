@@ -255,7 +255,7 @@ def test_auto_decision_time_stop_closes_stagnant():
 
 
 def test_auto_decision_time_stop_skips_a_winner():
-    # +0.6R (above the 0.5R flat band) -> a working trade is NOT time-stopped, even when old.
+    # +0.6R (past the +0.25R "working" bar) -> a working trade is NOT time-stopped, even when old.
     p = _pos(direction="short", stop=4470.0)
     opened = datetime.now(timezone.utc) - timedelta(hours=30)
     d = advisor._auto_decision(_adv(thesis="intact"), p, {"atr": 5.0, "last": 4443.0}, 10.0,
@@ -275,6 +275,55 @@ def test_auto_decision_time_stop_off_when_disabled():
     opened = datetime.now(timezone.utc) - timedelta(hours=100)
     assert advisor._auto_decision(_adv(thesis="intact"), p, {"atr": 5.0, "last": 4449.0}, 10.0,
                                   opened_at=opened, max_hold_hours=0.0) is None
+
+
+def test_time_stop_also_cuts_a_drifting_loser():
+    """The old rule only closed FLAT trades; a -0.7R trade 30h old was left to reach its stop. It
+    hasn't worked, so it goes too."""
+    p = _pos(direction="short", stop=4470.0)
+    opened = datetime.now(timezone.utc) - timedelta(hours=30)
+    d = advisor._time_stop_decision(p, {"last": 4456.0}, 10.0, opened, 24.0)   # 7 against = -0.7R
+    assert d is not None and d["kind"] == "time_stop" and "-0.70R" in d["reason"]
+
+
+def test_time_stop_spares_a_trade_just_past_the_bar():
+    p = _pos(direction="short", stop=4470.0)
+    opened = datetime.now(timezone.utc) - timedelta(hours=30)
+    assert advisor._time_stop_decision(p, {"last": 4446.0}, 10.0, opened, 24.0) is None   # +0.30R
+
+
+def test_time_stop_runs_without_auto_execute(db_session, monkeypatch):
+    """Max hold > 0 turns the time-stop on by itself. It must NOT bring the rest of auto-execute with
+    it: the breakeven/trail stop moves cost the live book, so a winner's stop is left alone here."""
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    broker = _Broker(is_paper=True)
+    old = datetime.now(timezone.utc) - timedelta(hours=30)
+    db_session.add_all([
+        Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=1.0, entry_price=4449.0,
+                 stop_loss=4470.0, status=PositionStatus.OPEN.value, opened_at=old),
+        Position(symbol="BTCUSDm", asset_class="crypto", direction="short", qty=1.0, entry_price=4449.0,
+                 stop_loss=4470.0, status=PositionStatus.OPEN.value, opened_at=old),
+    ])
+    cfg = advisor.get_or_create_advisor_config(db_session)
+    cfg.auto_execute = False
+    cfg.max_hold_hours = 24.0
+    db_session.commit()
+    monkeypatch.setattr(advisor, "live_broker_positions", lambda session: [
+        _pos(symbol="XAUUSDm", direction="short", stop=4470.0),
+        _pos(symbol="BTCUSDm", direction="short", stop=4470.0)])
+    monkeypatch.setattr(advisor, "_plan_risk", lambda *a, **k: 10.0)
+    ctx = {"XAUUSDm": {"atr": 5.0, "last": 4449.0, "regime": "trending"},    # flat -> time-stopped
+           "BTCUSDm": {"atr": 5.0, "last": 4434.0, "regime": "trending"}}    # +1.5R -> would trail
+    monkeypatch.setattr(advisor, "_advise_with_context", lambda session: (
+        [_adv(symbol="XAUUSDm"), _adv(symbol="BTCUSDm")], ctx))
+    _patch_exec(monkeypatch, broker)
+
+    out = advisor.run_advisor(db_session)
+    assert broker.closed == ["XAUUSDm"]
+    assert broker.sltp == [] and broker.partials == []          # no stop moves, no scale-outs
+    assert [a["kind"] for a in out["actions"]] == ["time_stop"]
 
 
 def test_auto_decision_breakeven_winning_into_news():

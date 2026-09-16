@@ -48,6 +48,15 @@ def _downtrend_series(symbol="TEST", n=80, start=100.0, step=0.5) -> OHLCVSeries
     return OHLCVSeries(symbol=symbol, timeframe="1h", candles=candles)
 
 
+def _fresh(tech, bars: float = 5.0):
+    """Mark a synthetic trend as YOUNG. The helper series are straight lines with no SuperTrend flip in
+    the window — an ~80-bar-old leg, which the late-trend gate correctly refuses. Tests of OTHER logic
+    state the premise they need: a fresh leg, a few bars past its flip."""
+    for tf in tech.timeframes:
+        tf.indicators["supertrend_bars_since_flip"] = bars
+    return tech
+
+
 # ---- indicators ----
 
 def test_sma_and_rsi_and_swings():
@@ -82,7 +91,7 @@ def _neutral_fundamental(symbol="TEST", windows=None) -> FundamentalRead:
 
 
 def test_orchestrator_long_on_uptrend_confluence():
-    tech = run_technical("TEST", [_uptrend_series()])
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))
     prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), now=NOW)
     assert prop.direction == Direction.LONG
     assert prop.entry and prop.stop_loss and prop.stop_loss < prop.entry
@@ -90,16 +99,55 @@ def test_orchestrator_long_on_uptrend_confluence():
 
 
 def test_orchestrator_short_on_downtrend():
-    tech = run_technical("TEST", [_downtrend_series()])
+    tech = _fresh(run_technical("TEST", [_downtrend_series()]))
     prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), now=NOW)
     assert prop.direction == Direction.SHORT
     assert prop.stop_loss and prop.stop_loss > prop.entry
 
 
+def test_late_trend_is_not_joined_at_market():
+    """A leg that flipped 60 bars ago is a late entry — the engine's biggest leak on the honest replay."""
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]), bars=60.0)
+    prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), now=NOW)
+    assert prop.direction == Direction.NO_TRADE
+    assert "late trend" in prop.rationale.lower() and "60 bars" in prop.rationale
+
+
+def test_trend_with_no_flip_in_the_window_counts_as_late():
+    """No SuperTrend flip anywhere in the loaded history means the leg is older than the history."""
+    tech = run_technical("TEST", [_uptrend_series()])
+    assert tech.timeframes[0].indicators.get("supertrend_bars_since_flip") is None
+    prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), now=NOW)
+    assert prop.direction == Direction.NO_TRADE and "older than the loaded history" in prop.rationale
+
+
+def test_trend_age_limit_is_inclusive_and_toggleable():
+    from app.agents.orchestrator import _TREND_AGE_MAX_BARS, _deterministic_decision
+
+    at_limit = _fresh(run_technical("TEST", [_uptrend_series()]), bars=float(_TREND_AGE_MAX_BARS))
+    assert _deterministic_decision("TEST", AssetClass.STOCK, "1h", at_limit, _neutral_fundamental(),
+                                   NOW).direction == Direction.LONG
+    late = _fresh(run_technical("TEST", [_uptrend_series()]), bars=float(_TREND_AGE_MAX_BARS + 1))
+    assert _deterministic_decision("TEST", AssetClass.STOCK, "1h", late, _neutral_fundamental(),
+                                   NOW).direction == Direction.NO_TRADE
+    assert _deterministic_decision("TEST", AssetClass.STOCK, "1h", late, _neutral_fundamental(), NOW,
+                                   disable=frozenset({"trend_age"})).direction == Direction.LONG
+
+
+def test_trend_age_ignores_a_supertrend_pointing_against_the_trade():
+    """SuperTrend DOWN under an EMA uptrend: its bar count is a pullback's age, not the trend's."""
+    from app.agents.orchestrator import _deterministic_decision
+
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]), bars=80.0)
+    tech.timeframes[0].indicators["supertrend_dir"] = -1.0
+    prop = _deterministic_decision("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), NOW)
+    assert "late trend" not in (prop.rationale or "").lower()
+
+
 def test_orchestrator_arms_pullback_when_overbought_and_not_strong():
     # A moderate (not strong) uptrend already overbought -> don't chase at market; arm the pullback.
     from app.agents.orchestrator import _deterministic_decision
-    tech = run_technical("TEST", [_uptrend_series()])
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0        # moderate trend (< strong 25) -> stays in the trend path
     ind["adx_prev"] = 21.0   # keep the snapshot consistent (strength building, not fading)
@@ -112,7 +160,7 @@ def test_orchestrator_arms_pullback_when_overbought_and_not_strong():
 
 def test_orchestrator_arms_pullback_when_oversold_short_and_not_strong():
     from app.agents.orchestrator import _deterministic_decision
-    tech = run_technical("TEST", [_downtrend_series()])
+    tech = _fresh(run_technical("TEST", [_downtrend_series()]))
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0
     ind["adx_prev"] = 21.0
@@ -127,7 +175,7 @@ def test_disable_rsi_extreme_filter_takes_market_instead_of_arming():
     # Toggling a checklist filter OFF changes the LIVE deterministic decision: with rsi_extreme ON
     # (default) an overbought moderate trend arms the pullback; with it OFF it takes the market entry.
     from app.agents.orchestrator import _deterministic_decision
-    tech = run_technical("TEST", [_uptrend_series()])
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0        # moderate (not strong) -> the rsi_extreme arm path applies
     ind["adx_prev"] = 21.0
@@ -146,7 +194,7 @@ def test_macd_histogram_rising_lifts_confidence_vs_fading():
     from app.agents.orchestrator import _deterministic_decision
 
     def prop(hist, hist_prev, disable=frozenset()):
-        tech = run_technical("TEST", [_uptrend_series()])
+        tech = _fresh(run_technical("TEST", [_uptrend_series()]))
         ind = tech.timeframes[0].indicators
         ind["adx"] = 22.0        # moderate -> market entry, confidence not maxed at the cap
         ind["adx_prev"] = 21.0
@@ -217,7 +265,7 @@ def test_ema200_filter_gates_its_confidence_factor():
     # A newly-exposed filter: with ema200 ON, being on the right side of the 200-EMA adds confidence;
     # disabling the filter removes that contribution entirely.
     from app.agents.orchestrator import _deterministic_decision
-    tech = run_technical("TEST", [_uptrend_series()])
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))
     ind = tech.timeframes[0].indicators
     ind["adx"] = 22.0        # moderate -> market entry, confidence not clamped
     ind["adx_prev"] = 21.0
@@ -258,7 +306,7 @@ def test_det_filters_endpoint_persists_and_validates(db_session):
 def test_orchestrator_rides_overbought_when_strong_trend():
     # A STRONG trend (ADX >= 25) is allowed to ride an overbought RSI and still enter at market.
     from app.agents.orchestrator import _deterministic_decision
-    tech = run_technical("TEST", [_uptrend_series()])
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))
     ind = tech.timeframes[0].indicators
     ind["adx"] = 35.0        # strong trend
     ind["adx_prev"] = 33.0   # ...and still building, so the adx_rising gate passes
@@ -270,7 +318,7 @@ def test_orchestrator_rides_overbought_when_strong_trend():
 def test_fundamental_bias_nudges_confidence_not_vetoes():
     # An opposing fundamental bias is a soft macro lean now — it must NOT veto a clean technical
     # trend, only lower confidence. (Trend decides direction; bias is a confidence factor.)
-    tech = run_technical("TEST", [_uptrend_series()])  # up
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))  # up
     bearish = FundamentalRead(symbol="TEST", bias=TradingBias.BEARISH)
     neutral_prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, _neutral_fundamental(), now=NOW)
     bearish_prop = run_orchestrator("TEST", AssetClass.STOCK, "1h", tech, bearish, now=NOW)
@@ -292,7 +340,7 @@ def test_llm_review_can_veto(monkeypatch):
     from app.models.enums import ReviewDecision
     from app.models.schemas import TradeReviewLLM
 
-    tech = run_technical("TEST", [_uptrend_series()])  # deterministic -> LONG
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))  # deterministic -> LONG
     monkeypatch.setattr(orchestrator, "llm_available", lambda: True)
     monkeypatch.setattr(orchestrator, "analyze",
                         lambda **k: TradeReviewLLM(decision=ReviewDecision.VETO, confidence=0.2,
@@ -308,7 +356,7 @@ def test_llm_review_confirm_only_lowers_confidence(monkeypatch):
     from app.models.enums import ReviewDecision
     from app.models.schemas import TradeReviewLLM
 
-    tech = run_technical("TEST", [_uptrend_series()])
+    tech = _fresh(run_technical("TEST", [_uptrend_series()]))
     det = orchestrator._deterministic_decision("TEST", AssetClass.STOCK, "1h", tech,
                                                _neutral_fundamental(), NOW)
     assert det.direction == Direction.LONG

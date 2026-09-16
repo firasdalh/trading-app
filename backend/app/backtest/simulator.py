@@ -21,14 +21,51 @@ from __future__ import annotations
 
 import bisect
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.agents.orchestrator import _deterministic_decision
 from app.agents.technical import run_technical
 from app.models.enums import AssetClass, Direction, TradingBias
-from app.models.schemas import FundamentalRead, OHLCVSeries
+from app.models.schemas import Candle, FundamentalRead, OHLCVSeries
 
 _WINDOW = 200  # bars per timeframe handed to the engine — matches the live scanner's limit=200
+
+_TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
+def _context_window(htf: list, htf_ts: list, entry: list, entry_ts: list, i: int,
+                    tf: str, entry_tf: str, size: int = _WINDOW) -> list:
+    """The ``tf`` candles the live app would hold at the moment entry bar ``i`` CLOSES.
+
+    Candle timestamps are bar OPEN times. Slicing a higher timeframe by "opened at or before the entry
+    bar" (the old rule) hands the engine the WHOLE containing 4h/daily bar — its final high, low and
+    close — hours before they exist. That is look-ahead in exactly the filters this engine leans on
+    (higher-TF trend, daily levels, big-TF S/R), and it made backtests look better than live trading
+    could ever be.
+
+    Live, that bar is still forming: MT5 returns it with the data traded so far. So return the bars
+    completed by the decision moment, plus the forming one rebuilt from the entry-TF bars inside it up
+    to and including bar ``i`` — the same information the live app has, no more."""
+    step = _TF_SECONDS.get(entry_tf)
+    dur = _TF_SECONDS.get(tf)
+    if step is None or dur is None:           # unknown timeframe: fall back to the plain open-time slice
+        hi = bisect.bisect_right(htf_ts, entry[i].ts)
+        return htf[max(0, hi - size): hi]
+    decision = entry[i].ts + timedelta(seconds=step)
+    hi = bisect.bisect_left(htf_ts, decision)   # every bar that had OPENED before the decision moment
+    if hi == 0:
+        return []
+    last = htf[hi - 1]
+    if last.ts + timedelta(seconds=dur) <= decision:
+        return htf[max(0, hi - size): hi]      # the most recent bar is already complete
+    out = list(htf[max(0, hi - size): hi - 1])
+    lo = bisect.bisect_left(entry_ts, last.ts)
+    parts = entry[lo: i + 1]
+    if parts:
+        out.append(Candle(ts=last.ts, open=parts[0].open, high=max(p.high for p in parts),
+                          low=min(p.low for p in parts), close=parts[-1].close,
+                          volume=sum(p.volume for p in parts)))
+    return out[-size:]
 
 
 @dataclass
@@ -166,9 +203,9 @@ def simulate_symbol(broker, symbol: str, asset_class: AssetClass, timeframe: str
         for tf in tfs:
             if tf == timeframe:
                 w = entry_candles[max(0, i - _WINDOW + 1): i + 1]
-            else:
-                hi = bisect.bisect_right(ts_index[tf], t_i)   # context bars strictly up to now
-                w = series[tf][max(0, hi - _WINDOW): hi]
+            else:   # only what existed when bar i closed — no finished 4h/daily bar from the future
+                w = _context_window(series[tf], ts_index[tf], entry_candles, ts_index[timeframe],
+                                    i, tf, timeframe)
             if not w:
                 ok = False
                 break
@@ -213,10 +250,14 @@ def _tighter(is_long: bool, cur: float, new: float) -> bool:
     return new > cur if is_long else new < cur
 
 
-def _exit_indicators(entry: list, j: int, macro_closes: list, macro_ts: list, t_j):
+def _exit_indicators(entry: list, j: int, macro_closes: list, macro_ts: list, t_j,
+                     entry_tf: str | None = None, macro_tf: str | None = None):
     """Per-bar indicators for the advisor-aware exit: entry-TF trend (EMA20 vs 50), MACD hist, ATR,
     the higher-TF (macro) trend aligned to bar j's time, and the last swing low/high (structure, for
-    the structure-based protective stop). Uses a 200-bar window (like the live engine)."""
+    the structure-based protective stop). Uses a 200-bar window (like the live engine).
+
+    With ``entry_tf``/``macro_tf`` given, a macro bar still forming when bar j closes contributes the
+    price AT bar j's close, not its own final close (which would be read from the future)."""
     import bisect as _b
 
     from app.agents.indicators import atr as _atr
@@ -237,6 +278,9 @@ def _exit_indicators(entry: list, j: int, macro_closes: list, macro_ts: list, t_
     if macro_closes:
         hi = _b.bisect_right(macro_ts, t_j)
         cw = macro_closes[max(0, hi - 200): hi]
+        step, dur = _TF_SECONDS.get(entry_tf or ""), _TF_SECONDS.get(macro_tf or "")
+        if cw and step and dur and macro_ts[hi - 1] + timedelta(seconds=dur) > t_j + timedelta(seconds=step):
+            cw[-1] = entry[j].close          # that macro bar hasn't closed yet: use the price so far
         ce20, ce50 = _ema(cw, 20), _ema(cw, 50)
         macro = "up" if (ce20 and ce50 and ce20 > ce50) else ("down" if (ce20 and ce50 and ce20 < ce50) else "sideways")
     return trend, mh, a, macro, swing_low, swing_high
@@ -295,8 +339,7 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
             if tf == timeframe:
                 w = entry[max(0, i - _WINDOW + 1): i + 1]
             else:
-                hi = bisect.bisect_right(ts_index[tf], t_i)
-                w = series[tf][max(0, hi - _WINDOW): hi]
+                w = _context_window(series[tf], ts_index[tf], entry, ts_index[timeframe], i, tf, timeframe)
             if not w:
                 ok = False
                 break
@@ -350,7 +393,7 @@ def simulate_symbol_advisor(broker, symbol: str, asset_class: AssetClass, timefr
                     outcome, exit_px, exit_j = "target", tp, j; break
             close_j = bar.close
             trend, mh, a, macro, swing_low, swing_high = _exit_indicators(
-                entry, j, macro_closes, macro_ts, bar.ts)
+                entry, j, macro_closes, macro_ts, bar.ts, timeframe, macro_tf)
             if not a:
                 continue
             profit = (close_j - entry_px) if is_long else (entry_px - close_j)
@@ -742,8 +785,7 @@ def simulate_armed_symbol(broker, symbol: str, asset_class: AssetClass, timefram
             if tf == timeframe:
                 w = entry[max(0, i - _WINDOW + 1): i + 1]
             else:
-                hi = bisect.bisect_right(ts_index[tf], t_i)
-                w = series[tf][max(0, hi - _WINDOW): hi]
+                w = _context_window(series[tf], ts_index[tf], entry, ts_index[timeframe], i, tf, timeframe)
             if not w:
                 ok = False
                 break

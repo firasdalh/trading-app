@@ -68,6 +68,27 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _closed_only(candles: list, timeframe: str, now: datetime) -> list:
+    """Drop the bar that is still forming.
+
+    MT5 returns the current, unfinished bar as the LAST candle, and its ``close`` is nothing more
+    than the latest tick. Every check in this module that says "close" means a bar that has actually
+    closed — a break "held on two closes", a retest "closed back above the level". Reading the live
+    bar instead turns one tick past a level into a confirmed close, which is exactly the wick-driven
+    false break those checks exist to filter out.
+
+    Candles without a timestamp (unit-test stubs) are assumed closed."""
+    if not candles:
+        return candles
+    ts = getattr(candles[-1], "ts", None)
+    minutes = _TF_MINUTES.get(timeframe)
+    if ts is None or minutes is None:
+        return candles
+    if _aware(ts) + timedelta(minutes=minutes) > now:
+        return candles[:-1]
+    return candles
+
+
 def _crossed(order_type: str, ref: float, trigger: float) -> bool:
     """Has price reached the trigger for this order type?"""
     if order_type == "sell_stop":
@@ -89,12 +110,13 @@ _CONFIRM_TF = {"1d": "1h", "4h": "1h", "1h": "15m", "30m": "5m", "15m": "5m", "5
 _CONFIRM_BARS = 2
 
 
-def _break_confirmed(broker, s: ConditionalSetup) -> bool:
+def _break_confirmed(broker, s: ConditionalSetup, now: datetime | None = None) -> bool:
     """True when the last _CONFIRM_BARS closed candles of the confirmation timeframe hold beyond the
     trigger in the break direction. Conservative: if the lower-TF data can't be read, do NOT confirm."""
     ltf = _CONFIRM_TF.get(s.timeframe, "15m")
     try:
         candles = get_ohlcv_cached(broker, s.symbol, ltf, limit=_CONFIRM_BARS + 3).candles
+        candles = _closed_only(candles, ltf, now or datetime.now(timezone.utc))
     except Exception:  # noqa: BLE001
         return False
     if not candles or len(candles) < _CONFIRM_BARS:
@@ -139,17 +161,25 @@ def _retest_zone(level: float, stop: float | None) -> float:
     return abs(level - stop) * _RETEST_ZONE_FRAC
 
 
-def _retest_confirmed(candles: list, level: float, direction: str, zone: float) -> tuple[bool, str]:
+def _retest_confirmed(candles: list, level: float, direction: str, zone: float,
+                      since: datetime | None = None, timeframe: str | None = None) -> tuple[bool, str]:
     """Has price retested the zone AND then CONFIRMED the direction? Returns (ok, why-not).
 
     Two conditions, because either alone is a trap:
 
-    * TOUCHED — a recent bar traded into the band around the level. A zone, not a line: price rarely
-      returns to an exact price, so a limit order on one mostly just misses the trade.
+    * TOUCHED — a bar AFTER the break traded back into the band around the level. A zone, not a line:
+      price rarely returns to an exact price, so a limit order on one mostly just misses the trade.
     * HELD — the latest bar CLOSED back beyond the level. This is the part a limit order can't do.
       A limit fills the instant price touches it, which proves nothing: if the retest fails and price
       keeps going, the fill happens anyway and you are long into the collapse. Requiring a close back
       on the trade's side means the level was defended before any money is committed.
+
+    ``since`` (when the break was confirmed) restricts the touch to bars that closed after it. Without
+    it the look-back window reaches back over the BREAKOUT bars themselves, whose lows sit at the level
+    they just broke — so the "retest" counted as done the moment the break confirmed, and the arm fired
+    at market while price ran away from the level. That turned a buy-the-retest into a chase: the
+    journal has USTECm armed at a 29,592 retest and filled at 29,751, ETHUSDm armed at 2,018.9 and
+    filled at 2,084.
 
     The cost is a later, worse entry than a limit would have got — paid to find out whether the
     "retest" was a pause or the start of the move against you.
@@ -158,6 +188,14 @@ def _retest_confirmed(candles: list, level: float, direction: str, zone: float) 
         return False, "no candles"
     recent = candles[-_RETEST_LOOKBACK:]
     last = recent[-1]
+    minutes = _TF_MINUTES.get(timeframe or "")
+    if since is not None and minutes is not None:
+        cutoff = _aware(since)
+        recent = [c for c in recent
+                  if getattr(c, "ts", None) is None
+                  or _aware(c.ts) + timedelta(minutes=minutes) > cutoff]
+        if not recent:
+            return False, f"price hasn't come back to the {round(level, 6)} zone since the break"
     if direction == Direction.LONG.value:
         touched = any(c.low <= level + zone for c in recent)
         held = last.close > level
@@ -710,7 +748,9 @@ def check_conditional_setups(session: Session) -> dict:
         closes: list[float] = []
         candles: list = []
         try:
-            candles = get_ohlcv_cached(broker, s.symbol, s.timeframe, limit=60).candles or []
+            # CLOSED bars only: every "close" test below means a finished bar, not the live tick.
+            candles = _closed_only(get_ohlcv_cached(broker, s.symbol, s.timeframe, limit=60).candles or [],
+                                   s.timeframe, now)
             closes = [c.close for c in candles]
         except Exception:  # noqa: BLE001 - fall back to the live quote
             candles, closes = [], []
@@ -775,15 +815,12 @@ def check_conditional_setups(session: Session) -> dict:
         # revisited AND defended (a close back on the trade's side) before anything opens.
         if s.break_level is not None:
             zone = _retest_zone(s.break_level, s.stop_loss)
-            ok, why = _retest_confirmed(candles, s.break_level, s.direction, zone)
+            ok, why = _retest_confirmed(candles, s.break_level, s.direction, zone,
+                                        since=s.break_confirmed_at, timeframe=s.timeframe)
             if not ok:
                 s.last_note = f"break confirmed — {why}"
                 session.add(s)
                 continue
-            # Entry is where price actually is now, not the stale limit price: waiting for the
-            # confirming close means the fill is above/below the level, and sizing must use the real
-            # number or the risk is understated.
-            ref = closes[-1]
         elif not _crossed(s.order_type, ref, s.trigger_price):
             continue  # trigger not reached yet — keep waiting
 
@@ -805,7 +842,10 @@ def check_conditional_setups(session: Session) -> dict:
             s.last_note = "trigger hit but no room (position cap) — still armed"
             session.add(s)
             continue
-        triggered += _fire(session, s, ref)
+        # The CONFIRMATION above is judged on closed bars, but the order fills at market NOW — so the
+        # re-checks at the trigger (target already hit? stop already hit? overshoot? R:R left?) and the
+        # sizing of a retest entry must use the live price, not a close that may be an hour old.
+        triggered += _fire(session, s, price)
 
     session.commit()
     return {"checked": len(armed), "triggered": triggered, "expired": expired,

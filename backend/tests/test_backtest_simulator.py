@@ -265,3 +265,50 @@ def test_partial_scaleout_caps_a_clean_target_winner():
         tp = tgt_plain[0]
         ts = next(t for t in scaled if t.entry_time == tp.entry_time)
         assert ts.r < tp.r  # the banked half at +1.5R caps the clean +2R winner
+
+
+# ---------------------------------------------------------------- no look-ahead in higher timeframes
+
+def _ctx_fixture():
+    """Six 1h bars from 00:00, and the 4h bars that contain them. The 00:00 4h bar's high (200) is
+    only printed by the 03:00 1h bar."""
+    from app.backtest.simulator import _context_window  # noqa: F401 - imported by the tests below
+
+    entry = [_c(0, 101, 99, 100), _c(1, 102, 100, 101), _c(2, 103, 101, 102),
+             _c(3, 200, 102, 150), _c(4, 151, 149, 150), _c(5, 152, 150, 151)]
+    h4 = [Candle(ts=T0, open=100, high=200, low=99, close=150, volume=4000.0),
+          Candle(ts=T0 + timedelta(hours=4), open=150, high=152, low=149, close=151, volume=2000.0)]
+    return entry, h4
+
+
+def test_forming_higher_tf_bar_is_rebuilt_not_read_from_the_future():
+    """At the close of the 01:00 bar the 00:00 4h bar is two hours old. Live, it has high 102 — the
+    200 spike doesn't exist yet. The old slice handed the engine the finished bar."""
+    from app.backtest.simulator import _context_window
+
+    entry, h4 = _ctx_fixture()
+    w = _context_window(h4, [c.ts for c in h4], entry, [c.ts for c in entry], 1, "4h", "1h")
+    assert len(w) == 1
+    assert w[-1].ts == T0
+    assert w[-1].high == 102 and w[-1].close == 101      # built from the 00:00 + 01:00 bars only
+    assert w[-1].open == 100 and w[-1].low == 99
+
+
+def test_completed_higher_tf_bar_is_returned_whole():
+    """At the close of the 03:00 bar (04:00) the 00:00 4h bar has closed: now it is real data."""
+    from app.backtest.simulator import _context_window
+
+    entry, h4 = _ctx_fixture()
+    w = _context_window(h4, [c.ts for c in h4], entry, [c.ts for c in entry], 3, "4h", "1h")
+    assert [c.ts for c in w] == [T0]
+    assert w[-1].high == 200 and w[-1].close == 150
+
+
+def test_next_higher_tf_bar_starts_forming_after_the_boundary():
+    from app.backtest.simulator import _context_window
+
+    entry, h4 = _ctx_fixture()
+    w = _context_window(h4, [c.ts for c in h4], entry, [c.ts for c in entry], 4, "4h", "1h")
+    assert len(w) == 2
+    assert w[0].high == 200                                # the finished bar
+    assert w[1].ts == T0 + timedelta(hours=4) and w[1].high == 151 and w[1].close == 150

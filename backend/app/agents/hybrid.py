@@ -40,6 +40,30 @@ log = get_logger("agents.hybrid")
 _MR_MIN_CONFIDENCE = 0.60
 
 
+# When several setups qualify on the same tick, open the one whose NEXT timeframe up (4h for a 1h book)
+# is in a young leg in the trade's direction. On the faithful backtest the qualifying trades with a 4h
+# SuperTrend leg <= 4-8 bars old were the strongest group in all four time folds (~+0.2-0.3R vs ~+0.1R).
+# Ranking only: it never lets a setup below the confidence bar in (those did NOT hold out-of-sample).
+_FRESH_HTF_LEG_BARS = 6
+
+
+def _fresh_higher_leg(prop) -> bool:
+    """Is the immediate higher timeframe in a young SuperTrend leg pointing the trade's way?"""
+    from app.agents.orchestrator import _higher_tf
+
+    tech = getattr(prop, "technical", None)
+    if tech is None or prop.direction.value not in ("long", "short"):
+        return False
+    hi = _higher_tf(tech, prop.timeframe)
+    if hi is None:
+        return False
+    st_dir = hi.indicators.get("supertrend_dir")
+    age = hi.indicators.get("supertrend_bars_since_flip")
+    if not st_dir or age is None:
+        return False
+    return (st_dir > 0) == (prop.direction.value == "long") and age <= _FRESH_HTF_LEG_BARS
+
+
 def _effective_min_conf(strategy: str | None, threshold: float) -> float:
     """The confidence bar a setup must clear to be a Hybrid candidate — lower for a ranging fade."""
     if strategy == "mean_reversion":
@@ -176,7 +200,7 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     armed_syms = {_norm_symbol(s.symbol) for s in active_armed(session)}
 
     stats["reached_scan"] = True
-    candidates: list[tuple[float, WatchItem]] = []
+    candidates: list[tuple[bool, float, WatchItem]] = []
     for it in items:
         if (_norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms
                 or _norm_symbol(it.symbol) in armed_syms):
@@ -206,7 +230,7 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
         if is_directional:
             stats["ai_opens"] += 1
             if dec.approved and prop.confidence > eff_min:
-                candidates.append((prop.confidence, it))
+                candidates.append((_fresh_higher_leg(prop), prop.confidence, it))
             elif prop.confidence <= eff_min:
                 # A real setup that just didn't clear the confidence bar — the "Skipped (<thr)" tally.
                 stats["skipped_low_conf"] += 1
@@ -223,8 +247,9 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
         return done(f"no risk-approved setup above {threshold:.0%} confidence "
                     f"(ranging fades above {_MR_MIN_CONFIDENCE:.0%})")
 
-    candidates.sort(key=lambda x: -x[0])
-    _, best = candidates[0]
+    # Fresh higher-TF leg first, then confidence (see _FRESH_HTF_LEG_BARS).
+    candidates.sort(key=lambda x: (not x[0], -x[1]))
+    _, _, best = candidates[0]
 
     # --- 3. full analysis (the AI decider re-decides the best on its own levels) then auto-open ---
     res = analyze_symbol(session, best.symbol, AssetClass(best.asset_class),

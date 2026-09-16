@@ -426,3 +426,89 @@ def test_confirmed_retest_opens_and_sizes_off_the_real_price(db_session, monkeyp
     out = cond.check_conditional_setups(db_session)
     assert out["triggered"] == 1
     assert seen["ref"] == 100.45                  # the confirming close, not trigger_price
+
+
+# --- closed bars only, and a retest must come AFTER the break -----------------------------------
+
+def _hour_floor(dt):
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def _bars(start, rows, step_min=60):
+    """rows = [(low, high, close), ...] from ``start``, one per ``step_min``."""
+    return [SimpleNamespace(ts=start + timedelta(minutes=step_min * k), low=lo, high=hi, close=c)
+            for k, (lo, hi, c) in enumerate(rows)]
+
+
+def _market_ts(monkeypatch, candles, price):
+    broker = SimpleNamespace(get_quote=lambda sym: SimpleNamespace(price=price),
+                             market_open=lambda sym: True)
+    monkeypatch.setattr(cond, "get_broker_for", lambda ac, bm: broker)
+    monkeypatch.setattr(cond, "get_ohlcv_cached",
+                        lambda b, sym, tf, limit=60: SimpleNamespace(candles=candles))
+    monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr(cond, "kill_switch_active", lambda s: False)
+
+
+def test_closed_only_drops_the_forming_bar():
+    now = datetime.now(timezone.utc)
+    h = _hour_floor(now)
+    bars = _bars(h - timedelta(hours=2), [(99, 101, 100), (100, 102, 101), (101, 103, 102)])
+    kept = cond._closed_only(bars, "1h", now)
+    assert [b.close for b in kept] == [100, 101]             # the bar opened at `h` is still live
+    # Stubs without timestamps are left alone.
+    plain = [SimpleNamespace(close=1.0)]
+    assert cond._closed_only(plain, "1h", now) is plain
+
+
+def test_break_is_not_confirmed_by_a_live_tick(monkeypatch):
+    """The last 15m bar is still forming; one tick above the trigger is not a close above it."""
+    now = datetime.now(timezone.utc)
+    q = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+    ltf = _bars(q - timedelta(minutes=30), [(99, 100, 99.5), (99.8, 100.4, 100.3), (100.2, 100.5, 100.4)],
+                step_min=15)
+    monkeypatch.setattr(cond, "get_ohlcv_cached",
+                        lambda b, sym, tf, limit=60: SimpleNamespace(candles=ltf))
+    s = SimpleNamespace(symbol="X", timeframe="1h", order_type="buy_stop", trigger_price=100.0)
+    assert cond._break_confirmed(None, s) is False           # closed: 99.5, 100.3 -> not both beyond
+
+
+def test_breakout_bars_do_not_count_as_the_retest(db_session, monkeypatch):
+    """THE BUG. The break confirmed on the two bars that closed above 100; their lows sit at the level
+    they broke, so the old look-back saw a 'touch' and fired at market straight away — a chase at
+    102.5 on an arm meant to buy 100.1."""
+    h = _hour_floor(datetime.now(timezone.utc))
+    candles = _bars(h - timedelta(hours=3), [
+        (99.0, 99.8, 99.5),        # before the break
+        (99.8, 100.9, 100.6),      # breakout close #1 (low inside the zone)
+        (100.3, 101.4, 101.2),     # breakout close #2 (low inside the zone)
+        (101.2, 102.6, 102.5),     # forming: price running away
+    ])
+    s = _arm(db_session, break_confirmed_at=h + timedelta(seconds=1))
+    _market_ts(monkeypatch, candles, price=102.5)
+    fired: list = []
+    monkeypatch.setattr(cond, "_fire", lambda session, setup, ref: (fired.append(ref), 1)[1])
+
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 0 and fired == []
+    db_session.refresh(s)
+    assert s.status == "armed" and "since the break" in s.last_note
+
+
+def test_real_retest_after_the_break_fires_at_the_live_price(db_session, monkeypatch):
+    h = _hour_floor(datetime.now(timezone.utc))
+    candles = _bars(h - timedelta(hours=4), [
+        (99.0, 99.8, 99.5),
+        (99.8, 100.9, 100.6),      # breakout close #1
+        (100.3, 101.4, 101.2),     # breakout close #2 -> break confirmed just after this closed
+        (100.2, 101.3, 100.9),     # pulled back INTO the zone and closed back above: the retest
+        (100.8, 101.1, 101.0),     # forming
+    ])
+    _arm(db_session, break_confirmed_at=h - timedelta(hours=1) + timedelta(seconds=1))
+    _market_ts(monkeypatch, candles, price=101.05)
+    fired: list = []
+    monkeypatch.setattr(cond, "_fire", lambda session, setup, ref: (fired.append(ref), 1)[1])
+
+    out = cond.check_conditional_setups(db_session)
+    assert out["triggered"] == 1
+    assert fired == [101.05]                                  # sized/checked at the price it fills at

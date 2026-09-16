@@ -112,3 +112,54 @@ def test_hybrid_still_scans_symbols_that_are_not_armed(db_session, monkeypatch):
 
     assert "XAUUSDm" not in seen               # armed -> skipped
     assert "DE30m" in seen                     # not armed -> still scanned
+
+
+# --- 3. ranking: a fresh higher-timeframe leg goes first ------------------------------------------
+
+def _prop_with_4h_leg(symbol, confidence, age, st_dir=1.0):
+    from app.models.enums import AssetClass, Direction
+    from app.models.schemas import TechnicalRead, TimeframeRead, TradeProposal
+
+    tech = TechnicalRead(symbol=symbol, overall_trend="up", confidence=0.6, timeframes=[
+        TimeframeRead(timeframe="1h", trend="up", indicators={"supertrend_dir": 1.0,
+                                                             "supertrend_bars_since_flip": 5.0}),
+        TimeframeRead(timeframe="4h", trend="up", indicators={"supertrend_dir": st_dir,
+                                                             "supertrend_bars_since_flip": age}),
+    ])
+    return TradeProposal(symbol=symbol, asset_class=AssetClass.INDEX, timeframe="1h",
+                         direction=Direction.LONG, confidence=confidence, technical=tech)
+
+
+def test_fresh_higher_leg_reads_the_next_timeframe_up():
+    from app.agents.hybrid import _FRESH_HTF_LEG_BARS, _fresh_higher_leg
+
+    assert _fresh_higher_leg(_prop_with_4h_leg("A", 0.8, float(_FRESH_HTF_LEG_BARS))) is True
+    assert _fresh_higher_leg(_prop_with_4h_leg("A", 0.8, float(_FRESH_HTF_LEG_BARS + 1))) is False
+    assert _fresh_higher_leg(_prop_with_4h_leg("A", 0.8, 2.0, st_dir=-1.0)) is False   # leg points the other way
+
+
+def test_hybrid_opens_the_fresh_higher_tf_leg_before_higher_confidence(db_session, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.agents import hybrid as H
+    from app.models.db import WatchItem
+
+    for sym in ("XAUUSDm", "DE30m"):
+        db_session.add(WatchItem(symbol=sym, asset_class="index", timeframe="1h", enabled=True))
+    db_session.commit()
+    monkeypatch.setattr(H, "kill_switch_active", lambda s: False)
+    monkeypatch.setattr(H, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr(H, "get_broker_for", lambda ac, bm: SimpleNamespace(market_open=lambda sym: True))
+    props = {"XAUUSDm": _prop_with_4h_leg("XAUUSDm", 0.90, 40.0),   # higher confidence, old 4h leg
+             "DE30m": _prop_with_4h_leg("DE30m", 0.75, 3.0)}        # lower confidence, fresh 4h leg
+    monkeypatch.setattr(H, "preview_symbol",
+                        lambda session, symbol, *a, **k: (props[symbol], SimpleNamespace(approved=True)))
+    chosen: list[str] = []
+
+    def _analyze(session, symbol, *a, **k):
+        chosen.append(symbol)
+        return SimpleNamespace(proposal_id=-1)        # stop right after the pick
+
+    monkeypatch.setattr(H, "analyze_symbol", _analyze)
+    H.run_hybrid(db_session)
+    assert chosen == ["DE30m"]
