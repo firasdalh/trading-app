@@ -4,17 +4,48 @@ import pickle
 import statistics as st
 import sys
 from collections import defaultdict
+from datetime import datetime
 
 S = sys.argv[1]
 files = sys.argv[2:]
-spec = pickle.load(open(S + "/bars.pkl", "rb")).get("spec", {})
+_PKL = pickle.load(open(S + "/bars.pkl", "rb"))
+spec = _PKL.get("spec", {})
 WATCH = {"XAUUSDm", "JP225m", "USOILm", "USTECm", "HK50m", "BTCUSDm", "XNGUSDm", "DE30m", "AUS200m",
          "US500_x100m", "FR40m", "STOXX50m", "UK100m", "AUDUSDm"}
+
+# --- per-bar spread ---------------------------------------------------------------------------- #
+# The cost model used to charge every trade of a symbol the SAME spread: one snapshot taken at fetch
+# time. That made the harness blind to the only widening that actually matters on this broker — the
+# 22:00-00:00 rollover, where UK100m goes 142 -> 858 points and DE30m 16 -> 100. A trade opened there
+# was costed as if it had been opened at midday. fetch_data.py now stores the bar's real spread as a
+# 7th element; this indexes it by (symbol, bar-open timestamp) so each trade pays what it really paid.
+# Pickles fetched before that change have 6-tuples — those symbols fall back to the snapshot spread.
+_bar_spread = {}
+for (_sym, _tf), _rows in _PKL.get("bars", {}).items():
+    for _r in _rows:
+        if len(_r) > 6:
+            _bar_spread[(_sym, int(_r[0]))] = _r[6]
+
+
+def _spread_points(sym, entry_time):
+    """The symbol's spread in POINTS at this trade's entry bar, else its snapshot spread."""
+    if entry_time and _bar_spread:
+        try:
+            ts = int(datetime.fromisoformat(entry_time).timestamp())
+        except (ValueError, TypeError):
+            ts = None
+        if ts is not None:
+            hit = _bar_spread.get((sym, ts))
+            if hit is None:  # entry_time is a bar OPEN; nudge onto the 1h grid if it drifted
+                hit = _bar_spread.get((sym, ts - ts % 3600))
+            if hit is not None:
+                return hit
+    return spec.get(sym, {}).get("spread") or 0
 
 
 def cost_r(t):
     sp = spec.get(t["symbol"], {})
-    spread_px = (sp.get("spread") or 0) * (sp.get("point") or 0)
+    spread_px = _spread_points(t["symbol"], t.get("entry_time")) * (sp.get("point") or 0)
     risk = abs(t.get("entry", t.get("fill", 0)) - t["stop"]) if "entry" in t else t.get("risk") or 0
     if not risk:
         return 0.05

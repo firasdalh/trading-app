@@ -150,6 +150,8 @@ export interface TradeProposal {
   conditional?: ConditionalSuggestion | null;
   ai_decision?: AiDecision | null;
   // AI momentum classification at an ambiguous-momentum fork (set only when it ran).
+  // Measured base rate for THIS plan's stop/target distances on this symbol's own history.
+  odds?: { p_target: number; p_stop: number; samples: number; horizon: number; edge_r: number } | null;
   momentum_read?: { category: string; evidence: string; confidence: number } | null;
   // AI regime-texture classification at the ambiguous regime boundary (set only when it ran).
   regime_read?: { category: string; evidence: string; confidence: number } | null;

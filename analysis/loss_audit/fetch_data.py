@@ -22,7 +22,11 @@ for sym in SYMS:
         r = mt5.copy_rates_from_pos(sym, code, 0, n)
         if r is None:
             print("no data", sym, tf, mt5.last_error()); continue
-        data["bars"][(sym, tf)] = [(int(x["time"]), float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]), float(x["tick_volume"])) for x in r]
+        # 7th element = the bar's SPREAD in points. MT5 returns it per bar and we used to throw it
+        # away, which left every cost model in this folder stuck with one fixed spread per symbol —
+        # structurally blind to the 22:00-00:00 rollover (UK100m widens 142 -> 858 points there).
+        # Older pickles have 6-tuples; every reader indexes r[0..5], so appending is compatible.
+        data["bars"][(sym, tf)] = [(int(x["time"]), float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]), float(x["tick_volume"]), int(x["spread"])) for x in r]
         time.sleep(0.05)
     print(sym, {tf: len(data["bars"].get((sym, tf), [])) for tf in TFS}, flush=True)
     si = mt5.symbol_info(sym)

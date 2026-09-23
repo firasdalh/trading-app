@@ -194,6 +194,12 @@ class TradeProposal(BaseModel):
     # risks, and the action/levels — so the UI can render it cleanly instead of parsing the rationale.
     ai_decision: dict | None = None
 
+    # MEASURED ODDS for this exact plan: {p_target, p_stop, samples, horizon, edge_r} — how often this
+    # symbol reached a target this far away before a stop that far away, in this kind of tape. A base
+    # rate from its own history (see agents/odds.py), NOT a model and NOT a gate: confidence says how
+    # good the setup looks, this says what the level distances are historically worth.
+    odds: dict | None = None
+
     # AI momentum CLASSIFICATION at an ambiguous-momentum fork: {category, evidence, confidence}. Set
     # ONLY when the AI momentum-read ran (MACD rolling over / RSI stretched); None otherwise. The engine
     # decides the action from it — this field is for the UI to show WHY momentum was read the way it was.

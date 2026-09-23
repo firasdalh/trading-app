@@ -771,6 +771,21 @@ function SetupSignals({ proposal, standAside, onToggleScenLevels, scenLevelsShow
       verdict: biasDir && dir ? (biasDir === dir ? "good" : "bad") : "neutral",
       note: biasDir && dir ? (biasDir === dir ? `Leans with the ${dirWord}.` : `Leans against the ${dirWord}.`) : "Neutral — no lean either way.",
     },
+    // MEASURED ODDS — how often this symbol reached a target this far away before a stop that far
+    // away, counted on its own history. The one thing R:R alone can't tell you: a 2:1 plan whose stop
+    // is closer than its target can still be a coin flip.
+    ...(proposal.odds
+      ? [{
+          label: "Measured odds",
+          value: `${Math.round(proposal.odds.p_target * 100)}% hit target first`,
+          tone: proposal.odds.edge_r >= 0.15 ? "text-bull" : proposal.odds.edge_r <= 0 ? "text-bear" : undefined,
+          verdict: (proposal.odds.edge_r >= 0.15 ? "good" : proposal.odds.edge_r <= 0 ? "bad" : "neutral") as V,
+          note: `On ${proposal.odds.samples.toLocaleString()} past cases in this kind of tape, price reached a target this far `
+            + `before a stop this far ${Math.round(proposal.odds.p_target * 100)}% of the time — worth `
+            + `${proposal.odds.edge_r >= 0 ? "+" : ""}${proposal.odds.edge_r.toFixed(2)}R per trade at these levels. `
+            + `A base rate from history, not a forecast.`,
+        }]
+      : []),
     // Reward:Risk only exists for an actionable setup (a stand-aside has no levels yet).
     ...(standAside
       ? []

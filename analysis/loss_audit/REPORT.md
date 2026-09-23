@@ -171,6 +171,37 @@ Path-dependent re-run with the 3R target in the engine (Hybrid gate):
 The win rate drops to ~30% by design — trend books pay through a few big runs. The last two months are
 still slightly negative on both versions: a modest edge to forward-test, not a proven one.
 
+## 6. What a second opinion was worth (2026-09-18)
+
+A USTECm short (entry 29,438 / stop 29,552 / target 29,281) with an outside read arguing "down first is
+slightly more likely". Measured on the symbol's own history — same state (1h uptrend, price within 0.4%
+of a 20-bar high), 2,383 cases on USTECm and 21,000 across the index CFDs:
+
+| | target (short) first | stop first |
+|---|---|---|
+| as it stood | 43% | 57% |
+| with RSI ≥ 70 / stalling (the stated thesis) | 44-45% | 55% |
+| after price broke its 29,410 trigger | **54-55%** | 45% |
+| after price reclaimed 29,500 | 20% | **80%** |
+
+43% ≈ the pure distance ratio (stop 118 points away vs target 153): the "overbought and stalling"
+premise added nothing. The read's LEVELS were right and its trigger genuinely flips the odds — it was
+describing a setup that hadn't happened yet and quoting it as the current probability.
+
+Transferred to the engine, and what survived:
+- **wait-for-a-trigger entries — REJECTED.** Requiring +0.1R confirmation within 3-6 bars before entering:
+  per trade +0.156R vs +0.152R, but per SIGNAL +0.135R and total +167R vs +188R. It skips the runs that
+  never come back. (A first pass looked spectacular at +0.43R — an accounting error: it required a CLOSE
+  beyond the trigger while filling at the trigger. Priced at the real close it is +0.160R.) Right rule for
+  a counter-trend fade, wrong one for a with-momentum engine.
+- **abandon level before the stop — already covered/rejected** for trend trades (the stop grid showed
+  tighter/earlier exits are worse). Keep it as a manual rule for discretionary fades.
+- **distance-aware odds — ADOPTED** (`app/agents/odds.py`). Every actionable proposal now carries a measured
+  base rate: how often this symbol reached a target this far away before a stop that far away, in this
+  kind of tape (~1,500 sampled cases, 96-bar horizon, trend-side matched), plus the expectancy in R those
+  odds imply. Shown in the setup checklist as "Measured odds". Read-out only — it gates nothing. This is
+  the gap both our confidence score and the outside read shared: neither looked at barrier distance.
+
 ## Reproduce
 From `backend/` with the MT5 terminal running and the app stopped (or one short read while it runs):
 

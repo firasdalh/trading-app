@@ -61,7 +61,9 @@ export function Header({ settings, onKillSwitchChange, onOpenSettings }: Props) 
   };
 
   return (
-    <div className="sticky top-0 z-20">
+    // NOT sticky itself: App wraps this and the tab bar in ONE sticky stack, so the conditional
+    // banners below change the stack's height instead of overlapping whatever sits under it.
+    <div>
       <header className="border-b border-neutral-800 bg-neutral-900/80 backdrop-blur supports-[backdrop-filter]:bg-neutral-900/60">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-2.5">
           <div className="flex items-center gap-2.5">

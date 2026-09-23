@@ -69,9 +69,20 @@ interface Favorite {
   assetClass: AssetClass;
 }
 
+/**
+ * The four sections of the desk. They share ONE component (and therefore one chart, one selected
+ * pair, one polling set) and differ only in which panels they render — see the render block at the
+ * bottom. Splitting them into separate components would mean re-mounting the chart on every tab
+ * switch and duplicating the symbol/timeframe state that all four read.
+ */
+export type DeskSection = "trade" | "scan" | "book" | "risk";
+
 interface Props {
+  section: DeskSection;
   settings: SettingsResponse | null;
   onSettingsChanged?: () => void;
+  /** Move the desk to another section — see `openPositionSymbol`. */
+  onNavigate?: (section: DeskSection) => void;
 }
 
 // This selector drives BOTH the chart and the analysis/trade the engine produces. 5m and 15m are
@@ -83,7 +94,7 @@ const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
 const FAST_TF = new Set(["5m", "15m"]);
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
 
-export function Dashboard({ settings, onSettingsChanged }: Props) {
+export function Dashboard({ section, settings, onSettingsChanged, onNavigate }: Props) {
   // Persisted across refresh / navigation so the desk reopens on the last pair you used.
   const [symbol, setSymbol] = useLocalStorage("ta.symbol", "EURUSD");
   const [assetClass, setAssetClass] = useLocalStorage<AssetClass>("ta.assetClass", "forex");
@@ -127,6 +138,13 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     document.addEventListener("fullscreenchange", onChange);
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
+  // Leaving the Trade tab unmounts the chart. The browser then drops full screen on its own, but
+  // only AFTER the paint — which shows a frame of the Scan tab stretched over the whole monitor.
+  // Exiting first keeps the transition clean.
+  useEffect(() => {
+    if (section !== "trade" && document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+  }, [section]);
+
   const toggleChartFull = () => {
     const el = chartWrapRef.current;
     if (!el) return;
@@ -365,9 +383,14 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
     setSymbol(f.symbol);
   };
 
+  // Every panel's "select a pair" routes through here: a watchlist row, an opportunity, an RSI
+  // extreme, an armed setup, a position. Picking one means "show me this" — so it also brings the
+  // desk to the Trade tab, where the chart is. Without that, clicking a row on Scan silently
+  // changed a symbol on a tab that does not draw it, and looked like nothing had happened.
   const openPositionSymbol = (p: { symbol: string; asset_class: string }) => {
     if (p.asset_class !== assetClass) setAssetClass(p.asset_class as AssetClass);
     setSymbol(p.symbol);
+    onNavigate?.("trade");
   };
 
   return (
@@ -375,359 +398,393 @@ export function Dashboard({ settings, onSettingsChanged }: Props) {
       {/* Always-visible account header: equity, day P&L, slots/exposure used, paused/kill-switch */}
       <AccountBar account={account} risk={risk} settings={settings} positions={positions} />
 
-      {/* Controls */}
-      <div className="card flex flex-wrap items-end gap-3">
-        <label className="text-sm">
-          <div className="mb-1 text-xs text-neutral-400">Symbol</div>
-          <SymbolPicker
-            value={symbol}
-            symbols={symbols}
-            descriptions={descriptions}
-            favorites={favForClass}
-            onChange={setSymbol}
-            onToggleFavorite={toggleFavorite}
-          />
-        </label>
-        <label className="text-sm">
-          <div className="mb-1 text-xs text-neutral-400">Asset class</div>
-          <select
-            name="dash-asset-class"
-            value={assetClass}
-            onChange={(e) => setAssetClass(e.target.value as AssetClass)}
-            className="field"
-          >
-            {ASSET_CLASSES.map((a) => (
-              <option key={a} value={a}>
-                {assetLabel(a)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm">
-          <div className="mb-1 text-xs text-neutral-400">Timeframe</div>
-          <select
-            name="dash-timeframe"
-            value={timeframe}
-            onChange={(e) => setTimeframe(e.target.value)}
-            className="field disabled:opacity-50"
-          >
-            {TIMEFRAMES.map((t) => (
-              <option key={t} value={t}>
-                {t}{FAST_TF.has(t) ? " ⚠" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        {/* Named at the point of use, not buried in a doc: the cost of a fast timeframe is invisible
-            on the chart but decisive in the results. */}
-        {FAST_TF.has(timeframe) && (
-          <span className="self-end pb-2 text-[11px] text-warn"
-                title="Backtested over 959 signals: 15m lost -0.159R per trade in both halves of the data — the win rate drops and the fixed spread eats about twice as much of a smaller stop. Fine for reading price; poor for trading.">
-            ⚠ {timeframe} tested as loss-making — good for timing, not for entries
-          </span>
-        )}
-        <button
-          onClick={toggleStBand}
-          disabled={stBandBusy}
-          title="SuperTrend Strategy: trade the mechanical SuperTrend + EMA20-band breakout (long on a close above the band in an uptrend / short below it in a downtrend; stop trails the SuperTrend line). Overrides the AI decider while on."
-          className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
-            stBand
-              ? "border-emerald-500 bg-emerald-500/15 text-emerald-300"
-              : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
-          }`}
-        >
-          📈 SuperTrend {stBand ? "ON" : "OFF"}
-        </button>
-        <button
-          onClick={toggleAiReview}
-          disabled={aiReviewBusy}
-          title="AI DECIDES. ON: the deterministic engine does the full analysis (a decision brief with real levels, level strength, two scenarios, trend maturity + its own historical hit-rate) and the AI is the JUDGE — it picks the better scenario and decides open now / arm a pending order / stand aside. The deterministic Risk Manager still sizes + gates, and you approve in Mode A. Best with a non-reasoning model (gpt-4.1) at temp 0 for repeatable decisions. OFF (recommended default): the deterministic engine + 70% confidence gate decide; AI only reads fundamentals."
-          className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
-            aiReview
-              ? "border-violet-500 bg-violet-500/15 text-violet-300"
-              : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
-          }`}
-        >
-          🤖 AI decides {aiReview ? "ON" : "OFF (deterministic)"}
-        </button>
-        <div className="ml-auto flex items-center gap-3">
-          {brokerInfo &&
-            (() => {
-              const configured = settings?.app.broker_map?.[assetClass];
-              const fallback = configured && configured !== brokerInfo.name;
-              return (
-                <span
-                  className={`rounded px-2 py-0.5 text-xs ${
-                    fallback ? "bg-warn/20 text-warn" : "bg-neutral-800 text-neutral-300"
-                  }`}
-                  title={
-                    fallback
-                      ? `Configured '${configured}' is unavailable — using the simulator. Check broker keys / MT5 terminal.`
-                      : "Active broker for this asset class"
-                  }
-                >
-                  {fallback ? `${configured}→${brokerInfo.name} (fallback)` : brokerInfo.name} ·{" "}
-                  {brokerInfo.is_paper ? "paper" : "live"}
-                </span>
-              );
-            })()}
-          {liveQuote && (
-            <span className="text-sm text-neutral-300">
-              {liveQuote.symbol}{" "}
-              <span className="tabular-nums font-semibold">{fmtPrice(liveQuote.price)}</span>
-            </span>
-          )}
-          <button
-            onClick={runAnalysis}
-            disabled={analyzing}
-            className="btn btn-primary"
-          >
-            {analyzing ? "Analyzing…" : "Run analysis"}
-          </button>
-        </div>
-      </div>
-
-      {favorites.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-neutral-500">★ Favourites</span>
-          {favorites.map((f) => {
-            const active = f.symbol === symbol && f.assetClass === assetClass;
-            return (
-              <span
-                key={`${f.assetClass}-${f.symbol}`}
-                className={`group flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
-                  active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
-                }`}
-              >
-                <button onClick={() => openFavorite(f)} title={`${f.symbol} · ${f.assetClass}`}>
-                  {f.symbol}
-                </button>
-                <button
-                  onClick={() => removeFavorite(f)}
-                  title="Remove favourite"
-                  className="text-neutral-500 hover:text-bear"
-                >
-                  ×
-                </button>
-              </span>
-            );
-          })}
-        </div>
-      )}
-
+      {/* A hard error reaching the API belongs above everything, in every section. */}
       {error && (
         <div className="rounded-md border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">
           {error}
         </div>
       )}
 
-      {/* Chart — full width so it gets the whole row (bigger, bordered) */}
-      <div className="card border-2 border-neutral-700">
-        {/* Header + position strip + chart all travel together into full screen — see chartWrapRef
-            above. The open-pair pills belong in here: they are how you switch the chart between
-            live trades, and a full-screen chart you cannot switch is a chart you have to leave. */}
-        <div
-          ref={chartWrapRef}
-          className={chartFull ? "flex h-screen flex-col overflow-hidden bg-neutral-950 p-3" : undefined}
-        >
-        <div className="mb-2 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2">
-          <span className="text-sm font-semibold">
-            {symbol} · {timeframe}
-          </span>
-          {result?.proposal?.regime && (
-            <RegimeBadge regime={result.proposal.regime} strategy={result.proposal.strategy} />
-          )}
-          {/* Full screen only: the real Timeframe dropdown is in the controls bar above, which is
-              off-screen here. Switching timeframe is the single most common thing you do while
-              reading a chart, and having to leave full screen for it defeats the point. */}
-          {chartFull && (
-            <span className="flex items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-900/60 p-0.5">
-              {TIMEFRAMES.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTimeframe(t)}
-                  title={FAST_TF.has(t) ? `${t} — backtested as loss-making for entries; fine for timing` : `Switch the chart to ${t}`}
-                  className={`rounded px-2 py-0.5 text-xs transition ${
-                    t === timeframe ? "bg-brand-600 text-white" : "text-neutral-400 hover:bg-neutral-800 hover:text-white"
-                  }`}
-                >
-                  {t}{FAST_TF.has(t) ? " ⚠" : ""}
-                </button>
-              ))}
-            </span>
-          )}
-          {/* Full screen only: the ★ Favourites row lives above the chart card, which is off-screen
-              here. Favourites are how you move between the pairs you actually watch, so without
-              them full screen is a one-pair view you have to leave to change pair.
-              Compact on purpose — no × remove button. Removing a favourite is a housekeeping
-              action, not something you do mid-read, and every extra × is a mis-click that silently
-              drops a pair from the list. */}
-          {chartFull && favorites.length > 0 && (
-            <span className="flex flex-wrap items-center gap-1">
-              <span className="text-xs text-neutral-500">★</span>
+
+      {/* ------------------------------------------------------------------------------------
+          TRADE — the workspace. One pair, one chart, one decision. Everything that is not about
+          the pair currently on screen lives in another tab, so this view stays readable.
+          ------------------------------------------------------------------------------------ */}
+      {section === "trade" && (
+        <>
+          {/* Controls */}
+          <div className="card flex flex-wrap items-end gap-3">
+            <label className="text-sm">
+              <div className="mb-1 text-xs text-neutral-400">Symbol</div>
+              <SymbolPicker
+                value={symbol}
+                symbols={symbols}
+                descriptions={descriptions}
+                favorites={favForClass}
+                onChange={setSymbol}
+                onToggleFavorite={toggleFavorite}
+              />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 text-xs text-neutral-400">Asset class</div>
+              <select
+                name="dash-asset-class"
+                value={assetClass}
+                onChange={(e) => setAssetClass(e.target.value as AssetClass)}
+                className="field"
+              >
+                {ASSET_CLASSES.map((a) => (
+                  <option key={a} value={a}>
+                    {assetLabel(a)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 text-xs text-neutral-400">Timeframe</div>
+              <select
+                name="dash-timeframe"
+                value={timeframe}
+                onChange={(e) => setTimeframe(e.target.value)}
+                className="field disabled:opacity-50"
+              >
+                {TIMEFRAMES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}{FAST_TF.has(t) ? " ⚠" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {/* Named at the point of use, not buried in a doc: the cost of a fast timeframe is invisible
+                on the chart but decisive in the results. */}
+            {FAST_TF.has(timeframe) && (
+              <span className="self-end pb-2 text-[11px] text-warn"
+                    title="Backtested over 959 signals: 15m lost -0.159R per trade in both halves of the data — the win rate drops and the fixed spread eats about twice as much of a smaller stop. Fine for reading price; poor for trading.">
+                ⚠ {timeframe} tested as loss-making — good for timing, not for entries
+              </span>
+            )}
+            <button
+              onClick={toggleStBand}
+              disabled={stBandBusy}
+              title="SuperTrend Strategy: trade the mechanical SuperTrend + EMA20-band breakout (long on a close above the band in an uptrend / short below it in a downtrend; stop trails the SuperTrend line). Overrides the AI decider while on."
+              className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+                stBand
+                  ? "border-emerald-500 bg-emerald-500/15 text-emerald-300"
+                  : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+              }`}
+            >
+              📈 SuperTrend {stBand ? "ON" : "OFF"}
+            </button>
+            <button
+              onClick={toggleAiReview}
+              disabled={aiReviewBusy}
+              title="AI DECIDES. ON: the deterministic engine does the full analysis (a decision brief with real levels, level strength, two scenarios, trend maturity + its own historical hit-rate) and the AI is the JUDGE — it picks the better scenario and decides open now / arm a pending order / stand aside. The deterministic Risk Manager still sizes + gates, and you approve in Mode A. Best with a non-reasoning model (gpt-4.1) at temp 0 for repeatable decisions. OFF (recommended default): the deterministic engine + 70% confidence gate decide; AI only reads fundamentals."
+              className={`self-end rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+                aiReview
+                  ? "border-violet-500 bg-violet-500/15 text-violet-300"
+                  : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+              }`}
+            >
+              🤖 AI decides {aiReview ? "ON" : "OFF (deterministic)"}
+            </button>
+            <div className="ml-auto flex items-center gap-3">
+              {brokerInfo &&
+                (() => {
+                  const configured = settings?.app.broker_map?.[assetClass];
+                  const fallback = configured && configured !== brokerInfo.name;
+                  return (
+                    <span
+                      className={`rounded px-2 py-0.5 text-xs ${
+                        fallback ? "bg-warn/20 text-warn" : "bg-neutral-800 text-neutral-300"
+                      }`}
+                      title={
+                        fallback
+                          ? `Configured '${configured}' is unavailable — using the simulator. Check broker keys / MT5 terminal.`
+                          : "Active broker for this asset class"
+                      }
+                    >
+                      {fallback ? `${configured}→${brokerInfo.name} (fallback)` : brokerInfo.name} ·{" "}
+                      {brokerInfo.is_paper ? "paper" : "live"}
+                    </span>
+                  );
+                })()}
+              {liveQuote && (
+                <span className="text-sm text-neutral-300">
+                  {liveQuote.symbol}{" "}
+                  <span className="tabular-nums font-semibold">{fmtPrice(liveQuote.price)}</span>
+                </span>
+              )}
+              <button
+                onClick={runAnalysis}
+                disabled={analyzing}
+                className="btn btn-primary"
+              >
+                {analyzing ? "Analyzing…" : "Run analysis"}
+              </button>
+            </div>
+          </div>
+
+          {favorites.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-neutral-500">★ Favourites</span>
               {favorites.map((f) => {
                 const active = f.symbol === symbol && f.assetClass === assetClass;
                 return (
-                  <button
+                  <span
                     key={`${f.assetClass}-${f.symbol}`}
-                    onClick={() => openFavorite(f)}
-                    title={`Switch the chart to ${f.symbol} · ${f.assetClass}`}
-                    className={`rounded-full px-2 py-0.5 text-xs transition ${
+                    className={`group flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
                       active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
                     }`}
                   >
-                    {f.symbol}
-                  </button>
+                    <button onClick={() => openFavorite(f)} title={`${f.symbol} · ${f.assetClass}`}>
+                      {f.symbol}
+                    </button>
+                    <button
+                      onClick={() => removeFavorite(f)}
+                      title="Remove favourite"
+                      className="text-neutral-500 hover:text-bear"
+                    >
+                      ×
+                    </button>
+                  </span>
                 );
               })}
-            </span>
+            </div>
           )}
-          {/* Open positions — quick-switch the chart between them */}
-          {(positions ?? []).length > 0 && (
-            <span className="flex flex-wrap items-center gap-1.5">
-              <span className="text-xs text-neutral-500">● Open</span>
-              {(positions ?? []).map((p) => {
-                const active = p.symbol.toUpperCase() === symbol.toUpperCase();
-                return (
-                  <button
-                    key={`${p.symbol}-${p.direction}`}
-                    onClick={() => openPositionSymbol(p)}
-                    title={`Switch chart to ${p.symbol} (${p.direction})`}
-                    className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs ${
-                      active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
-                    }`}
-                  >
-                    <span className={p.direction === "long" ? "text-bull" : "text-bear"}>
-                      {p.direction === "long" ? "▲" : "▼"}
-                    </span>
-                    <span className="font-medium">{displaySymbol(p.symbol)}</span>
-                    <span className={`tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}>
-                      {fmtUsd(p.unrealized_pnl, { sign: true })}
-                    </span>
-                  </button>
-                );
-              })}
-            </span>
-          )}
-        </div>
-        {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close */}
-        <ChartPositionBar
-          pos={(positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null}
-          pulse={pulse}
-          onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class })}
-        />
-        <Chart
-          symbol={symbol}
-          assetClass={assetClass}
-          timeframe={timeframe}
-          proposal={result?.proposal ?? null}
-          liveQuote={liveQuote}
-          positions={positions}
-          armed={armedLevels}
-          onSetSlTp={(sl, tp) => setSlTp({ symbol, asset_class: assetClass }, sl, tp)}
-          onSetArmedLevels={async (id, levels) => {
-            try {
-              await api.setConditionalLevels(id, levels);
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-          }}
-          scenLevels={scenLevels}
-          scenLevelsShown={!!scenLevels}
-          onToggleScenLevels={toggleScenLevels}
-          isFullscreen={chartFull}
-          onToggleFullscreen={toggleChartFull}
-          onArmed={() => setCondKey((v) => v + 1)}
-          onOpened={() => setPosBump((v) => v + 1)}
-          onPulse={setPulse}
-        />
-        </div>
-        <p className="mt-2 text-xs text-neutral-500">
-          Backtest and paper results do not guarantee live results.
-        </p>
-      </div>
 
-      {/* Analysis (left) + Armed/pending setups (right), side by side below the chart */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <ProposalPanel
-          result={result}
-          status={status}
-          positionOpen={positionOpen}
-          openPosition={
-            (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null
-          }
-          armedSetup={armedForResult}
-          busy={actionBusy}
-          equity={account?.equity ?? null}
-          onApprove={approve}
-          onReject={reject}
-          onRunAnalysis={runAnalysis}
-          analyzing={analyzing}
-          scenario={scenario}
-          scenarioBusy={scenarioBusy}
-          analysisLang={settings?.app.analysis_language}
-          onLoadScenarios={loadScenarios}
-          scenLevelsShown={!!scenLevels}
-          onToggleScenLevels={toggleScenLevels}
-        />
-        <div className="space-y-4">
-          <QuickTradePanel
-            symbol={symbol}
-            assetClass={assetClass}
-            timeframe={timeframe}
-            onPlaced={() => setPosBump((b) => b + 1)}
+          {/* Chart — full width so it gets the whole row (bigger, bordered) */}
+          <div className="card border-2 border-neutral-700">
+            {/* Header + position strip + chart all travel together into full screen — see chartWrapRef
+                above. The open-pair pills belong in here: they are how you switch the chart between
+                live trades, and a full-screen chart you cannot switch is a chart you have to leave. */}
+            <div
+              ref={chartWrapRef}
+              className={chartFull ? "flex h-screen flex-col overflow-hidden bg-neutral-950 p-3" : undefined}
+            >
+            <div className="mb-2 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2">
+              <span className="text-sm font-semibold">
+                {symbol} · {timeframe}
+              </span>
+              {result?.proposal?.regime && (
+                <RegimeBadge regime={result.proposal.regime} strategy={result.proposal.strategy} />
+              )}
+              {/* Full screen only: the real Timeframe dropdown is in the controls bar above, which is
+                  off-screen here. Switching timeframe is the single most common thing you do while
+                  reading a chart, and having to leave full screen for it defeats the point. */}
+              {chartFull && (
+                <span className="flex items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-900/60 p-0.5">
+                  {TIMEFRAMES.map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setTimeframe(t)}
+                      title={FAST_TF.has(t) ? `${t} — backtested as loss-making for entries; fine for timing` : `Switch the chart to ${t}`}
+                      className={`rounded px-2 py-0.5 text-xs transition ${
+                        t === timeframe ? "bg-brand-600 text-white" : "text-neutral-400 hover:bg-neutral-800 hover:text-white"
+                      }`}
+                    >
+                      {t}{FAST_TF.has(t) ? " ⚠" : ""}
+                    </button>
+                  ))}
+                </span>
+              )}
+              {/* Full screen only: the ★ Favourites row lives above the chart card, which is off-screen
+                  here. Favourites are how you move between the pairs you actually watch, so without
+                  them full screen is a one-pair view you have to leave to change pair.
+                  Compact on purpose — no × remove button. Removing a favourite is a housekeeping
+                  action, not something you do mid-read, and every extra × is a mis-click that silently
+                  drops a pair from the list. */}
+              {chartFull && favorites.length > 0 && (
+                <span className="flex flex-wrap items-center gap-1">
+                  <span className="text-xs text-neutral-500">★</span>
+                  {favorites.map((f) => {
+                    const active = f.symbol === symbol && f.assetClass === assetClass;
+                    return (
+                      <button
+                        key={`${f.assetClass}-${f.symbol}`}
+                        onClick={() => openFavorite(f)}
+                        title={`Switch the chart to ${f.symbol} · ${f.assetClass}`}
+                        className={`rounded-full px-2 py-0.5 text-xs transition ${
+                          active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                        }`}
+                      >
+                        {f.symbol}
+                      </button>
+                    );
+                  })}
+                </span>
+              )}
+              {/* Open positions — quick-switch the chart between them */}
+              {(positions ?? []).length > 0 && (
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-neutral-500">● Open</span>
+                  {(positions ?? []).map((p) => {
+                    const active = p.symbol.toUpperCase() === symbol.toUpperCase();
+                    return (
+                      <button
+                        key={`${p.symbol}-${p.direction}`}
+                        onClick={() => openPositionSymbol(p)}
+                        title={`Switch chart to ${p.symbol} (${p.direction})`}
+                        className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs ${
+                          active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                        }`}
+                      >
+                        <span className={p.direction === "long" ? "text-bull" : "text-bear"}>
+                          {p.direction === "long" ? "▲" : "▼"}
+                        </span>
+                        <span className="font-medium">{displaySymbol(p.symbol)}</span>
+                        <span className={`tabular-nums ${p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}>
+                          {fmtUsd(p.unrealized_pnl, { sign: true })}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </span>
+              )}
+            </div>
+            {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close */}
+            <ChartPositionBar
+              pos={(positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null}
+              pulse={pulse}
+              onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class })}
+            />
+            <Chart
+              symbol={symbol}
+              assetClass={assetClass}
+              timeframe={timeframe}
+              proposal={result?.proposal ?? null}
+              liveQuote={liveQuote}
+              positions={positions}
+              armed={armedLevels}
+              onSetSlTp={(sl, tp) => setSlTp({ symbol, asset_class: assetClass }, sl, tp)}
+              onSetArmedLevels={async (id, levels) => {
+                try {
+                  await api.setConditionalLevels(id, levels);
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+              }}
+              scenLevels={scenLevels}
+              scenLevelsShown={!!scenLevels}
+              onToggleScenLevels={toggleScenLevels}
+              isFullscreen={chartFull}
+              onToggleFullscreen={toggleChartFull}
+              onArmed={() => setCondKey((v) => v + 1)}
+              onOpened={() => setPosBump((v) => v + 1)}
+              onPulse={setPulse}
+            />
+            </div>
+            <p className="mt-2 text-xs text-neutral-500">
+              Backtest and paper results do not guarantee live results.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <ProposalPanel
+              result={result}
+              status={status}
+              positionOpen={positionOpen}
+              openPosition={
+                (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null
+              }
+              armedSetup={armedForResult}
+              busy={actionBusy}
+              equity={account?.equity ?? null}
+              onApprove={approve}
+              onReject={reject}
+              onRunAnalysis={runAnalysis}
+              analyzing={analyzing}
+              scenario={scenario}
+              scenarioBusy={scenarioBusy}
+              analysisLang={settings?.app.analysis_language}
+              onLoadScenarios={loadScenarios}
+              scenLevelsShown={!!scenLevels}
+              onToggleScenLevels={toggleScenLevels}
+            />
+            <div className="space-y-4">
+              <QuickTradePanel
+                symbol={symbol}
+                assetClass={assetClass}
+                timeframe={timeframe}
+                onPlaced={() => setPosBump((b) => b + 1)}
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ------------------------------------------------------------------------------------
+          SCAN — where candidates come from. Nothing here opens a trade by itself; it feeds the
+          Trade tab. Picking a pair anywhere in this section switches the desk to it.
+          ------------------------------------------------------------------------------------ */}
+      {section === "scan" && (
+        <>
+          <WatchlistPanel
+            currentSymbol={symbol}
+            currentAsset={assetClass}
+            currentTimeframe={timeframe}
+            onSelect={(it) => {
+              if (it.asset_class !== assetClass) setAssetClass(it.asset_class as AssetClass);
+              setSymbol(it.symbol);
+              if (it.timeframe) setTimeframe(it.timeframe);
+              onNavigate?.("trade");
+            }}
           />
-          <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} onSelect={openPositionSymbol} />
-          <ConditionalsPanel onSelect={openPositionSymbol} />
-        </div>
-      </div>
 
-      <WatchlistPanel
-        currentSymbol={symbol}
-        currentAsset={assetClass}
-        currentTimeframe={timeframe}
-        onSelect={(it) => {
-          if (it.asset_class !== assetClass) setAssetClass(it.asset_class as AssetClass);
-          setSymbol(it.symbol);
-          if (it.timeframe) setTimeframe(it.timeframe);
-        }}
-      />
-
-      <div className="section-label pt-1">Automation &amp; scanners</div>
-
-      <OpportunitiesPanel
-        onSelect={openPositionSymbol}
-        onOpened={() => setPosBump((b) => b + 1)}
-      />
-
-      <RsiOverPanel onStaged={() => setPosBump((b) => b + 1)} onSelect={openPositionSymbol} />
-
-      <PendingProposalsPanel
-        onSelect={openPositionSymbol}
-        onChanged={() => setPosBump((b) => b + 1)}
-      />
-
-      <div className="section-label pt-1">Positions &amp; risk</div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="space-y-4 lg:col-span-2">
-          <PositionAdvicePanel refreshSignal={posBump}
-                               lang={settings?.app.analysis_language} />
-          <PositionsTable
-            positions={positions}
-            onClose={closePosition}
-            onSetSlTp={setSlTp}
+          <div className="section-label pt-1">Scanners</div>
+          <OpportunitiesPanel
             onSelect={openPositionSymbol}
+            onOpened={() => setPosBump((b) => b + 1)}
           />
-        </div>
-        <div className="space-y-4">
-          <RiskDashboard risk={risk} account={account} settings={settings} onChanged={onSettingsChanged} />
-          <AdvisorActivity refreshSignal={posBump} />
-        </div>
-      </div>
 
-      <ScorecardPanel />
-      <EntryFiltersPanel />
+          <RsiOverPanel onStaged={() => setPosBump((b) => b + 1)} onSelect={openPositionSymbol} />
+          <div className="section-label pt-1">
+            Auto-trader
+            <span className="font-normal normal-case tracking-normal text-neutral-600">
+              for {displaySymbol(symbol)}
+            </span>
+          </div>
+          <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} onSelect={openPositionSymbol} />
+        </>
+      )}
+
+      {/* ------------------------------------------------------------------------------------
+          BOOK — everything with money or a commitment behind it, ordered by how much it wants
+          your attention: decisions awaiting you, then setups armed to fire, then the open book.
+          ------------------------------------------------------------------------------------ */}
+      {section === "book" && (
+        <>
+          <PendingProposalsPanel
+            onSelect={openPositionSymbol}
+            onChanged={() => setPosBump((b) => b + 1)}
+          />
+
+          <ConditionalsPanel onSelect={openPositionSymbol} />
+          <div className="section-label pt-1">Open positions</div>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <div className="space-y-4 lg:col-span-2">
+              <PositionAdvicePanel refreshSignal={posBump} lang={settings?.app.analysis_language} />
+              <PositionsTable
+                positions={positions}
+                onClose={closePosition}
+                onSetSlTp={setSlTp}
+                onSelect={openPositionSymbol}
+              />
+            </div>
+            <AdvisorActivity refreshSignal={posBump} />
+          </div>
+        </>
+      )}
+
+      {/* ------------------------------------------------------------------------------------
+          RISK — the settings you change rarely, and should never meet by accident mid-trade.
+          ------------------------------------------------------------------------------------ */}
+      {section === "risk" && (
+        <>
+          <RiskDashboard risk={risk} account={account} settings={settings} onChanged={onSettingsChanged} />
+          <ScorecardPanel />
+          <EntryFiltersPanel />
+        </>
+      )}
     </div>
   );
 }

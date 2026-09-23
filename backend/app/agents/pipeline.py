@@ -193,6 +193,14 @@ def analyze_symbol(
         record_shadow(session, symbol, asset_class.value, timeframe, now,
                       ind0.get("last_close"), ind0.get("atr14"), proposal, det_proposal)
 
+    # 2b. MEASURED ODDS: what this plan's stop/target distances have historically been worth on this
+    # symbol (agents/odds.py). Read-out only — it never changes the decision, it just stops a plan whose
+    # stop sits closer than its target from looking better than it is.
+    if proposal.direction.value in ("long", "short"):
+        from app.agents.odds import odds_for_proposal
+
+        proposal.odds = odds_for_proposal(broker, proposal, timeframe)
+
     # 3. Persist the proposal + full reasoning bundle (audit trail). The SOURCE (who opened it) is the
     # caller's explicit hint (hybrid/rsi_over/manual) or, failing that, derived from the active mode so
     # the journal can compare win rate + P&L by mechanism.
