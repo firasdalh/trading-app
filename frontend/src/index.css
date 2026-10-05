@@ -88,6 +88,14 @@
     @apply bg-bear text-white hover:brightness-110;
   }
 
+  /* Reading measure. The analysis panel now owns the full page width, which is right for its
+     number grids and level ladders but wrong for its prose: a paragraph 1200px wide runs to ~180
+     characters a line, and the eye loses the start of the next one. Typographic convention is
+     60-75 characters, so prose blocks opt into this while the tables around them keep the width. */
+  .prose-measure {
+    @apply max-w-[72ch];
+  }
+
   /* Inline controls */
   .chip {
     @apply inline-flex items-center gap-1 rounded-md border border-neutral-700 bg-neutral-800/40 px-2 py-0.5 text-xs;

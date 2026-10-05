@@ -199,6 +199,15 @@ class TradeProposal(BaseModel):
     # rate from its own history (see agents/odds.py), NOT a model and NOT a gate: confidence says how
     # good the setup looks, this says what the level distances are historically worth.
     odds: dict | None = None
+    # MACRO / NEWS / POSITIONING context (app/macro/). Read-out plus at most a WAIT: this layer can
+    # delay a trade or annotate it, and can never choose a side. See app/macro/engine.py.
+    # What price is doing to the last swing (app/agents/chart_state.py): pullback / rejection /
+    # breakout / range / impulse, with a trigger and an invalidation price. Read-out only.
+    chart_state: dict | None = None
+    macro: dict | None = None
+    # Set when the macro layer held an otherwise-valid setup, so the UI can show the candidate and
+    # the reason together rather than silently dropping it.
+    macro_wait: bool = False
 
     # AI momentum CLASSIFICATION at an ambiguous-momentum fork: {category, evidence, confidence}. Set
     # ONLY when the AI momentum-read ran (MACD rolling over / RSI stretched); None otherwise. The engine

@@ -1466,7 +1466,11 @@ def _deterministic_decision(
     disable: frozenset[str] = frozenset(), momentum_ai: bool = False,
     regime_ai: bool = False, priceaction_ai: bool = False,
     wait_entry: float = 0.0,
+    entry_candles: list | None = None,
 ) -> TradeProposal:
+    # ``entry_candles`` are the entry-timeframe candles, supplied by the live pipeline and by the
+    # backtest harness so the price_action filter behaves identically in both. Optional: callers
+    # that do not pass them simply never trigger that filter.
     # ``disable`` is a BACKTEST-ONLY filter-ablation switch (the live path never passes it): naming a
     # gate ("mtf", "momentum", "structure", "volatility", "divergence", "minrr", "rsi_extreme") skips it, so the
     # backtest can measure each filter's contribution (keep it if removing it hurts).
@@ -2206,6 +2210,22 @@ def _deterministic_decision(
             )
             return base
 
+    # PRICE ACTION AS A GATE: BUILT, MEASURED, REJECTED (2026-09-29).
+    #
+    # The idea was to refuse a market entry the current pattern had just argued against - a long
+    # into a fresh bearish rejection. It reads well and it is wrong. Measured on the faithful
+    # harness, 33 symbols, true per-bar cost, against the +0.109R baseline:
+    #
+    #     per trade  +0.125R vs +0.109R   (better)
+    #     TOTAL      +128.8R vs +134.6R   (worse - it skips 461 trades worth +0.153R each)
+    #     4 folds    +0.084 +0.286 +0.104 +0.025   vs   +0.109 +0.133 +0.110 +0.082
+    #     OOS        +0.106 vs +0.116     (worse)
+    #
+    # The per-trade gain is bought by refusing profitable trades, and it wrecks the fold stability
+    # that made the baseline believable: a tight +0.082..+0.133 band became +0.025..+0.286. That is
+    # the signature of noise, not an edge. The read-out stays (app/agents/chart_state.py is genuinely
+    # useful on the chart); the GATE does not ship. Fifth hypothesis rejected this week.
+
     # TARGET FLOOR (see _TARGET_MIN_R): give the trend room. The level logic above still picks a further
     # level when there is one; this only lifts a target that would have banked the move too early.
     if "target_floor" not in disable and abs(target - entry) < _TARGET_MIN_R * risk:
@@ -2292,6 +2312,7 @@ def run_orchestrator(
     ai_review: bool = True, momentum_ai: bool = False,
     regime_ai: bool = False, priceaction_ai: bool = False,
     wait_entry: float = 0.0,
+    entry_candles: list | None = None,
 ) -> TradeProposal:
     """Deterministic engine decides; the LLM may only CONFIRM or VETO (never widen).
 
@@ -2308,6 +2329,7 @@ def run_orchestrator(
     now = now or datetime.now(timezone.utc)
 
     proposal = _deterministic_decision(symbol, asset_class, timeframe, technical, fundamental, now,
+                                       entry_candles=entry_candles,
                                        trend_only=trend_only, st_band=st_band, rsi_over=rsi_over,
                                        rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
                                        rsi_trend_filter=rsi_trend_filter, rsi_rej=rsi_rej,

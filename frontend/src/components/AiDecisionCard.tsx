@@ -127,7 +127,7 @@ export function AiDecisionCard({ d }: { d: AiDecision }) {
       )}
 
       {/* The plan in one line */}
-      {d.summary && <p className="mb-2 text-xs leading-relaxed text-neutral-300">{d.summary}</p>}
+      {d.summary && <p className="prose-measure mb-2 text-xs leading-relaxed text-neutral-300">{d.summary}</p>}
 
       {/* Risks */}
       {d.risks.length > 0 && (

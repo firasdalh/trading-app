@@ -336,7 +336,7 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
                   </span>
                 </div>
                 <AnalysisText as="p" text={a.detail} lang={lang}
-                              className="mt-1 text-xs leading-relaxed text-neutral-300" />
+                              className="prose-measure mt-1 text-xs leading-relaxed text-neutral-300" />
                 {a.events_soon && (
                   <div
                     className="mt-1 text-xs text-warn/90"

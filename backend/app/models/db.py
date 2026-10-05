@@ -654,3 +654,130 @@ class ShadowDecision(Base):
     # For a stand-aside: did a clean 2R move happen anyway (missed) — the opportunity-cost check.
     missed_move: Mapped[str | None] = mapped_column(String(16))   # up|down|none|None
     note: Mapped[str | None] = mapped_column(Text)
+
+
+# --------------------------------------------------------------------------- #
+#  Macro / news / positioning layer (Forex Factory integration)
+# --------------------------------------------------------------------------- #
+
+
+class MacroConfig(Base):
+    """Singleton (id=1) for the macro/news context layer.
+
+    Every timing window and threshold lives here rather than in code, because none of them is a
+    measured optimum — they exist to be ablated against the baseline (see the feature flags below
+    and app/macro/ablation.py).
+    """
+
+    __tablename__ = "macro_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    calendar_source: Mapped[str] = mapped_column(String(24), default="forexfactory")
+
+    # Timing windows, minutes. Defaults are the spec's starting point, NOT a proven setting.
+    warning_minutes: Mapped[int] = mapped_column(Integer, default=120)
+    lock_before_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    lock_after_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    normalize_minutes: Mapped[int] = mapped_column(Integer, default=60)
+
+    # Score at which the gate warns / holds.
+    warn_score: Mapped[int] = mapped_column(Integer, default=40)
+    wait_score: Mapped[int] = mapped_column(Integer, default=70)
+
+    # Does the news gate actually HOLD a trade, or only annotate it? Default False: the layer
+    # starts as a read-out so its effect can be measured before it is allowed to change outcomes.
+    block_new_trades: Mapped[bool] = mapped_column(Boolean, default=False)
+    delay_armed_triggers: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # What to do when the feed is unreadable. Conservative default for high-impact data.
+    fail_mode: Mapped[str] = mapped_column(String(24), default="allow_with_warning")
+
+    # Ablation flags (spec section 17) — each layer can be switched off independently.
+    use_news_risk: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_positioning: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_news_articles: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_surprise: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    positioning_stale_after_sec: Mapped[int] = mapped_column(Integer, default=6 * 3600)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_note: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class EconomicEventRow(Base):
+    """A calendar event as fetched. ``event_key`` is the de-dupe key (see data/forexfactory.py)."""
+
+    __tablename__ = "economic_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    currency: Mapped[str] = mapped_column(String(8), index=True)
+    country: Mapped[str | None] = mapped_column(String(8))
+    impact: Mapped[str] = mapped_column(String(16), index=True)   # high|medium|low|holiday
+    when_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    forecast: Mapped[float | None] = mapped_column(Float)
+    previous: Mapped[float | None] = mapped_column(Float)
+    actual: Mapped[float | None] = mapped_column(Float)
+    revision: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(16), default="scheduled")  # scheduled|released
+    source: Mapped[str] = mapped_column(String(24), default="forexfactory")
+    source_url: Mapped[str | None] = mapped_column(String(300))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PositioningSnapshotRow(Base):
+    """A periodic reading of crowd positioning for one symbol (see app/macro/positioning.py)."""
+
+    __tablename__ = "positioning_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    long_traders_pct: Mapped[float | None] = mapped_column(Float)
+    short_traders_pct: Mapped[float | None] = mapped_column(Float)
+    long_lots_pct: Mapped[float | None] = mapped_column(Float)
+    short_lots_pct: Mapped[float | None] = mapped_column(Float)
+    trader_count: Mapped[int | None] = mapped_column(Integer)
+    lot_count: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(32), default="unavailable")
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class TradeMacroContext(Base):
+    """The macro state at the EXACT moment a proposal was decided.
+
+    This is the row that makes section 17 possible: without a frozen snapshot per decision there is
+    no way to ask afterwards whether the news layer actually improved expectancy, only whether it
+    felt like it did.
+    """
+
+    __tablename__ = "trade_macro_context"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposal_id: Mapped[int | None] = mapped_column(ForeignKey("trade_proposals.id"), index=True)
+    position_id: Mapped[int | None] = mapped_column(ForeignKey("positions.id"), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    direction: Mapped[str | None] = mapped_column(String(16))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    technical_confidence: Mapped[float | None] = mapped_column(Float)
+    news_risk_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    news_band: Mapped[str | None] = mapped_column(String(16), index=True)
+    news_action: Mapped[str | None] = mapped_column(String(16), index=True)  # proceed|warn|wait
+    minutes_to_event: Mapped[float | None] = mapped_column(Float)
+    event_name: Mapped[str | None] = mapped_column(String(200))
+    event_currency: Mapped[str | None] = mapped_column(String(8))
+    event_impact: Mapped[str | None] = mapped_column(String(16))
+    event_forecast: Mapped[float | None] = mapped_column(Float)
+    event_previous: Mapped[float | None] = mapped_column(Float)
+    event_actual: Mapped[float | None] = mapped_column(Float)
+
+    crowding_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    trader_imbalance: Mapped[float | None] = mapped_column(Float)
+    lot_imbalance: Mapped[float | None] = mapped_column(Float)
+    positioning_source: Mapped[str | None] = mapped_column(String(32))
+
+    blocked_by_news: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    payload: Mapped[dict | None] = mapped_column(JSON)   # the full context, for later re-analysis

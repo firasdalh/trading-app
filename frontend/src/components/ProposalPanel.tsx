@@ -6,6 +6,9 @@ import { ArmSetupButton } from "./ArmSetupButton";
 import { ago, localTime } from "./advisorFormat";
 import { RegimeBadge } from "./RegimeBadge";
 import { AiDecisionCard } from "./AiDecisionCard";
+import { TradePath } from "./TradePath";
+import { MacroPanel } from "./MacroPanel";
+import { ChartStateCard } from "./ChartStateCard";
 import { ReviewExplanation } from "./ReviewExplanation";
 import { ScenarioCard } from "./ScenarioCard";
 import type {
@@ -161,7 +164,14 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
       && proposal.entry !== proposal.stop_loss
       ? Math.abs(proposal.take_profit - proposal.entry) / Math.abs(proposal.entry - proposal.stop_loss)
       : null;
-  const rewardUsd = riskUsd != null && rrMult != null ? riskUsd * rrMult : null;
+  // The live size-preview is only meaningful while this proposal is still a DECISION. Once it has
+  // been executed, that preview re-runs the Risk Manager against a book that ALREADY holds the
+  // position, which vetoes it ("not stacking") — and a veto returns risk_amount 0. Rendering that
+  // gave "Risk $0.00" for a trade risking real money, directly under a green line reading
+  // "APPROVED ... risk $32.41". Fall back to the decision that was actually taken.
+  const effRiskUsd =
+    riskUsd != null && riskUsd > 0 ? riskUsd : risk.risk_amount > 0 ? risk.risk_amount : null;
+  const rewardUsd = effRiskUsd != null && rrMult != null ? effRiskUsd * rrMult : null;
 
   return (
     <div className="card space-y-3">
@@ -240,6 +250,12 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
         </div>
       )}
 
+      {/* What the three numbers above do NOT say: how far each barrier is in the market's own units,
+          what price has to get through to pay you, and what the deal still is FROM HERE. */}
+      {!noTrade && (
+        <TradePath proposal={proposal} livePrice={openPosition?.last_price ?? null} />
+      )}
+
       {!aiNonOpen && !noTrade && (() => {
         const pct = Math.round(proposal.confidence * 100);
         const color = pct >= 70 ? "bg-bull" : pct >= 50 ? "bg-warn" : "bg-bear";
@@ -260,6 +276,35 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
           </div>
         );
       })()}
+
+      {/* What the bar above is, and is not.
+          Measured on 386 live trades: below the 0.67 gate expectancy is -0.25R, but ABOVE it the
+          score does not rank outcomes at all (0.67-0.75 -0.07R, 0.75-0.82 +0.01R, 0.82-0.88 +0.08R,
+          >=0.88 +0.01R; corr +0.07, t = 1.36, not significant). So 94% is not "more likely to win"
+          than 75% — it only means the checklist is fuller. Saying so here stops a big green bar from
+          being read as conviction it has not earned.
+          See analysis/strategy_review_2026-09-23.md §2. */}
+      {!aiNonOpen && !noTrade && proposal.confidence >= 0.67 && (
+        <div className="-mt-1.5 text-[11px] text-neutral-500">
+          Clears the 70% bar. Above that line the score stops separating winners from losers — read it
+          as “how much of the checklist is ticked”, not as the odds.
+        </div>
+      )}
+
+      {/* ---------------------------------------------------------------------------------
+          WHAT THE MARKET IS DOING. The plan above is the idea; this is the tape it has to
+          survive. Chart state first (it can change the trade), then timing (it only changes
+          when). Both are read-outs: neither picks a side.
+          --------------------------------------------------------------------------------- */}
+      {/* What price is doing right now. Sits ABOVE the macro block because "is this a pullback or
+          a rejection?" changes the trade; "is there news in 20 minutes?" only changes the timing. */}
+      <ChartStateCard cs={proposal.chart_state} levelsShown={scenLevelsShown}
+                      onShowLevels={onToggleScenLevels} />
+
+      {/* Timing and crowd context. Sits directly under the plan because "is this a bad MOMENT?" is
+          a different question from "is this a good setup?", and the answer can be yes to both. */}
+      <MacroPanel macro={proposal.macro} />
+
 
       {/* Risk Manager verdict — deterministic, final. When the AI DECIDED not to open a market trade
           (stand aside / arm / blocked), there's nothing to size, so we DON'T show the raw red
@@ -325,7 +370,8 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
         <div className="rounded-md border border-neutral-800 p-3 text-sm">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
-              Cost &amp; size {previewBusy && <span className="text-neutral-500">· …</span>}
+              {pending ? "Cost & size" : "What this trade costs"}
+              {previewBusy && <span className="text-neutral-500"> · …</span>}
             </span>
             {capped && (
               <span
@@ -338,7 +384,7 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
           </div>
 
           <div className="grid grid-cols-3 gap-2">
-            <Stat label="Risk" value={fmtUsd(riskUsd)} />
+            <Stat label="Risk" value={fmtUsd(effRiskUsd)} />
             <Stat label="Reward" value={fmtUsd(rewardUsd)} />
             <Stat label="Spend (margin)" value={fmtUsd(econ?.margin_usd)} />
             <Stat label="Leverage" value={econ?.leverage != null ? `${econ.leverage.toFixed(0)}×` : "—"} />
@@ -397,7 +443,7 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
           AiDecisionCard (when present) replaces the raw rationale wall entirely. */}
       {!ai && !noTrade && reviewNote(proposal.rationale) && (
         <AnalysisText as="p" text={reviewNote(proposal.rationale)} lang={analysisLang}
-                      className="text-xs leading-relaxed text-neutral-400" />
+                      className="prose-measure text-xs leading-relaxed text-neutral-400" />
       )}
 
       {!ai && <ReviewExplanation rationale={proposal.rationale} />}
@@ -529,7 +575,7 @@ function StandAsideCard({ proposal, analysisLang }:
 
       {/* The engine's own reason (plain language). */}
       <AnalysisText as="p" text={proposal.rationale} lang={analysisLang}
-                    className="mt-1.5 leading-relaxed text-neutral-100" />
+                    className="prose-measure mt-1.5 leading-relaxed text-neutral-100" />
 
       {points.length > 0 && (
         <ul className="mt-2 space-y-1 text-neutral-300">
@@ -543,7 +589,7 @@ function StandAsideCard({ proposal, analysisLang }:
       )}
 
       {/* Reframe it: a stand-aside is the engine's call, not a risk-limit rejection. */}
-      <div className="mt-2 rounded bg-neutral-900/50 px-2.5 py-2 text-xs leading-relaxed text-neutral-400">
+      <div className="prose-measure mt-2 rounded bg-neutral-900/50 px-2.5 py-2 text-xs leading-relaxed text-neutral-400">
         <span className="font-medium text-neutral-300">What this means:</span> this is the analysis
         engine's own decision from the current read — <span className="text-neutral-300">not</span> a
         Risk-Manager rejection and not an error. The engine only opens a trade when the pieces line up:
@@ -774,16 +820,20 @@ function SetupSignals({ proposal, standAside, onToggleScenLevels, scenLevelsShow
     // MEASURED ODDS — how often this symbol reached a target this far away before a stop that far
     // away, counted on its own history. The one thing R:R alone can't tell you: a 2:1 plan whose stop
     // is closer than its target can still be a coin flip.
+    // Deliberately scored NEUTRAL, never for/against. Checked on 371 live trades with the odds
+    // computed from pre-trade candles only, `edge_r` had NO relationship to the outcome
+    // (corr -0.004, t = -0.08) — gating on it would have kept the worse half of the book. It is
+    // honest context for how far apart the barriers are; it is not a signal, and colouring it
+    // green or red would sell noise as conviction. See analysis/strategy_review_2026-09-23.md §2.
     ...(proposal.odds
       ? [{
           label: "Measured odds",
           value: `${Math.round(proposal.odds.p_target * 100)}% hit target first`,
-          tone: proposal.odds.edge_r >= 0.15 ? "text-bull" : proposal.odds.edge_r <= 0 ? "text-bear" : undefined,
-          verdict: (proposal.odds.edge_r >= 0.15 ? "good" : proposal.odds.edge_r <= 0 ? "bad" : "neutral") as V,
+          verdict: "neutral" as V,
           note: `On ${proposal.odds.samples.toLocaleString()} past cases in this kind of tape, price reached a target this far `
-            + `before a stop this far ${Math.round(proposal.odds.p_target * 100)}% of the time — worth `
-            + `${proposal.odds.edge_r >= 0 ? "+" : ""}${proposal.odds.edge_r.toFixed(2)}R per trade at these levels. `
-            + `A base rate from history, not a forecast.`,
+            + `before a stop this far ${Math.round(proposal.odds.p_target * 100)}% of the time. `
+            + `Context for how far apart your barriers are — NOT a ranking: measured on the live book, `
+            + `this number had no relationship to whether a trade won.`,
         }]
       : []),
     // Reward:Risk only exists for an actionable setup (a stand-aside has no levels yet).
@@ -1150,23 +1200,48 @@ function FollowUp({
   const agrees = now === mine;
   const opposed = (now === "long" || now === "short") && now !== mine;
 
-  const tone = opposed
+  // The advisor's thesis is fetched HERE rather than inside the badge below, because this headline
+  // has to agree with it. It previously did not: a green "✓ the latest analysis agrees with your
+  // trade" rendered directly above an amber "THESIS WEAKENING — losing momentum", and the green
+  // line's own detail claimed "direction, trend and momentum still line up" while the checklist
+  // underneath showed MACD against the trade. They answer different questions — "would I open this
+  // now?" vs "is the reason I'm in it still true?" — and both belong in the verdict.
+  const advice = usePositionAdvice(pos.symbol, analyzedAt ?? "");
+  const thesis = advice?.thesis;
+  const broken = thesis === "invalidated";
+  const fading = thesis === "weakening";
+
+  const tone = opposed || broken
     ? "border-bear/40 bg-bear/10"
-    : agrees
-      ? "border-bull/40 bg-bull/10"
-      : "border-neutral-700 bg-neutral-800/40";
+    : fading
+      ? "border-warn/40 bg-warn/10"
+      : agrees
+        ? "border-bull/40 bg-bull/10"
+        : "border-neutral-700 bg-neutral-800/40";
   const headline = opposed
     ? `⚠ The engine now reads ${now.toUpperCase()} — the opposite of your ${mine.toUpperCase()}`
-    : agrees
-      ? `✓ Still reads ${now.toUpperCase()} — the latest analysis agrees with your trade`
-      : "• No fresh setup right now — that is not an exit signal";
+    : broken
+      ? `⚠ Still reads ${mine.toUpperCase()}, but the thesis you entered on has broken`
+      : fading
+        ? `Still reads ${mine.toUpperCase()} — but the thesis is weakening`
+        : agrees
+          ? `✓ Still reads ${now.toUpperCase()} — the latest analysis agrees with your trade`
+          : "• No fresh setup right now — that is not an exit signal";
+  // Only claim what was actually checked. The old copy asserted trend AND momentum were still
+  // aligned, which is a specific claim the checklist can contradict on the same screen.
   const detail = opposed
     ? "The read you entered on has flipped. Worth a hard look: tighten the stop, take part off, or " +
       "close. It is not automatic — a flip against an open trade often happens mid-pullback."
-    : agrees
-      ? "The direction, trend and momentum still line up the way they did when you opened."
-      : "The engine only says it would not OPEN a new trade here (no clean entry from the current " +
-        "price). Your existing position is managed by its stop, target and the advisor.";
+    : broken
+      ? "The engine would still open this direction from here, but the levels you entered on no " +
+        "longer hold. Trust the advisor's read below over the direction agreement above."
+      : fading
+        ? "The engine would still open this direction from here, but the move is losing its push. " +
+          "That is usually a pullback rather than a failure — see what is in the way below."
+        : agrees
+          ? "The engine would still open this same direction from the current price."
+          : "The engine only says it would not OPEN a new trade here (no clean entry from the current " +
+            "price). Your existing position is managed by its stop, target and the advisor.";
 
   const pnl = pos.unrealized_pnl ?? 0;
   return (
@@ -1187,11 +1262,11 @@ function FollowUp({
           )}
         </span>
       </div>
-      <div className="mt-1 text-neutral-400">{detail}</div>
+      <div className="prose-measure mt-1 text-neutral-400">{detail}</div>
 
       {/* The advisor's verdict on the trade you HOLD — the direct answer to "stay or not?", which
           the new-entry check above can only hint at. Deterministic (no AI), so it costs nothing. */}
-      <AdvisorVerdict symbol={pos.symbol} refreshKey={analyzedAt ?? ""} />
+      <AdvisorVerdict advice={advice} />
       <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-neutral-400">
         <span>
           You are {mine.toUpperCase()} from <strong className="text-neutral-200">{fmtPrice(pos.entry_price)}</strong>
@@ -1212,9 +1287,8 @@ function FollowUp({
 // This is the piece the entry analysis genuinely cannot give you: `thesis` is judged against the
 // levels you ACTUALLY entered on, so it answers "is the reason I'm in this still true?" rather than
 // "would I open it again from here?". Deterministic — no LLM, no tokens — so it can be polled freely.
-function AdvisorVerdict({ symbol, refreshKey }: { symbol: string; refreshKey: string }) {
+function usePositionAdvice(symbol: string, refreshKey: string): PositionAdvice | null {
   const [advice, setAdvice] = useState<PositionAdvice | null>(null);
-
   useEffect(() => {
     let cancelled = false;
     api
@@ -1230,7 +1304,10 @@ function AdvisorVerdict({ symbol, refreshKey }: { symbol: string; refreshKey: st
       cancelled = true;
     };
   }, [symbol, refreshKey]);
+  return advice;
+}
 
+function AdvisorVerdict({ advice }: { advice: PositionAdvice | null }) {
   if (!advice) return null;
 
   const THESIS: Record<string, { label: string; cls: string }> = {

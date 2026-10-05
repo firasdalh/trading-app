@@ -479,9 +479,16 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
         if thesis is not None:
             detail = f"{detail} {thesis['note']}"
             if r_mult is not None:
-                word = "up" if r_mult >= 0 else "down"
-                detail = (f"{detail} (You're {word} about {abs(r_mult):.1f}x the amount you risked on "
-                          f"this trade — {r_mult:+.1f}R.)")
+                # Under a twentieth of R the trade has not meaningfully moved, and one decimal turns
+                # that into "down about 0.0x the amount you risked — -0.0R", which reads like a
+                # broken number instead of "nothing has happened yet". Say so in words, and quote R
+                # to two places so it matches the -0.04R on the badge beside it.
+                if abs(r_mult) < 0.05:
+                    detail = f"{detail} (Effectively flat so far — {r_mult:+.2f}R.)"
+                else:
+                    word = "up" if r_mult >= 0 else "down"
+                    detail = (f"{detail} (You're {word} about {abs(r_mult):.1f}x the amount you risked "
+                              f"on this trade — {r_mult:+.2f}R.)")
             # The thesis can escalate urgency. News keeps its headline (it's the nearer concern);
             # otherwise the thesis drives the headline too.
             if thesis_label == "invalidated":

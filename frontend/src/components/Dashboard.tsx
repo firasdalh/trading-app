@@ -56,7 +56,6 @@ import { EntryFiltersPanel } from "./EntryFiltersPanel";
 import { ScorecardPanel } from "./ScorecardPanel";
 import { PendingProposalsPanel } from "./PendingProposalsPanel";
 import { ProposalPanel } from "./ProposalPanel";
-import { QuickTradePanel } from "./QuickTradePanel";
 import { AutoTradePanel } from "./AutoTradePanel";
 import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
@@ -70,12 +69,17 @@ interface Favorite {
 }
 
 /**
- * The four sections of the desk. They share ONE component (and therefore one chart, one selected
- * pair, one polling set) and differ only in which panels they render — see the render block at the
- * bottom. Splitting them into separate components would mean re-mounting the chart on every tab
- * switch and duplicating the symbol/timeframe state that all four read.
+ * The desk's top-level views. Working (DESK) and configuration (RISK) are separate because you
+ * should never meet a risk setting by accident mid-trade.
  */
-export type DeskSection = "trade" | "scan" | "book" | "risk";
+export type DeskSection = "desk" | "risk";
+
+/**
+ * Inside the desk, the chart stays put and only the panel area under it changes. Scanning for a
+ * pair and checking the book are things you do WHILE looking at a chart — as separate pages they
+ * cost you the chart every time you glanced at them, and the pair you were studying went off screen.
+ */
+export type DeskTab = "analysis" | "scan" | "book";
 
 interface Props {
   section: DeskSection;
@@ -83,6 +87,8 @@ interface Props {
   onSettingsChanged?: () => void;
   /** Move the desk to another section — see `openPositionSymbol`. */
   onNavigate?: (section: DeskSection) => void;
+  /** Badge counts for the Book tab, polled once in App so they stay right across views. */
+  counts?: { open: number; pending: number };
 }
 
 // This selector drives BOTH the chart and the analysis/trade the engine produces. 5m and 15m are
@@ -94,9 +100,12 @@ const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
 const FAST_TF = new Set(["5m", "15m"]);
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
 
-export function Dashboard({ section, settings, onSettingsChanged, onNavigate }: Props) {
+export function Dashboard({ section, settings, onSettingsChanged, onNavigate, counts }: Props) {
   // Persisted across refresh / navigation so the desk reopens on the last pair you used.
   const [symbol, setSymbol] = useLocalStorage("ta.symbol", "EURUSD");
+  // Which panel area sits under the chart. Persisted for the same reason as the pair: you come back
+  // to the desk where you left it.
+  const [deskTab, setDeskTab] = useLocalStorage<DeskTab>("ta.deskTab", "analysis");
   const [assetClass, setAssetClass] = useLocalStorage<AssetClass>("ta.assetClass", "forex");
   const [timeframe, setTimeframe] = useLocalStorage("ta.timeframe", "1h");
   const [favorites, setFavorites] = useLocalStorage<Favorite[]>("ta.favorites", []);
@@ -138,11 +147,12 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate }: 
     document.addEventListener("fullscreenchange", onChange);
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
-  // Leaving the Trade tab unmounts the chart. The browser then drops full screen on its own, but
-  // only AFTER the paint — which shows a frame of the Scan tab stretched over the whole monitor.
-  // Exiting first keeps the transition clean.
+  // Leaving the desk unmounts the chart. The browser then drops full screen on its own, but only
+  // AFTER the paint — which shows a frame of the next view stretched over the whole monitor.
+  // Exiting first keeps the transition clean. (Switching tabs UNDER the chart keeps it mounted, so
+  // full screen deliberately survives that.)
   useEffect(() => {
-    if (section !== "trade" && document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    if (section !== "desk" && document.fullscreenElement) void document.exitFullscreen().catch(() => {});
   }, [section]);
 
   const toggleChartFull = () => {
@@ -384,13 +394,13 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate }: 
   };
 
   // Every panel's "select a pair" routes through here: a watchlist row, an opportunity, an RSI
-  // extreme, an armed setup, a position. Picking one means "show me this" — so it also brings the
-  // desk to the Trade tab, where the chart is. Without that, clicking a row on Scan silently
-  // changed a symbol on a tab that does not draw it, and looked like nothing had happened.
+  // extreme, an armed setup, a position. Picking one means "show me this" — the chart is already on
+  // screen above, so it just retunes it and brings the analysis for that pair back up underneath.
   const openPositionSymbol = (p: { symbol: string; asset_class: string }) => {
     if (p.asset_class !== assetClass) setAssetClass(p.asset_class as AssetClass);
     setSymbol(p.symbol);
-    onNavigate?.("trade");
+    onNavigate?.("desk");
+    setDeskTab("analysis");
   };
 
   return (
@@ -407,10 +417,10 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate }: 
 
 
       {/* ------------------------------------------------------------------------------------
-          TRADE — the workspace. One pair, one chart, one decision. Everything that is not about
-          the pair currently on screen lives in another tab, so this view stays readable.
+          DESK — one pair, one chart, and under it the three things you do with it: read the
+          analysis, hunt for the next pair, or check the book. The chart never leaves the screen.
           ------------------------------------------------------------------------------------ */}
-      {section === "trade" && (
+      {section === "desk" && (
         <>
           {/* Controls */}
           <div className="card flex flex-wrap items-end gap-3">
@@ -678,100 +688,104 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate }: 
             </p>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ProposalPanel
-              result={result}
-              status={status}
-              positionOpen={positionOpen}
-              openPosition={
-                (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null
-              }
-              armedSetup={armedForResult}
-              busy={actionBusy}
-              equity={account?.equity ?? null}
-              onApprove={approve}
-              onReject={reject}
-              onRunAnalysis={runAnalysis}
-              analyzing={analyzing}
-              scenario={scenario}
-              scenarioBusy={scenarioBusy}
-              analysisLang={settings?.app.analysis_language}
-              onLoadScenarios={loadScenarios}
-              scenLevelsShown={!!scenLevels}
-              onToggleScenLevels={toggleScenLevels}
-            />
-            <div className="space-y-4">
-              <QuickTradePanel
-                symbol={symbol}
-                assetClass={assetClass}
-                timeframe={timeframe}
-                onPlaced={() => setPosBump((b) => b + 1)}
+          {/* The panel area under the chart. One strip, three destinations — see DeskTab. */}
+          <DeskTabs
+            active={deskTab}
+            onChange={setDeskTab}
+            open={counts?.open ?? (positions ?? []).length}
+            pending={counts?.pending ?? 0}
+          />
+
+          {/* The analysis gets the whole row. Quick-trade used to sit beside it, but the chart
+              already places market orders and arms breaks (its Buy now / Sell now / break
+              buttons), so the panel was a second door to the same thing — paid for with half the
+              width of the one panel you actually read before deciding. */}
+          {deskTab === "analysis" && (
+          <ProposalPanel
+            result={result}
+            status={status}
+            positionOpen={positionOpen}
+            openPosition={
+              (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase()) ?? null
+            }
+            armedSetup={armedForResult}
+            busy={actionBusy}
+            equity={account?.equity ?? null}
+            onApprove={approve}
+            onReject={reject}
+            onRunAnalysis={runAnalysis}
+            analyzing={analyzing}
+            scenario={scenario}
+            scenarioBusy={scenarioBusy}
+            analysisLang={settings?.app.analysis_language}
+            onLoadScenarios={loadScenarios}
+            scenLevelsShown={!!scenLevels}
+            onToggleScenLevels={toggleScenLevels}
+          />
+          )}
+
+          {/* ------------------------------------------------------------------------------------
+              SCAN — where candidates come from. Nothing here opens a trade by itself; it feeds the
+              chart above. Picking a pair anywhere here retunes that chart and returns to Analysis.
+              ------------------------------------------------------------------------------------ */}
+          {deskTab === "scan" && (
+            <>
+              <WatchlistPanel
+                currentSymbol={symbol}
+                currentAsset={assetClass}
+                currentTimeframe={timeframe}
+                onSelect={(it) => {
+                  if (it.asset_class !== assetClass) setAssetClass(it.asset_class as AssetClass);
+                  setSymbol(it.symbol);
+                  if (it.timeframe) setTimeframe(it.timeframe);
+                  setDeskTab("analysis");
+                }}
               />
-            </div>
-          </div>
-        </>
-      )}
 
-      {/* ------------------------------------------------------------------------------------
-          SCAN — where candidates come from. Nothing here opens a trade by itself; it feeds the
-          Trade tab. Picking a pair anywhere in this section switches the desk to it.
-          ------------------------------------------------------------------------------------ */}
-      {section === "scan" && (
-        <>
-          <WatchlistPanel
-            currentSymbol={symbol}
-            currentAsset={assetClass}
-            currentTimeframe={timeframe}
-            onSelect={(it) => {
-              if (it.asset_class !== assetClass) setAssetClass(it.asset_class as AssetClass);
-              setSymbol(it.symbol);
-              if (it.timeframe) setTimeframe(it.timeframe);
-              onNavigate?.("trade");
-            }}
-          />
-
-          <div className="section-label pt-1">Scanners</div>
-          <OpportunitiesPanel
-            onSelect={openPositionSymbol}
-            onOpened={() => setPosBump((b) => b + 1)}
-          />
-
-          <RsiOverPanel onStaged={() => setPosBump((b) => b + 1)} onSelect={openPositionSymbol} />
-          <div className="section-label pt-1">
-            Auto-trader
-            <span className="font-normal normal-case tracking-normal text-neutral-600">
-              for {displaySymbol(symbol)}
-            </span>
-          </div>
-          <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} onSelect={openPositionSymbol} />
-        </>
-      )}
-
-      {/* ------------------------------------------------------------------------------------
-          BOOK — everything with money or a commitment behind it, ordered by how much it wants
-          your attention: decisions awaiting you, then setups armed to fire, then the open book.
-          ------------------------------------------------------------------------------------ */}
-      {section === "book" && (
-        <>
-          <PendingProposalsPanel
-            onSelect={openPositionSymbol}
-            onChanged={() => setPosBump((b) => b + 1)}
-          />
-
-          <ConditionalsPanel onSelect={openPositionSymbol} />
-          <div className="section-label pt-1">Open positions</div>
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <div className="space-y-4 lg:col-span-2">
-              <PositionAdvicePanel refreshSignal={posBump} lang={settings?.app.analysis_language} />
-              <PositionsTable
-                positions={positions}
-                onClose={closePosition}
-                onSetSlTp={setSlTp}
+              <div className="section-label pt-1">Scanners</div>
+              <OpportunitiesPanel
                 onSelect={openPositionSymbol}
+                onOpened={() => setPosBump((b) => b + 1)}
               />
-            </div>
-            <AdvisorActivity refreshSignal={posBump} />
-          </div>
+
+              <RsiOverPanel onStaged={() => setPosBump((b) => b + 1)} onSelect={openPositionSymbol} />
+              <div className="section-label pt-1">
+                Auto-trader
+                <span className="font-normal normal-case tracking-normal text-neutral-600">
+                  for {displaySymbol(symbol)}
+                </span>
+              </div>
+              <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} onSelect={openPositionSymbol} />
+            </>
+          )}
+
+          {/* ------------------------------------------------------------------------------------
+              BOOK — everything with money or a commitment behind it, ordered by how much it wants
+              your attention: decisions awaiting you, then setups armed to fire, then the open book.
+              ------------------------------------------------------------------------------------ */}
+          {deskTab === "book" && (
+            <>
+              <PendingProposalsPanel
+                onSelect={openPositionSymbol}
+                onChanged={() => setPosBump((b) => b + 1)}
+              />
+
+              <ConditionalsPanel onSelect={openPositionSymbol} />
+              <div className="section-label pt-1">Open positions</div>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                <div className="space-y-4 lg:col-span-2">
+                  <PositionAdvicePanel refreshSignal={posBump} lang={settings?.app.analysis_language} />
+                  <PositionsTable
+                    positions={positions}
+                    onClose={closePosition}
+                    onSetSlTp={setSlTp}
+                    onSelect={openPositionSymbol}
+                  />
+                </div>
+                <AdvisorActivity refreshSignal={posBump} />
+              </div>
+            </>
+          )}
         </>
       )}
 
@@ -785,6 +799,66 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate }: 
           <EntryFiltersPanel />
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The tab strip that sits between the chart and the panel area.
+ *
+ * Scanning and the book used to be separate pages, which meant losing the chart — and the pair you
+ * were studying — every time you glanced at either. Here the chart stays mounted above and only the
+ * area beneath it changes, so "is anything else setting up?" and "what am I holding?" are a click
+ * away from the analysis instead of a navigation away from the trade.
+ *
+ * The badges are the part that earns its keep: Book can say a decision is waiting on you while you
+ * are reading the analysis, which is exactly when it matters.
+ */
+function DeskTabs({ active, onChange, open, pending }: {
+  active: DeskTab;
+  onChange: (t: DeskTab) => void;
+  open: number;
+  pending: number;
+}) {
+  const tabs: { id: DeskTab; label: string; hint: string; count?: number; alert?: number }[] = [
+    { id: "analysis", label: "Analysis", hint: "The engine's read of the pair on the chart, and the approve / reject decision" },
+    { id: "scan", label: "Scan", hint: "Watchlist, opportunities, RSI extremes and the auto-trader — picking a pair retunes the chart above" },
+    { id: "book", label: "Book", count: open, alert: pending,
+      hint: "Open positions, exit advice, armed setups and anything awaiting your approval" },
+  ];
+  return (
+    <div className="flex items-center gap-1 border-b border-neutral-800" role="tablist" aria-label="Desk panels">
+      {tabs.map((t) => {
+        const on = t.id === active;
+        return (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={on}
+            title={t.hint}
+            onClick={() => onChange(t.id)}
+            className={`-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition
+              ${on
+                ? "border-brand-500 text-neutral-100"
+                : "border-transparent text-neutral-500 hover:text-neutral-200"}`}
+          >
+            {t.label}
+            {t.count ? (
+              <span className="rounded bg-neutral-800 px-1.5 py-px text-[11px] tabular-nums text-neutral-300">
+                {t.count}
+              </span>
+            ) : null}
+            {t.alert ? (
+              <span
+                className="rounded bg-warn px-1.5 py-px text-[11px] font-bold tabular-nums text-black"
+                title={`${t.alert} waiting on you`}
+              >
+                {t.alert}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
     </div>
   );
 }

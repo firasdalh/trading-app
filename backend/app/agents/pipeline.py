@@ -69,7 +69,9 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
     technical = run_technical(symbol, series, use_llm=reads)
     fundamental = run_fundamental(symbol, now=now, use_llm=(use_llm if read_llm is None else read_llm),
                                   asset_class=asset_class.value)
+    _entry_series = next((x for x in series if x.timeframe == timeframe), None)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
+                                entry_candles=list(_entry_series.candles) if _entry_series else None,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
                                 st_band=settings.st_band_mode, rsi_over=rsi_over,
@@ -163,7 +165,9 @@ def analyze_symbol(
     # asset_class reaches the calendar so a single-stock ticker resolves to the US calendar —
     # without it AAPLm matched no country and got no news blackout at all.
     fundamental = run_fundamental(symbol, now=now, use_llm=use_llm, asset_class=asset_class.value)
+    _entry_series = next((x for x in series if x.timeframe == timeframe), None)
     proposal = run_orchestrator(symbol, asset_class, timeframe, technical, fundamental, now=now,
+                                entry_candles=list(_entry_series.candles) if _entry_series else None,
                                 use_llm=use_llm, ai_review=review_on and not ai_decides,
                                 trend_only=settings.trend_only_mode,
                                 st_band=st_band_eff, rsi_over=rsi_over,
@@ -201,6 +205,43 @@ def analyze_symbol(
 
         proposal.odds = odds_for_proposal(broker, proposal, timeframe)
 
+    # 2b-ii. CHART STATE: what price is DOING to the last swing right now - pullback, rejection,
+    # break, range or impulse - plus the two prices that settle it (a trigger and an invalidation).
+    # Read-out only: it is shown on the chart and in the analysis, and gates nothing.
+    try:
+        from app.agents.chart_state import read_chart_state
+
+        entry_series = next((x for x in series if x.timeframe == timeframe), None)
+        if entry_series is not None and entry_series.candles:
+            proposal.chart_state = read_chart_state(list(entry_series.candles)).as_dict()
+    except Exception as exc:  # noqa: BLE001 - a read-out must never break the analysis
+        log.warning("chart state unavailable", extra={"symbol": symbol, "error": str(exc)})
+
+    # 2c. MACRO / NEWS / POSITIONING (app/macro/). Sits AFTER the deterministic engine has already
+    # chosen a direction, and deliberately cannot change it: the only thing this layer may do is
+    # delay ("wait") or annotate. A scheduled release is a volatility event of unknown sign, so a
+    # macro layer that produced a side would be inventing information it does not have.
+    macro_ctx = None
+    try:
+        from app.macro.service import macro_context
+
+        macro_ctx = macro_context(session, symbol, asset_class.value, now=now)
+        proposal.macro = macro_ctx
+        if macro_ctx.get("blocked") and proposal.is_actionable():
+            # Keep the candidate VISIBLE (watch=True) instead of discarding it, so the desk can see
+            # a good setup was found AND why it was held. Levels, direction and confidence survive.
+            proposal.macro_wait = True
+            proposal.watch = True
+            proposal.rationale = (
+                f"HELD - {macro_ctx.get('gate_reason', 'high-impact news nearby')}. "
+                f"The setup itself still stands: {proposal.rationale}"
+            )
+            log.warning("macro gate held a setup",
+                        extra={"symbol": symbol, "reason": macro_ctx.get("gate_reason"),
+                               "score": (macro_ctx.get("news") or {}).get("score")})
+    except Exception as exc:  # noqa: BLE001 - the macro layer must never break the trade path
+        log.warning("macro context unavailable", extra={"symbol": symbol, "error": str(exc)})
+
     # 3. Persist the proposal + full reasoning bundle (audit trail). The SOURCE (who opened it) is the
     # caller's explicit hint (hybrid/rsi_over/manual) or, failing that, derived from the active mode so
     # the journal can compare win rate + P&L by mechanism.
@@ -227,6 +268,16 @@ def analyze_symbol(
     )
     session.add(record)
     session.commit()
+
+    # 3b. Freeze the macro state behind THIS decision. Without a per-decision snapshot there is no
+    # way to ask later whether the news layer improved expectancy — only whether it felt like it
+    # did, which is how the previous filters in this project got shipped unmeasured.
+    if macro_ctx is not None:
+        from app.macro.service import record_trade_macro
+
+        record_trade_macro(session, symbol=symbol, context=macro_ctx, proposal_id=record.id,
+                           direction=proposal.direction.value,
+                           technical_confidence=proposal.confidence)
 
     # 4. Deterministic Risk Manager.
     decision = assess(session, proposal, override_cooldown_minutes=cooldown_override)

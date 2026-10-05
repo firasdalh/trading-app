@@ -73,8 +73,11 @@ def run_symbol(args):
             window.append(OHLCVSeries(symbol=sym, timeframe=t, candles=w))
         else:
             technical = run_technical(sym, window, use_llm=False)
+            # Same candles the live pipeline hands the engine, so the price_action filter is
+            # measured here exactly as it will behave in production.
             prop = _deterministic_decision(sym, AssetClass(ac), tf, technical, fund, now=entry[i].ts,
-                                           trend_only=trend_only, disable=frozenset(disable))
+                                           trend_only=trend_only, disable=frozenset(disable),
+                                           entry_candles=entry[max(0, i - _WINDOW + 1): i + 1])
             if prop.is_actionable and prop.take_profit is not None:
                 tf0 = next((x for x in technical.timeframes if x.timeframe == tf), None)
                 atr = tf0.indicators.get("atr14") if tf0 else None

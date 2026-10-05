@@ -151,6 +151,11 @@ export interface TradeProposal {
   ai_decision?: AiDecision | null;
   // AI momentum classification at an ambiguous-momentum fork (set only when it ran).
   // Measured base rate for THIS plan's stop/target distances on this symbol's own history.
+  // Macro / news / positioning context (backend app/macro/). Read-out plus at most a WAIT - this
+  // layer never carries a direction. See MacroPanel.tsx.
+  chart_state?: ChartState | null;
+  macro?: MacroContext | null;
+  macro_wait?: boolean;
   odds?: { p_target: number; p_stop: number; samples: number; horizon: number; edge_r: number } | null;
   momentum_read?: { category: string; evidence: string; confidence: number } | null;
   // AI regime-texture classification at the ambiguous regime boundary (set only when it ran).
@@ -801,4 +806,85 @@ export interface RsiOverConfig {
   last_scan_at: string | null;
   last_scanned: number;
   last_candidates: { overbought: RsiOverCandidate[]; oversold: RsiOverCandidate[] } | null;
+}
+
+
+/** Macro / news / positioning context from the Forex Factory layer (backend app/macro/).
+ *  Deliberately has no direction field: the layer can delay a trade or describe the crowd, and
+ *  can never choose a side. */
+export interface MacroContext {
+  enabled: boolean;
+  generated_at: string;
+  symbol: string;
+  base_currency: string | null;
+  quote_currency: string | null;
+  action: "proceed" | "warn" | "wait";
+  blocked: boolean;
+  gate_reason: string;
+  source_mode?: "live" | "cached" | "unavailable";
+  news_articles: unknown[];
+  news_articles_note: string;
+  news: {
+    score: number;
+    band: string;
+    action: string;
+    reason: string;
+    available: boolean;
+    stale: boolean;
+    note: string;
+    both_sides: boolean;
+    affects_base: boolean;
+    affects_quote: boolean;
+    next_high: MacroEvent | null;
+    next_medium: MacroEvent | null;
+    recent: MacroEvent[];
+  };
+  positioning: {
+    available: boolean;
+    stale: boolean;
+    long_traders_pct: number | null;
+    short_traders_pct: number | null;
+    long_lots_pct: number | null;
+    short_lots_pct: number | null;
+    trader_imbalance: number | null;
+    lot_imbalance: number | null;
+    crowding_score: number;
+    crowding_band: string;
+    bias_label: string;
+    percentile: number | null;
+    trend: string;
+    samples: number;
+    source: string;
+    note: string;
+    disclaimer: string;
+  };
+  sources?: Record<string, unknown>;
+}
+
+export interface MacroEvent {
+  title: string;
+  currency: string;
+  impact: string;
+  when: string;
+  minutes_away: number;
+  forecast: number | null;
+  previous: number | null;
+  actual: number | null;
+}
+
+
+/** What price is doing to the last swing (backend app/agents/chart_state.py).
+ *  Descriptive only: `trigger` and `invalidation` are prices that settle it, not a forecast. */
+export interface ChartState {
+  state: "impulse" | "pullback" | "rejection" | "breakout" | "breakdown" | "range" | "reversal" | "unclear";
+  trend: "up" | "down" | "sideways";
+  headline: string;
+  evidence: string[];
+  retrace_frac: number | null;
+  depth_atr: number | null;
+  trigger: number | null;
+  invalidation: number | null;
+  expected: string;
+  target_level: number | null;
+  level_in_play: number | null;
 }

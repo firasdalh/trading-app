@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.auto_trade_routes import router as auto_trade_router
+from app.api.macro_routes import router as macro_router
 from app.api.backtest_routes import router as backtest_router
 from app.api.conditional_routes import router as conditional_router
 from app.api.rsi_over_routes import router as rsi_over_router
@@ -254,6 +255,7 @@ app.include_router(watchlist_router)
 app.include_router(shadow_router)
 app.include_router(rsi_over_router)
 app.include_router(auto_trade_router)
+app.include_router(macro_router)
 app.include_router(ws_router)
 
 

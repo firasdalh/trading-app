@@ -162,6 +162,76 @@ def _f(v) -> float | None:
         return None
 
 
+def countries_for_symbol(symbol: str, asset_class: str | None = None) -> list[str]:
+    """Which national calendars move this instrument, as TradingView country codes.
+
+    Module-level so every calendar provider shares ONE mapping: the Forex Factory provider in
+    `app/data/forexfactory.py` calls this instead of carrying a second copy that would drift out
+    of sync the first time a symbol is added.
+    """
+    # Two forms, because they are matched against different things. Currency codes are letters,
+    # so digits are stripped to stop "US30" reading as a USD pair. Index and energy tickers ARE
+    # partly digits — matching those against the stripped string turned "JP225M" into "JPM", so
+    # every entry in _INDEX_COUNTRY silently matched nothing and index trades came back with an
+    # empty calendar (and therefore no news blackout).
+    raw = symbol.upper()
+    s = "".join(ch for ch in raw if ch.isalpha())
+    countries: list[str] = []
+    # Currencies are matched as the pair's LEGS (first three letters, next three), not as a
+    # substring anywhere. "ETHBTC" contains "THB" straddling the two halves, so an anywhere
+    # match handed an Ethereum cross the Thai calendar. A currency only counts where a currency
+    # can actually sit.
+    # The quote currency is the LAST three letters, not always characters 3-6: "AAVEUSD" has a
+    # four-letter base, so a fixed slice missed its USD. The broker's trailing "m" is dropped
+    # first or it would eat the final letter of the quote.
+    core = s[:-1] if s.endswith("M") and len(s) > 4 else s
+    legs = {core[:3], core[-3:]} if len(core) >= 3 else set()
+    for ccy, country in _CCY_TO_COUNTRY.items():
+        if ccy in legs and country not in countries:
+            countries.append(country)
+    if any(s.startswith(p) or p in s for p in _METAL_PREFIXES) and "US" not in countries:
+        countries.append("US")
+    # A symbol that already resolved BOTH legs is a proper FX pair, so the index/energy token scan
+    # below has nothing to add and can only produce false matches: those tokens are tested as bare
+    # substrings, and "CADJPYm" contains "DJ" (the Dow Jones token), which silently attached the US
+    # calendar to a CAD/JPY trade. Harmless while this was only a soft bias; with a news-risk gate
+    # in front of it, it would hold that trade for a US CPI release that cannot move it.
+    if len(countries) >= 2:
+        return countries
+    # Stock indices: add the country whose macro calendar drives them.
+    for token, country in _INDEX_COUNTRY.items():
+        if token in raw and country not in countries:
+            countries.append(country)
+    # Energy: same idea, and the reason oil used to come back with an empty calendar.
+    for token, country in _ENERGY_TOKENS.items():
+        if token in raw and country not in countries:
+            countries.append(country)
+    if not countries:
+        # Last resorts, only when nothing above matched.
+        # A single-stock ticker carries no country in its name at all, and this broker lists US
+        # equities — so CPI and FOMC are its calendar. Crypto crosses with no fiat leg key off
+        # US rates too. Guessing wrong here costs a few irrelevant rows; guessing NOTHING costs
+        # the news blackout entirely, which is the far worse error.
+        if (asset_class or "").lower() == "stock":
+            countries.append("US")
+        elif any(t in raw for t in _CRYPTO_TOKENS):
+            countries.append("US")
+    return countries
+
+
+_COUNTRY_TO_CCY = {c: ccy for ccy, c in _CCY_TO_COUNTRY.items() if ccy != "CNH"}
+
+
+def currencies_for_symbol(symbol: str, asset_class: str | None = None) -> list[str]:
+    """The CURRENCY codes whose events matter for this instrument (EURUSD -> [EUR, USD]).
+
+    Derived from `countries_for_symbol`, so the two can never disagree. Forex Factory tags every
+    event by currency rather than country, which is why the macro layer needs this form.
+    """
+    return [_COUNTRY_TO_CCY[c] for c in countries_for_symbol(symbol, asset_class)
+            if c in _COUNTRY_TO_CCY]
+
+
 class TradingViewCalendarProvider(EconomicCalendarProvider):
     """Pulls high-impact economic events from TradingView's public calendar JSON.
 
@@ -178,47 +248,7 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
         self._cache: dict[str, tuple[datetime, list[CalendarEvent]]] = {}
 
     def _countries(self, symbol: str, asset_class: str | None = None) -> list[str]:
-        # Two forms, because they are matched against different things. Currency codes are letters,
-        # so digits are stripped to stop "US30" reading as a USD pair. Index and energy tickers ARE
-        # partly digits — matching those against the stripped string turned "JP225M" into "JPM", so
-        # every entry in _INDEX_COUNTRY silently matched nothing and index trades came back with an
-        # empty calendar (and therefore no news blackout).
-        raw = symbol.upper()
-        s = "".join(ch for ch in raw if ch.isalpha())
-        countries: list[str] = []
-        # Currencies are matched as the pair's LEGS (first three letters, next three), not as a
-        # substring anywhere. "ETHBTC" contains "THB" straddling the two halves, so an anywhere
-        # match handed an Ethereum cross the Thai calendar. A currency only counts where a currency
-        # can actually sit.
-        # The quote currency is the LAST three letters, not always characters 3-6: "AAVEUSD" has a
-        # four-letter base, so a fixed slice missed its USD. The broker's trailing "m" is dropped
-        # first or it would eat the final letter of the quote.
-        core = s[:-1] if s.endswith("M") and len(s) > 4 else s
-        legs = {core[:3], core[-3:]} if len(core) >= 3 else set()
-        for ccy, country in _CCY_TO_COUNTRY.items():
-            if ccy in legs and country not in countries:
-                countries.append(country)
-        if any(s.startswith(p) or p in s for p in _METAL_PREFIXES) and "US" not in countries:
-            countries.append("US")
-        # Stock indices: add the country whose macro calendar drives them.
-        for token, country in _INDEX_COUNTRY.items():
-            if token in raw and country not in countries:
-                countries.append(country)
-        # Energy: same idea, and the reason oil used to come back with an empty calendar.
-        for token, country in _ENERGY_TOKENS.items():
-            if token in raw and country not in countries:
-                countries.append(country)
-        if not countries:
-            # Last resorts, only when nothing above matched.
-            # A single-stock ticker carries no country in its name at all, and this broker lists US
-            # equities — so CPI and FOMC are its calendar. Crypto crosses with no fiat leg key off
-            # US rates too. Guessing wrong here costs a few irrelevant rows; guessing NOTHING costs
-            # the news blackout entirely, which is the far worse error.
-            if (asset_class or "").lower() == "stock":
-                countries.append("US")
-            elif any(t in raw for t in _CRYPTO_TOKENS):
-                countries.append("US")
-        return countries
+        return countries_for_symbol(symbol, asset_class)
 
     def get_events(self, symbol: str, lookahead_hours: int = 24,
                    include_medium: bool = False,

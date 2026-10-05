@@ -11,14 +11,19 @@ import { usePolling } from "./hooks/usePolling";
 
 type View = DeskSection | "journal" | "backtest";
 
-const DESK_SECTIONS: DeskSection[] = ["trade", "scan", "book", "risk"];
+const DESK_SECTIONS: DeskSection[] = ["desk", "risk"];
+
+// Tabs the desk used to own at the top level. Anyone reopening the app with "scan" or "book" saved
+// from the old layout lands on the desk, where those now live as tabs under the chart.
+const LEGACY_VIEWS: Record<string, View> = { trade: "desk", scan: "desk", book: "desk" };
 
 export default function App() {
   // A bump counter lets child actions (kill-switch toggle) force an immediate settings refetch.
   const [bump, setBump] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Persisted: reopening the app on the tab you were last working in is what every desk tool does.
-  const [view, setView] = useLocalStorage<View>("ta.view", "trade");
+  const [stored, setView] = useLocalStorage<View>("ta.view", "desk");
+  const view: View = LEGACY_VIEWS[stored as string] ?? stored;
   const { data: settings, error } = usePolling(() => api.settings(), 5000, [bump]);
   const refresh = useCallback(() => setBump((b) => b + 1), []);
 
@@ -36,14 +41,12 @@ export default function App() {
   const openN = openPositions?.length ?? 0;
 
   const tabs: TabDef<View>[] = [
-    { id: "trade", label: "Trade", hint: "Chart, analysis and manual entry for the selected pair" },
-    { id: "scan", label: "Scan", hint: "Watchlist, opportunities, RSI extremes and the auto-trader" },
     {
-      id: "book",
-      label: "Book",
+      id: "desk",
+      label: "Trade",
       count: openN,
       alert: pendingN,
-      hint: "Open positions, exit advice, armed setups and anything awaiting your approval",
+      hint: "The desk: chart on top, with Analysis / Scan / Book as tabs underneath it",
     },
     { id: "risk", label: "Risk", hint: "Risk limits, the AI-vs-deterministic scorecard and entry filters" },
     { id: "journal", label: "Journal", hint: "Closed trades and performance by source" },
@@ -81,15 +84,16 @@ export default function App() {
         </div>
       )}
 
-      {/* The desk stays MOUNTED across its four sections: the chart, the pair you are on and the
-          last analysis survive a tab switch, and its polling is not torn down and restarted each
-          time. Journal and Backtest are separate views and may unmount freely. */}
+      {/* The desk stays MOUNTED across both sections: the chart, the pair you are on and the last
+          analysis survive a switch, and its polling is not torn down and restarted each time.
+          Journal and Backtest are separate views and may unmount freely. */}
       {isDesk(view) && (
         <Dashboard
           section={view}
           settings={settings}
           onSettingsChanged={refresh}
           onNavigate={setView}
+          counts={{ open: openN, pending: pendingN }}
         />
       )}
       {view === "journal" && <JournalView />}
