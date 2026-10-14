@@ -7,7 +7,7 @@ positions view.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -649,9 +649,101 @@ def live_positions(session: Session = Depends(get_session)) -> list[PositionView
         for p in missing:
             p.opened_at = by_symbol.get(_norm_symbol(p.symbol))
 
+    # The stop each trade was OPENED with, so the UI measures R against the risk taken at entry.
+    # Best effort: a lookup failure must never cost the position list (the UI falls back to the
+    # current stop when this is None).
+    try:
+        _fill_initial_stops(session, out)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("initial stop lookup failed", extra={"error": str(exc)})
+
     for i, p in enumerate(out):
         p.id = i + 1
     return out
+
+
+# The executor logs its Order row a moment BEFORE it submits, and the broker stamps the fill a moment
+# after, so the two sit seconds apart. A window this wide still can't reach an order from an earlier,
+# since-closed trade on the same pair and side.
+_INITIAL_STOP_MATCH = timedelta(minutes=15)
+# A Mode-A proposal can wait for approval (or an armed one for its trigger) well before it fills.
+_INITIAL_STOP_PROPOSAL_AGE = timedelta(days=2)
+
+
+def _utc(dt: datetime) -> datetime:
+    """SQLite hands datetimes back naive; they are stored as UTC."""
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _fill_initial_stops(session: Session, positions: list[PositionView]) -> None:
+    """Set ``initial_stop_loss`` on each broker position from the app's OWN records of the open.
+
+    Why not ``Position.stop_loss``: POST /positions/sl-tp overwrites it (and ``risk_amount``) on
+    every manual move, so after a widen it is the new stop, not the one the trade was sized on.
+    The executor's Order row keeps the stop it SUBMITTED, so that is the source; the executed
+    proposal for the same pair and side is the fallback. A trade is matched by its open time:
+    the broker's fill time, plus the app's own open row when that is unambiguous (one live trade
+    on the pair+side), which still matches if the broker's server clock runs on another offset.
+    A trade opened directly in the terminal matches nothing and stays None.
+    """
+    from app.models.db import Order, TradeProposalRecord
+    from app.models.enums import OrderStatus, ProposalStatus
+    from app.risk.service import _norm_symbol
+
+    if not positions:
+        return
+    filled = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
+    orders = session.scalars(
+        select(Order).where(Order.status.in_(filled), Order.stop_loss.is_not(None))
+        .order_by(Order.id.desc()).limit(500)
+    ).all()
+    proposals = session.scalars(
+        select(TradeProposalRecord).where(
+            TradeProposalRecord.status == ProposalStatus.EXECUTED.value,
+            TradeProposalRecord.stop_loss.is_not(None),
+        ).order_by(TradeProposalRecord.id.desc()).limit(500)
+    ).all()
+    app_rows = session.scalars(
+        select(Position).where(Position.status == PositionStatus.OPEN.value)
+    ).all()
+
+    for p in positions:
+        if p.direction not in ("long", "short"):
+            continue
+        key = _norm_symbol(p.symbol)
+        side = "buy" if p.direction == "long" else "sell"
+        anchors: list[datetime] = []
+        if p.opened_at is not None:
+            anchors.append(_utc(p.opened_at))
+        twins = [q for q in positions if _norm_symbol(q.symbol) == key and q.direction == p.direction]
+        mine = [r for r in app_rows
+                if _norm_symbol(r.symbol) == key and r.direction == p.direction and r.opened_at]
+        if len(twins) == 1 and len(mine) == 1:
+            anchors.append(_utc(mine[0].opened_at))
+        if not anchors:
+            continue
+
+        best: tuple[timedelta, float] | None = None
+        for o in orders:
+            if _norm_symbol(o.symbol) != key or o.side != side or o.created_at is None:
+                continue
+            gap = min(abs(_utc(o.created_at) - a) for a in anchors)
+            if gap <= _INITIAL_STOP_MATCH and (best is None or gap < best[0]):
+                best = (gap, o.stop_loss)
+        if best is None:
+            for r in proposals:
+                if _norm_symbol(r.symbol) != key or r.direction != p.direction or r.created_at is None:
+                    continue
+                made = _utc(r.created_at)
+                # Created before the fill (with a little clock slack), and not from a stale old idea.
+                gaps = [a - made for a in anchors
+                        if -_INITIAL_STOP_MATCH <= a - made <= _INITIAL_STOP_PROPOSAL_AGE]
+                if gaps:
+                    gap = min(abs(g) for g in gaps)
+                    if best is None or gap < best[0]:
+                        best = (gap, r.stop_loss)
+        if best is not None:
+            p.initial_stop_loss = best[1]
 
 
 @router.get("/positions/advice", response_model=list[PositionAdvice], tags=["positions"])

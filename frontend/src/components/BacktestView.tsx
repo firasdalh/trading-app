@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
-import { assetLabel } from "../format";
+import { assetLabel, displaySymbol, fmtPrice } from "../format";
 import type { AssetClass, BacktestResult } from "../types";
 import { EquityChart } from "./EquityChart";
 
@@ -17,6 +17,15 @@ function lsGet<T>(key: string, fallback: T): T {
   }
 }
 
+// The symbol as the API should get it. A mixed-case name (AUDCADm, US30_x10m) is a real broker
+// name: send it exactly, so MT5 matches it on the first, exact lookup. One typed all in one case
+// ("aapl", "XAUUSDM") is normalised to upper case as before — the MT5 resolver still finds the
+// suffixed instrument from that.
+function apiSymbol(raw: string): string {
+  const s = raw.trim();
+  return /[a-z]/.test(s) && /[A-Z]/.test(s) ? s : s.toUpperCase();
+}
+
 export function BacktestView() {
   const [symbol, setSymbol] = useState(() => lsGet("ta.symbol", "AAPL"));
   const [assetClass, setAssetClass] = useState<AssetClass>(() => lsGet("ta.assetClass", "stock"));
@@ -31,7 +40,7 @@ export function BacktestView() {
     setBusy(true);
     setError(null);
     try {
-      setResult(await api.backtest(symbol.trim().toUpperCase(), assetClass, timeframe, bars, equity));
+      setResult(await api.backtest(apiSymbol(symbol), assetClass, timeframe, bars, equity));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -42,7 +51,8 @@ export function BacktestView() {
   const m = result?.metrics;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-4 p-4">
+    // Full width with the desk's gutter, like the desk and the Journal.
+    <div className="space-y-3 p-3">
       <div className="card flex flex-wrap items-end gap-3">
         <Field label="Symbol">
           <input
@@ -50,7 +60,8 @@ export function BacktestView() {
             autoComplete="off"
             value={symbol}
             onChange={(e) => setSymbol(e.target.value)}
-            className="w-28 rounded bg-neutral-800 px-2 py-1.5 uppercase"
+            className="w-32 rounded bg-neutral-800 px-2 py-1.5"
+            title="Broker symbol, e.g. XAUUSDm or EURUSDm (Exness), or a stock ticker"
           />
         </Field>
         <Field label="Asset class">
@@ -94,7 +105,9 @@ export function BacktestView() {
       {result && m && (
         <>
           <div className="card">
-            <div className="mb-2 text-sm font-semibold">Equity curve · {result.symbol} {result.timeframe} · {result.bars} bars</div>
+            <div className="mb-2 text-sm font-semibold">
+              Equity curve · {result.asset_class === "stock" ? result.symbol : displaySymbol(result.symbol)} {result.timeframe} · {result.bars} bars
+            </div>
             <EquityChart points={result.equity_curve} />
             <p className="mt-2 text-xs text-warn">{result.disclaimer}</p>
           </div>
@@ -114,24 +127,26 @@ export function BacktestView() {
             {result.trades.length === 0 ? (
               <div className="text-sm text-neutral-500">No trades were taken (no qualifying setups).</div>
             ) : (
-              <table className="w-full text-sm">
+              // Every column gets the same right gutter (as in the Journal): without it the right-
+              // aligned R ran straight into the left-aligned Bars, so "1.8" and "7" read as "1.87".
+              <table className="w-full whitespace-nowrap text-sm">
                 <thead className="text-left text-xs text-neutral-400">
                   <tr>
-                    <th className="py-1">Dir</th><th>Entry</th><th>Exit</th>
-                    <th className="text-right">Qty</th><th className="text-right">P&amp;L</th>
-                    <th className="text-right">R</th><th>Bars</th><th>Reason</th>
+                    <th className="py-1 pr-3">Dir</th><th className="pr-3">Entry</th><th className="pr-3">Exit</th>
+                    <th className="pr-3 text-right">Qty</th><th className="pr-3 text-right">P&amp;L</th>
+                    <th className="pr-3 text-right">R</th><th className="pr-3 text-right">Bars</th><th>Reason</th>
                   </tr>
                 </thead>
                 <tbody>
                   {result.trades.map((t, i) => (
                     <tr key={i} className="border-t border-neutral-800">
-                      <td className={t.direction === "long" ? "text-bull" : "text-bear"}>{t.direction}</td>
-                      <td className="tabular-nums">{t.entry}</td>
-                      <td className="tabular-nums">{t.exit}</td>
-                      <td className="text-right tabular-nums">{t.qty}</td>
-                      <td className={`text-right tabular-nums ${t.pnl >= 0 ? "text-bull" : "text-bear"}`}>{t.pnl.toFixed(2)}</td>
-                      <td className="text-right tabular-nums">{t.r_multiple}</td>
-                      <td className="tabular-nums">{t.bars_held}</td>
+                      <td className={`py-1 pr-3 ${t.direction === "long" ? "text-bull" : "text-bear"}`}>{t.direction}</td>
+                      <td className="pr-3 tabular-nums">{fmtPrice(t.entry)}</td>
+                      <td className="pr-3 tabular-nums">{fmtPrice(t.exit)}</td>
+                      <td className="pr-3 text-right tabular-nums">{t.qty}</td>
+                      <td className={`pr-3 text-right tabular-nums ${t.pnl >= 0 ? "text-bull" : "text-bear"}`}>{t.pnl.toFixed(2)}</td>
+                      <td className="pr-3 text-right tabular-nums">{t.r_multiple}</td>
+                      <td className="pr-3 text-right tabular-nums">{t.bars_held}</td>
                       <td className="text-neutral-400">{t.exit_reason}</td>
                     </tr>
                   ))}

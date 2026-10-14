@@ -1,72 +1,180 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "./api/client";
 import { Header } from "./components/Header";
-import { Dashboard, type DeskSection } from "./components/Dashboard";
+import { Dashboard } from "./components/Dashboard";
 import { BacktestView } from "./components/BacktestView";
+import { DRAWER_IDS, Drawer, type DrawerId } from "./components/Drawer";
+import { EntryFiltersPanel } from "./components/EntryFiltersPanel";
 import { JournalView } from "./components/JournalView";
+import { RiskDashboard } from "./components/RiskDashboard";
+import { ScorecardPanel } from "./components/ScorecardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { Tabs, type TabDef } from "./components/Tabs";
+import type { NavItem } from "./components/Tabs";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 import { usePolling } from "./hooks/usePolling";
+import type { AssetClass } from "./types";
 
-type View = DeskSection | "journal" | "backtest";
+/** Full-page views. Everything else is a drawer over the desk. */
+type View = "desk" | "journal" | "backtest";
+const VIEWS: View[] = ["desk", "journal", "backtest"];
 
-const DESK_SECTIONS: DeskSection[] = ["desk", "risk"];
+// Values older layouts saved in `ta.view`. Trade/Scan/Book all live on the desk now, and Risk is a
+// drawer — someone who last left the app on Risk gets the desk with the Risk drawer open.
+const LEGACY_VIEWS: Record<string, View> = { trade: "desk", scan: "desk", book: "desk", risk: "desk" };
 
-// Tabs the desk used to own at the top level. Anyone reopening the app with "scan" or "book" saved
-// from the old layout lands on the desk, where those now live as tabs under the chart.
-const LEGACY_VIEWS: Record<string, View> = { trade: "desk", scan: "desk", book: "desk" };
+function initialDrawer(storedView: string): DrawerId | null {
+  // ?drawer=scanner|risk|advisor opens a drawer straight from a link (and lets a headless browser
+  // screenshot one, which cannot click).
+  try {
+    const q = new URLSearchParams(window.location.search).get("drawer");
+    if (q && (DRAWER_IDS as string[]).includes(q)) return q as DrawerId;
+  } catch {
+    /* no URL API — ignore */
+  }
+  return storedView === "risk" ? "risk" : null;
+}
 
 export default function App() {
   // A bump counter lets child actions (kill-switch toggle) force an immediate settings refetch.
   const [bump, setBump] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // Persisted: reopening the app on the tab you were last working in is what every desk tool does.
-  const [stored, setView] = useLocalStorage<View>("ta.view", "desk");
-  const view: View = LEGACY_VIEWS[stored as string] ?? stored;
+  // Persisted: reopening the app on the view you were last working in is what every desk tool does.
+  const [stored, setStored] = useLocalStorage<string>("ta.view", "desk");
+  const view: View = LEGACY_VIEWS[stored] ?? ((VIEWS as string[]).includes(stored) ? (stored as View) : "desk");
+  const [drawer, setDrawer] = useState<DrawerId | null>(() => initialDrawer(stored));
+  // Rewrite a legacy value once, so the mapping above is a migration and not a permanent alias.
+  useEffect(() => {
+    if (stored !== view) setStored(view);
+  }, [stored, view, setStored]);
+  // Scanner and Advisor are rendered BY the desk, so they can only be open while the desk is the
+  // view (e.g. a ?drawer=scanner link opened while the app was last left on Journal).
+  useEffect(() => {
+    if (drawer && drawer !== "risk" && view !== "desk") setStored("desk");
+  }, [drawer, view, setStored]);
+
   const { data: settings, error } = usePolling(() => api.settings(), 5000, [bump]);
   const refresh = useCallback(() => setBump((b) => b + 1), []);
 
-  // Badge counts. These are the whole point of the tab bar: a decision waiting on you used to be
-  // invisible until you scrolled to it. Polled here (not in Dashboard) so the badge is still right
-  // while you are reading the Journal. Cheap endpoints, deliberately slower than the desk's own.
-  const { data: openPositions } = usePolling(() => api.livePositions(), 8000, []);
+  // The desk's asset class lives HERE (same `ta.assetClass` key as before) because the header's
+  // account numbers are per broker, and the broker is chosen per asset class.
+  const [assetClass, setAssetClass] = useLocalStorage<AssetClass>("ta.assetClass", "forex");
+
+  // The live book, polled once and shared by the header (KPIs), the desk sidebar, the chart and the
+  // drawers. `posBump` forces an immediate re-poll after anything that opens/closes/modifies a trade.
+  const [posBump, setPosBump] = useState(0);
+  const bumpPositions = useCallback(() => setPosBump((b) => b + 1), []);
+  const { data: account } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
+  const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
+  const { data: risk } = usePolling(() => api.riskState(), 5000, [bump]);
+  // The approval badge. Polled here (not in the desk) so it is still right while you read the Journal.
   const { data: pending } = usePolling(
     () => api.proposals({ status: "pending_approval", limit: 50 }),
     8000,
-    [],
+    [posBump],
   );
-
   const pendingN = pending?.length ?? 0;
-  const openN = openPositions?.length ?? 0;
+  // Whether the Hybrid auto-pilot is running — it opens trades on its own, so the nav says so even
+  // while its controls are tucked away in the Scanner drawer.
+  const { data: hybrid } = usePolling(() => api.hybridState(), 30000, [bump]);
 
-  const tabs: TabDef<View>[] = [
+  // Publish the sticky header's real height as --hdr-h. The desk sidebar sticks under it and drawers
+  // open below it; both would otherwise hard-code a height that changes whenever an alert strip
+  // (kill-switch, paused, MT5) appears or the header wraps to two lines on a narrower window.
+  const headerRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const set = () => document.documentElement.style.setProperty("--hdr-h", `${el.offsetHeight}px`);
+    set();
+    const ro = new ResizeObserver(set);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const goView = (v: View) => {
+    setDrawer(null);
+    setStored(v);
+  };
+  // Drawers toggle. Scanner and Advisor belong to the desk (they retune its chart), so opening one
+  // from Journal/Backtest brings you back to the desk underneath it. Risk opens over any view.
+  const toggleDrawer = (d: DrawerId) => {
+    if (drawer === d) {
+      setDrawer(null);
+      return;
+    }
+    if (d !== "risk" && view !== "desk") setStored("desk");
+    setDrawer(d);
+  };
+  const closeDrawer = useCallback(() => setDrawer(null), []);
+
+  const paused = !!(account?.trading_paused || risk?.trading_paused);
+  const nav: NavItem[] = [
     {
       id: "desk",
-      label: "Trade",
-      count: openN,
+      label: "Desk",
+      icon: "desk",
+      kind: "view",
+      active: view === "desk",
+      onClick: () => goView("desk"),
       alert: pendingN,
-      hint: "The desk: chart on top, with Analysis / Scan / Book as tabs underneath it",
+      hint: "Chart, analysis, and your open positions and pending approvals beside it",
     },
-    { id: "risk", label: "Risk", hint: "Risk limits, the AI-vs-deterministic scorecard and entry filters" },
-    { id: "journal", label: "Journal", hint: "Closed trades and performance by source" },
-    { id: "backtest", label: "Backtest", hint: "Replay the engine over historical candles" },
+    {
+      id: "scanner",
+      label: "Scanner",
+      icon: "scanner",
+      kind: "drawer",
+      active: drawer === "scanner",
+      onClick: () => toggleDrawer("scanner"),
+      live: !!hybrid?.enabled,
+      hint:
+        (hybrid?.enabled ? "Hybrid auto-pilot is ON. " : "") +
+        "Hybrid auto-pilot, opportunities, RSI extremes and the per-pair auto-trader (opens over the desk)",
+    },
+    {
+      id: "risk",
+      label: "Risk",
+      icon: "risk",
+      kind: "drawer",
+      active: drawer === "risk",
+      onClick: () => toggleDrawer("risk"),
+      danger: paused || !!risk?.entry_breaker,
+      hint: "Risk limits and breakers, the AI-vs-deterministic scorecard and entry filters (opens over the page)",
+    },
+    {
+      id: "journal",
+      label: "Journal",
+      icon: "journal",
+      kind: "view",
+      active: view === "journal",
+      onClick: () => goView("journal"),
+      hint: "Closed trades and performance by source",
+    },
+    {
+      id: "backtest",
+      label: "Backtest",
+      icon: "backtest",
+      kind: "view",
+      active: view === "backtest",
+      onClick: () => goView("backtest"),
+      hint: "Replay the engine over historical candles",
+    },
   ];
-
-  const isDesk = (v: View): v is DeskSection => (DESK_SECTIONS as string[]).includes(v);
 
   return (
     <div className="min-h-screen">
-      {/* ONE sticky stack: title bar, any live/kill banners, and the tab bar travel together.
-          Sticking them separately needs hardcoded pixel offsets, which go wrong the moment a
-          banner appears and changes the header's height. */}
-      <div className="sticky top-0 z-20">
+      {/* ONE sticky stack: the header bar and any alert strips travel together. Sticking them
+          separately needs hardcoded pixel offsets, which go wrong the moment a strip appears. */}
+      <div ref={headerRef} className="sticky top-0 z-20">
         <Header
           settings={settings}
+          account={account}
+          risk={risk}
+          positions={positions}
+          nav={nav}
           onKillSwitchChange={refresh}
           onOpenSettings={() => setSettingsOpen(true)}
         />
-        <Tabs tabs={tabs} active={view} onChange={setView} />
       </div>
       {settingsOpen && (
         <SettingsPanel
@@ -77,27 +185,47 @@ export default function App() {
       )}
 
       {error && (
-        <div className="mx-auto max-w-7xl px-4 pt-4">
+        <div className="px-3 pt-3">
           <div className="rounded-lg border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">
-            Cannot reach backend: {error}. Is the API running on :8000?
+            Cannot reach backend: {error}. Is the API running?
           </div>
         </div>
       )}
 
-      {/* The desk stays MOUNTED across both sections: the chart, the pair you are on and the last
-          analysis survive a switch, and its polling is not torn down and restarted each time.
-          Journal and Backtest are separate views and may unmount freely. */}
-      {isDesk(view) && (
+      {/* The desk stays MOUNTED while a drawer is open over it: the chart, the pair you are on and
+          the last analysis survive, and its polling is not torn down and restarted. Journal and
+          Backtest are separate views and may unmount freely. */}
+      {view === "desk" && (
         <Dashboard
-          section={view}
           settings={settings}
           onSettingsChanged={refresh}
-          onNavigate={setView}
-          counts={{ open: openN, pending: pendingN }}
+          assetClass={assetClass}
+          setAssetClass={setAssetClass}
+          account={account}
+          positions={positions}
+          posBump={posBump}
+          onPositionsChanged={bumpPositions}
+          pendingN={pendingN}
+          drawer={drawer}
+          onOpenDrawer={(d) => setDrawer(d)}
+          onCloseDrawer={closeDrawer}
         />
       )}
       {view === "journal" && <JournalView />}
       {view === "backtest" && <BacktestView />}
+
+      {/* Risk is configuration you change rarely and should never meet by accident mid-trade — so it
+          is a pop-up you open on purpose, over whatever view you are on. */}
+      <Drawer
+        open={drawer === "risk"}
+        title="Risk"
+        subtitle="Limits and breakers, the AI-vs-deterministic scorecard, and the entry filters."
+        onClose={closeDrawer}
+      >
+        <RiskDashboard risk={risk} account={account} settings={settings} onChanged={refresh} />
+        <ScorecardPanel />
+        <EntryFiltersPanel />
+      </Drawer>
     </div>
   );
 }

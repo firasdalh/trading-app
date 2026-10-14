@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fmtPrice, fmtUsd } from "../format";
 import type { Pulse } from "./Chart";
+import { OverCapChip, overCapRisk, positionR, stopWidening, WidenedChip } from "./LiveBook";
 import type { PositionView } from "../types";
 
 // The account-currency value an open position would show AT a price level (its SL/TP) and now.
@@ -14,14 +15,23 @@ function usdAtLevel(pos: PositionView, level: number | null | undefined): number
 }
 
 // Resume of the open position for the charted symbol, sitting on top of the chart: direction/entry,
-// current P&L, risk ($ to SL) and reward ($ to TP) in dollars, R:R, and a quick (confirmed) Close.
+// current P&L (and in R), risk ($ to SL) and reward ($ to TP) in dollars, R:R, and a quick
+// (confirmed) Close.
 export function ChartPositionBar({
   pos,
   pulse,
+  adviceR,
+  equity,
+  riskCap,
   onClose,
 }: {
   pos: PositionView | null;
   pulse?: Pulse | null;
+  /** The advisor's R for this trade — preferred, so the strip quotes the R its exit rules act on (see positionR). */
+  adviceR?: number | null;
+  /** Account equity and the per-trade risk cap (fraction): the risk turns red past the cap. */
+  equity?: number | null;
+  riskCap?: number | null;
   onClose: (p: PositionView) => Promise<void> | void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -41,6 +51,11 @@ export function ChartPositionBar({
   const riskUsd = usdAtLevel(pos, pos.stop_loss);       // negative (loss at the stop)
   const rewardUsd = usdAtLevel(pos, pos.take_profit);   // positive (gain at the target)
   const rr = riskUsd && rewardUsd && riskUsd !== 0 ? Math.abs(rewardUsd / riskUsd) : null;
+  // R against the risk taken at ENTRY — the same number as the sidebar card and the advisor. (The
+  // pulse's own R is measured against the CURRENT stop, so a widened stop made it read smaller.)
+  const r = positionR(pos, adviceR);
+  const widened = stopWidening(pos);
+  const over = overCapRisk(pos, equity, riskCap);
   const isBE =
     pos.stop_loss != null &&
     Math.abs(pos.stop_loss - pos.entry_price) <= Math.abs(pos.entry_price) * 1e-4;
@@ -70,6 +85,14 @@ export function ChartPositionBar({
         <span className={`font-semibold tabular-nums ${pos.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}`}>
           {fmtUsd(pos.unrealized_pnl, { sign: true })}
         </span>
+        {r != null && (
+          <span
+            className={`ml-1.5 tabular-nums ${r >= 0 ? "text-bull" : "text-bear"}`}
+            title="Profit in R — multiples of the risk taken at entry (entry to the stop the trade opened with). Dollars don't compare across pairs or sizes; R does, and every scale-out rule is written in it."
+          >
+            {r >= 0 ? "+" : ""}{r.toFixed(2)}R
+          </span>
+        )}
       </span>
 
       <span className="text-neutral-400">
@@ -79,8 +102,15 @@ export function ChartPositionBar({
           {isBE && <span className="ml-1 text-bull">(BE)</span>}
         </span>
         {riskUsd != null && (
-          <span className="ml-1 font-semibold tabular-nums text-bear">{fmtUsd(riskUsd, { sign: true })}</span>
+          <span
+            className={`ml-1 font-semibold tabular-nums text-bear ${over ? "rounded bg-bear/20 px-1 ring-1 ring-inset ring-bear/50" : ""}`}
+            title={over ? "Loss if the stop is hit — above the per-trade risk cap" : "Loss if the stop is hit"}
+          >
+            {fmtUsd(riskUsd, { sign: true })}
+          </span>
         )}
+        {over && riskCap != null && <span className="ml-1.5"><OverCapChip over={over} cap={riskCap} compact /></span>}
+        {widened != null && widened > 1.05 && <span className="ml-1.5"><WidenedChip k={widened} /></span>}
       </span>
 
       <span className="text-neutral-400">
@@ -93,9 +123,17 @@ export function ChartPositionBar({
         )}
       </span>
 
+      {/* Reward smaller than risk is exactly the stop-widened / target-pulled-in pattern, so it is
+          coloured rather than left to be noticed: amber under 1, red under 0.5. */}
       {rr != null && (
-        <span className="text-neutral-400">
-          R:R <span className="font-semibold tabular-nums text-neutral-200">{rr.toFixed(2)}</span>
+        <span
+          className="text-neutral-400"
+          title={rr < 1 ? "Reward is smaller than risk — the stop or target has moved since entry, or the plan was thin" : "Reward to risk from entry, at the current stop and target"}
+        >
+          R:R{" "}
+          <span className={`font-semibold tabular-nums ${rr < 0.5 ? "text-bear" : rr < 1 ? "text-warn" : "text-neutral-200"}`}>
+            {rr.toFixed(2)}
+          </span>
         </span>
       )}
 
@@ -162,17 +200,6 @@ export function ChartPositionBar({
               <span className="opacity-70">{it.label}</span> {it.value}
             </span>
           ))}
-
-          {pulse.rMultiple != null && (
-            <span
-              className="text-neutral-400"
-              title="Profit measured in R — multiples of the risk you took. Dollars don't compare across pairs or sizes; R does, and every scale-out rule is written in it."
-            >
-              <span className={`font-semibold tabular-nums ${pulse.rMultiple >= 0 ? "text-bull" : "text-bear"}`}>
-                {pulse.rMultiple >= 0 ? "+" : ""}{pulse.rMultiple.toFixed(2)}R
-              </span>
-            </span>
-          )}
 
           {pulse.stopAtr != null && (
             <span

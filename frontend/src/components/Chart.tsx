@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CandlestickData,
   ColorType,
@@ -18,6 +18,7 @@ import {
 } from "lightweight-charts";
 import { api } from "../api/client";
 import { ScenarioCard } from "./ScenarioCard";
+import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
 import { fmtPrice, fmtUsd } from "../format";
 import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
@@ -824,6 +825,24 @@ export function positionPulse(candles: Candle[], pos: PositionView): Pulse | nul
   return { items, withCount, againstCount, rMultiple, stopAtr };
 }
 
+// Several trades open on one pair (a scale-in, a re-entry): "#1", "#2"… oldest first, by position
+// id. The same number goes on the entry-candle marker and on every label of that trade's SL/TP zone,
+// so a tag that had to move aside can still be matched to its trade. Empty with a single trade.
+function tradeNumbers(positions: PositionView[] | null | undefined, symbol: string): Map<number | string, string> {
+  const sym = symbol.toUpperCase();
+  const mine = (positions ?? []).filter(
+    (p) => p.symbol.toUpperCase() === sym && (p.direction === "long" || p.direction === "short"),
+  );
+  const out = new Map<number | string, string>();
+  if (mine.length < 2) return out;
+  const t = (p: PositionView) => {
+    const v = Date.parse(p.opened_at ?? "");
+    return Number.isFinite(v) ? v : Number.MAX_SAFE_INTEGER;   // unknown open time sorts last
+  };
+  [...mine].sort((a, b) => t(a) - t(b)).forEach((p, i) => out.set(p.id ?? p.symbol, `#${i + 1}`));
+  return out;
+}
+
 // The dollar P&L an open position would show AT a given price level (e.g. its SL or TP). Derived
 // from the live floating P&L per price unit — which already encodes lot size, contract size and
 // FX conversion — so it's exact in the account currency. Empty until price moves off entry (the
@@ -925,6 +944,19 @@ function storedPaneH(key: string): number {
   }
 }
 
+// --- Price-pane height -------------------------------------------------------------------------
+// The price pane used to be a fixed 600px, which left RSI and MACD below the fold on most screens
+// (and wasted a tall monitor). It now takes whatever the window has left once the sticky header,
+// the toolbars above it and the indicator panes below it are counted, so price + RSI + MACD read as
+// ONE screen without scrolling. The floor keeps it a chart on a short window (the panes then go below
+// the fold, reachable by scrolling, as before); it is low because with a trade open on the pair the
+// position strip and a wrapped toolbar alone take ~120px. The cap stops a 4K monitor turning it into
+// a wall of candles.
+const MAIN_MIN = 360;
+const MAIN_MAX = 900;
+const MAIN_DEFAULT = 600;
+const FIT_GAP = 12;   // the chart card's bottom padding, so the card ends at the window's edge
+
 // The grab-strip that sits on a pane's TOP edge. Pointer capture (not window listeners) keeps the
 // drag alive when the cursor leaves the 8px strip — which it does immediately on any real drag.
 function PaneResizer({ height, onChange, label }: { height: number; onChange: (h: number) => void; label: string }) {
@@ -963,6 +995,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const toggleFullscreen = () => onToggleFullscreen?.();
   const [rsiH, setRsiH] = useState(() => storedPaneH("chart.rsiH"));
   const [macdH, setMacdH] = useState(() => storedPaneH("chart.macdH"));
+  const [mainH, setMainH] = useState(MAIN_DEFAULT);
+  const mainHRef = useRef(MAIN_DEFAULT);   // read by the fit below without re-rendering to compare
   const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -985,6 +1019,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const macdHistRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const candlesRef = useRef<Candle[]>([]);
   const lastBarRef = useRef<CandlestickData | null>(null);
+  // TradingView-style SL/TP boxes (chartZones.ts), attached to the candle series once.
+  const zonesRef = useRef<TradeZonesPrimitive | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
   const armedLinesRef = useRef<IPriceLine[]>([]);
@@ -1052,6 +1088,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const candlesKeyRef = useRef("");  // which symbol|timeframe candlesRef currently holds
 
   const [legend, setLegend] = useState<Legend | null>(null);
+  // The charted instrument's decimals (from the loaded candles), so the OHLC readout prints prices
+  // the way the price axis does — and its close-minus-open change without float noise.
+  const [priceDec, setPriceDec] = useState<number | null>(null);
+  const legendRef = useRef<HTMLDivElement>(null);       // day labels keep clear of these two
+  const fsBtnRef = useRef<HTMLButtonElement>(null);
   const [showEma, setShowEma] = usePersisted<Record<number, boolean>>(
     "chart.showEma", { 10: true, 20: true, 50: true, 100: false, 200: true }, true);
   const [showRsi, setShowRsi] = usePersisted("chart.showRsi", true);
@@ -1068,7 +1109,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     "chart.overlays",
     // `days` defaults ON — knowing where one day ends and the next begins is orientation, not
     // analysis, and without it a 1h chart is an undifferentiated run of candles.
-    { pd: false, pw: false, open: false, sessions: false, vwap: false, rr: false, div: false, choch: false, days: true },
+    // `zones` (the SL/TP boxes) defaults ON for the same reason: "where is my stop, where is my
+    // target, and where is price between them" is the first thing you look at on a live trade.
+    { pd: false, pw: false, open: false, sessions: false, vwap: false, rr: false, div: false, choch: false, days: true, zones: true },
     true,
   );
   // Which toolbar menu is open (only one at a time — two dropdowns overlapping is worse than
@@ -1154,6 +1197,27 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     });
     volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
+    // The SL/TP boxes read the drag handles' lines directly, so a box follows its line while you
+    // drag it — and stays with the dropped price until the broker's new level comes back on the poll,
+    // exactly as the line does. A missing handle (e.g. a stop merged into the entry label at
+    // breakeven) falls back to the broker's level.
+    const zones = new TradeZonesPrimitive({
+      liveLevel: (key) => {
+        const h = handlesRef.current.find((x) => x.key === key);
+        return h ? Number(h.line.options().price) : null;
+      },
+      // The newest bar INCLUDING the provisional one the quote handler opens at a rollover, which
+      // isn't in barTimesRef until the broker's real bar is re-pulled.
+      liveBar: () => {
+        const ts = barTimesRef.current;
+        const lb = lastBarRef.current;
+        if (!ts.length || !lb) return null;
+        return { index: ts.length - 1 + ((lb.time as number) > ts[ts.length - 1] ? 1 : 0), close: lb.close };
+      },
+    });
+    series.attachPrimitive(zones);
+    zonesRef.current = zones;
+
     chartRef.current = chart;
     seriesRef.current = series;
     volumeRef.current = volume;
@@ -1208,6 +1272,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     });
 
     return () => {
+      series.detachPrimitive(zones);
+      zonesRef.current = null;
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
@@ -1218,6 +1284,40 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       emaLoRef.current = null;
     };
   }, []);
+
+  // Fit the price pane to the window (see MAIN_MIN above). Measured from the top of the DOCUMENT, not
+  // the viewport, so scrolling down to the analysis never resizes the chart under you. Re-measured
+  // on a window resize, and whenever the page or this block changes size: an alert strip in the
+  // header, the position strip appearing for a pair you hold, a toolbar wrapping, an indicator pane
+  // toggled or dragged (a taller RSI then takes its room from the price pane, so the total still
+  // fits). It converges in one pass: the pane's own height never moves its top or what is below it.
+  // Full screen sizes by flexbox instead and skips this.
+  useLayoutEffect(() => {
+    if (isFull) return;
+    const fit = () => {
+      const pane = containerRef.current;
+      const root = rootRef.current;
+      if (!pane || !root) return;
+      const r = pane.getBoundingClientRect();
+      const top = r.top + window.scrollY;
+      const below = root.getBoundingClientRect().bottom - r.bottom;   // key row + RSI + MACD
+      const h = Math.round(Math.min(MAIN_MAX, Math.max(MAIN_MIN, window.innerHeight - top - below - FIT_GAP)));
+      // Most page resizes (an analysis panel below growing) leave the answer unchanged — skip those
+      // without a render; the 1px slack absorbs sub-pixel rounding that could otherwise flip-flop.
+      if (Math.abs(mainHRef.current - h) <= 1) return;
+      mainHRef.current = h;
+      setMainH(h);
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(document.body);
+    if (rootRef.current) ro.observe(rootRef.current);
+    window.addEventListener("resize", fit);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", fit);
+    };
+  }, [isFull]);
 
   // Remember the pane heights. Both sub-charts are autoSize, so resizing the wrapper is all it
   // takes — no manual chart.resize() call, and no re-create on drag.
@@ -1235,7 +1335,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (!showRsi || !rsiContainerRef.current) return;
     const rsiChart = createChart(rsiContainerRef.current, {
       autoSize: true,
-      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: "#a3a3a3" },
+      // The TradingView attribution stays on the main chart (that satisfies the licence's link
+      // requirement); repeating the logo in every sub-pane only stacked three of them up the left.
+      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: "#a3a3a3", attributionLogo: false },
       grid: { vertLines: { color: "#1f1f1f" }, horzLines: { color: "#1f1f1f" } },
       timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#404040" },
       // Same minimumWidth as the main chart so both price axes match and the bars line up.
@@ -1284,7 +1386,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (!showMacd || !macdContainerRef.current) return;
     const macdChart = createChart(macdContainerRef.current, {
       autoSize: true,
-      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: "#a3a3a3" },
+      // Attribution logo on the main chart only (see the RSI pane).
+      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: "#a3a3a3", attributionLogo: false },
       grid: { vertLines: { color: "#1f1f1f" }, horzLines: { color: "#1f1f1f" } },
       timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#404040" },
       rightPriceScale: { borderColor: "#404040", minimumWidth: 72 },
@@ -1353,6 +1456,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         seriesRef.current.applyOptions({
           priceFormat: { type: "price", precision: dec, minMove: 10 ** -dec },
         });
+        setPriceDec(dec);
         volumeRef.current.setData(
           series.candles.map((c): HistogramData => ({
             time: toTime(c), value: c.volume,
@@ -1431,11 +1535,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   }, [showSt]);
 
   // `positions` is in here so the entry marker follows the trade: it appears the moment a position
-  // opens, its P&L text tracks the poll, and it disappears on close.
+  // opens, its P&L text tracks the poll, and it disappears on close. `ovl.zones` decides whether
+  // that marker carries text at all (the zone tag says it otherwise).
   useEffect(() => {
     applyMarkers(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showPb, showStructure, positions, symbol]);
+  }, [showPb, showStructure, positions, symbol, ovl.zones]);
 
   useEffect(() => {
     applyBand(candlesRef.current);
@@ -1613,6 +1718,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // Coloured with the entry line's blue rather than by profit: the arrow and the horizontal line
     // then read as one object ("here is your entry, in time AND in price") instead of competing with
     // the red/green of the candles around it. Live P&L is the header's job.
+    const nums = tradeNumbers(positions, symbol);
     for (const p of positions ?? []) {
       if (p.symbol.toUpperCase() !== symbol.toUpperCase() || !p.opened_at) continue;
       // Broker timestamps may arrive without a zone marker; they are UTC, and the candles are too.
@@ -1643,7 +1749,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         shape: isLong ? "arrowUp" : "arrowDown",
         // Short by design: price/risk/reward are already in the header and the line labels, so the
         // marker carries only what's unique to it — the bar you entered on, and how it's doing.
-        text: `ENTRY ${pnl >= 0 ? "+" : "−"}$${amount.replace("-", "")}`,
+        // With several trades on the pair, just the trade's number ("#2"): entry candles a few bars
+        // apart would otherwise print their "ENTRY −$42" texts over each other, and the number is
+        // what ties the arrow to that trade's zone tags (which carry the P&L anyway).
+        // With the trade zones on, a single trade's arrow carries no text at all: the zone's entry
+        // tag right beside it already says "▼ SHORT 0.24 · −$43.68", and "ENTRY −$44" printed over
+        // the candles was the same number a second time.
+        text: nums.get(p.id ?? p.symbol)
+          ?? (ovl.zones ? "" : `ENTRY ${pnl >= 0 ? "+" : "−"}$${amount.replace("-", "")}`),
       });
     }
     // lightweight-charts requires markers in ascending time order.
@@ -1973,11 +2086,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       const be =
         p.stop_loss != null && Math.abs(p.stop_loss - p.entry_price) <= Math.abs(p.entry_price) * 1e-4;
       // Show the $ you'd lose at SL / gain at TP right on the line label (like MT5's on-chart box).
-      const slUsd = usdAtLevel(p, p.stop_loss);
-      const tpUsd = usdAtLevel(p, p.take_profit);
+      // Not when the trade zones are on: each zone already prints "SL 1.12238 · −$78.00" next to
+      // its edge, so the axis label is cut to just "SL" / "TP" rather than say the dollars twice.
+      // "· drag" goes with it — the resize cursor on hover is the cue that the line can be dragged.
+      const zonesOn = !!ovl.zones;
+      const slUsd = zonesOn ? "" : usdAtLevel(p, p.stop_loss);
+      const tpUsd = zonesOn ? "" : usdAtLevel(p, p.take_profit);
+      const dragCue = zonesOn ? "" : " · drag";
       add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL ${slUsd}`.trim() : `${arrow} entry`);
-      const slLine = be ? null : add(p.stop_loss, "#ef5350", `SL ${slUsd} · drag`.trim());
-      const tpLine = add(p.take_profit, "#26a69a", `TP ${tpUsd} · drag`.trim());
+      const slLine = be ? null : add(p.stop_loss, "#ef5350", `SL ${slUsd}`.trim() + dragCue);
+      const tpLine = add(p.take_profit, "#26a69a", `TP ${tpUsd}`.trim() + dragCue);
       // Levels are validated against the CURRENT PRICE, not the entry.
       //
       // Against the entry, a long's stop could never be placed above it — so you could never
@@ -2003,7 +2121,80 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         });
       }
     }
-  }, [positions, symbol]);
+    // ovl.zones: the line titles are shortened while the zones carry the dollars (see above).
+  }, [positions, symbol, ovl.zones]);
+
+  // TradingView-style SL/TP boxes. One per open position on this symbol (from the candle it was
+  // opened on), else one for the proposed trade (from the last bar). Rebuilt on every positions poll
+  // and candle load; between those, the primitive reads live drag prices and the live close itself.
+  useEffect(() => {
+    const prim = zonesRef.current;
+    if (!prim) return;
+    const times = barTimesRef.current;
+    // Only once the loaded candles are THIS chart's. On a pair/timeframe switch the old series is
+    // still on screen until the new one lands, and the new pair's levels would be drawn against the
+    // old pair's price scale — a box in the wrong place is worse than no box for a moment.
+    if (!ovl.zones || candlesKeyRef.current !== `${symbol}|${timeframe}` || times.length < 2) {
+      prim.setZones([]);
+      return;
+    }
+    const n = times.length;
+    const barSec = (TF_MINUTES[timeframe] ?? 0) * 60 || Math.max(1, times[n - 1] - times[n - 2]);
+    // The candle the trade was opened INSIDE (same rule as the ENTRY marker), as a bar index. Before
+    // the loaded history → -1 (the box clamps to the left edge); after the last loaded bar (opened in
+    // the bar that is still forming) → counted forward in whole bars.
+    const startIndex = (opened: string | null): number | null => {
+      if (!opened) return null;
+      const iso = /[Zz]|[+-]\d{2}:?\d{2}$/.test(opened) ? opened : `${opened}Z`;
+      const at = utcToDisp(Date.parse(iso) / 1000);
+      if (!Number.isFinite(at)) return null;
+      if (at < times[0]) return -1;
+      if (at >= times[n - 1]) return n - 1 + Math.floor((at - times[n - 1]) / barSec);
+      let lo = 0;
+      let hi = n - 1;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (times[mid] <= at) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const sym = symbol.toUpperCase();
+    const list: TradeZone[] = [];
+    const nums = tradeNumbers(positions, symbol);
+    for (const p of positions ?? []) {
+      if (p.symbol.toUpperCase() !== sym || (p.direction !== "long" && p.direction !== "short")) continue;
+      // $ per unit of price from the live floating P&L — the same derivation as usdAtLevel(), so the
+      // box and the line labels can never disagree. Undefined while price sits exactly on entry.
+      const per = p.last_price != null && p.last_price !== p.entry_price
+        ? p.unrealized_pnl / (p.last_price - p.entry_price) : null;
+      const id = p.id ?? p.symbol;
+      list.push({
+        key: `pos-${id}`, kind: "position", direction: p.direction,
+        entry: p.entry_price, stop: p.stop_loss ?? null, target: p.take_profit ?? null,
+        stopKey: `pos-sl-${id}`, targetKey: `pos-tp-${id}`,   // the drag-handle keys registered above
+        startIndex: startIndex(p.opened_at),
+        usdPerPrice: per != null && Number.isFinite(per) ? per : null,
+        pnl: p.unrealized_pnl ?? null, qty: p.qty ?? null,
+        initialStop: p.initial_stop_loss ?? null,
+        tag: nums.get(id),
+      });
+    }
+    // The plan only when nothing is open here — same rule as the dashed proposal lines, so a box
+    // never appears without its lines. The symbol check also stops the PREVIOUS pair's proposal
+    // (still in hand until the new pair's one loads) from being drawn on this pair's scale.
+    if (!list.length && proposal && proposal.entry != null
+        && (proposal.direction === "long" || proposal.direction === "short")
+        && (!proposal.symbol || proposal.symbol.toUpperCase() === sym)) {
+      list.push({
+        key: "plan", kind: "plan", direction: proposal.direction,
+        entry: proposal.entry, stop: proposal.stop_loss ?? null, target: proposal.take_profit ?? null,
+        startIndex: null, usdPerPrice: null, pnl: null, qty: null,
+      });
+    }
+    prim.setZones(list);
+    // tzMode re-derives every bar time (via a candle reload, which bumps dataV).
+  }, [positions, proposal, symbol, timeframe, dataV, ovl.zones]);
 
   // Armed conditional ('wait for the break') overlay — large-dashed amber lines for THIS symbol's
   // armed setups, so the pending trigger/SL/TP are visible on the chart distinct from proposal
@@ -2307,10 +2498,22 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       }
       g.restore();
 
+      // The top strip belongs to the OHLC readout (top-left) and the Full-screen button (top-right),
+      // both HTML laid over this canvas. Labels printed there ran through the numbers ("Thu, Oct 8"
+      // across the low and the close) and under the button. So they sit on ONE row just beneath
+      // both: every label readable, all on the same line, none dropped for the overlay's sake.
+      const cr = cont.getBoundingClientRect();
+      let row = 11;
+      for (const el of [legendRef.current, fsBtnRef.current]) {
+        const r = el?.getBoundingClientRect();
+        if (r && r.height > 0) row = Math.max(row, Math.round(r.bottom - cr.top) + 12);
+      }
+
       // Labels by day size, biggest first, each claiming 64px of room.
       const claimed: number[] = [];
       g.fillStyle = "rgba(212,212,212,0.65)";
       for (const b of [...bounds].sort((a, c) => c.bars - a.bars)) {
+        if (row + 4 > plotH) break;
         if (claimed.some((x) => Math.abs(x - b.px) < 64)) continue;
         claimed.push(b.px);
         // Formatted in UTC so the label names the session day the line opens, not whatever local
@@ -2319,7 +2522,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           b.date.toLocaleDateString(undefined, {
             weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
           }),
-          b.px + 4, 11,
+          b.px + 4, row,
         );
       }
     }
@@ -2360,7 +2563,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // red one?" — and a target with another wall sitting inside it becomes obvious.
     if (ovl.rr) {
       const zones: { entry: number; stop: number | null; target: number | null }[] = [];
-      if (myPos) zones.push({ entry: myPos.entry_price, stop: myPos.stop_loss ?? null, target: myPos.take_profit ?? null });
+      // With "Trade zones" on, the position and the proposal already have their boxes (chartZones),
+      // so these full-width bands only cover what the boxes don't: armed setups. Shading the same
+      // trade twice would just make the stop and target zones look darker than they are.
+      if (ovl.zones) { /* positions / proposal: drawn by the zones primitive */ }
+      else if (myPos) zones.push({ entry: myPos.entry_price, stop: myPos.stop_loss ?? null, target: myPos.take_profit ?? null });
       else if (proposal && proposal.direction !== "no_trade" && proposal.entry != null) {
         zones.push({ entry: proposal.entry, stop: proposal.stop_loss ?? null, target: proposal.take_profit ?? null });
       }
@@ -2517,6 +2724,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           r?.from, r?.to,
           series.coordinateToPrice(0), series.coordinateToPrice(cont.clientHeight),
           cont.clientWidth, cont.clientHeight, dirtyRef.current,
+          // The day labels sit just below these two, so the readout appearing (once candles load)
+          // must re-place them.
+          legendRef.current?.offsetHeight, fsBtnRef.current?.offsetHeight,
         ].join("|");
         if (next !== sig) {
           sig = next;
@@ -2557,7 +2767,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     if (drawMode === "off") return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      // Not when a pop-up above the chart used this Esc to close itself (one layer per press).
+      if (e.key !== "Escape" || e.defaultPrevented) return;
       draftRef.current = null;
       dirtyRef.current += 1;
       setDrawMode("off");
@@ -2827,7 +3038,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
   };
 
-  const change = legend ? legend.close - legend.open : 0;
+  // Rounded to the instrument's decimals: a raw float difference prints as -0.0000800000000001.
+  const rawChange = legend ? legend.close - legend.open : 0;
+  const change = priceDec != null ? Number(rawChange.toFixed(priceDec)) : rawChange;
   const changePct = legend && legend.open ? (change / legend.open) * 100 : 0;
 
   const myPos = (positions ?? []).find((p) => p.symbol.toUpperCase() === symbol.toUpperCase());
@@ -2910,7 +3123,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
             ["vwap", "Session VWAP", "Volume-weighted average price, reset each trading day — the level institutions execute against, and the same one the rejection score uses for its location points."],
             ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
-            ["rr", "Risk / reward zones", "Shades entry→stop red and entry→target green for positions, proposals and armed setups."],
+            ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
+            ["rr", "Risk / reward bands", "Full-width bands entry→stop (red) and entry→target (green). With Trade zones on, only armed setups get these; otherwise positions and proposals too."],
             ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
             ["choch", "Change of character", "Marks where the swing sequence first contradicts the trend it was in."],
           ] as const).map(([k, lbl, tip]) => (
@@ -3574,13 +3788,13 @@ Click for the full breakdown. Info only — it gates nothing.`}
           numbers. A wrapping toolbar now just pushes the chart (and everything on it) down. */}
       <div className={`relative${isFull ? " min-h-0 flex-1" : ""}`}>
         {legend && (
-          <div className="pointer-events-none absolute left-2 top-2 z-10 flex gap-2 text-xs tabular-nums">
-            <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.open)}</span></span>
-            <span className="text-neutral-400">H<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.high)}</span></span>
-            <span className="text-neutral-400">L<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.low)}</span></span>
-            <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.close)}</span></span>
+          <div ref={legendRef} className="pointer-events-none absolute left-2 top-2 z-10 flex gap-2 text-xs tabular-nums">
+            <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.open, priceDec)}</span></span>
+            <span className="text-neutral-400">H<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.high, priceDec)}</span></span>
+            <span className="text-neutral-400">L<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.low, priceDec)}</span></span>
+            <span className="text-neutral-400">C<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.close, priceDec)}</span></span>
             <span className={change >= 0 ? "text-bull" : "text-bear"}>
-              {change >= 0 ? "+" : ""}{fmtPrice(change)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
+              {change >= 0 ? "+" : ""}{fmtPrice(change, priceDec)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
             </span>
           </div>
         )}
@@ -3778,6 +3992,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
         {/* Sits over the chart's top-right corner (clear of the ~72px price axis) rather than at
             the end of the toolbar, where it was one more chip competing for a row that wraps. */}
         <button
+          ref={fsBtnRef}
           onClick={toggleFullscreen}
           className="absolute right-[78px] top-1.5 z-20 rounded border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-xs text-neutral-300 shadow backdrop-blur-sm transition hover:border-sky-600 hover:bg-neutral-800 hover:text-white"
           title={isFull ? "Exit full screen (Esc)" : "Full screen — price, RSI and MACD together"}
@@ -3789,7 +4004,11 @@ Click for the full breakdown. Info only — it gates nothing.`}
             is transparent, so a canvas underneath shows through — tinting on top would recolour the
             candles themselves, which is the one thing that must stay true. */}
         <canvas ref={bgCanvasRef} className="pointer-events-none absolute inset-0 z-0" />
-        <div ref={containerRef} className={`relative z-[1] ${isFull ? "h-full w-full" : "h-[600px] w-full"}`} />
+        <div
+          ref={containerRef}
+          className={`relative z-[1] w-full ${isFull ? "h-full" : ""}`}
+          style={isFull ? undefined : { height: mainH }}
+        />
 
         {/* Key for the session bands. One small legend rather than a name written inside every
             block: on a 1h chart there are three sessions a day and several days on screen, so

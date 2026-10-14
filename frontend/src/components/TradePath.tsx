@@ -1,10 +1,23 @@
 import { fmtPrice } from "../format";
 import type { TradeProposal } from "../types";
 
+/** The trade you actually HOLD — its live levels, which a manual move or a trail can take far from the plan. */
+export interface LiveLevels {
+  direction: string;
+  entry: number;
+  stop: number | null;
+  target: number | null;
+  /** The stop it was opened with: R is measured against the risk taken at entry. null = unknown. */
+  entryStop?: number | null;
+}
+
 interface Props {
+  /** The read: its S/R levels and timeframe, and — when no trade is open — the plan's levels. */
   proposal: TradeProposal;
-  /** Live price when we have one (an open position's mark); falls back to the entry-TF last close. */
+  /** Live price when we have one (the position's mark or the live quote); else the entry-TF last close. */
   livePrice?: number | null;
+  /** When a trade is open on this pair, the path is drawn for IT rather than for the plan. */
+  position?: LiveLevels | null;
 }
 
 interface Level {
@@ -54,8 +67,12 @@ function dedupe(levels: Level[], atr: number): Level[] {
  *   3. What is the reward:risk FROM HERE? Once price has moved, the planned R:R is history. A long
  *      that has already run has a worse deal left than the one you approved, and this says so.
  */
-export function TradePath({ proposal, livePrice }: Props) {
-  const { entry, stop_loss: stop, take_profit: target, direction } = proposal;
+export function TradePath({ proposal, livePrice, position }: Props) {
+  const live = position != null;
+  const entry = live ? position.entry : proposal.entry;
+  const stop = live ? position.stop : proposal.stop_loss;
+  const target = live ? position.target : proposal.take_profit;
+  const direction = live ? position.direction : proposal.direction;
   if (entry == null || stop == null || target == null) return null;
   if (direction !== "long" && direction !== "short") return null;
 
@@ -68,6 +85,12 @@ export function TradePath({ proposal, livePrice }: Props) {
   const isLong = direction === "long";
   const risk = Math.abs(entry - stop);
   if (risk <= 0) return null;
+  // R for a live trade is the risk taken at ENTRY (the stop it opened with), like everywhere else on
+  // the desk; a widened stop must not make a dip "cost" fewer R.
+  const entryRisk =
+    live && position.entryStop != null && Math.abs(entry - position.entryStop) > 0
+      ? Math.abs(entry - position.entryStop)
+      : risk;
 
   // Distances FROM HERE (not from the planned entry) — the numbers that are still actionable.
   const toTarget = isLong ? target - now : now - target;
@@ -110,6 +133,11 @@ export function TradePath({ proposal, livePrice }: Props) {
       <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
           Path to target
+          {live && (
+            <span className="ml-1.5 font-normal normal-case tracking-normal text-neutral-500">
+              · your live stop and target
+            </span>
+          )}
         </span>
         <span className="text-xs text-neutral-500">
           {barsToTarget != null && !reached && (
@@ -172,9 +200,13 @@ export function TradePath({ proposal, livePrice }: Props) {
           value={rrHere != null && rrHere > 0 ? `${rrHere.toFixed(2)} : 1` : "—"}
           sub={
             rrHere != null && rrHere > 0
-              ? rrHere >= rrPlan
-                ? `better than the ${rrPlan.toFixed(2)} you planned`
-                : `was ${rrPlan.toFixed(2)} at entry`
+              ? live
+                // Live levels: "planned" would be wrong once the stop or target has moved — this is
+                // simply the same stop and target measured from the entry price.
+                ? `${rrPlan.toFixed(2)} from your entry`
+                : rrHere >= rrPlan
+                  ? `better than the ${rrPlan.toFixed(2)} you planned`
+                  : `was ${rrPlan.toFixed(2)} at entry`
               : undefined
           }
           tone={rrHere != null && rrHere >= 1.5 ? "text-bull" : rrHere != null && rrHere < 1 ? "text-bear" : ""}
@@ -233,7 +265,7 @@ export function TradePath({ proposal, livePrice }: Props) {
                 <div className="mt-1 text-neutral-500">
                   A dip to here is{" "}
                   <span className="text-neutral-300">
-                    {(Math.abs(now - floor.price) / risk).toFixed(2)}R
+                    {(Math.abs(now - floor.price) / entryRisk).toFixed(2)}R
                   </span>{" "}
                   and still {isLong ? "above" : "below"} your stop — normal, not a failure.
                 </div>

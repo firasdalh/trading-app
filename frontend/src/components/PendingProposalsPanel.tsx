@@ -10,6 +10,14 @@ import type { ProposalView } from "../types";
 interface Props {
   onSelect?: (p: { symbol: string; asset_class: string }) => void; // open on the chart
   onChanged?: () => void; // refresh positions after approve/reject
+  /**
+   * Inside the desk sidebar's WAITING FOR YOU section: no title row of its own (the section header
+   * already names it and counts it), and nothing at all when the list is empty — the section says
+   * "nothing" once. Still mounted and polling while empty, because it plays the chime.
+   */
+  embedded?: boolean;
+  /** Chime on/off when the host owns the switch (the sidebar puts it in its section header). */
+  sound?: boolean;
 }
 
 const DIR: Record<string, { label: string; cls: string }> = {
@@ -26,7 +34,7 @@ function ago(iso: string): string {
 
 // Proposals that passed the Risk Manager and are waiting for your approval (Mode A). Approve to
 // open, or reject to discard. Stale ones auto-expire, so this list stays clean.
-export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
+export function PendingProposalsPanel({ onSelect, onChanged, embedded = false, sound: soundProp }: Props) {
   const [bump, setBump] = useState(0);
   const { data } = usePolling(
     () => api.proposals({ status: "pending_approval", limit: 50 }),
@@ -66,47 +74,52 @@ export function PendingProposalsPanel({ onSelect, onChanged }: Props) {
 
   // Sound alert when a NEW approval lands. This panel polls in the background while you are
   // looking at a chart, so a proposal can appear with nothing on screen to draw the eye.
-  const [sound, setSound] = useLocalStorage("pending.sound", true);
+  const [ownSound, setSound] = useLocalStorage("pending.sound", true);
+  const sound = soundProp ?? ownSound;
   const ids = useMemo(() => (data ? data.map((p) => p.id) : undefined), [data]);
   useApprovalChime(ids, sound);
 
+  if (embedded && items.length === 0 && !error) return null;
+
   return (
     <div className="card">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <button
-          onClick={() => setOpen((o) => !o)}
-          className="flex items-center gap-1 text-sm font-semibold hover:text-neutral-300"
-          title={open ? "Collapse" : "Expand"}
-        >
-          <span className="text-xs text-neutral-500">{open ? "▾" : "▸"}</span>
-          Pending approval
-        </button>
-        <span
-          className={`rounded px-1.5 py-0.5 text-xs font-medium ${
-            items.length ? "bg-warn/20 text-warn" : "bg-neutral-800 text-neutral-400"
-          }`}
-        >
-          {items.length}
-        </span>
-        <span className="text-xs text-neutral-500">risk-approved setups waiting for you to approve</span>
-        <button
-          onClick={() => setSound((v) => !v)}
-          className={`ml-auto rounded px-1.5 py-0.5 text-xs ${
-            sound ? "text-amber-300 hover:bg-neutral-800" : "text-neutral-600 hover:text-neutral-400"
-          }`}
-          title={sound
-            ? "Sound is ON — a chime plays when a new approval arrives. Click to mute."
-            : "Sound is OFF — new approvals arrive silently. Click to unmute."}
-        >
-          {sound ? "🔔" : "🔕"}
-        </button>
-      </div>
+      {!embedded && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="flex items-center gap-1 text-sm font-semibold hover:text-neutral-300"
+            title={open ? "Collapse" : "Expand"}
+          >
+            <span className="text-xs text-neutral-500">{open ? "▾" : "▸"}</span>
+            Pending approval
+          </button>
+          <span
+            className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+              items.length ? "bg-warn/20 text-warn" : "bg-neutral-800 text-neutral-400"
+            }`}
+          >
+            {items.length}
+          </span>
+          <span className="text-xs text-neutral-500">risk-approved setups waiting for you to approve</span>
+          <button
+            onClick={() => setSound((v) => !v)}
+            className={`ml-auto rounded px-1.5 py-0.5 text-xs ${
+              sound ? "text-amber-300 hover:bg-neutral-800" : "text-neutral-600 hover:text-neutral-400"
+            }`}
+            title={sound
+              ? "Sound is ON — a chime plays when a new approval arrives. Click to mute."
+              : "Sound is OFF — new approvals arrive silently. Click to unmute."}
+          >
+            {sound ? "🔔" : "🔕"}
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="mb-2 rounded border border-bear/40 bg-bear/10 px-2 py-1 text-xs text-bear">{error}</div>
       )}
 
-      {!open ? null : items.length === 0 ? (
+      {!open && !embedded ? null : items.length === 0 ? (
         <div className="text-sm text-neutral-500">No proposals awaiting approval.</div>
       ) : (
         <div className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">

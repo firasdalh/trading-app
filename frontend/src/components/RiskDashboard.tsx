@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import { fmtUsd } from "../format";
 import type { AccountState, RiskState, SettingsResponse } from "../types";
 
 interface Props {
@@ -12,6 +13,10 @@ interface Props {
 
 // Daily P&L vs the daily-loss limit, current exposure, and open-position count, with
 // visual warnings as limits approach.
+//
+// No title of its own: it lives in the Risk drawer, whose header already says "Risk" — a second
+// "Risk Dashboard" heading right under it was the same word twice. The row only appears to carry
+// the "Trading paused" badge and its Resume button.
 export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
   const equity = account?.equity ?? risk?.starting_equity ?? null;
   const limits = settings?.risk;
@@ -70,23 +75,25 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
     }
   }
 
+  // Real fractions, NOT clamped to 1: only the meter's bar is capped at full width. Clamping the
+  // number made this read "100%" while the header said 120% for the same book — and the part over
+  // the limit is exactly what this panel exists to show.
   const dailyLoss = risk ? -Math.min(0, risk.realized_pnl) : 0;
   const dailyLimit = risk?.daily_loss_limit_amount ?? null;
-  const dailyPct = dailyLimit ? Math.min(1, dailyLoss / dailyLimit) : 0;
+  const dailyPct = dailyLimit ? dailyLoss / dailyLimit : 0;
 
   const exposure = risk?.total_risk_amount ?? account?.total_risk_amount ?? 0;
   const exposureLimit = equity && limits ? equity * limits.max_total_exposure : null;
-  const exposurePct = exposureLimit ? Math.min(1, exposure / exposureLimit) : 0;
+  const exposurePct = exposureLimit ? exposure / exposureLimit : 0;
 
   const posCount = account?.open_positions ?? 0;
   const posLimit = limits?.max_open_positions ?? 0;
-  const posPct = posLimit ? Math.min(1, posCount / posLimit) : 0;
+  const posPct = posLimit ? posCount / posLimit : 0;
 
   return (
     <div className="card space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="card-title">Risk Dashboard</div>
-        {risk?.trading_paused && (
+      {risk?.trading_paused && (
+        <div className="flex items-center justify-end">
           <div className="flex items-center gap-2">
             <span className="rounded-md bg-bear px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-white">
               Trading paused
@@ -101,8 +108,8 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
               Resume
             </button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {risk?.entry_breaker && (
         <div
@@ -116,17 +123,17 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
       <div className="grid grid-cols-3 gap-3 text-sm">
         <KV
           label="Equity"
-          value={equity != null ? `$${equity.toLocaleString()}` : "—"}
+          value={equity != null ? fmtUsd(equity) : "—"}
           title="Live account equity (balance + floating P&L). The daily-loss limit is measured against the day's starting equity."
         />
         <KV
           label="Realized (today)"
-          value={risk ? `${risk.realized_pnl >= 0 ? "+" : ""}$${risk.realized_pnl.toFixed(2)}` : "—"}
+          value={risk ? fmtUsd(risk.realized_pnl, { sign: true }) : "—"}
           valueClass={risk && risk.realized_pnl < 0 ? "text-bear" : "text-bull"}
         />
         <KV
           label="Open P&L"
-          value={risk ? `${risk.unrealized_pnl >= 0 ? "+" : ""}$${risk.unrealized_pnl.toFixed(2)}` : "—"}
+          value={risk ? fmtUsd(risk.unrealized_pnl, { sign: true }) : "—"}
           valueClass={risk && risk.unrealized_pnl < 0 ? "text-bear" : "text-bull"}
         />
       </div>
@@ -134,7 +141,7 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
       <div>
         <div className="mb-1 flex items-center justify-between">
           <span className="text-xs text-neutral-400">
-            Daily loss vs limit{dailyLimit ? ` ($${dailyLimit.toFixed(0)})` : ""}
+            Daily loss vs limit{dailyLimit ? ` (${fmtUsd(dailyLimit)})` : ""}
           </span>
           <BreakerToggle on={breakerOn} busy={busy} onChange={toggleBreaker} />
         </div>
@@ -152,8 +159,9 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
         )}
       </div>
       <Meter
-        label={`Exposure vs limit${exposureLimit ? ` ($${exposureLimit.toFixed(0)})` : ""}`}
+        label={`Exposure vs limit${exposureLimit ? ` · ${fmtUsd(exposure)} of ${fmtUsd(exposureLimit)}` : ""}`}
         pct={exposurePct}
+        title="Risk-at-stop across open positions vs the exposure budget (equity × max exposure). Over 100%, no new trade can open until risk comes off."
       />
       <Meter label={`Open positions ${posCount}/${posLimit}`} pct={posPct} />
 
@@ -436,20 +444,26 @@ function NumField({
   );
 }
 
-function Meter({ label, pct }: { label?: string; pct: number }) {
+// `pct` is the real fraction (1.2 = 120%). The bar caps at full width; the number does not, and
+// past 100% it says so in red.
+function Meter({ label, pct, title }: { label?: string; pct: number; title?: string }) {
   const color = pct >= 0.9 ? "bg-bear" : pct >= 0.6 ? "bg-warn" : "bg-bull";
+  const shown = Math.round(pct * 100);
+  const over = shown > 100;   // judged on the printed number, so "100%" is never labelled over
   return (
-    <div>
+    <div title={title}>
       {label && (
-        <div className="mb-1 flex justify-between text-xs">
+        <div className="mb-1 flex justify-between gap-2 text-xs">
           <span className="text-neutral-400">{label}</span>
-          <span className="tabular-nums text-neutral-300">{Math.round(pct * 100)}%</span>
+          <span className={`whitespace-nowrap tabular-nums ${over ? "font-semibold text-bear" : "text-neutral-300"}`}>
+            {shown}%{over && " · over limit"}
+          </span>
         </div>
       )}
       <div className="h-1.5 overflow-hidden rounded-full bg-neutral-800">
         <div
           className={`h-full rounded-full ${color} transition-all duration-500`}
-          style={{ width: `${Math.round(pct * 100)}%` }}
+          style={{ width: `${Math.round(Math.min(1, Math.max(0, pct)) * 100)}%` }}
         />
       </div>
     </div>

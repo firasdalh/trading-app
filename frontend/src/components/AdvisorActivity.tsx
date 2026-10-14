@@ -13,13 +13,16 @@ interface Props {
 // browser notifications for newly-executed actions.
 export function AdvisorActivity({ refreshSignal }: Props) {
   const [items, setItems] = useState<AdvisorActivityItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     const fetchActivity = async () => {
-      const acts = await api.advisorActivity().catch(() => [] as AdvisorActivityItem[]);
-      if (cancelled) return;
+      // A failed read keeps what is on screen (and is not "no actions") until the next poll.
+      const acts = await api.advisorActivity().catch(() => null);
+      if (cancelled || acts == null) return;
       setItems(acts);
+      setLoaded(true);
       notifyNew(acts);
     };
     void fetchActivity();
@@ -30,7 +33,21 @@ export function AdvisorActivity({ refreshSignal }: Props) {
     };
   }, [refreshSignal]);
 
-  if (items.length === 0) return null;
+  // Before the first answer, nothing — an empty-state flash would read as "it has done nothing".
+  if (!loaded) return null;
+
+  // Empty still says so: the drawer's subtitle promises "what the advisor has done", and a section
+  // that silently isn't there reads as broken, not as "nothing happened".
+  if (items.length === 0) {
+    return (
+      <div className="card">
+        <div className="mb-1 text-sm font-semibold">Recent actions</div>
+        <div className="text-xs text-neutral-500">
+          No advisor actions in its recent checks — nothing closed, trailed or banked.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="card">

@@ -21,8 +21,9 @@ function resultRow(r: AutoTradeResult) {
 }
 
 /**
- * Per-pair AI auto-trader. Toggle it ON for the charted pair and, every ~15 min, the AI analyses it
- * and auto-opens a >=60% setup following the scenario's levels; the monitor rides it to TP/SL and it
+ * Per-pair auto-trader. Toggle it ON for the charted pair and, every ~15 min, the selected strategy
+ * (AI scenario, or the mechanical SuperTrend / level-bounce engines) checks it and auto-opens a
+ * setup at market; the monitor rides it to TP/SL and it
  * re-enters after a short cooldown. PAPER-ONLY; every risk gate (3% cap, exposure, daily-loss,
  * kill-switch) still applies. Off by default.
  */
@@ -63,16 +64,28 @@ export function AutoTradePanel({
 
   const on = !!cfg?.pairs?.some((p) => p.symbol.toUpperCase() === symbol.toUpperCase());
   const enabledPairs = cfg?.pairs ?? [];
+  const strategy = cfg?.strategy ?? "scenario";
+  const superTrend = strategy === "supertrend";
+  const reversal = strategy === "reversal";
+  // Named from the strategy actually selected. The header used to say "AI" whatever ran — wrong,
+  // and misleading, while a mechanical engine (SuperTrend, level bounce: no LLM, no tokens) trades.
+  const stratName = reversal ? "level bounce" : superTrend ? "SuperTrend" : "AI scenario";
+  const minConfPct = ((cfg?.min_confidence ?? 0.6) * 100).toFixed(0);
+  const opensWhat = reversal
+    ? "scalp a level rejection (mechanical, no AI)"
+    : superTrend
+      ? "open a fresh SuperTrend + EMA20-band breakout (mechanical, no AI)"
+      : `follow the AI read and open a setup at ${minConfPct}%+ confidence`;
 
   const toggle = async () => {
     setBusy(true);
     try {
       if (!on) {
         const ok = window.confirm(
-          `Auto-trade ${symbol}?\n\nEvery ~${Math.round((cfg?.interval_seconds ?? 900) / 60)} min the AI ` +
-            `will analyse ${symbol} and AUTO-OPEN a setup at ${((cfg?.min_confidence ?? 0.6) * 100).toFixed(0)}%+ ` +
-            `confidence (paper), riding it to target/stop and re-entering after a ` +
-            `${cfg?.cooldown_minutes ?? 5}-min cooldown.\n\nEvery risk gate + the kill-switch still apply. Proceed?`,
+          `Auto-trade ${symbol} (${stratName})?\n\nEvery ~${Math.round((cfg?.interval_seconds ?? 900) / 60)} min it ` +
+            `will check ${symbol} and AUTO-OPEN (paper) when it can ${opensWhat}, riding it to ` +
+            `target/stop and re-entering after a ${cfg?.cooldown_minutes ?? 5}-min cooldown.\n\n` +
+            `Every risk gate + the kill-switch still apply. Proceed?`,
         );
         if (!ok) {
           setBusy(false);
@@ -107,9 +120,6 @@ export function AutoTradePanel({
   };
 
   const [open, setOpen] = useLocalStorage("autotrade.open", false);
-  const strategy = cfg?.strategy ?? "scenario";
-  const superTrend = strategy === "supertrend";
-  const reversal = strategy === "reversal";
 
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-3">
@@ -133,7 +143,12 @@ export function AutoTradePanel({
             {enabledPairs.length} pair{enabledPairs.length === 1 ? "" : "s"} active
           </span>
         )}
-        <span className="ml-auto text-[10px] text-neutral-500">paper · AI · risk-gated</span>
+        <span
+          className="ml-auto whitespace-nowrap text-[10px] text-neutral-500"
+          title={`Strategy: ${stratName} — applies to every auto-traded pair`}
+        >
+          paper · {stratName} · risk-gated
+        </span>
       </button>
 
       {!open ? null : (<>
@@ -143,7 +158,7 @@ export function AutoTradePanel({
         className={`w-full rounded py-2 text-sm font-semibold disabled:opacity-50 ${
           on ? "bg-bull text-white hover:bg-green-700" : "bg-neutral-800 text-neutral-200 hover:bg-neutral-700"
         }`}
-        title="Let the AI auto-open/close trades on this pair, following the scenario levels"
+        title={`Auto-open/close trades on this pair: ${opensWhat}`}
       >
         {on ? `● Auto-trading ${symbol} — ON (tap to stop)` : `Auto-trade ${symbol} — OFF`}
       </button>

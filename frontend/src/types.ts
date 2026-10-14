@@ -264,6 +264,9 @@ export interface PositionView {
   opened_at: string | null;   // when it was opened — used to mark the entry CANDLE on the chart
   cost_usd: number | null;
   closed_at: string | null;
+  // The stop the trade was OPENED with (from the app's own order/proposal records; null for trades
+  // opened in the terminal). R is measured against this, so widening a stop can't shrink a loss in R.
+  initial_stop_loss?: number | null;
 }
 
 export interface PositionAdvice {

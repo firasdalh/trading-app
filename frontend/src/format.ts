@@ -2,9 +2,19 @@
 
 // Strip IEEE-754 representation noise (e.g. 51664.00000000001) without hard-coding decimals —
 // keeps the right precision for JPY (3dp), indices (1dp), 5-digit FX, and sub-cent crypto.
-export function fmtPrice(v: number | null | undefined): string {
+//
+// `digits` (optional) pins the output to the instrument's own decimals instead, exactly like the
+// chart's price axis: a DIFFERENCE of two prices (close - open = -0.0000800000000001) or a computed
+// level (a stop at 4171.370022) carries noise toPrecision(12) can't strip, and only the symbol's
+// precision says where the real digits end. Fixed width, so a column of them lines up. A value that
+// rounds to zero prints unsigned ("0.00000", never "-0.00000").
+export function fmtPrice(v: number | null | undefined, digits?: number | null): string {
   if (v == null) return "—";
   if (!Number.isFinite(v)) return String(v);
+  if (digits != null && Number.isInteger(digits) && digits >= 0 && digits <= 10) {
+    const s = v.toFixed(digits);
+    return Number(s) === 0 ? (0).toFixed(digits) : s;
+  }
   return Number(v.toPrecision(12)).toString();
 }
 

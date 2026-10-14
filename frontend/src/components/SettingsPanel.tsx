@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { api } from "../api/client";
 import { assetLabel } from "../format";
 import type { AssetClass, ExecutionMode, LlmStatus, Mt5Status, SettingsResponse } from "../types";
@@ -40,6 +40,24 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
     }
   }, [settings]);
 
+  // Esc closes THIS modal, and only this modal. Settings opens from the header, so it can sit on top
+  // of an open drawer (Scanner / Risk / Advisor) — and one Esc used to close both, dropping you out
+  // of the drawer you were in. The key is taken in the CAPTURE phase, which runs before the drawer's
+  // own listener, and marked handled (preventDefault); the drawer ignores an Esc that is already
+  // used, so it closes on the NEXT press — one layer per press, topmost first.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      closeRef.current();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+  const titleId = useId();
+
   const currentMode = settings?.app.execution_mode;
   const isLive = settings?.app.broker_env === "live";
   const reconfirm = settings?.live_re_confirm_required;
@@ -77,10 +95,13 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
 
   return (
     <div className="fixed inset-0 z-30 flex items-start justify-center bg-black/60 p-4">
-      <div className="card mt-12 flex max-h-[88vh] w-full max-w-lg flex-col">
+      {/* Opaque, not the translucent .card surface: over a live chart the candles, markers and
+          level labels showed through and collided with the toggles. max-w-2xl because the content
+          is long (~1700px) — a 512px column made it a long scroll of short lines. */}
+      <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="card mt-12 flex max-h-[88vh] w-full max-w-2xl flex-col border-neutral-700/80 bg-neutral-950 shadow-pop">
         <div className="flex shrink-0 items-center justify-between">
-          <h2 className="text-lg font-semibold">Settings</h2>
-          <button onClick={onClose} className="text-neutral-400 hover:text-white">
+          <h2 id={titleId} className="text-lg font-semibold">Settings</h2>
+          <button onClick={onClose} className="text-neutral-400 hover:text-white" aria-label="Close settings" title="Close (Esc)">
             ✕
           </button>
         </div>

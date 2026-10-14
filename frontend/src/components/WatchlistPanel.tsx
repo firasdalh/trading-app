@@ -15,6 +15,10 @@ interface Props {
 export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, onSelect }: Props) {
   const [data, setData] = useState<WatchlistResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  // Removing a pair takes it out of the Hybrid scan with no confirmation, so the × only shows in
+  // edit mode. On every chip it sat right beside the name you click to chart the pair — one slip
+  // and a pair silently stopped being scanned.
+  const [editing, setEditing] = useState(false);
   // symbol (uppercase) -> instrument name, for hover tooltips. Fetched once per asset class.
   const [descs, setDescs] = useState<Record<string, string>>({});
   const fetchedAc = useRef<Set<string>>(new Set());
@@ -69,13 +73,25 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
             validated core — add your own pairs anytime.
           </div>
         </div>
-        <button
-          disabled={busy}
-          onClick={() => wrap(() => api.addWatch(currentSymbol, currentAsset, currentTimeframe))}
-          className="btn bg-neutral-700 text-white hover:bg-neutral-600"
-        >
-          + Add {currentSymbol} ({currentTimeframe})
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            disabled={busy}
+            onClick={() => wrap(() => api.addWatch(currentSymbol, currentAsset, currentTimeframe))}
+            className="btn bg-neutral-700 text-white hover:bg-neutral-600"
+          >
+            + Add {currentSymbol} ({currentTimeframe})
+          </button>
+          {!!data?.items.length && (
+            <button
+              onClick={() => setEditing((e) => !e)}
+              aria-pressed={editing}
+              className={`btn px-2.5 ${editing ? "bg-brand-600 text-white hover:bg-brand-500" : "btn-subtle"}`}
+              title={editing ? "Done removing pairs" : "Remove pairs from the watchlist (and from the Hybrid scan)"}
+            >
+              {editing ? "Done" : "Edit"}
+            </button>
+          )}
+        </div>
       </div>
 
       {!data || data.items.length === 0 ? (
@@ -121,14 +137,17 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
                   <span className={`text-xs ${active ? "text-blue-100" : "text-neutral-500"}`}>
                     {it.timeframe}
                   </span>
-                  <button
-                    disabled={busy}
-                    onClick={() => wrap(() => api.removeWatch(it.id))}
-                    className={`hover:text-bear ${active ? "text-blue-200" : "text-neutral-500"}`}
-                    title="Remove from watchlist"
-                  >
-                    ✕
-                  </button>
+                  {editing && (
+                    <button
+                      disabled={busy}
+                      onClick={() => wrap(() => api.removeWatch(it.id))}
+                      className={`hover:text-bear ${active ? "text-blue-200" : "text-neutral-400"}`}
+                      title={`Remove ${displaySymbol(it.symbol)} ${it.timeframe} from the watchlist — the Hybrid stops scanning it`}
+                      aria-label={`Remove ${displaySymbol(it.symbol)} ${it.timeframe} from the watchlist`}
+                    >
+                      ✕
+                    </button>
+                  )}
                 </span>
               );
             })}

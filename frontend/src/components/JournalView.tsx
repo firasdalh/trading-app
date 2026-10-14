@@ -23,6 +23,18 @@ function fmtDate(iso: string | null | undefined): string {
   });
 }
 
+// "5m ago" / "3h ago" / "4d ago" — how old the stored reflection snapshot is.
+function sinceText(iso: string): string {
+  const safe = /[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const mins = Math.max(0, Math.round((Date.now() - Date.parse(safe)) / 60000));
+  if (!Number.isFinite(mins)) return "";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  return hrs < 48 ? `${hrs}h ago` : `${Math.round(hrs / 24)}d ago`;
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 // Journal: closed-trade log + the read-only Reflection agent's patterns and lessons.
 export function JournalView() {
   const [bump, setBump] = useState(0);
@@ -101,22 +113,35 @@ export function JournalView() {
   };
 
   return (
-    <div className="mx-auto max-w-7xl space-y-4 p-4">
+    // Full width with the desk's own gutter (p-3 / gap-3): a centred max-w-7xl column made the
+    // Journal look like a different app from the edge-to-edge desk you switch from.
+    <div className="space-y-3 p-3">
       <div className="card space-y-3">
         <div className="flex items-center justify-between gap-2">
           <button
             onClick={() => setOpen((v) => !v)}
-            className="flex items-center gap-2 text-sm font-semibold hover:text-white"
+            className="flex items-center gap-2 text-left text-sm font-semibold hover:text-white"
             title={open ? "Collapse the report" : "Expand the report"}
           >
             <span className="text-neutral-500">{open ? "▾" : "▸"}</span>
             Reflection / Journal agent
+            {/* The scope goes first. These are a SNAPSHOT from the last reflection run, over its own
+                window and judged in dollars, so they will not match the live Performance (R) card
+                below — without the scope that read as two contradicting win rates. */}
             {!open && reflection && (
-              <span className="ml-1 text-xs font-normal text-neutral-500">
-                · win {(reflection.win_rate * 100).toFixed(0)}% · PF{" "}
+              <span
+                className="ml-1 text-xs font-normal text-neutral-500"
+                title={
+                  "Snapshot from the last reflection run: the most recent closed trades with a booked $ " +
+                  "result, judged in dollars. Performance (R) below is live and measured in R, so its win " +
+                  "rate and profit factor can differ."
+                }
+              >
+                · last {plural(reflection.trades_reviewed, "trade")} · {sinceText(reflection.generated_at)}
+                {" "}· win {(reflection.win_rate * 100).toFixed(0)}% · PF{" "}
                 {reflection.profit_factor == null ? "—" : reflection.profit_factor.toFixed(2)} · net{" "}
                 <span className={reflection.net_pnl >= 0 ? "text-bull" : "text-bear"}>
-                  {reflection.net_pnl >= 0 ? "+" : ""}{reflection.net_pnl.toFixed(0)}
+                  {fmtUsd(reflection.net_pnl, { sign: true })}
                 </span>
               </span>
             )}
@@ -134,6 +159,7 @@ export function JournalView() {
           can never place or modify a trade.
         </p>
 
+        {/* Full width now, so the prose keeps a reading measure (the tiles above still span). */}
         {reflection ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -141,16 +167,16 @@ export function JournalView() {
               <Tile label="Win rate" value={`${(reflection.win_rate * 100).toFixed(0)}%`} />
               <Tile
                 label="Net P&L"
-                value={`${reflection.net_pnl >= 0 ? "+" : ""}${reflection.net_pnl.toFixed(0)}`}
+                value={fmtUsd(reflection.net_pnl, { sign: true })}
                 valueClass={reflection.net_pnl >= 0 ? "text-bull" : "text-bear"}
               />
               <Tile label="Profit factor" value={reflection.profit_factor == null ? "—" : reflection.profit_factor.toFixed(2)} />
             </div>
-            <p className="text-sm text-neutral-300">{reflection.summary}</p>
+            <p className="prose-measure text-sm text-neutral-300">{reflection.summary}</p>
             {reflection.patterns.length > 0 && (
               <div>
                 <div className="text-xs font-semibold text-neutral-400">Patterns</div>
-                <ul className="ml-4 list-disc text-sm text-neutral-300">
+                <ul className="prose-measure ml-4 list-disc text-sm text-neutral-300">
                   {reflection.patterns.map((p, i) => <li key={i}>{p}</li>)}
                 </ul>
               </div>
@@ -158,7 +184,7 @@ export function JournalView() {
             {reflection.lessons.length > 0 && (
               <div>
                 <div className="text-xs font-semibold text-neutral-400">Lessons</div>
-                <ul className="ml-4 list-disc text-sm text-warn">
+                <ul className="prose-measure ml-4 list-disc text-sm text-warn">
                   {reflection.lessons.map((l, i) => <li key={i}>{l}</li>)}
                 </ul>
               </div>
@@ -323,7 +349,7 @@ function BreakdownCard({ breakdown }: { breakdown: JournalBreakdown | null }) {
                 <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-sm">
                   <span className="font-semibold">{b.period}</span>
                   <span className="flex items-center gap-3 text-xs">
-                    <span className="text-neutral-400">{b.total.trades} trades · {pctText(b.total.win_rate)} win</span>
+                    <span className="text-neutral-400">{plural(b.total.trades, "trade")} · {pctText(b.total.win_rate)} win</span>
                     <span className={b.total.net_pnl >= 0 ? "text-bull" : "text-bear"}>{fmtUsd(b.total.net_pnl, { sign: true })}</span>
                     <span className={(b.total.total_r ?? 0) >= 0 ? "text-bull" : "text-bear"}>{rText(b.total.total_r)}</span>
                   </span>

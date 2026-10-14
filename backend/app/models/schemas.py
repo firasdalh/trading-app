@@ -339,6 +339,12 @@ class PositionView(BaseModel):
     entry_price: float
     stop_loss: float | None = None
     take_profit: float | None = None
+    # The stop the trade was OPENED with — from the app's own order record, filled in by
+    # GET /api/positions/live. "R" is measured against it everywhere, so it means one thing: the risk
+    # taken at entry. The live `stop_loss` moves (a manual widen, an advisor trail), and measuring R
+    # against it made a widened stop shrink the loss shown in R. None when the app has no record of
+    # the trade (opened directly in the terminal) — the UI then falls back to the current stop.
+    initial_stop_loss: float | None = None
     status: str
     last_price: float | None = None
     unrealized_pnl: float = 0.0

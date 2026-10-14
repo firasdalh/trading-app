@@ -9,6 +9,7 @@ import { AiDecisionCard } from "./AiDecisionCard";
 import { TradePath } from "./TradePath";
 import { MacroPanel } from "./MacroPanel";
 import { ChartStateCard } from "./ChartStateCard";
+import { entryStopOf } from "./LiveBook";
 import { ReviewExplanation } from "./ReviewExplanation";
 import { ScenarioCard } from "./ScenarioCard";
 import type {
@@ -57,6 +58,14 @@ interface Props {
   // against the trade you're actually in ("does the engine still agree with me?").
   openPosition?: PositionView | null;
   armedSetup?: ConditionalSetupView | null;   // an armed 'wait for the break' setup for this symbol
+  // The live price of the charted pair (the quote stream), for "Path to target" when no trade is
+  // open — without it the path measured from the read's own last close, i.e. as if nothing had moved.
+  livePrice?: number | null;
+  // 3+ bars of its timeframe have closed since this read ran (the chart already hides its plan).
+  // With no trade open it folds to a one-line "Last read" card; it never offers APPROVED / Approve.
+  stale?: boolean;
+  // Opens the position advisor (exit advice + the SL/TP table).
+  onOpenAdvisor?: () => void;
   busy: boolean;
   equity?: number | null;
   onApprove: (lots?: number | null) => void;
@@ -76,10 +85,13 @@ interface Props {
 // Shows the current proposal: direction, levels, confidence, the risk-adjusted size, the
 // risk-manager verdict, the cost/leverage + an adjustable (3%-capped) size, and each agent's
 // reasoning (expandable). Approve/Reject in Mode A.
-export function ProposalPanel({ result, status, positionOpen, openPosition, armedSetup, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, onLoadScenarios, analysisLang, scenLevelsShown, onToggleScenLevels }: Props) {
+export function ProposalPanel({ result, status, positionOpen, openPosition, armedSetup, livePrice, stale = false, onOpenAdvisor, busy, equity, onApprove, onReject, onRunAnalysis, analyzing, scenario, scenarioBusy, onLoadScenarios, analysisLang, scenLevelsShown, onToggleScenLevels }: Props) {
   const proposalId = result?.proposal_id ?? null;
   const actionable = !!result && result.proposal.direction !== "no_trade";
   const pending = status === "pending_approval";
+  // "Show old read" on the folded stale card — folds again for the next read.
+  const [showOld, setShowOld] = useState(false);
+  useEffect(() => setShowOld(false), [proposalId]);
 
   const [lots, setLots] = useState<string>("");
   const [econ, setEcon] = useState<TradeEconomics | null>(null);
@@ -88,9 +100,11 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
   const [maxLots, setMaxLots] = useState<number | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
 
-  // Load the AI's default size + cost/leverage whenever the proposal changes.
+  // Load the AI's default size + cost/leverage whenever the proposal changes. Not for a stale read:
+  // that would re-run the Risk Manager on an old plan against today's book, to size a trade that is
+  // no longer on offer.
   useEffect(() => {
-    if (!proposalId || !actionable) {
+    if (!proposalId || !actionable || stale) {
       setEcon(null);
       setLots("");
       return;
@@ -112,7 +126,7 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
     return () => {
       cancelled = true;
     };
-  }, [proposalId, actionable]);
+  }, [proposalId, actionable, stale]);
 
   // Re-price at a user-entered lot size (the backend clamps to the 3% per-trade ceiling).
   const reprice = async (val: string) => {
@@ -150,6 +164,20 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
     );
   }
 
+  // An old read with nothing open on the pair: one line, not a full analysis that looks current.
+  if (stale && !openPosition && !showOld) {
+    return (
+      <StaleReadCard
+        result={result}
+        status={status}
+        positionOpen={positionOpen}
+        onShow={() => setShowOld(true)}
+        onRunAnalysis={onRunAnalysis}
+        analyzing={analyzing}
+      />
+    );
+  }
+
   const { proposal, risk } = result;
   const noTrade = proposal.direction === "no_trade";
   // Structured AI decision (when 🤖 AI decides). For an ARM the market proposal is NO_TRADE by design
@@ -175,6 +203,18 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
 
   return (
     <div className="card space-y-3">
+      {stale && !openPosition && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-neutral-700 bg-neutral-800/50 px-2.5 py-1.5 text-xs text-neutral-400">
+          <span>
+            <span className="font-semibold text-neutral-300">Old read</span> — kept for reference. It ran{" "}
+            {result.analyzed_at ? ageText(result.analyzed_at) : "in an earlier session"}; its levels and verdicts may
+            no longer hold.
+          </span>
+          <button onClick={() => setShowOld(false)} className="btn btn-ghost ml-auto px-2 py-0.5 text-xs">
+            Hide
+          </button>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-base font-semibold">{proposal.symbol}</span>
@@ -242,7 +282,17 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
         </div>
       )}
 
-      {!noTrade && (
+      {/* With a trade open, the tiles show the trade you HOLD — its live stop and target, which a
+          manual move or a trail can take far from the plan — with the read's levels muted under them.
+          Showing the plan as if it were the trade said "R:R 17.65 from here" about a position whose
+          real stop and target gave 0.84. */}
+      {openPosition ? (
+        <LiveTiles
+          pos={openPosition}
+          proposal={proposal}
+          planIsTrade={status === "executed" && proposal.direction === openPosition.direction}
+        />
+      ) : !noTrade && (
         <div className="grid grid-cols-3 gap-2 text-sm">
           <Stat label="Entry" value={fmtPrice(proposal.entry)} />
           <Stat label="Stop" value={fmtPrice(proposal.stop_loss)} valueClass="text-bear" />
@@ -252,8 +302,20 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
 
       {/* What the three numbers above do NOT say: how far each barrier is in the market's own units,
           what price has to get through to pay you, and what the deal still is FROM HERE. */}
-      {!noTrade && (
-        <TradePath proposal={proposal} livePrice={openPosition?.last_price ?? null} />
+      {openPosition ? (
+        <TradePath
+          proposal={proposal}
+          livePrice={openPosition.last_price ?? livePrice ?? null}
+          position={{
+            direction: openPosition.direction,
+            entry: openPosition.entry_price,
+            stop: openPosition.stop_loss,
+            target: openPosition.take_profit,
+            entryStop: entryStopOf(openPosition) ?? null,
+          }}
+        />
+      ) : !noTrade && (
+        <TradePath proposal={proposal} livePrice={livePrice ?? null} />
       )}
 
       {!aiNonOpen && !noTrade && (() => {
@@ -327,6 +389,16 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
         </div>
       ) : noTrade ? (
         <StandAsideCard proposal={proposal} analysisLang={analysisLang} />
+      ) : stale ? (
+        // An approval is a decision about a price and a book that no longer exist; a green APPROVED
+        // on an old read made it look like a live, sized trade.
+        <div className="rounded-md border border-neutral-700 bg-neutral-800/40 p-2 text-sm text-neutral-400">
+          <span className="font-medium text-neutral-300">Risk check not shown</span> — this read is stale, so its
+          size and approval were worked out against an old price and an old book.{" "}
+          {openPosition
+            ? "The trade's live risk is on the strip above the chart and on its sidebar card."
+            : "Run analysis for a current one."}
+        </div>
       ) : (
       <div
         className={`rounded-md border p-2 text-sm ${
@@ -365,8 +437,12 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
       {/* Structured AI decision — the created scenarios, the chosen one, why, action + levels. */}
       {ai && <AiDecisionCard d={ai} />}
 
-      {/* Cost, leverage, and an adjustable (3%-capped) size — what you'll spend before approving. */}
-      {!noTrade && (
+      {/* Cost, leverage, and an adjustable (3%-capped) size — what you'll spend before approving.
+          Not with a trade open on the pair (its live $ risk and reward are on the chart strip and the
+          sidebar card; these were the plan's — "Reward $113" beside a live target worth $41), and not
+          on a stale read (the sizing behind an approval that is no longer on offer). A pending
+          decision keeps it: that is where its size is set. */}
+      {!noTrade && !stale && (!openPosition || pending) && (
         <div className="rounded-md border border-neutral-800 p-3 text-sm">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
@@ -493,7 +569,12 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
         </div>
       )}
 
-      {pending ? (
+      {pending && stale ? (
+        <div className="text-xs text-warn">
+          This read is stale — run a fresh analysis before approving anything here (the setup may have
+          expired or moved).
+        </div>
+      ) : pending ? (
         <div className="flex gap-2">
           <button
             onClick={() => onApprove(approveLots)}
@@ -519,7 +600,23 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
             : status === "executed"
               ? positionOpen === false
                 ? "Position closed — no longer open at the broker. Run analysis for a fresh setup."
-                : "Position open — manage it in the Positions table below."
+                : (
+                  <>
+                    Position open — manage it from Open positions in the sidebar, or edit its SL/TP in{" "}
+                    {onOpenAdvisor ? (
+                      <button
+                        onClick={onOpenAdvisor}
+                        className="font-medium text-brand-400 underline-offset-2 hover:text-brand-300 hover:underline"
+                        title="Open the position advisor: exit advice, the SL/TP table and its recent actions"
+                      >
+                        Advice
+                      </button>
+                    ) : (
+                      "the Advisor"
+                    )}
+                    .
+                  </>
+                )
               : status === "approved"
                 ? "Approved — awaiting execution."
                 : status === "rejected"
@@ -1443,11 +1540,154 @@ function StatusBadge({ status, positionOpen, standAside }: { status: string | nu
   );
 }
 
-function Stat({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
+function Stat({ label, value, valueClass, sub }: { label: string; value: string; valueClass?: string; sub?: string }) {
   return (
     <div className="rounded bg-neutral-800/60 p-2">
       <div className="text-xs text-neutral-400">{label}</div>
       <div className={`tabular-nums ${valueClass ?? ""}`}>{value}</div>
+      {sub && <div className="mt-0.5 text-[11px] tabular-nums text-neutral-500">{sub}</div>}
+    </div>
+  );
+}
+
+// "84 d ago" — the stale card needs days; the shared ago() only counts hours ("2023h ago").
+function ageText(iso: string): string {
+  const safe = /[Z+]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const mins = Math.max(0, (Date.now() - new Date(safe).getTime()) / 60000);
+  if (mins < 60) return `${Math.round(mins)} m ago`;
+  const h = mins / 60;
+  return h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} d ago`;
+}
+
+// Decimals a broker price is quoted in ("4157.365" -> 3), to round the read's computed levels
+// (4171.370022) to the instrument's own precision next to the live ones.
+function decimalsOf(v: number): number {
+  const t = fmtPrice(v);
+  const i = t.indexOf(".");
+  return i < 0 ? 0 : Math.min(8, t.length - i - 1);
+}
+
+// The live trade's entry / stop / target, with the read's levels muted under them and a chip when
+// the stop or target has moved since the trade opened.
+function LiveTiles({ pos, proposal, planIsTrade }: { pos: PositionView; proposal: TradeProposal; planIsTrade: boolean }) {
+  const sign = pos.direction === "long" ? 1 : -1;
+  const digits = decimalsOf(pos.entry_price);
+  const fmtLv = (v: number | null | undefined) => (v == null ? "—" : fmtPrice(Number(v.toFixed(digits))));
+  // The read's levels are only comparable when it points the same way as the trade.
+  const sameWay = proposal.direction === pos.direction;
+  const word = planIsTrade ? "plan" : "this read";
+
+  // The stop the trade opened with: the app's own order record when the backend sends it, else the
+  // executed plan this panel is showing.
+  const recorded = entryStopOf(pos) ?? null;
+  const baseStop = recorded ?? (planIsTrade ? proposal.stop_loss : null);
+  const riskAtEntry = baseStop != null ? (pos.entry_price - baseStop) * sign : null;
+  const tol = Math.max(Math.abs(riskAtEntry ?? 0) * 0.03, Math.abs(pos.entry_price) * 1e-6);
+  const moves: string[] = [];
+  let worse = false;
+  if (baseStop != null && (pos.stop_loss == null || Math.abs(pos.stop_loss - baseStop) > tol)) {
+    if (pos.stop_loss == null) {
+      moves.push("stop removed");
+      worse = true;
+    } else {
+      const now = (pos.entry_price - pos.stop_loss) * sign;   // > 0 = still on the losing side
+      if (now <= tol) moves.push(now < -tol ? "stop locks profit" : "stop at breakeven");
+      else if (riskAtEntry != null && riskAtEntry > 0 && now > riskAtEntry) {
+        moves.push(`stop widened ×${(now / riskAtEntry).toFixed(1)}`);
+        worse = true;
+      } else moves.push("stop tightened");
+    }
+  }
+  if (planIsTrade && proposal.take_profit != null && pos.take_profit != null
+      && Math.abs(pos.take_profit - proposal.take_profit) > tol) {
+    const pulledIn = Math.abs(pos.take_profit - pos.entry_price) < Math.abs(proposal.take_profit - pos.entry_price);
+    moves.push(pulledIn ? "target pulled in" : "target extended");
+    if (pulledIn) worse = true;
+  }
+
+  const stopSub =
+    recorded != null && pos.stop_loss != null && Math.abs(pos.stop_loss - recorded) > tol
+      ? `at entry ${fmtLv(recorded)}`
+      : sameWay ? `${word} ${fmtLv(proposal.stop_loss)}` : undefined;
+
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="font-semibold uppercase tracking-wide text-neutral-300">Live</span>
+        <span className="text-neutral-500">your {pos.direction.toUpperCase()} at the broker</span>
+        {moves.length > 0 && (
+          <span
+            className={`rounded px-1.5 py-px font-semibold ${
+              worse ? "bg-warn/15 text-warn ring-1 ring-inset ring-warn/30" : "bg-neutral-800 text-neutral-300"
+            }`}
+            title="The trade's live stop/target differ from the ones it was opened with. The tiles and the path below use the LIVE levels; the muted line under each tile is the read's."
+          >
+            moved since entry · {moves.join(" · ")}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-sm">
+        <Stat label="Entry" value={fmtPrice(pos.entry_price)} sub={sameWay ? `${word} ${fmtLv(proposal.entry)}` : undefined} />
+        <Stat label="Stop" value={fmtPrice(pos.stop_loss)} valueClass="text-bear" sub={stopSub} />
+        <Stat
+          label="Target"
+          value={fmtPrice(pos.take_profit)}
+          valueClass="text-bull"
+          sub={sameWay ? `${word} ${fmtLv(proposal.take_profit)}` : undefined}
+        />
+      </div>
+    </div>
+  );
+}
+
+// A read 3+ bars old with nothing open on the pair, folded to one line. The full panel looked
+// exactly like a current analysis — "Risk Manager: APPROVED", a confidence bar, a path measured from
+// a price long gone — for a trade that closed weeks ago.
+function StaleReadCard({ result, status, positionOpen, onShow, onRunAnalysis, analyzing }: {
+  result: AnalyzeResponse;
+  status: string | null;
+  positionOpen?: boolean | null;
+  onShow: () => void;
+  onRunAnalysis?: () => void;
+  analyzing?: boolean;
+}) {
+  const p = result.proposal;
+  const dir = p.direction === "no_trade" ? (p.watch ? "WATCHING" : "NO TRADE") : p.direction.toUpperCase();
+  const dirCls = p.direction === "long" ? "text-bull" : p.direction === "short" ? "text-bear" : "text-neutral-300";
+  const st =
+    p.direction === "no_trade" ? null
+      : status === "executed" ? (positionOpen === false ? "closed" : "executed")
+        : status === "pending_approval" ? "was awaiting approval"
+          : status?.replace("_", " ") ?? null;
+  return (
+    <div className="card flex flex-wrap items-center gap-x-2 gap-y-2 text-sm">
+      <span className="text-neutral-400">Last read:</span>
+      <span className={`font-semibold ${dirCls}`}>{dir}</span>
+      <span className="text-neutral-600">·</span>
+      <span className="text-neutral-300">{p.timeframe}</span>
+      {result.analyzed_at && (
+        <>
+          <span className="text-neutral-600">·</span>
+          <span className="text-neutral-300" title={`Analysed ${localTime(result.analyzed_at)}`}>
+            {ageText(result.analyzed_at)}
+          </span>
+        </>
+      )}
+      {st && (
+        <>
+          <span className="text-neutral-600">·</span>
+          <span className="text-neutral-300">{st}</span>
+        </>
+      )}
+      <span className="text-neutral-500">— too old to act on.</span>
+      <button onClick={onShow} className="btn btn-ghost px-2 py-0.5 text-xs" title="Show the old analysis, for reference only">
+        Show old read ▸
+      </button>
+      {onRunAnalysis && (
+        <button onClick={onRunAnalysis} disabled={analyzing} className="btn btn-primary ml-auto">
+          {analyzing ? "Analyzing…" : "Run analysis"}
+        </button>
+      )}
     </div>
   );
 }

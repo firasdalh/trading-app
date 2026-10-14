@@ -1,79 +1,127 @@
 import type { ReactNode } from "react";
 
-export interface TabDef<T extends string> {
-  id: T;
-  label: string;
-  /** Neutral count shown beside the label (open positions, watched pairs…). Hidden when 0/undefined. */
-  count?: number;
-  /** Amber count for work that is WAITING ON YOU. Always shown when > 0, even next to a count. */
-  alert?: number;
-  hint?: string;
-}
+export type NavIcon = "desk" | "scanner" | "risk" | "journal" | "backtest";
 
-interface Props<T extends string> {
-  tabs: TabDef<T>[];
-  active: T;
-  onChange: (id: T) => void;
-  /** Rendered at the right end of the bar (status text, a global action…). */
-  trailing?: ReactNode;
+export interface NavItem {
+  id: string;
+  label: string;
+  hint?: string;
+  icon?: NavIcon;
+  /** "view" swaps the page; "drawer" opens a pop-up over the desk (shown with a different active style). */
+  kind: "view" | "drawer";
+  active: boolean;
+  onClick: () => void;
+  /** Amber count for work that is WAITING ON YOU (pending approvals). Shown whenever > 0. */
+  alert?: number;
+  /** Red dot: something here has stopped trading (breaker paused / tripped). */
+  danger?: boolean;
+  /** Green dot: an automation that can open trades by itself is running here (Hybrid auto-pilot). */
+  live?: boolean;
 }
 
 /**
- * The desk's ONE primary navigation.
+ * The app's ONE navigation, living in the header bar.
  *
- * The dashboard used to be a single scroll of fourteen equal-weight cards, which meant the two
- * things a desk must never hide — an open position and a decision waiting on you — sat below three
- * screens of scanners. Splitting the same panels across tabs costs nothing (they are unchanged) and
- * buys a real hierarchy: one place to work, one place to look for candidates, one place for the
- * book, one for configuration.
+ * Two kinds of destination, deliberately styled apart:
+ *  - VIEWS (Desk, Journal, Backtest) replace the page — underlined when active, like any page tab.
+ *  - DRAWERS (Scanner, Risk) slide over the desk without leaving it — highlighted as "open" while up,
+ *    and a second click closes them again.
  *
- * The alert badge is the part that earns its keep: a tab you are not looking at can still tell you
+ * The alert badge is the part that earns its keep: a view you are not looking at can still tell you
  * it needs you, so "pending approval" no longer depends on you scrolling past it.
  */
-export function Tabs<T extends string>({ tabs, active, onChange, trailing }: Props<T>) {
+export function NavTabs({ items }: { items: NavItem[] }) {
   return (
-    <div className="border-b border-neutral-800 bg-neutral-950/95 backdrop-blur">
-      <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4">
-        <nav className="flex items-center gap-0.5 overflow-x-auto" role="tablist" aria-label="Sections">
-          {tabs.map((t) => {
-            const on = t.id === active;
-            return (
-              <button
-                key={t.id}
-                role="tab"
-                aria-selected={on}
-                title={t.hint}
-                onClick={() => onChange(t.id)}
-                className={`relative flex shrink-0 items-center gap-1.5 px-3 py-2.5 text-sm font-medium transition
-                  ${on ? "text-neutral-100" : "text-neutral-500 hover:text-neutral-200"}`}
+    <nav className="flex shrink-0 items-center gap-0.5" aria-label="Sections">
+      {items.map((t) => {
+        const viewOn = t.kind === "view" && t.active;
+        const drawerOn = t.kind === "drawer" && t.active;
+        return (
+          <button
+            key={t.id}
+            onClick={t.onClick}
+            title={t.hint}
+            aria-current={viewOn ? "page" : undefined}
+            aria-expanded={t.kind === "drawer" ? t.active : undefined}
+            className={`relative flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium transition 2xl:px-2.5
+              focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50
+              ${viewOn ? "text-white" : drawerOn ? "bg-brand-500/15 text-white ring-1 ring-inset ring-brand-500/50" : "text-neutral-400 hover:bg-neutral-800/70 hover:text-neutral-100"}`}
+          >
+            {t.icon && <Icon name={t.icon} />}
+            <span>{t.label}</span>
+            {t.alert ? (
+              <span
+                className="rounded bg-warn px-1.5 py-px text-[11px] font-bold leading-4 tabular-nums text-black"
+                title={`${t.alert} waiting on you`}
               >
-                {t.label}
-                {t.count ? (
-                  <span className="rounded bg-neutral-800 px-1.5 py-px text-[11px] tabular-nums text-neutral-300">
-                    {t.count}
-                  </span>
-                ) : null}
-                {t.alert ? (
-                  <span
-                    className="rounded bg-warn px-1.5 py-px text-[11px] font-bold tabular-nums text-black"
-                    title={`${t.alert} waiting on you`}
-                  >
-                    {t.alert}
-                  </span>
-                ) : null}
-                {/* The active marker sits on the container's bottom border, so the bar reads as one
-                    surface rather than a row of buttons. */}
-                <span
-                  className={`absolute inset-x-1 -bottom-px h-0.5 rounded-full transition ${
-                    on ? "bg-brand-500" : "bg-transparent"
-                  }`}
-                />
-              </button>
-            );
-          })}
-        </nav>
-        {trailing ? <div className="shrink-0">{trailing}</div> : null}
-      </div>
-    </div>
+                {t.alert}
+              </span>
+            ) : null}
+            {t.live && !t.danger && (
+              <span className="relative flex h-2 w-2" aria-label="running">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-bull/60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-bull" />
+              </span>
+            )}
+            {t.danger && <span className="h-2 w-2 rounded-full bg-bear ring-2 ring-bear/30" aria-label="needs attention" />}
+            {/* The page marker: a short accent under the label of the view you are on. */}
+            <span
+              className={`absolute inset-x-2.5 bottom-0 h-0.5 rounded-full transition ${viewOn ? "bg-brand-500" : "bg-transparent"}`}
+              aria-hidden="true"
+            />
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+// Small stroke icons, drawn inline so the offline desktop build ships no icon font.
+function Icon({ name }: { name: NavIcon }) {
+  const paths: Record<NavIcon, ReactNode> = {
+    desk: (
+      <>
+        <path d="M4 5v14M4 9h2v6H4" />
+        <path d="M10 3v18M9 7h2v8H9z" />
+        <path d="M16 6v12M15 9h2v5h-2z" />
+        <path d="M21 20H3" />
+      </>
+    ),
+    scanner: (
+      <>
+        <circle cx="11" cy="11" r="6.5" />
+        <path d="M20.5 20.5 16 16" />
+        <path d="M8 12.5l2-2.5 2 1.5 2.5-3" />
+      </>
+    ),
+    risk: <path d="M12 3l7 3v5.5c0 4.5-3 7.8-7 9.5-4-1.7-7-5-7-9.5V6l7-3z" />,
+    journal: (
+      <>
+        <path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V4z" />
+        <path d="M5 18a2 2 0 0 1 2-2h11" />
+        <path d="M9 8h5" />
+      </>
+    ),
+    backtest: (
+      <>
+        <path d="M3 12a9 9 0 1 0 3-6.7" />
+        <path d="M3 4v4h4" />
+        <path d="M12 8v4l3 2" />
+      </>
+    ),
+  };
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {paths[name]}
+    </svg>
   );
 }
