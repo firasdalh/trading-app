@@ -371,7 +371,15 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
         <section className="border-t border-neutral-800 pt-3">
           <button
             disabled={busy}
-            onClick={() => run(() => api.flatten(), "All positions flattened.")}
+            onClick={() => run(async () => {
+              const res = await api.flatten();
+              const failed = res.failed ?? [];
+              // Anything listed is STILL OPEN at the broker — never report "all flattened" over it.
+              if (failed.length) {
+                throw new Error(`Closed ${res.closed}, but ${failed.length} could NOT be closed — check MT5 now: ` +
+                  failed.map((f) => `${f.symbol ?? f.broker}: ${f.error}`).join("; "));
+              }
+            }, "All positions flattened.")}
             className="btn border border-bear bg-bear/15 text-bear hover:bg-bear/25"
           >
             Flatten all positions

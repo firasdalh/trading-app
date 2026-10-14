@@ -37,12 +37,16 @@ def test_entry_timeframe_matched_by_param_not_position():
     assert prop.regime == "ranging"   # read the 1h (ADX 15), not the 1d (ADX 30)
 
 
-def test_hybrid_lowers_bar_for_ranging_fades():
-    # The Hybrid takes a ranging fade on a lower confidence bar than a trend trade.
-    from app.agents.hybrid import _MR_MIN_CONFIDENCE, _effective_min_conf
-    assert _effective_min_conf("trend", 0.70) == 0.70
-    assert _effective_min_conf("mean_reversion", 0.70) == _MR_MIN_CONFIDENCE
+def test_hybrid_never_auto_opens_ranging_fades():
+    # Ranging fades lost in every test through the Hybrid gate (-37.9R over 73 trades), so the
+    # auto-pilot no longer opens them at ANY confidence — not even at the engine's 0.68 fade cap,
+    # which sits above the default 0.67 bar. Trend setups keep the configured bar.
+    from app.agents.hybrid import _effective_min_conf
+    from app.agents.orchestrator import _MR_CONF_CAP
+    assert _effective_min_conf("trend", 0.67) == 0.67
     assert _effective_min_conf(None, 0.70) == 0.70
+    assert not _MR_CONF_CAP > _effective_min_conf("mean_reversion", 0.67)
+    assert not 1.0 > _effective_min_conf("mean_reversion", 0.50)
 
 
 def test_regime_policy_mapping():

@@ -11,7 +11,7 @@ executor, not here.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,9 +20,16 @@ from app.brokers.registry import get_broker_for
 from app.core.logging import get_logger
 from app.core.state import get_or_create_daily_state, get_or_create_risk_config, get_or_create_settings
 from app.models.db import AgentRun, Position
-from app.models.enums import AssetClass, Direction, PositionStatus
+from app.models.enums import AssetClass, Direction, OrderStatus, PositionStatus
 
 log = get_logger("execution.monitor")
+
+# A position must be missing from the broker's book on successful reads for this long before we
+# call it closed. Right after the PC wakes from sleep the terminal can report an EMPTY (not failed)
+# book for a few seconds; one such read used to mark every open trade CLOSED (19 phantom closes,
+# up to 103 h, the exposure cap silently bypassed). A real broker-side close is reconciled 60 s late.
+_RECONCILE_CONFIRM = timedelta(seconds=60)
+_MISSING_SINCE: dict[int, datetime] = {}   # position id -> first successful read that lacked it
 
 
 def _exit_reason(direction: str, price: float, stop: float | None, target: float | None) -> str | None:
@@ -62,11 +69,25 @@ def _pnl(broker, pos, price: float) -> float:
     return round(sign * pos.qty * _contract_size(broker, pos.symbol) * (price - pos.entry_price), 2)
 
 
-def _close_position(session: Session, pos: Position, broker, exit_price: float, reason: str) -> None:
+def _close_position(session: Session, pos: Position, broker, exit_price: float, reason: str) -> bool:
+    """Close ``pos`` at the broker and book it. Returns False — and leaves the row OPEN — when the
+    broker close FAILED (order refused, terminal unreachable): the trade is still live and must stay
+    managed. (REJECTED = the broker holds nothing to close any more, e.g. its own SL already fired.)"""
     # Close the EXISTING position by ticket — never fire a fresh opposite order. On a hedging
     # MT5 account (Exness default) an opposing market order opens a NEW opposite position
     # instead of closing, which would silently flip a short into a long.
-    result = broker.close_position(pos.symbol)
+    try:
+        result = broker.close_position(pos.symbol)
+    except Exception as exc:  # noqa: BLE001 - treat like a failed close: keep it open, retry later
+        log.warning("broker close raised — position kept OPEN",
+                    extra={"symbol": pos.symbol, "id": pos.id, "reason": reason, "error": str(exc)})
+        return False
+    if result.status == OrderStatus.ERROR:
+        log.warning("broker close failed — position kept OPEN",
+                    extra={"symbol": pos.symbol, "id": pos.id, "reason": reason, "error": result.error})
+        session.add(AgentRun(agent="monitor", symbol=pos.symbol, event="close_failed",
+                             detail={"reason": reason, "error": result.error}))
+        return False
     fill = result.avg_fill_price or exit_price
     realized = _pnl(broker, pos, fill)  # broker-truth (currency-correct) when available
 
@@ -94,6 +115,7 @@ def _close_position(session: Session, pos: Position, broker, exit_price: float, 
     )])
     log.info("position closed", extra={"symbol": pos.symbol, "reason": reason,
                                        "exit": fill, "realized_pnl": realized})
+    return True
 
 
 def close_one(session: Session, position_id: int) -> dict:
@@ -113,27 +135,38 @@ def close_one(session: Session, position_id: int) -> dict:
         price = pos.last_price or pos.entry_price
         log.warning("manual close quote failed; using last price", extra={"symbol": pos.symbol, "error": str(exc)})
 
-    _close_position(session, pos, broker, price, "manual")
+    if not _close_position(session, pos, broker, price, "manual"):
+        session.commit()
+        return {"closed": False, "error": "the broker did not close it — the position is still open"}
     session.commit()
     return {"closed": True, "symbol": pos.symbol, "realized_pnl": pos.realized_pnl}
 
 
-def _reconcile_closed_at_broker(session: Session, settings, open_positions: list[Position]) -> int:
+def _reconcile_closed_at_broker(session: Session, settings, open_positions: list[Position],
+                                now: datetime | None = None) -> int:
     """Mark app positions CLOSED when the broker no longer holds them — i.e. they were closed in
     the MT5 terminal, by a broker-side SL/TP, or by any path that didn't update the DB. Without
     this, such 'phantom' rows linger as OPEN forever and wrongly count against the anti-stacking
     rule and the position cap, and show as open in the UI when they aren't.
 
     Outage-safe: a position is reconciled only when ITS OWN broker successfully reports an open
-    book that lacks it. (`live_broker_positions` swallows per-broker errors and can return an empty
-    list on an outage, so we fetch per broker here and skip any broker whose fetch failed — never
-    closing a position just because the broker was unreachable.)
+    book that lacks it. (We fetch per broker here and skip any broker whose fetch failed — the MT5
+    adapter raises on a failed read rather than returning an empty book — so a position is never
+    closed just because the broker was unreachable.)
+
+    Confirmed absence only: a position is closed once it has been missing from SUCCESSFUL reads for
+    ``_RECONCILE_CONFIRM`` (60 s); one empty read (a terminal waking from sleep) never closes it.
 
     Does NOT book realized P&L into the daily state: realized P&L and the journal already come from
     the broker's own deal history (broker truth), so re-booking here would double-count. This only
     removes the phantom from the OPEN set.
     """
     from app.risk.service import _norm_symbol
+
+    now = now or datetime.now(timezone.utc)
+    live_ids = {p.id for p in open_positions}
+    for stale in [i for i in _MISSING_SINCE if i not in live_ids]:   # closed by another path
+        _MISSING_SINCE.pop(stale, None)
 
     bm = settings.broker_map or {}
     broker_books: dict[str, tuple[bool, set[tuple[str, str]]]] = {}  # broker name -> (fetch_ok, keys)
@@ -164,17 +197,26 @@ def _reconcile_closed_at_broker(session: Session, settings, open_positions: list
         ok, keys = book_for(pos.asset_class)
         if not ok:
             continue
-        if (_norm_symbol(pos.symbol), pos.direction) not in keys:
-            pos.status = PositionStatus.CLOSED.value
-            pos.closed_at = datetime.now(timezone.utc)
-            session.add(pos)
-            session.add(AgentRun(
-                agent="monitor", symbol=pos.symbol, event="position_reconciled",
-                detail={"reason": "closed at broker (reconciled)", "direction": pos.direction},
-            ))
-            log.warning("position reconciled (closed at broker)",
-                        extra={"symbol": pos.symbol, "direction": pos.direction, "id": pos.id})
-            reconciled += 1
+        if (_norm_symbol(pos.symbol), pos.direction) in keys:
+            _MISSING_SINCE.pop(pos.id, None)     # seen again -> any earlier empty read was transient
+            continue
+        first_missing = _MISSING_SINCE.setdefault(pos.id, now)
+        if now - first_missing < _RECONCILE_CONFIRM:
+            if first_missing == now:
+                log.info("position missing from the broker book — confirming before closing",
+                         extra={"symbol": pos.symbol, "direction": pos.direction, "id": pos.id})
+            continue
+        _MISSING_SINCE.pop(pos.id, None)
+        pos.status = PositionStatus.CLOSED.value
+        pos.closed_at = datetime.now(timezone.utc)
+        session.add(pos)
+        session.add(AgentRun(
+            agent="monitor", symbol=pos.symbol, event="position_reconciled",
+            detail={"reason": "closed at broker (reconciled)", "direction": pos.direction},
+        ))
+        log.warning("position reconciled (closed at broker)",
+                    extra={"symbol": pos.symbol, "direction": pos.direction, "id": pos.id})
+        reconciled += 1
     return reconciled
 
 
@@ -264,7 +306,8 @@ def flatten_before_weekend(session: Session) -> int:
         broker = get_broker_for(AssetClass(pos.asset_class), settings.broker_map)
         try:
             price = broker.get_quote(pos.symbol).price
-            _close_position(session, pos, broker, price, "weekend-flat")
+            if not _close_position(session, pos, broker, price, "weekend-flat"):
+                continue   # broker refused/unreachable: still open, retried on the next pass
             closed += 1
             log.warning("closed before the weekend gap",
                         extra={"symbol": pos.symbol, "position_id": pos.id})
@@ -316,11 +359,10 @@ def monitor_positions(session: Session) -> dict:
         pos.unrealized_pnl = _pnl(broker, pos, price)  # broker-truth (currency-correct) when available
 
         reason = _exit_reason(pos.direction, price, pos.stop_loss, pos.take_profit)
-        if reason:
-            _close_position(session, pos, broker, price, reason)
+        if reason and _close_position(session, pos, broker, price, reason):
             closed += 1
         else:
-            session.add(pos)
+            session.add(pos)   # not hit, or the close failed -> still open, retried next pass
 
     session.commit()
 

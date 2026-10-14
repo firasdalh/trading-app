@@ -29,6 +29,9 @@ def _force_deterministic_agents(monkeypatch):
             getattr(importlib.import_module(f"app.agents.{mod_name}"), attr).clear()
         except Exception:  # noqa: BLE001
             pass
+    # The reconciler's "missing since" memory is keyed by position id; fresh test DBs reuse ids.
+    from app.execution import monitor
+    monitor._MISSING_SINCE.clear()
     # Offline data providers — never hit the network (e.g. the live economic calendar).
     from app.data import providers
     providers.set_providers(

@@ -83,14 +83,21 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
     asset_class = AssetClass(record.asset_class)
     broker = get_broker_for(asset_class, settings.broker_map)
     if not broker.is_paper and not live_execution_allowed(settings):
-        raise ExecutionBlocked("live execution not confirmed for this session")
+        raise ExecutionBlocked(
+            "REAL-money account connected but live trading is not confirmed for this session — "
+            "switch the broker environment to LIVE (typed confirmation; again after every restart)")
 
     # --- anti-stacking: never pile a second same-direction trade into one symbol ---
     # (Final gate at the moment of opening — catches Mode-A approvals of multiple pending
     # proposals and Mode-B auto-execs that the analyze-time check couldn't see yet.)
     from app.risk.service import broker_has_open_same_direction
 
-    if broker_has_open_same_direction(session, record.symbol, record.direction):
+    try:
+        stacked = broker_has_open_same_direction(session, record.symbol, record.direction)
+    except Exception as exc:  # noqa: BLE001 - an unreadable book is not an empty one
+        raise ExecutionBlocked(
+            f"can't read the broker's open positions ({exc}) — not opening blind") from exc
+    if stacked:
         raise ExecutionBlocked(
             f"already have an open {record.direction} position in {record.symbol} — not stacking"
         )

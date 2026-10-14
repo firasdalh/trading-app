@@ -34,10 +34,12 @@ from app.risk.service import ScanCache, _norm_symbol, live_broker_positions
 
 log = get_logger("agents.hybrid")
 
-# Ranging fades are lower-conviction (engine caps them below trend setups), so the Hybrid takes one
-# on a LOWER bar than trend trades — but only when it's the single best available (a stronger trend
-# setup always outranks it). Trend setups still need the full min_confidence threshold.
-_MR_MIN_CONFIDENCE = 0.60
+# Ranging fades used to get a LOWER bar here (0.60) so the Hybrid would take one when nothing better
+# qualified. Since 2026-10-14 the auto-pilot does not open them at any confidence: through the Hybrid
+# gate they lost in every test — 73 fades -37.9R (-0.52R/trade) on the faithful 33-symbol replay,
+# negative in every quarter and asset class, matching the ranging regime's -0.240R over 1,647 trades in
+# the 2026-09-23 review. (The normal bar alone would not stop them: fades are capped at 0.68 confidence,
+# above the default 0.67.) They still show in Run analysis, for a manual decision.
 
 
 # When several setups qualify on the same tick, open the one whose NEXT timeframe up (4h for a 1h book)
@@ -65,9 +67,10 @@ def _fresh_higher_leg(prop) -> bool:
 
 
 def _effective_min_conf(strategy: str | None, threshold: float) -> float:
-    """The confidence bar a setup must clear to be a Hybrid candidate — lower for a ranging fade."""
+    """The confidence bar a setup must clear to be a Hybrid candidate. A ranging fade never clears it
+    (see the note above): confidence can't exceed 1.0."""
     if strategy == "mean_reversion":
-        return min(threshold, _MR_MIN_CONFIDENCE)
+        return 1.0
     return threshold
 
 
@@ -244,8 +247,7 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     stats["candidates"] = len(candidates)
 
     if not candidates:
-        return done(f"no risk-approved setup above {threshold:.0%} confidence "
-                    f"(ranging fades above {_MR_MIN_CONFIDENCE:.0%})")
+        return done(f"no risk-approved setup above {threshold:.0%} confidence")
 
     # Fresh higher-TF leg first, then confidence (see _FRESH_HTF_LEG_BARS).
     candidates.sort(key=lambda x: (not x[0], -x[1]))

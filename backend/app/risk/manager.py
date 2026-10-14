@@ -27,6 +27,22 @@ log = get_logger("risk")
 # Quantities below this are treated as zero (floating-point hygiene).
 _QTY_EPS = 1e-12
 
+# Broker-minimum-lot exception bound (RISK.md, tightened 2026-10-13 at the user's request): a trade
+# floored UP to the broker's minimum lot may risk at most this multiple of the per-trade risk. On a
+# small account the minimum lot can be several times the budget (gold at $1,000 / 0.5% risked 2.75%
+# per trade, 5.5x) — and the auto-openers took those unattended.
+_MIN_LOT_MAX_MULTIPLE = 2.0
+
+
+def _min_lot_over_cap(risk_amount: float, equity: float, risk_fraction: float, min_qty: float) -> str | None:
+    """Veto reason when the broker-minimum lot risks more than ``_MIN_LOT_MAX_MULTIPLE`` x the
+    per-trade risk, else None."""
+    if equity <= 0 or risk_amount <= _MIN_LOT_MAX_MULTIPLE * risk_fraction * equity:
+        return None
+    return (f"broker minimum lot ({min_qty}) risks ${risk_amount:.2f} = {risk_amount / equity:.1%} of "
+            f"equity — more than {_MIN_LOT_MAX_MULTIPLE:.0f}x the {risk_fraction:.1%} per-trade risk; "
+            "the account is too small for this symbol at this stop")
+
 
 def _veto(symbol: str, reason: str, checks: dict[str, bool]) -> RiskDecision:
     return RiskDecision(
@@ -289,6 +305,8 @@ def evaluate_proposal(
         qty = min_qty
         risk_amount = qty * per_lot
         min_lot_floored = True
+        if (over := _min_lot_over_cap(risk_amount, account.equity, risk_fraction, min_qty)):
+            return _veto(symbol, over, checks)
     if qty <= _QTY_EPS:
         return _veto(symbol, "computed position size is zero (no broker minimum and stop too wide "
                              "for the risk budget)", checks)
@@ -321,6 +339,8 @@ def evaluate_proposal(
             qty = min_qty
             risk_amount = qty * per_lot
             min_lot_floored = True
+            if (over := _min_lot_over_cap(risk_amount, account.equity, risk_fraction, min_qty)):
+                return _veto(symbol, over, checks)
             if risk_amount > remaining:
                 return _veto(
                     symbol,
@@ -338,8 +358,8 @@ def evaluate_proposal(
     risk_pct = risk_amount / account.equity
     if min_lot_floored:
         reason = (f"approved at the broker MINIMUM lot ({qty}) — risks {risk_pct * 100:.1f}% of "
-                  f"equity, above the {limits.risk_per_trade_ceiling * 100:.0f}% per-trade cap "
-                  "(can't trade smaller).")
+                  f"equity, above the {risk_fraction * 100:.1f}% per-trade risk (can't trade smaller; "
+                  f"allowed up to {_MIN_LOT_MAX_MULTIPLE:.0f}x).")
     elif decision_type == RiskDecisionType.APPROVED:
         reason = "approved at full risk-per-trade size"
     else:

@@ -238,11 +238,27 @@ class Mt5BrokerAdapter(BrokerAdapter):
 
     # ---- account ----
 
+    def _last_error(self):
+        try:
+            return self._mt5.last_error()
+        except Exception:  # noqa: BLE001 - only used to enrich an error message
+            return None
+
+    def _positions(self, **kwargs):
+        """``positions_get`` that RAISES when the terminal call fails. MT5 returns None on an error
+        (IPC down, terminal waking from sleep) and an empty tuple when nothing is open — treating
+        None as "nothing open" once made the monitor mark every open trade CLOSED (19 phantom
+        closes) and let the openers see free room. An unknown book must never look empty."""
+        positions = self._mt5.positions_get(**kwargs)
+        if positions is None:
+            raise BrokerError(f"MT5 positions_get failed: {self._last_error()}")
+        return positions
+
     def get_account(self) -> AccountState:
         info = self._mt5.account_info()
         if info is None:
             raise BrokerError("MT5 account_info unavailable")
-        positions = self._mt5.positions_get() or []
+        positions = self._positions()
         return AccountState(
             equity=float(info.equity), cash=float(info.balance), open_positions=len(positions),
         )
@@ -434,7 +450,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
 
     def get_open_positions(self) -> list[PositionView]:
         mt5 = self._mt5
-        positions = mt5.positions_get() or []
+        positions = self._positions()
         views: list[PositionView] = []
         for i, p in enumerate(positions):
             is_long = p.type == getattr(mt5, "POSITION_TYPE_BUY", 0)
@@ -583,7 +599,10 @@ class Mt5BrokerAdapter(BrokerAdapter):
     def close_position(self, symbol: str) -> OrderResult:
         mt5 = self._mt5
         sym = self._resolve_symbol(symbol)
-        positions = [p for p in (mt5.positions_get(symbol=sym) or [])]
+        try:
+            positions = list(self._positions(symbol=sym))
+        except BrokerError as exc:  # a failed read is NOT "already closed" — callers keep it open
+            return OrderResult(status=OrderStatus.ERROR, error=str(exc))
         if not positions:
             return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
         last: OrderResult | None = None
@@ -612,7 +631,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
         mt5 = self._mt5
         try:
             sym = self._resolve_symbol(symbol)
-            positions = [p for p in (mt5.positions_get(symbol=sym) or [])]
+            positions = list(self._positions(symbol=sym))   # BrokerError -> ERROR below, not "none open"
             if not positions:
                 return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
             info = mt5.symbol_info(sym)
@@ -655,7 +674,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
         mt5 = self._mt5
         try:
             sym = self._resolve_symbol(symbol)
-            positions = mt5.positions_get(symbol=sym) or []
+            positions = self._positions(symbol=sym)   # BrokerError -> ERROR below, not "none open"
             if not positions:
                 return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
 
@@ -719,7 +738,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
             return OrderResult(status=OrderStatus.ERROR, error=str(exc))
 
     def close_all_positions(self) -> list[OrderResult]:
-        symbols = {p.symbol for p in (self._mt5.positions_get() or [])}
+        symbols = {p.symbol for p in self._positions()}
         return [self.close_position(s) for s in symbols]
 
     def can_open(self, symbol: str, direction: str) -> tuple[bool, str | None]:
@@ -798,7 +817,9 @@ class Mt5BrokerAdapter(BrokerAdapter):
         """
         deals = self._mt5.history_deals_get(since, datetime.now(timezone.utc))
         if deals is None:
-            return 0.0
+            # A FAILED history read is not "nothing realized today": returning 0.0 here un-latched
+            # the daily-loss breaker mid-outage (2026-09-25). Raise; the breaker keeps its state.
+            raise BrokerError(f"MT5 deal history unavailable: {self._last_error()}")
         total = 0.0
         for d in deals:
             if not getattr(d, "symbol", ""):  # balance / credit / correction / charge — not trading

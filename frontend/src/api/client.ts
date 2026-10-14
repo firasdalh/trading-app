@@ -371,7 +371,9 @@ export const api = {
   mt5Status: () => request<Mt5Status>("/api/settings/mt5/status"),
   connectMt5: (body: { login?: number; password?: string; server?: string; path?: string }) =>
     request<Mt5Status>("/api/settings/mt5", { method: "POST", body: JSON.stringify(body) }),
-  flatten: () => request<{ closed: number }>("/api/execution/flatten", { method: "POST" }),
+  flatten: () =>
+    request<{ closed: number; failed?: { symbol?: string; broker?: string; error: string }[] }>(
+      "/api/execution/flatten", { method: "POST" }),
 
   backtest: (symbol: string, assetClass: AssetClass, timeframe: string, bars: number, startingEquity: number) =>
     request<BacktestResult>("/api/backtest", {

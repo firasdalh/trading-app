@@ -86,14 +86,18 @@ def live_reconfirm_required(settings: AppSettings) -> bool:
 
 
 def live_execution_allowed(settings: AppSettings) -> bool:
-    """Whether LIVE orders may be submitted right now.
+    """Whether orders may be sent to a REAL-money account right now.
 
-    Paper is always allowed. Live requires a confirmation recorded *after* this process
-    started (so the user re-confirms on every restart — safety requirement #7).
+    Callers ask only for a non-paper broker (``broker.is_paper`` False — e.g. the MT5 terminal
+    logged into a real Exness account); paper/demo brokers never need it. A real account requires
+    the typed live confirmation: ``broker_env`` switched to 'live' AND confirmed *after* this
+    process started (re-confirm on every restart — safety requirement #7).
+
+    A real account while the app is still set to 'paper' is BLOCKED. (It used to pass: logging the
+    terminal into a real account with the app left on 'paper' let every opener trade real money
+    with no confirmation, while the header still said PAPER.)
     """
-    if settings.broker_env != "live":
-        return True
-    if settings.live_confirmed_at is None:
+    if settings.broker_env != "live" or settings.live_confirmed_at is None:
         return False
     confirmed = settings.live_confirmed_at
     if confirmed.tzinfo is None:

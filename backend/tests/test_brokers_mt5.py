@@ -198,6 +198,53 @@ def test_open_positions_returns_lots():
     assert views[0].qty == 1.0  # LOTS (qty is in lots everywhere now)
 
 
+class _DownMt5(FakeMt5):
+    """MT5 returns None when a terminal call FAILS (IPC down / waking from sleep)."""
+
+    def positions_get(self, symbol=None):
+        return None
+
+    def history_deals_get(self, frm, to):
+        return None
+
+
+def test_failed_positions_read_raises_instead_of_an_empty_book():
+    import pytest
+
+    from app.brokers.base import BrokerError
+    a = _adapter(_DownMt5())
+    with pytest.raises(BrokerError):
+        a.get_open_positions()
+    with pytest.raises(BrokerError):
+        a.get_account()
+
+
+def test_failed_read_is_an_error_not_already_closed():
+    """close / partial / modify must report ERROR on a failed read — 'no open position' (REJECTED)
+    would tell the monitor the trade is already gone and it would book it closed."""
+    a = _adapter(_DownMt5())
+    assert a.close_position("EURUSD").status == OrderStatus.ERROR
+    assert a.close_partial("EURUSD", 0.5).status == OrderStatus.ERROR
+    assert a.set_sl_tp("EURUSD", stop_loss=1.09).status == OrderStatus.ERROR
+
+
+def test_failed_deal_history_raises():
+    from datetime import datetime, timezone
+
+    import pytest
+
+    from app.brokers.base import BrokerError
+    with pytest.raises(BrokerError):
+        _adapter(_DownMt5()).get_realized_pnl(datetime(2026, 10, 13, tzinfo=timezone.utc))
+
+
+def test_a_genuinely_empty_book_is_still_empty():
+    class _Flat(FakeMt5):
+        def positions_get(self, symbol=None):
+            return ()
+    assert _adapter(_Flat()).get_open_positions() == []
+
+
 def test_serialized_mt5_passes_constants_and_serializes_calls():
     """The proxy wrapping the MetaTrader5 module must pass constants through unlocked and hold the
     shared lock for the duration of every call, so concurrent threads can't interleave on the

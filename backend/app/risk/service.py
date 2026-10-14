@@ -25,12 +25,20 @@ from app.risk.manager import evaluate_proposal
 
 _log = get_logger("risk.service")
 
+# A floating-driven daily-loss pause auto-resumes only once the day's loss is back under this fraction
+# of the limit (hysteresis — see evaluate_daily_pause).
+_BREAKER_RESUME_FRACTION = 0.8
+
 
 def live_broker_positions(session: Session) -> list[PositionView]:
     """Aggregate the brokers' real open positions across the configured broker map.
 
     One call per distinct broker (MT5 returns all its positions at once). Includes trades
     opened directly in the terminal, not just app-opened ones.
+
+    RAISES if a broker's book can't be read. An outage must never look like an empty book: it used
+    to be swallowed here, so every caller's "can't read the book -> don't open" guard was dead code
+    and the room check / anti-stacking / correlation checks saw a flat account mid-outage.
     """
     settings = get_or_create_settings(session)
     bm = settings.broker_map or {}
@@ -45,6 +53,7 @@ def live_broker_positions(session: Session) -> list[PositionView]:
             out.extend(get_broker_for(ac, bm).get_open_positions())
         except Exception as exc:  # noqa: BLE001
             _log.warning("live broker positions failed", extra={"broker": name, "error": str(exc)})
+            raise
     return out
 
 
@@ -95,10 +104,11 @@ def broker_closed_trades(session: Session, lookback_days: int = 120) -> list[Pos
     return out
 
 
-def broker_realized_today(session: Session) -> float | None:
+def broker_realized_today(session: Session, *, strict: bool = False) -> float | None:
     """Realized P&L today from the broker's own deal history (the account truth, including
     trades closed directly in the terminal). Returns None if no configured broker supports
-    it — the caller then falls back to app-tracked realized P&L."""
+    it — the caller then falls back to app-tracked realized P&L. ``strict`` re-raises a broker's
+    read failure instead of skipping it (the daily-loss breaker must not run on a partial view)."""
     from datetime import datetime, timezone
 
     settings = get_or_create_settings(session)
@@ -116,6 +126,8 @@ def broker_realized_today(session: Session) -> float | None:
             val = get_broker_for(ac, bm).get_realized_pnl(day_start)
         except Exception as exc:  # noqa: BLE001
             _log.warning("broker realized lookup failed", extra={"broker": name, "error": str(exc)})
+            if strict:
+                raise
             continue
         if val is not None:
             supported = True
@@ -123,9 +135,10 @@ def broker_realized_today(session: Session) -> float | None:
     return round(total, 2) if supported else None
 
 
-def realized_today(session: Session) -> float:
-    """Realized P&L today: broker truth if available, else app-tracked."""
-    b = broker_realized_today(session)
+def realized_today(session: Session, *, strict: bool = False) -> float:
+    """Realized P&L today: broker truth if available, else app-tracked. ``strict`` raises when a
+    broker's history can't be read instead of silently falling back."""
+    b = broker_realized_today(session, strict=strict)
     if b is not None:
         return b
     return get_or_create_daily_state(session).realized_pnl
@@ -186,13 +199,25 @@ def evaluate_daily_pause(session: Session) -> bool:
     if not equity or equity <= 0:
         return daily.trading_paused
 
-    realized = realized_today(session)
-    floating = total_unrealized(session)        # open positions marked to market (0.0 when flat)
+    try:
+        realized = realized_today(session, strict=True)
+        floating = total_unrealized(session)    # open positions marked to market (0.0 when flat)
+    except Exception as exc:  # noqa: BLE001
+        # The account can't be read right now (MT5 outage / terminal waking from sleep). Leave the
+        # breaker exactly as it is: a failed read once looked like "realized 0, floating 0" and
+        # un-latched a tripped breaker (2026-09-25 15:27) until the next good read re-tripped it.
+        _log.warning("daily pause: broker read failed — breaker state unchanged",
+                     extra={"error": str(exc), "paused": daily.trading_paused})
+        return daily.trading_paused
     day_pnl = realized + floating
     limit = equity * risk.max_daily_loss
     combined_breached = -day_pnl >= limit       # realized + floating past the limit
     realized_latched = -realized >= limit       # closed losses past the limit -> locked for the day
     should_pause = combined_breached or realized_latched
+    # Hysteresis: a floating-driven pause lifts only once the day's loss is clearly back inside the
+    # limit, not the moment it is a cent under it (2026-09-18 it toggled ~14 times on a +/-$2 float,
+    # each "resume" a window for a new entry right at the limit).
+    recovered = not realized_latched and -day_pnl < limit * _BREAKER_RESUME_FRACTION
 
     if should_pause and not daily.trading_paused:
         daily.trading_paused = True
@@ -210,7 +235,7 @@ def evaluate_daily_pause(session: Session) -> bool:
                             "realized_latched": realized_latched})
         return True
 
-    if daily.trading_paused and not should_pause:
+    if daily.trading_paused and recovered:
         # Floating-driven pause has RECOVERED (and realized alone never breached) -> auto-resume.
         daily.trading_paused = False
         daily.pause_reason = None
@@ -366,13 +391,13 @@ class ScanCache:
 
 
 def _scan_open_book(session: Session, cache: ScanCache | None) -> list[tuple[str, str]]:
-    """Broker open book as (symbol, direction) tuples; memoized on ``cache`` for one scan."""
+    """Broker open book as (symbol, direction) tuples; memoized on ``cache`` for one scan.
+
+    Raises when the book can't be read — ``assess`` then refuses the trade. (It used to return an
+    empty book, so a broker hiccup silently disabled anti-stacking and the correlation guard.)"""
     if cache is not None and cache.open_book is not None:
         return cache.open_book
-    try:
-        book = [(p.symbol, p.direction) for p in live_broker_positions(session)]
-    except Exception:  # noqa: BLE001 - never let a broker hiccup block sizing
-        book = []
+    book = [(p.symbol, p.direction) for p in live_broker_positions(session)]
     if cache is not None:
         cache.open_book = book
     return book
@@ -459,13 +484,11 @@ def broker_has_open_same_direction(session: Session, symbol: str, direction: str
     """True if the BROKER already has an open position in this symbol + direction (anti-stacking).
 
     Broker truth, so it also catches trades opened directly in the terminal. Used as the final
-    gate in the executor right before a new order is submitted.
+    gate in the executor right before a new order is submitted. Raises when the book can't be
+    read (the executor then refuses) — it used to answer "not stacked" on any broker error.
     """
     norm = _norm_symbol(symbol)
-    try:
-        positions = live_broker_positions(session)
-    except Exception:  # noqa: BLE001
-        return False
+    positions = live_broker_positions(session)
     return any(_norm_symbol(p.symbol) == norm and p.direction == direction for p in positions)
 
 
@@ -546,14 +569,19 @@ def assess(
     # the executor's final broker-truth gate — a stale app-DB row can no longer "phantom-block" a
     # symbol that isn't actually open at the broker. (Refuses e.g. a 2nd same-direction trade in
     # an open symbol, or a 3rd position piling onto one risk factor like "long USD" x3.)
-    open_book = _scan_open_book(session, cache)
+    not_tradeable = None
+    try:
+        open_book = _scan_open_book(session, cache)
+    except Exception as exc:  # noqa: BLE001 - can't see the book -> can't check stacking/correlation
+        open_book = []
+        not_tradeable = (f"broker open positions unavailable ({exc}) — can't check stacking or "
+                         "correlation, not opening blind")
     norm = _norm_symbol(proposal.symbol)
     same_dir = any(_norm_symbol(sym) == norm and d == proposal.direction.value for sym, d in open_book)
     correlated = correlated_concentration(open_book, proposal.symbol, proposal.direction.value)
     # Broker tradeability: don't approve a setup the broker won't let us OPEN (instrument disabled
     # / close-only, or the wrong side of a long-only/short-only symbol). Caught here so it shows as
     # "not tradeable", not a tempting "approved · Open" that bounces at order time.
-    not_tradeable = None
     if proposal.direction.value in ("long", "short"):
         try:
             ok_open, why = broker.can_open(proposal.symbol, proposal.direction.value)

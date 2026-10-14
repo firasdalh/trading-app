@@ -221,22 +221,37 @@ def test_stop_too_wide_zero_size_vetoed():
 
 
 def test_min_lot_floors_up_and_flags():
-    # The risk-budget size (200) is below the broker minimum (1000): floor UP to the minimum and
-    # FLAG it — this trade now risks more than the per-trade cap, but it's the smallest tradable lot.
+    # The risk-budget size (200) is below the broker minimum (300): floor UP to the minimum and
+    # FLAG it — this trade now risks more than the per-trade risk, but it's the smallest tradable lot.
     d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
-                          now=NOW, qty_step=1, min_qty=1000.0)
+                          now=NOW, qty_step=1, min_qty=300.0)
     assert d.approved and d.min_lot_floored
-    assert d.approved_qty == 1000.0
-    assert d.risk_amount == 5000.0
-    assert d.risk_pct_of_equity == pytest.approx(0.05)   # 5% > the 2% cap, accepted at min lot
+    assert d.approved_qty == 300.0
+    assert d.risk_amount == 1500.0
+    assert d.risk_pct_of_equity == pytest.approx(0.015)  # 1.5x the 1% risk, accepted at min lot
     assert "minimum" in d.reason.lower()
 
 
-def test_min_lot_floor_vetoed_when_over_exposure_budget():
-    # The per-trade cap is waived for the broker minimum, but the PORTFOLIO exposure cap is not:
-    # if even the min lot (2000 units -> $10k risk) won't fit the 6% budget ($6k), veto.
+def test_min_lot_floor_vetoed_beyond_twice_the_risk():
+    # A minimum lot of 1000 units risks $5,000 = 5% = 5x the 1% per-trade risk: the account is too
+    # small for this symbol at this stop -> refused, not silently taken at 5x the plan.
     d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
-                          now=NOW, qty_step=1, min_qty=2000.0)
+                          now=NOW, qty_step=1, min_qty=1000.0)
+    assert not d.approved and "minimum lot" in d.reason and "2x" in d.reason
+
+
+def test_min_lot_floor_allowed_at_exactly_twice_the_risk():
+    d = evaluate_proposal(make_proposal(), make_account(), make_limits(),
+                          now=NOW, qty_step=1, min_qty=400.0)   # $2,000 = 2% = 2x the 1% risk
+    assert d.approved and d.min_lot_floored and d.risk_amount == 2000.0
+
+
+def test_min_lot_floor_vetoed_when_over_exposure_budget():
+    # The per-trade risk is waived (up to 2x) for the broker minimum, but the PORTFOLIO exposure cap
+    # is not: with $5,000 of the $6,000 budget already at risk, a $1,500 min lot won't fit -> veto.
+    acct = make_account(open_positions=1, total_risk_amount=5000.0)
+    d = evaluate_proposal(make_proposal(), acct, make_limits(),
+                          now=NOW, qty_step=1, min_qty=300.0)
     assert not d.approved and "exposure budget" in d.reason
 
 

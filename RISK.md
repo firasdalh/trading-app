@@ -40,6 +40,15 @@ The maximum you can lose on a single trade if the stop-loss is hit. Position siz
   kill-switch, live-confirmation) still applies. This replaces the previous behaviour, which either
   vetoed the trade or let the broker silently clamp a sub-minimum size up at order time (a hidden
   over-risk).
+  **Bounded (2026-10-13, at the user's explicit request):** the minimum-lot trade may risk at most
+  **2× the per-trade risk**; beyond that it is VETOED ("the account is too small for this symbol at
+  this stop"). On a small real account the minimum lot can be many times the budget (gold on $1,000
+  at 0.5% risk = 2.75% per trade, 5.5×), and the auto-openers were taking those unattended.
+  (`_MIN_LOT_MAX_MULTIPLE` in `app/risk/manager.py`.)
+- **Manual stop moves (2026-10-13):** the chart drag / positions-table SL edit goes through a guard:
+  a stop may be added, tightened, or moved within the per-trade risk limit — never removed, never on
+  the wrong side of price, never widened past the limit (or at all while the kill-switch is on).
+  Every change is logged and mirrored onto the app's rows so exposure accounting sees the real stop.
 
 ### `max_open_positions` (default: 3)
 Caps how many trades can be open at once.

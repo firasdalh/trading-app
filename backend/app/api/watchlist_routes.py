@@ -202,7 +202,10 @@ def opportunities(
     expire_stale_proposals(session)  # so the scan reflects a clean pending list
     # One open-book fetch for the whole scan: serves both the already-open check and (primed into
     # the ScanCache) every per-symbol risk assessment below, instead of one broker call per symbol.
-    live = live_broker_positions(session)
+    try:
+        live = live_broker_positions(session)
+    except Exception as exc:  # noqa: BLE001 - don't rank setups against a book we can't see
+        raise HTTPException(status_code=503, detail=f"broker positions unavailable: {exc}") from exc
     open_syms = {p.symbol.upper() for p in live}
     cache = ScanCache(open_book=[(p.symbol, p.direction) for p in live])
     items = session.scalars(select(WatchItem).where(WatchItem.enabled.is_(True))).all()

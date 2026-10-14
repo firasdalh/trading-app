@@ -624,7 +624,10 @@ def live_positions(session: Session = Depends(get_session)) -> list[PositionView
     from app.models.enums import PositionStatus
     from app.risk.service import _norm_symbol, live_broker_positions
 
-    out = live_broker_positions(session)
+    try:
+        out = live_broker_positions(session)
+    except Exception as exc:  # noqa: BLE001 - say so; an empty list would read as "everything closed"
+        raise HTTPException(status_code=503, detail=f"broker positions unavailable: {exc}") from exc
 
     # Backfill the OPEN TIME from our own row when the broker didn't report one. This is what the
     # chart uses to mark the entry CANDLE (not just the price level), and a broker that omits it
@@ -851,16 +854,101 @@ def close_position(position_id: int, session: Session = Depends(get_session)) ->
     return result
 
 
+def _stop_risk(broker, pos, stop: float | None) -> float:
+    """Account-currency loss if ``stop`` is hit on ``pos`` (a broker PositionView or a DB Position:
+    symbol / direction / entry_price / qty in lots). 0 when the stop locks in profit; infinite with
+    no stop at all (an unprotected trade can lose anything)."""
+    from app.risk.service import _risk_per_lot
+
+    if not stop:
+        return float("inf")
+    loss_dist = (pos.entry_price - stop) if pos.direction == "long" else (stop - pos.entry_price)
+    if loss_dist <= 0:
+        return 0.0
+    return (_risk_per_lot(broker, pos.symbol, pos.entry_price, stop) or 0.0) * (pos.qty or 0.0)
+
+
 @router.post("/positions/sl-tp", tags=["positions"])
 def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)) -> dict:
-    """Attach/modify SL and/or TP on an open position (e.g. protect a manual MT5 trade)."""
+    """Attach/modify SL and/or TP on an open position (e.g. protect a manual MT5 trade).
+
+    Guarded — the chart drag and the positions table both land here: a stop may be ADDED, TIGHTENED,
+    or moved anywhere that keeps the position within the per-trade risk limit, but never REMOVED,
+    never put on the wrong side of price, and never WIDENED past the limit (or at all while the
+    kill-switch is on). It used to forward anything (0 cleared the stop; any widening passed) with
+    no Risk Manager, no log and the app's own rows left stale. Every change is now logged and
+    mirrored onto the app's rows (stop, target and risk for exposure accounting)."""
     from app.brokers.registry import get_broker_for
+    from app.core.state import kill_switch_active
+    from app.models.db import AgentRun
+    from app.risk.service import _norm_symbol
 
     settings = get_or_create_settings(session)
     broker = get_broker_for(req.asset_class, settings.broker_map)
+    norm = _norm_symbol(req.symbol)
+    try:
+        held = [p for p in broker.get_open_positions() if _norm_symbol(p.symbol) == norm]
+    except Exception as exc:  # noqa: BLE001 - can't check the change against a book we can't see
+        raise HTTPException(status_code=503, detail=f"broker positions unavailable: {exc}") from exc
+    if not held:
+        raise HTTPException(status_code=409, detail=f"no open position in {req.symbol}")
+    if len({p.direction for p in held}) > 1:
+        raise HTTPException(status_code=409, detail=(
+            f"both a long and a short are open in {req.symbol} — one stop can't fit both; set them in MT5"))
+    direction = held[0].direction
+    long_ = direction == "long"
+    price = held[0].last_price
+
+    risk_before = risk_after = None
+    if req.stop_loss is not None:
+        if req.stop_loss <= 0:
+            if any(p.stop_loss for p in held):
+                raise HTTPException(status_code=400, detail="removing a stop is not allowed — move it instead")
+        else:
+            if price and ((long_ and req.stop_loss >= price) or (not long_ and req.stop_loss <= price)):
+                raise HTTPException(status_code=400, detail=(
+                    f"a {direction} stop must be {'below' if long_ else 'above'} the current price ({price})"))
+            risk_before = sum(_stop_risk(broker, p, p.stop_loss) for p in held)
+            risk_after = sum(_stop_risk(broker, p, req.stop_loss) for p in held)
+            if risk_after > risk_before:   # WIDENING
+                if kill_switch_active(session):
+                    raise HTTPException(status_code=423, detail="kill-switch active — stops can only be tightened")
+                try:
+                    equity = broker.get_account().equity
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(status_code=503, detail=f"account unavailable: {exc}") from exc
+                limit_frac = get_or_create_risk_config(session).risk_per_trade
+                if risk_after > equity * limit_frac:
+                    raise HTTPException(status_code=400, detail=(
+                        f"that stop would risk ${risk_after:.2f} ({risk_after / equity:.1%} of equity) — over the "
+                        f"{limit_frac:.1%} per-trade limit (${equity * limit_frac:.2f}). A stop can be tightened, "
+                        "not widened past the limit."))
+    if req.take_profit and price and ((long_ and req.take_profit <= price) or (not long_ and req.take_profit >= price)):
+        raise HTTPException(status_code=400, detail=(
+            f"a {direction} target must be {'above' if long_ else 'below'} the current price ({price})"))
+
     result = broker.set_sl_tp(req.symbol, req.stop_loss, req.take_profit)
     if result.status.value in ("error", "rejected"):
         raise HTTPException(status_code=409, detail=result.error or "could not set SL/TP")
+
+    # Mirror onto our own rows so the monitor, the exposure budget and the journal see the real stop.
+    rows = [r for r in session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
+            if _norm_symbol(r.symbol) == norm and r.direction == direction]
+    for r in rows:
+        if req.stop_loss is not None and req.stop_loss > 0:
+            r.stop_loss = req.stop_loss
+            r.risk_amount = round(_stop_risk(broker, r, req.stop_loss), 2)
+        if req.take_profit is not None:
+            r.take_profit = req.take_profit or None
+    session.add(AgentRun(agent="manual", symbol=req.symbol, event="sl_tp_modified", detail={
+        "direction": direction, "stop_loss": req.stop_loss, "take_profit": req.take_profit,
+        "previous_stops": [p.stop_loss for p in held], "previous_targets": [p.take_profit for p in held],
+        "risk_before": None if risk_before in (None, float("inf")) else round(risk_before, 2),
+        "risk_after": None if risk_after is None else round(risk_after, 2)}))
+    session.commit()
+    log.warning("manual SL/TP change", extra={"symbol": req.symbol, "direction": direction,
+                                              "stop_loss": req.stop_loss, "take_profit": req.take_profit,
+                                              "previous_stops": [p.stop_loss for p in held]})
     return {"status": result.status.value, "symbol": req.symbol,
             "stop_loss": req.stop_loss, "take_profit": req.take_profit}
 

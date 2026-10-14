@@ -157,8 +157,10 @@ def test_drift_guard_allows_favorable_drift(db_session, monkeypatch):
 # ---- live gating (unit) ----
 
 def test_live_execution_gate():
+    # Asked only for a REAL-money broker: with the app still on 'paper' the real account is
+    # BLOCKED (it used to pass, letting a terminal logged into a real account trade unconfirmed).
     paper = AppSettings(id=1, broker_env="paper")
-    assert live_execution_allowed(paper) is True
+    assert live_execution_allowed(paper) is False
 
     live_unconfirmed = AppSettings(id=1, broker_env="live", live_confirmed_at=None)
     assert live_execution_allowed(live_unconfirmed) is False
@@ -171,6 +173,47 @@ def test_live_execution_gate():
     fresh = AppSettings(id=1, broker_env="live",
                         live_confirmed_at=datetime.now(timezone.utc) + timedelta(minutes=1))
     assert live_execution_allowed(fresh) is True
+
+
+class _RealMoneyBroker(_DriftBroker):
+    """A broker on a REAL-money account (e.g. MT5 logged into a real Exness account)."""
+    is_paper = False
+
+    def __init__(self, current: float):
+        super().__init__(current)
+        self.submitted = []
+
+    def submit_order(self, request):
+        self.submitted.append(request)
+        return super().submit_order(request)
+
+
+def test_real_account_blocked_while_app_says_paper(db_session, monkeypatch):
+    """The terminal logged into a REAL account while the app is still on 'paper': nothing may be
+    sent — no typed live confirmation has been given."""
+    from app.execution import executor as ex
+    broker = _RealMoneyBroker(100.0)
+    monkeypatch.setattr(ex, "get_broker_for", lambda ac, bm: broker)
+    assert get_or_create_settings(db_session).broker_env == "paper"
+    rec = _make_record(db_session)
+    with pytest.raises(ExecutionBlocked, match="REAL-money"):
+        execute_proposal(db_session, rec)
+    assert broker.submitted == []
+    assert db_session.scalars(select(Order)).all() == []
+
+
+def test_real_account_trades_once_live_confirmed(db_session, monkeypatch):
+    """With the typed confirmation given in THIS process, the real account may trade."""
+    from app.execution import executor as ex
+    broker = _RealMoneyBroker(100.0)
+    monkeypatch.setattr(ex, "get_broker_for", lambda ac, bm: broker)
+    settings = get_or_create_settings(db_session)
+    settings.broker_env = "live"
+    settings.live_confirmed_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+    db_session.commit()
+    rec = _make_record(db_session)
+    assert execute_proposal(db_session, rec).status == OrderStatus.FILLED
+    assert len(broker.submitted) == 1
 
 
 # ---- monitor ----
@@ -246,7 +289,11 @@ def test_reconcile_closes_phantom_on_durable_broker(db_session, monkeypatch):
     monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
 
     settings = get_or_create_settings(db_session)
-    n = monitor_mod._reconcile_closed_at_broker(db_session, settings, [real, phantom])
+    # First read lacking it only starts the confirmation clock ...
+    assert monitor_mod._reconcile_closed_at_broker(db_session, settings, [real, phantom], now=NOW) == 0
+    # ... still missing a minute later on a good read -> confirmed closed.
+    n = monitor_mod._reconcile_closed_at_broker(db_session, settings, [real, phantom],
+                                                now=NOW + timedelta(seconds=61))
     db_session.commit()
     assert n == 1
     db_session.refresh(real)
@@ -254,6 +301,70 @@ def test_reconcile_closes_phantom_on_durable_broker(db_session, monkeypatch):
     assert real.status == PositionStatus.OPEN.value
     assert phantom.status == PositionStatus.CLOSED.value
     assert phantom.closed_at is not None
+
+
+def test_reconcile_ignores_a_transient_empty_book(db_session, monkeypatch):
+    """The 10-10 21:31 phantom: right after the PC woke, the terminal reported an EMPTY book for a
+    moment and the open EURUSD short was marked closed (it was still open at the broker). An empty
+    read followed by the position reappearing must never close it — and resets the clock."""
+    from app.execution import monitor as monitor_mod
+
+    pos = Position(symbol="EURUSDm", asset_class="forex", direction="short", qty=0.25,
+                   entry_price=1.16, status=PositionStatus.OPEN.value, last_price=1.16)
+    db_session.add(pos)
+    db_session.commit()
+    settings = get_or_create_settings(db_session)
+
+    empty, held = _FakeBroker(reconciles=True, book=[]), _FakeBroker(reconciles=True, book=[_pv("EURUSDm", "short")])
+    for t, broker in ((0, empty), (30, held), (70, empty), (100, held), (140, empty)):
+        monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm, b=broker: b)
+        assert monitor_mod._reconcile_closed_at_broker(
+            db_session, settings, [pos], now=NOW + timedelta(seconds=t)) == 0
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.OPEN.value
+
+
+def test_failed_broker_close_keeps_position_open(db_session):
+    """A close the broker REFUSES (or can't be reached for) leaves the trade live — the row must stay
+    OPEN and managed, not be booked as closed (the old behaviour marked it closed regardless)."""
+    from app.execution.monitor import _close_position
+    from app.models.schemas import OrderResult
+
+    class _Broker:
+        is_paper = True
+
+        def close_position(self, symbol):
+            return OrderResult(status=OrderStatus.ERROR, error="MT5 positions_get failed")
+
+    pos = Position(symbol="XAUUSDm", asset_class="metal", direction="long", qty=0.01,
+                   entry_price=4000.0, status=PositionStatus.OPEN.value, last_price=3990.0)
+    db_session.add(pos)
+    db_session.commit()
+    assert _close_position(db_session, pos, _Broker(), 3990.0, "stop") is False
+    db_session.commit()
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.OPEN.value and pos.realized_pnl in (None, 0.0)
+
+
+def test_manual_close_reports_failure(db_session, monkeypatch):
+    from app.execution import monitor as monitor_mod
+    from app.models.schemas import OrderResult, Quote
+
+    class _Broker:
+        is_paper = True
+
+        def get_quote(self, symbol):
+            return Quote(symbol=symbol, price=99.0, ts=NOW)
+
+        def close_position(self, symbol):
+            return OrderResult(status=OrderStatus.ERROR, error="off quotes")
+
+    pos = _open_position(db_session, direction=Direction.LONG, entry=100.0, stop=90.0, tp=110.0)
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: _Broker())
+    res = monitor_mod.close_one(db_session, pos.id)
+    assert res["closed"] is False
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.OPEN.value
 
 
 def test_reconcile_skips_non_durable_broker(db_session, monkeypatch):
@@ -480,6 +591,20 @@ def test_daily_pause_auto_resumes_when_floating_recovers(db_session, monkeypatch
     db_session.refresh(daily); assert daily.trading_paused is False and daily.pause_reason is None
 
 
+def test_daily_pause_does_not_flap_at_the_limit(db_session, monkeypatch):
+    """Hysteresis: tripped at -31 (limit 30), a float that drifts back to -28 / -25 is NOT a recovery —
+    it stays paused (it used to resume a cent under the limit and toggle ~14x on a +/-$2 float). It
+    resumes once the day's loss is back under 80% of the limit (-23 < 24)."""
+    from app.risk import service
+    daily = get_or_create_daily_state(db_session, starting_equity=1000.0)
+    daily.starting_equity = 1000.0
+    daily.realized_pnl = 0.0
+    db_session.commit()
+    for floating, paused in ((-31.0, True), (-28.0, True), (-25.0, True), (-31.5, True), (-23.0, False)):
+        monkeypatch.setattr(service, "total_unrealized", lambda s, f=floating: f)
+        assert service.evaluate_daily_pause(db_session) is paused, floating
+
+
 def test_daily_pause_realized_breach_stays_latched_despite_floating_profit(db_session, monkeypatch):
     """A REALIZED loss beyond the limit latches for the day: an open winner masking it must NOT
     auto-resume trading (closed losses are locked in)."""
@@ -510,11 +635,70 @@ def test_flatten_closes_all(db_session):
     _open_position(db_session, direction=Direction.LONG, entry=100.0, stop=90.0, tp=110.0, symbol="AAPL")
     _open_position(db_session, direction=Direction.SHORT, entry=100.0, stop=110.0, tp=90.0, symbol="TSLA")
     res = flatten_all(db_session)
-    assert res["closed"] == 2
+    assert res["closed"] == 2 and res["failed"] == []
     open_left = db_session.scalars(
         select(Position).where(Position.status == PositionStatus.OPEN.value)
     ).all()
     assert open_left == []
+
+
+class _HedgingBroker:
+    """An MT5 hedging account: an OPPOSITE market order opens a new position instead of closing, so
+    flatten must close by ticket. Holds an app trade AND one opened directly in the terminal."""
+    is_paper = True
+    name = "mt5"
+
+    def __init__(self, fail=()):
+        self.book = {"AAPL": _pv("AAPL", "long", "stock"), "EURUSDm": _pv("EURUSDm", "short", "forex")}
+        self.fail = set(fail)
+        self.closed, self.orders = [], []
+
+    def get_quote(self, symbol):
+        from app.models.schemas import Quote
+        return Quote(symbol=symbol, price=100.0, ts=NOW)
+
+    def get_open_positions(self):
+        return list(self.book.values())
+
+    def close_position(self, symbol):
+        from app.models.schemas import OrderResult
+        if symbol in self.fail:
+            return OrderResult(status=OrderStatus.ERROR, error="off quotes")
+        if self.book.pop(symbol, None) is None:
+            return OrderResult(status=OrderStatus.REJECTED, error=f"no open position for {symbol}")
+        self.closed.append(symbol)
+        return OrderResult(status=OrderStatus.SUBMITTED, avg_fill_price=100.0)
+
+    def submit_order(self, request):  # flatten must never open an opposite position
+        self.orders.append(request)
+        raise AssertionError("flatten sent a market order — on a hedging account that OPENS a position")
+
+
+def test_flatten_closes_by_ticket_including_terminal_trades(db_session, monkeypatch):
+    from app.execution import kill_switch as ks
+    from app.execution import monitor as monitor_mod
+    broker = _HedgingBroker()
+    for mod in (ks, monitor_mod):
+        monkeypatch.setattr(mod, "get_broker_for", lambda ac, bm: broker)
+    _open_position(db_session, direction=Direction.LONG, entry=100.0, stop=90.0, tp=110.0, symbol="AAPL")
+    res = flatten_all(db_session)
+    assert broker.orders == []
+    assert sorted(broker.closed) == ["AAPL", "EURUSDm"]       # the terminal-opened trade too
+    assert res == {"closed": 2, "failed": []}
+    assert db_session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all() == []
+
+
+def test_flatten_reports_what_it_could_not_close(db_session, monkeypatch):
+    from app.execution import kill_switch as ks
+    from app.execution import monitor as monitor_mod
+    broker = _HedgingBroker(fail={"AAPL"})
+    for mod in (ks, monitor_mod):
+        monkeypatch.setattr(mod, "get_broker_for", lambda ac, bm: broker)
+    pos = _open_position(db_session, direction=Direction.LONG, entry=100.0, stop=90.0, tp=110.0, symbol="AAPL")
+    res = flatten_all(db_session)
+    assert {f.get("symbol") for f in res["failed"]} == {"AAPL"}   # reported, not claimed closed
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.OPEN.value
 
 
 # ---- Mode B auto-execute ----

@@ -403,7 +403,12 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
                 select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
         }
 
-    for p in live_broker_positions(session):
+    try:
+        live = live_broker_positions(session)
+    except Exception as exc:  # noqa: BLE001 - book unreadable (MT5 outage): no advice this pass
+        log.warning("advisor: broker positions unavailable — skipping this pass", extra={"error": str(exc)})
+        return out, contexts
+    for p in live:
         dbp = db_open.get((_norm_symbol(p.symbol), p.direction))
         try:
             events = cal.get_events(p.symbol, lookahead_hours=12, include_medium=True)
@@ -846,7 +851,11 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
     _adv_cfg = get_or_create_advisor_config(session)
     max_hold_hours = _adv_cfg.max_hold_hours or 0.0
     scale_out = getattr(_adv_cfg, "scale_out_enabled", True)
-    positions = {p.symbol: p for p in live_broker_positions(session)}
+    try:
+        positions = {p.symbol: p for p in live_broker_positions(session)}
+    except Exception as exc:  # noqa: BLE001 - never act on a book we can't see
+        log.warning("advisor auto-execute skipped: broker positions unavailable", extra={"error": str(exc)})
+        return actions
     contexts = contexts or {}
     # A symbol that has gone flat can scale out again next time it's entered.
     for sym in list(_PARTIAL_DONE):

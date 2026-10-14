@@ -103,6 +103,35 @@ def test_run_hybrid_records_stats(db_session, monkeypatch):
     assert out.scans == 1 and out.skipped_low_conf == 1 and out.candidates == 0
 
 
+def test_run_hybrid_does_not_open_a_ranging_fade(db_session, monkeypatch):
+    """A risk-approved ranging fade at the engine's 0.68 fade cap (above the 0.67 bar) is NOT a Hybrid
+    candidate — the auto-pilot no longer opens fades at any confidence."""
+    import app.agents.conditional as cond
+    import app.agents.hybrid as hybrid
+    from app.models.db import WatchItem
+    from app.models.enums import AssetClass, Direction, RiskDecisionType
+    from app.models.schemas import RiskDecision, TradeProposal
+
+    db_session.add(WatchItem(symbol="EURUSDm", asset_class="forex", timeframe="1h", enabled=True))
+    cfg = hybrid.get_or_create_hybrid_config(db_session)
+    cfg.enabled = True
+    cfg.min_confidence = 0.67
+    db_session.commit()
+
+    prop = TradeProposal(symbol="EURUSDm", asset_class=AssetClass.FOREX, direction=Direction.SHORT,
+                         confidence=0.68, strategy="mean_reversion", regime="ranging")
+    dec = RiskDecision(decision=RiskDecisionType.APPROVED, approved=True, reason="ok", symbol="EURUSDm")
+    monkeypatch.setattr(hybrid, "preview_symbol", lambda *a, **k: (prop, dec))
+    monkeypatch.setattr(hybrid, "analyze_symbol",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("a fade was taken to open")))
+    monkeypatch.setattr(hybrid, "live_broker_positions", lambda s: [])
+    monkeypatch.setattr(hybrid, "kill_switch_active", lambda s: False)
+    monkeypatch.setattr(cond, "live_broker_positions", lambda s: [])
+
+    out = hybrid.run_hybrid(db_session)
+    assert "no risk-approved setup" in (out.get("reason") or "")
+
+
 def test_run_hybrid_skips_scan_when_book_full(db_session, monkeypatch):
     """Room is checked FIRST: a full book (>= max_open_positions) skips the whole scan — no per-pair
     (AI) work is done, so preview_symbol is never called."""

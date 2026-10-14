@@ -89,11 +89,16 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
     # The pause only blocks while the breaker is armed; with it OFF the badge/banner shouldn't claim
     # "paused" (the manager already skips the veto). The stored flag is kept for the new UTC day reset.
     effective_paused = state.trading_paused and risk.daily_loss_breaker_enabled
+    try:
+        unrealized = total_unrealized(session)
+    except Exception as exc:  # noqa: BLE001 - display only; the breaker itself keeps its state
+        log.warning("risk state: floating P&L unavailable", extra={"error": str(exc)})
+        unrealized = 0.0
     return RiskStateView(
         trade_date=state.trade_date,
         starting_equity=state.starting_equity,
         realized_pnl=realized,
-        unrealized_pnl=total_unrealized(session),
+        unrealized_pnl=unrealized,
         total_risk_amount=total_risk,
         trades_count=state.trades_count,
         trading_paused=effective_paused,
