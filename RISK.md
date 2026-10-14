@@ -45,10 +45,12 @@ The maximum you can lose on a single trade if the stop-loss is hit. Position siz
   this stop"). On a small real account the minimum lot can be many times the budget (gold on $1,000
   at 0.5% risk = 2.75% per trade, 5.5×), and the auto-openers were taking those unattended.
   (`_MIN_LOT_MAX_MULTIPLE` in `app/risk/manager.py`.)
-- **Manual stop moves (2026-10-13):** the chart drag / positions-table SL edit goes through a guard:
-  a stop may be added, tightened, or moved within the per-trade risk limit — never removed, never on
-  the wrong side of price, never widened past the limit (or at all while the kill-switch is on).
-  Every change is logged and mirrored onto the app's rows so exposure accounting sees the real stop.
+- **Manual stop moves (2026-10-13; loosened 2026-10-14 at the user's explicit request):** on the
+  chart / positions table the user may move SL and TP anywhere, including widening past the per-trade
+  risk — the app shows a warning with the new risk % instead of refusing. Still refused: REMOVING the
+  stop outright (a typed 0 must not leave a live trade unprotected) and a level on the wrong side of
+  price. Every change is logged and mirrored onto the app's rows, so the exposure budget for NEW
+  trades still sees the real (widened) risk.
 
 ### `max_open_positions` (default: 3)
 Caps how many trades can be open at once.

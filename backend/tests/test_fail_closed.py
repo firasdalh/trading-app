@@ -179,10 +179,23 @@ def test_sltp_widening_within_the_limit_is_allowed(db_session, monkeypatch):
     assert broker.calls == [(80.0, None)]
 
 
-def test_sltp_widening_past_the_limit_is_refused(db_session, monkeypatch):
+def test_sltp_widening_past_the_limit_is_allowed_with_a_warning(db_session, monkeypatch):
+    # Manual control is the user's (2026-10-14): a wider stop goes through, with the new risk shown.
+    row = Position(symbol="XAUUSDm", asset_class="metal", direction="long", qty=1.0, entry_price=100.0,
+                   stop_loss=95.0, take_profit=110.0, status=PositionStatus.OPEN.value, risk_amount=50.0)
+    db_session.add(row)
+    db_session.commit()
     broker = _SlBroker()
-    code, detail = _status(lambda: _sltp(db_session, monkeypatch, broker, sl=60.0))   # $400 > $300
-    assert code == 400 and "per-trade limit" in detail and broker.calls == []
+    res = _sltp(db_session, monkeypatch, broker, sl=60.0)            # $400 > the $300 per-trade risk
+    assert broker.calls == [(60.0, None)]
+    assert res["warning"] and "4.0%" in res["warning"]
+    db_session.refresh(row)
+    assert row.stop_loss == 60.0 and row.risk_amount == 400.0       # exposure budget sees the real risk
+
+
+def test_sltp_within_the_limit_has_no_warning(db_session, monkeypatch):
+    res = _sltp(db_session, monkeypatch, _SlBroker(), sl=80.0)      # $200 <= $300
+    assert res["warning"] is None
 
 
 def test_sltp_removing_a_stop_is_refused(db_session, monkeypatch):
@@ -206,11 +219,11 @@ def test_sltp_protecting_an_unprotected_trade_is_always_allowed(db_session, monk
     assert broker.calls == [(50.0, None)]
 
 
-def test_sltp_widening_refused_under_kill_switch(db_session, monkeypatch):
+def test_sltp_manual_moves_work_under_kill_switch(db_session, monkeypatch):
+    # The kill-switch halts NEW orders; managing an open trade's stop by hand stays the user's call.
     get_or_create_settings(db_session).kill_switch_engaged = True
     db_session.commit()
     broker = _SlBroker()
-    code, _ = _status(lambda: _sltp(db_session, monkeypatch, broker, sl=90.0))   # within limit, but widening
-    assert code == 423 and broker.calls == []
-    _sltp(db_session, monkeypatch, broker, sl=98.0)                # tightening still works
-    assert broker.calls == [(98.0, None)]
+    _sltp(db_session, monkeypatch, broker, sl=90.0)
+    _sltp(db_session, monkeypatch, broker, sl=98.0)
+    assert broker.calls == [(90.0, None), (98.0, None)]

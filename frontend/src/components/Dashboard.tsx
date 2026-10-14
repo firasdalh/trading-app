@@ -128,6 +128,8 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate, co
   const [analyzing, setAnalyzing] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A manual stop moved past the per-trade risk: allowed (your call), but shown until dismissed.
+  const [slTpWarning, setSlTpWarning] = useState<string | null>(null);
   const [stBandBusy, setStBandBusy] = useState(false);
   const [aiReviewBusy, setAiReviewBusy] = useState(false);
 
@@ -248,7 +250,8 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate, co
     tp: number | null,
   ) => {
     try {
-      await api.setSlTp(p.symbol, p.asset_class as AssetClass, sl, tp);
+      const res = await api.setSlTp(p.symbol, p.asset_class as AssetClass, sl, tp);
+      setSlTpWarning(res.warning ? `${p.symbol}: ${res.warning}` : null);
       setPosBump((b) => b + 1);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -412,6 +415,14 @@ export function Dashboard({ section, settings, onSettingsChanged, onNavigate, co
       {error && (
         <div className="rounded-md border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">
           {error}
+        </div>
+      )}
+      {slTpWarning && (
+        <div className="flex items-start justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+          <span>⚠ {slTpWarning}</span>
+          <button onClick={() => setSlTpWarning(null)} className="text-amber-300/80 hover:text-amber-200" aria-label="Dismiss">
+            ×
+          </button>
         </div>
       )}
 

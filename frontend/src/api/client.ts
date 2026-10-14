@@ -132,7 +132,7 @@ export const api = {
       body: JSON.stringify({ symbol, asset_class: assetClass }),
     }),
   setSlTp: (symbol: string, assetClass: AssetClass, stopLoss: number | null, takeProfit: number | null) =>
-    request<{ status: string }>("/api/positions/sl-tp", {
+    request<{ status: string; warning?: string | null }>("/api/positions/sl-tp", {
       method: "POST",
       body: JSON.stringify({ symbol, asset_class: assetClass, stop_loss: stopLoss, take_profit: takeProfit }),
     }),
