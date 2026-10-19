@@ -1026,6 +1026,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // say different things: one is your trade, the other is the market's structure.
   const obRef = useRef<OrderBlockPrimitive | null>(null);
   const [obs, setObs] = useState<import("../types").OrderBlock[]>([]);
+  // What happened to the last order-block fetch, shown as a chip while the overlay is on. The first
+  // version swallowed failures: with the backend still running code from before the endpoint existed,
+  // the toggle switched on, the request 404'd, and the chart drew nothing and said nothing.
+  const [obStatus, setObStatus] = useState<{ kind: "loading" | "ok" | "error"; text: string } | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
   const armedLinesRef = useRef<IPriceLine[]>([]);
@@ -2316,11 +2320,35 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // Order blocks: fetched only while the overlay is on, and re-fetched per symbol AND timeframe —
   // a block belongs to the timeframe it formed on, so the 1h zones are simply wrong on the 5m chart.
   useEffect(() => {
-    if (!ovl.ob) { setObs([]); return; }
+    if (!ovl.ob) { setObs([]); setObStatus(null); return; }
     let dead = false;
+    setObStatus({ kind: "loading", text: "Order blocks…" });
     api.orderBlocks(symbol, assetClass, timeframe)
-      .then((r) => { if (!dead) setObs(r.blocks ?? []); })
-      .catch(() => { if (!dead) setObs([]); });
+      .then((r) => {
+        if (dead) return;
+        const list = r.blocks ?? [];
+        setObs(list);
+        const dem = list.filter((b) => b.kind === "bullish").length;
+        setObStatus({
+          kind: "ok",
+          text: list.length
+            ? `Order blocks: ${list.length} (${dem} demand · ${list.length - dem} supply)`
+            : `Order blocks: none on this ${timeframe} chart`,
+        });
+      })
+      .catch((e: unknown) => {
+        if (dead) return;
+        setObs([]);
+        const msg = e instanceof Error ? e.message : String(e);
+        // A 404 here means the backend process is older than this screen: the UI is read fresh from
+        // disk on every load, but the API is whatever code the running backend started with.
+        setObStatus({
+          kind: "error",
+          text: msg.startsWith("404")
+            ? "Order blocks unavailable — the app is running older code. Restart it (Stop, then Start AI Trading Desk)."
+            : `Order blocks unavailable — ${msg}`,
+        });
+      });
     return () => { dead = true; };
   }, [symbol, assetClass, timeframe, ovl.ob]);
 
@@ -2335,7 +2363,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         kind: b.kind,
         top: b.top,
         bottom: b.bottom,
-        originTime: Math.floor(new Date(b.origin_ts).getTime() / 1000) as unknown as import("lightweight-charts").Time,
+        // Exactly the conversion the candles go through (see `toTime`): the chart shows LOCAL time by
+        // default, so a raw UTC second matched no bar at all, timeToCoordinate returned null, and every
+        // zone fell back to the chart's left edge instead of starting at its origin candle.
+        originTime: utcToDisp(
+          Math.floor(Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(b.origin_ts) ? b.origin_ts : `${b.origin_ts}Z`) / 1000),
+        ) as UTCTimestamp,
         strength: b.strength,
         mitigated: b.mitigated,
         touches: b.touches,
@@ -2343,7 +2376,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         displacementAtr: b.displacement_atr,
       })),
     );
-  }, [obs, ovl.ob]);
+    // tzMode: switching the chart between local and UTC re-times every candle, so the zones have to be
+    // re-timed with them or they drift by the timezone offset.
+  }, [obs, ovl.ob, tzMode]);
 
   // Draw them dotted and muted on purpose: these are levels you judge price AGAINST, not levels
   // the engine is trading, so they must not compete with the position and plan lines.
@@ -3176,6 +3211,21 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             </MenuItem>
           ))}
         </ToolMenu>
+
+        {ovl.ob && obStatus && (
+          <span
+            className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+              obStatus.kind === "error"
+                ? "bg-bear/20 text-bear"
+                : obStatus.kind === "loading"
+                  ? "bg-neutral-800 text-neutral-400"
+                  : "bg-cyan-500/15 text-cyan-300"
+            }`}
+            title={obStatus.text}
+          >
+            {obStatus.text}
+          </span>
+        )}
 
         {/* Rejection score, on the chart rather than buried in the map panel. A score you have to
             go looking for is a score you don't use. Click it to open the full breakdown. */}

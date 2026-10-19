@@ -20,6 +20,7 @@ import type {
   SeriesType,
   Time,
 } from "lightweight-charts";
+import { roundRect } from "./chartZones";
 
 type Target = Parameters<ISeriesPrimitivePaneRenderer["draw"]>[0];
 type Scope = Parameters<Parameters<Target["useBitmapCoordinateSpace"]>[0]>[0];
@@ -153,25 +154,49 @@ export class OrderBlockPrimitive implements ISeriesPrimitive<Time> {
   }
 
   private drawLabels(target: Target) {
+    // Labels sit on a dark pill with a coloured border, the same treatment as the SL/TP tags next
+    // door. The first version wrote bare coloured text straight onto the chart, where it collided with
+    // candles, moving averages and the engine's own "PB" markers - readable in a screenshot only if you
+    // already knew what it said, which is no use on a tool meant for your eye.
     target.useBitmapCoordinateSpace((s: Scope) => {
       const { context: g, horizontalPixelRatio: hpr, verticalPixelRatio: vpr } = s;
-      const px = Math.max(9, Math.round(10 * vpr));
+      const fontPx = Math.max(10, Math.round(10.5 * vpr));
+      const H = Math.round(16 * vpr);                 // pill height
+      const PAD = 6 * hpr;
       g.save();
-      g.font = `600 ${px}px ui-sans-serif, system-ui, sans-serif`;
+      g.font = `600 ${fontPx}px system-ui, -apple-system, 'Segoe UI', sans-serif`;
       g.textBaseline = "middle";
+      const placed: { x: number; y: number; w: number }[] = [];
       for (const b of this.boxes(s.mediaSize.width)) {
-        const top = Math.min(b.yTop, b.yBot) * vpr;
-        const bot = Math.max(b.yTop, b.yBot) * vpr;
-        if (bot - top < px * 1.4) continue;          // too thin to write in without covering it
         const rgb = b.z.kind === "bullish" ? CYAN : AMBER;
-        // Everything that decides whether this zone is worth acting on, in one short tag.
         const bits = [b.z.kind === "bullish" ? "Demand" : "Supply", `${b.z.strength}`];
         if (b.z.fvg) bits.push("FVG");
         if (b.z.touches > 0) bits.push(`${b.z.touches}x`);
         const text = bits.join(" · ");
-        const x = Math.round(b.x0 * hpr) + 6 * hpr;
-        g.fillStyle = `rgba(${rgb},${b.z.mitigated ? 0.6 : 0.95})`;
-        g.fillText(text, x, (top + bot) / 2);
+        const w = Math.round(g.measureText(text).width + PAD * 2);
+        const top = Math.round(Math.min(b.yTop, b.yBot) * vpr);
+        const bot = Math.round(Math.max(b.yTop, b.yBot) * vpr);
+        const x = Math.round(b.x0 * hpr) + Math.round(4 * hpr);
+        // Centred in the zone when it is tall enough; otherwise sitting ON its top edge. The first
+        // version skipped the label on thin zones, which on a zoomed-out chart is most of them -
+        // leaving coloured bands with nothing to say what they were.
+        let y = bot - top >= H + 2 * vpr ? Math.round((top + bot) / 2 - H / 2) : top - H - Math.round(2 * vpr);
+        // Overlapping zones would stack their pills on one row; step each clash down a row.
+        for (let guard = 0; guard < 8; guard++) {
+          const clash = placed.some((q) => x < q.x + q.w && q.x < x + w && Math.abs(q.y - y) < H);
+          if (!clash) break;
+          y += H + Math.round(2 * vpr);
+        }
+        placed.push({ x, y, w });
+        g.fillStyle = "rgba(12,12,14,0.86)";
+        g.beginPath();
+        roundRect(g, x, y, w, H, 3 * hpr);
+        g.fill();
+        g.strokeStyle = `rgba(${rgb},${b.z.mitigated ? 0.55 : 0.9})`;
+        g.lineWidth = Math.max(1, Math.floor(hpr));
+        g.stroke();
+        g.fillStyle = `rgba(${rgb},${b.z.mitigated ? 0.75 : 1})`;
+        g.fillText(text, x + PAD, y + H / 2 + 0.5);
       }
       g.restore();
     });

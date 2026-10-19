@@ -437,7 +437,7 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
 }
 
 // ctx.roundRect is missing from older Chromium/Safari builds; a hand-rolled path works everywhere.
-function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+export function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   const rr = Math.min(r, w / 2, h / 2);
   g.moveTo(x + rr, y);
   g.lineTo(x + w - rr, y);
