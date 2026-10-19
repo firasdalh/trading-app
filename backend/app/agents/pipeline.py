@@ -33,6 +33,20 @@ log = get_logger("agents.pipeline")
 _CONTEXT_TIMEFRAMES = ("1h", "4h", "1d")
 
 
+# Engine features that are BUILT but not PROVEN. They exist so the backtest harness can measure them
+# (it calls the engine directly with its own `disable` set), but the live desk must never run them:
+# the filter convention here is "on unless disabled", so without this a new feature would switch
+# itself on in production the moment the code loaded - which is exactly how the order-block filters
+# were briefly live-by-default on 2026-10-19 before a single result was in. A feature leaves this
+# set only after it clears the bar in analysis/ and the user agrees.
+_UNPROVEN_FILTERS = frozenset({"ob_wall", "ob_target"})
+
+
+def _live_disable(settings) -> frozenset[str]:
+    """The live `disable` set: the user's switched-off filters PLUS everything not yet proven."""
+    return frozenset(settings.disabled_filters or ()) | _UNPROVEN_FILTERS
+
+
 def _timeframes_for(primary: str) -> list[str]:
     return list(dict.fromkeys([primary, *_CONTEXT_TIMEFRAMES]))
 
@@ -78,7 +92,7 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
                                 rsi_trend_filter=rsi_trend_filter, rsi_rej=rsi_rej,
                                 rsi_at_level=rsi_at_level, rsi_pa=rsi_pa,
-                                disable=frozenset(settings.disabled_filters or ()),
+                                disable=_live_disable(settings),
                                 momentum_ai=(settings.ai_momentum_read and use_llm
                                              and llm_available() and not ai_decides),
                                 regime_ai=(settings.ai_regime_read and use_llm
@@ -174,7 +188,7 @@ def analyze_symbol(
                                 rsi_confirm=rsi_confirm, rsi_macd=rsi_macd, rsi_div=rsi_div,
                                 rsi_trend_filter=rsi_trend_filter, rsi_rej=rsi_rej,
                                 rsi_at_level=rsi_at_level, rsi_pa=rsi_pa,
-                                disable=frozenset(settings.disabled_filters or ()),
+                                disable=_live_disable(settings),
                                 momentum_ai=(settings.ai_momentum_read and use_llm
                                              and llm_available() and not ai_decides),
                                 regime_ai=(settings.ai_regime_read and use_llm

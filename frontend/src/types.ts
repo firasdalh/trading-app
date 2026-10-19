@@ -891,3 +891,33 @@ export interface ChartState {
   target_level: number | null;
   level_in_play: number | null;
 }
+
+/** Order blocks for the chart's own timeframe (backend app/agents/order_blocks.py).
+ *  Read-out only: these are a statement about the market, never a trade instruction. */
+export interface OrderBlock {
+  kind: "bullish" | "bearish";
+  top: number;
+  bottom: number;
+  mid: number;
+  origin_index: number;
+  origin_ts: string;
+  /** The bar the block became KNOWABLE — a block is confirmed several bars after its origin. */
+  confirmed_index: number;
+  confirmed_ts: string;
+  broke_level: number;
+  displacement_atr: number;
+  fvg: boolean;
+  touches: number;
+  mitigated: boolean;
+  invalidated: boolean;
+  strength: number;
+  age_bars: number;
+  reasons: string[];
+}
+
+export interface OrderBlocksResponse {
+  symbol: string;
+  timeframe: string;
+  price: number | null;
+  blocks: OrderBlock[];
+}

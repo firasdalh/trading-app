@@ -78,6 +78,14 @@ export const api = {
       `/api/market/keylevels?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
     ),
 
+  // Order blocks for the chart's OWN timeframe. A 1h block is invisible on the 5m chart and
+  // meaningless on the daily, so unlike keyLevels this is timeframe-scoped. Read-out only — the
+  // deterministic engine does not consult these.
+  orderBlocks: (symbol: string, assetClass: AssetClass, timeframe: string) =>
+    request<import("../types").OrderBlocksResponse>(
+      `/api/market/orderblocks?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}&timeframe=${timeframe}`,
+    ),
+
   // AI two-scenario read (ranked + scored + why-primary). INFO only. Falls back to deterministic.
   // Also timeframe-scoped: the AI reasons over the same chart you're reading, and its horizon
   // ("next few hours" vs "next few weeks") depends on which one that is.

@@ -19,6 +19,7 @@ import {
 import { api } from "../api/client";
 import { ScenarioCard } from "./ScenarioCard";
 import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
+import { OrderBlockPrimitive, type ObZone } from "./orderBlockZones";
 import { fmtPrice, fmtUsd } from "../format";
 import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
@@ -1021,6 +1022,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const lastBarRef = useRef<CandlestickData | null>(null);
   // TradingView-style SL/TP boxes (chartZones.ts), attached to the candle series once.
   const zonesRef = useRef<TradeZonesPrimitive | null>(null);
+  // Order-block zones (orderBlockZones.ts) — a separate primitive from the SL/TP boxes because they
+  // say different things: one is your trade, the other is the market's structure.
+  const obRef = useRef<OrderBlockPrimitive | null>(null);
+  const [obs, setObs] = useState<import("../types").OrderBlock[]>([]);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
   const armedLinesRef = useRef<IPriceLine[]>([]);
@@ -1111,7 +1116,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // analysis, and without it a 1h chart is an undifferentiated run of candles.
     // `zones` (the SL/TP boxes) defaults ON for the same reason: "where is my stop, where is my
     // target, and where is price between them" is the first thing you look at on a live trade.
-    { pd: false, pw: false, open: false, sessions: false, vwap: false, rr: false, div: false, choch: false, days: true, zones: true },
+    { pd: false, pw: false, open: false, sessions: false, vwap: false, rr: false, div: false, choch: false, ob: false, days: true, zones: true },
     true,
   );
   // Which toolbar menu is open (only one at a time — two dropdowns overlapping is worse than
@@ -1218,6 +1223,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     series.attachPrimitive(zones);
     zonesRef.current = zones;
 
+    const obPrim = new OrderBlockPrimitive();
+    series.attachPrimitive(obPrim);
+    obRef.current = obPrim;
+
     chartRef.current = chart;
     seriesRef.current = series;
     volumeRef.current = volume;
@@ -1274,6 +1283,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     return () => {
       series.detachPrimitive(zones);
       zonesRef.current = null;
+      obRef.current = null;
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
@@ -2303,6 +2313,38 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     return () => { dead = true; };
   }, [symbol, assetClass, needKeyLv]);
 
+  // Order blocks: fetched only while the overlay is on, and re-fetched per symbol AND timeframe —
+  // a block belongs to the timeframe it formed on, so the 1h zones are simply wrong on the 5m chart.
+  useEffect(() => {
+    if (!ovl.ob) { setObs([]); return; }
+    let dead = false;
+    api.orderBlocks(symbol, assetClass, timeframe)
+      .then((r) => { if (!dead) setObs(r.blocks ?? []); })
+      .catch(() => { if (!dead) setObs([]); });
+    return () => { dead = true; };
+  }, [symbol, assetClass, timeframe, ovl.ob]);
+
+  // Hand them to the primitive. Cleared when the overlay is off so switching it back on cannot
+  // flash the previous pair's zones over this one's candles.
+  useEffect(() => {
+    const prim = obRef.current;
+    if (!prim) return;
+    prim.setZones(
+      !ovl.ob ? [] : obs.map((b): ObZone => ({
+        key: `${b.kind}-${b.origin_ts}`,
+        kind: b.kind,
+        top: b.top,
+        bottom: b.bottom,
+        originTime: Math.floor(new Date(b.origin_ts).getTime() / 1000) as unknown as import("lightweight-charts").Time,
+        strength: b.strength,
+        mitigated: b.mitigated,
+        touches: b.touches,
+        fvg: b.fvg,
+        displacementAtr: b.displacement_atr,
+      })),
+    );
+  }, [obs, ovl.ob]);
+
   // Draw them dotted and muted on purpose: these are levels you judge price AGAINST, not levels
   // the engine is trading, so they must not compete with the position and plan lines.
   useEffect(() => {
@@ -3125,6 +3167,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
             ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
             ["rr", "Risk / reward bands", "Full-width bands entry→stop (red) and entry→target (green). With Trade zones on, only armed setups get these; otherwise positions and proposals too."],
+            ["ob", "Order blocks", "Supply and demand zones: the candle an impulsive move departed from, where that move also BROKE a swing. Cyan = demand (below price), amber = supply (above). Brighter means stronger; a hollow, dashed box has already been traded into, and the first return to a zone is the clean one. The tag reads side · strength · FVG (an imbalance was left on the way out) · how many times it has been tested."],
             ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
             ["choch", "Change of character", "Marks where the swing sequence first contradicts the trend it was in."],
           ] as const).map(([k, lbl, tip]) => (

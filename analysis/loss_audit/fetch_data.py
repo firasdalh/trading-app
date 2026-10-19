@@ -11,6 +11,10 @@ SYMS = {
  "XAGAUDm":"metal","ETHUSDm":"crypto","UKOILm":"energy","AUDCHFm":"forex","USDJPYm":"forex","CHFJPYm":"forex",
  "GBPUSDm":"forex","AUDJPYm":"forex","XAGEURm":"metal","US30m":"index","XAUAUDm":"metal","EURJPYm":"forex","GBPJPYm":"forex",
 }
+# Optional 2nd argument: a comma-separated symbol list (treated as forex) for a HOLDOUT fetch -
+# instruments deliberately kept out of every earlier analysis. Without it, the original 33 as before.
+if len(sys.argv) > 2:
+    SYMS = {sym: "forex" for sym in sys.argv[2].split(",") if sym}
 TFS = {"15m":(mt5.TIMEFRAME_M15, 12000), "1h":(mt5.TIMEFRAME_H1, 7000), "4h":(mt5.TIMEFRAME_H4, 2500), "1d":(mt5.TIMEFRAME_D1, 900)}
 assert mt5.initialize(), mt5.last_error()
 data = {"asset_class": SYMS, "bars": {}, "fetched_at": dt.datetime.now(dt.timezone.utc)}

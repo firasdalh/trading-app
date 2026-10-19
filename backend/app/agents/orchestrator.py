@@ -212,6 +212,15 @@ DET_FILTERS = [
      "desc": "Stand aside in a chaotic volatility expansion with no trend (whipsaw zone)."},
     {"key": "wall", "label": "S/R wall + volume",
      "desc": "Penalise chasing into a nearby S/R wall; reward a volume-backed break behind the entry."},
+    {"key": "ob_wall", "label": "Don't buy under a supply block",
+     "desc": "Stand aside at market when a FRESH, never-retested order block sits in the trade's "
+             "path within 1.5 ATR — a long under untouched supply, a short above untouched demand. "
+             "Same idea as the higher-TF level filter, but the level is where an impulsive move "
+             "actually departed from rather than a pivot. UNPROVEN: see the backtest before trusting."},
+    {"key": "ob_target", "label": "Target the opposing order block",
+     "desc": "Place the take-profit at the near edge of the next opposing block instead of the "
+             "nearest pivot level — the price the last impulse left from is where the move is most "
+             "likely to be met. Only used when it still clears the minimum R:R. UNPROVEN."},
     {"key": "minrr", "label": "Minimum reward:risk",
      "desc": "Require a minimum R:R at market entry, else arm the better-priced break/pullback."},
 ]
@@ -310,6 +319,15 @@ _TREND_AGE_MAX_BARS = 24
 # 4R all beat the level target, in every one of 4 time folds — so this is a property of the trades, not
 # a tuned number. 3R sits mid-plateau; the level logic still applies beyond it (capped at _RR_MAX).
 _TARGET_MIN_R = 3.0
+
+# Order-block wall (the "ob_wall" filter): how close a fresh opposing block must be, and how strong,
+# before a market entry stands aside. Chosen BEFORE any backtest. They read env overrides so the
+# harness can test the neighbouring values a result has to survive (a "plateau", per the project's
+# rule) — BACKTEST-ONLY, exactly like the `disable` set: the live desk never sets these variables.
+import os as _os
+
+_OB_WALL_ATR = float(_os.environ.get("OB_WALL_ATR", "1.5"))
+_OB_WALL_MIN_STRENGTH = int(_os.environ.get("OB_WALL_MIN_STRENGTH", "70"))
 
 
 def _confirm_trend(technical: TechnicalRead, entry_tf: str) -> tuple[str, str]:
@@ -2226,9 +2244,72 @@ def _deterministic_decision(
     # the signature of noise, not an edge. The read-out stays (app/agents/chart_state.py is genuinely
     # useful on the chart); the GATE does not ship. Fifth hypothesis rejected this week.
 
+    # ORDER BLOCKS (app/agents/order_blocks.py) - BUILT, MEASURED, REJECTED (2026-10-19).
+    # Kept only so the harness can re-test them; the live desk can never run them
+    # (pipeline._UNPROVEN_FILTERS). Faithful harness, 33 symbols, true per-bar spread, vs +0.115R:
+    #   ob_target  same-entry paired +0.089R, 95% CI [-0.110, +0.306]           -> noise
+    #   ob_wall    +0.114..+0.128R over a 5-setting plateau, removed-vs-kept p 0.20-0.32, total
+    #              swings -3R..+12R around baseline, OOS +0.018..+0.085           -> no plateau
+    #   "opposing block 1.5R-4R ahead" (post-hoc, p=0.007 in-sample): pre-registered and run on 16
+    #              never-used G10 pairs -> p=0.243, REJECTED. See analysis/loss_audit/
+    #              ob_path_preregistration.md.
+    # Order blocks remain a chart read-out (Overlays -> Order blocks) for the trader's own eye.
+    #
+    # Both uses share ONE detection pass because it is the expensive part (~3 ms).
+    #
+    # No look-ahead by construction: `entry_candles` ends at the bar being decided, so a block can
+    # only be confirmed by bars already in that window. There are no future bars to confirm one.
+    ob_target_used = False
+    if entry_candles and len(entry_candles) >= 60 and (
+            "ob_wall" not in disable or "ob_target" not in disable):
+        try:
+            from app.agents.order_blocks import find_order_blocks, opposing_block
+
+            # No display cap here. find_order_blocks keeps the 8 STRONGEST for the chart; with a
+            # few strong demand zones below price, the supply block directly above the entry - the
+            # one the wall check exists to find - could be cut, and the check would pass silently.
+            _obs = find_order_blocks(list(entry_candles), max_blocks=1000)
+            _dirs = "long" if direction == Direction.LONG else "short"
+
+            # 1. WALL: a fresh, never-retested opposing block right in the path. A long bought
+            #    directly under untouched supply is buying into the one area with known sellers.
+            if "ob_wall" not in disable and atr_v:
+                wall = opposing_block(_obs, _dirs, entry, min_strength=_OB_WALL_MIN_STRENGTH,
+                                      within_atr=_OB_WALL_ATR, atr_v=atr_v)
+                if wall is not None:
+                    base.watch = True
+                    base.rationale = (
+                        f"Standing aside at MARKET: a {direction.value.upper()} is valid, but a fresh "
+                        f"{wall.kind} order block sits at {wall.bottom:.6g}-{wall.top:.6g} "
+                        f"({wall.displacement_atr:.1f} ATR departure, never retested) directly in the "
+                        f"way. Wait for it to be taken or to reject."
+                    )
+                    return base
+
+            # 2. TARGET: aim at the near edge of the next opposing block. Kept only if it still
+            #    clears the R:R floor — a nearer, "better" target that pays 0.8R is not better.
+            if "ob_target" not in disable:
+                tgt_ob = opposing_block(_obs, _dirs, entry, min_strength=55)
+                if tgt_ob is not None:
+                    cand = tgt_ob.bottom if direction == Direction.LONG else tgt_ob.top
+                    # Bounded both ways, like every other target in this engine: below the R:R
+                    # floor it is not worth taking, and past _RR_MAX (4R) it is not a target, it is
+                    # a hope - an uncapped block 10R away would have set a 10R take-profit.
+                    if risk > 0 and _MIN_RR_ENTRY <= abs(cand - entry) / risk <= _RR_MAX:
+                        target = cand
+                        ob_target_used = True
+                        struct_note = (f"opposing order block {tgt_ob.bottom:.6g}-{tgt_ob.top:.6g} "
+                                       f"(~{abs(cand - entry) / risk:.1f}R)")
+        except Exception:  # noqa: BLE001 - an unproven read-out must never break the decision path
+            pass
+
     # TARGET FLOOR (see _TARGET_MIN_R): give the trend room. The level logic above still picks a further
     # level when there is one; this only lifts a target that would have banked the move too early.
-    if "target_floor" not in disable and abs(target - entry) < _TARGET_MIN_R * risk:
+    # ...but NOT over an order-block target. The floor would lift a deliberate 2R block target to a
+    # blank 3R and silently undo the whole feature, leaving a backtest that measures nothing. This
+    # is the same conflict `minrr` had with the floor in September.
+    if ("target_floor" not in disable and not ob_target_used
+            and abs(target - entry) < _TARGET_MIN_R * risk):
         target = entry + _TARGET_MIN_R * risk if direction == Direction.LONG else entry - _TARGET_MIN_R * risk
         struct_note += f"; lifted to {_TARGET_MIN_R:.0f}R — trend winners need room"
 

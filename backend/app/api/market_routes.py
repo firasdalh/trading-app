@@ -277,3 +277,46 @@ def test_order(
         )
     log.warning("test-order (paper) submitted", extra={"symbol": request.symbol, "qty": request.qty})
     return broker.submit_order(request)
+
+
+@router.get("/market/orderblocks")
+def market_order_blocks(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    timeframe: str = Query("1h"),
+    limit: int = Query(500, ge=120, le=1500),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Order blocks for the chart's OWN timeframe (app/agents/order_blocks.py).
+
+    Unlike /market/keylevels, which is daily by nature, a block only means something on the
+    timeframe it formed on — a 1h block is invisible on the 5m chart and meaningless on the daily.
+    So this takes the chart's timeframe and reads the same candles the chart is drawing.
+
+    Read-out only: the deterministic engine does not consult these, and nothing here can open,
+    size or direct a trade. Each zone carries `confirmed_ts` — the bar it became knowable — because
+    a block is confirmed several bars after its origin candle, and drawing it from the origin
+    without saying so would misrepresent when you could have acted on it.
+    """
+    from app.agents.order_blocks import find_order_blocks
+    from app.brokers.registry import get_broker_for
+    from app.core.state import get_or_create_settings
+    from app.data.ohlcv_cache import get_ohlcv_cached
+
+    settings = get_or_create_settings(session)
+    broker = get_broker_for(asset_class, settings.broker_map)
+    try:
+        series = get_ohlcv_cached(broker, symbol, timeframe, limit, ttl=60.0)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"order blocks unavailable: {exc}") from exc
+    candles = list(series.candles) if series else []
+    if len(candles) < 40:
+        return {"symbol": symbol, "timeframe": timeframe, "price": None, "blocks": []}
+
+    blocks = find_order_blocks(candles)
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "price": round(candles[-1].close, 8),
+        "blocks": [b.as_dict() for b in blocks],
+    }

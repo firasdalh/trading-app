@@ -454,7 +454,15 @@ def _det_filters_view(session: Session) -> DetFiltersView:
     disabled = list(s.disabled_filters or [])
     if not s.trend_only_mode:
         disabled.append("adx")
-    return DetFiltersView(filters=[DetFilterItem(**f) for f in DET_FILTERS], disabled=disabled)
+    # Unproven engine features are forced OFF on the live desk (pipeline._UNPROVEN_FILTERS). Listing
+    # them here would put a toggle in the panel that reads ON and does nothing - so they are not
+    # offered until they have earned a place.
+    from app.agents.pipeline import _UNPROVEN_FILTERS
+
+    return DetFiltersView(
+        filters=[DetFilterItem(**f) for f in DET_FILTERS if f["key"] not in _UNPROVEN_FILTERS],
+        disabled=disabled,
+    )
 
 
 @router.get("/settings/det-filters", response_model=DetFiltersView, tags=["settings"])
