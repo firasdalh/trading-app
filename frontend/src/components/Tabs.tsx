@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type NavIcon = "desk" | "scanner" | "risk" | "journal" | "backtest";
+export type NavIcon = "desk" | "monitor" | "scanner" | "risk" | "journal" | "backtest";
 
 export interface NavItem {
   id: string;
@@ -85,6 +85,14 @@ function Icon({ name }: { name: NavIcon }) {
         <path d="M10 3v18M9 7h2v8H9z" />
         <path d="M16 6v12M15 9h2v5h-2z" />
         <path d="M21 20H3" />
+      </>
+    ),
+    // A grid of rows with a trend arrow - many pairs, one look.
+    monitor: (
+      <>
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M3 9.5h18M3 15h18M9 4v16" />
+        <path d="M13 13l2-2 2 1.5 2-2.5" />
       </>
     ),
     scanner: (

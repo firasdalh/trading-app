@@ -24,6 +24,7 @@ from app.api.conditional_routes import router as conditional_router
 from app.api.rsi_over_routes import router as rsi_over_router
 from app.api.journal_routes import router as journal_router
 from app.api.market_routes import router as market_router
+from app.api.monitor_routes import router as monitor_router
 from app.api.proposal_routes import router as proposal_router
 from app.api.routes import router
 from app.api.settings_routes import router as settings_router
@@ -246,6 +247,7 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(market_router)
+app.include_router(monitor_router)
 app.include_router(proposal_router)
 app.include_router(settings_router)
 app.include_router(backtest_router)

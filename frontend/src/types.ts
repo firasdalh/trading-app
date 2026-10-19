@@ -921,3 +921,80 @@ export interface OrderBlocksResponse {
   price: number | null;
   blocks: OrderBlock[];
 }
+
+// ---- Watchlist monitor (GET /api/monitor) -------------------------------------------------------
+export type MonitorBias =
+  | "aligned_up" | "aligned_down"
+  | "pullback_up" | "pullback_down"
+  | "counter_up" | "counter_down"
+  | "mixed";
+
+export interface MonitorZoneBox {
+  top: number;
+  bottom: number;
+  strength: number;
+  mitigated: boolean;
+  /** Distance from price to the zone's near edge, in ATRs of that timeframe (0 when inside). */
+  dist_atr: number | null;
+}
+
+export interface MonitorTf {
+  trend: "up" | "down" | "sideways" | null;
+  ema_stacked: boolean;
+  ema20: number | null;
+  ema50: number | null;
+  ema200: number | null;
+  price_vs_ema200: "above" | "below" | null;
+  adx: number | null;
+  strength: "strong" | "moderate" | "weak" | null;
+  adx_dir: "rising" | "falling" | "flat" | null;
+  supertrend: "up" | "down" | null;
+  rsi: number | null;
+  rsi_prev: number | null;
+  rsi_zone: "overbought" | "oversold" | "bullish" | "bearish" | null;
+  structure: "up" | "down" | "range";
+  choch: boolean;
+  /** Which way the change of character broke (measured against the swing structure). */
+  choch_side: "up" | "down" | null;
+  divergence: "bull" | "bear" | "bull_hidden" | "bear_hidden" | null;
+  state: string;
+  state_headline: string;
+  /** Which way the latest bar's pattern leans. */
+  pattern_side: "up" | "down" | null;
+  atr: number | null;
+  zones: {
+    inside: (MonitorZoneBox & { kind: "demand" | "supply" }) | null;
+    /** Every zone kind price is inside (both when a demand and a supply block overlap price). */
+    inside_kinds?: ("demand" | "supply")[];
+    demand: MonitorZoneBox | null;
+    supply: MonitorZoneBox | null;
+  };
+}
+
+export interface MonitorNote {
+  tone: "info" | "warn" | "caution";
+  text: string;
+}
+
+export interface MonitorRow {
+  symbol: string;
+  asset_class: string;
+  price: number | null;
+  change_pct: number | null;
+  /** Today's range so far as a multiple of the daily ATR (1.0 = a normal day's full range). */
+  range_used: number | null;
+  /** false = no fresh ticks (closed session, or a quiet crypto feed); null = unknown. */
+  market_open: boolean | null;
+  bias: MonitorBias;
+  tfs: Record<string, MonitorTf | null>;
+  notes: MonitorNote[];
+  events_soon?: string | null;
+  news_pending?: boolean;
+  errors: string[];
+}
+
+export interface MonitorResponse {
+  generated_at: string;
+  timeframes: string[];
+  rows: MonitorRow[];
+}

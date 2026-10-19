@@ -67,6 +67,7 @@ import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
 import { SymbolPicker } from "./SymbolPicker";
 import { WatchlistPanel } from "./WatchlistPanel";
+import { MarketMonitor } from "./MarketMonitor";
 
 interface Favorite {
   symbol: string;
@@ -921,6 +922,15 @@ export function Dashboard({
             title="Watchlist"
             hint="Pairs the Hybrid auto-pilot scans — click one to chart it"
             body="flush"
+            actions={
+              <button
+                onClick={() => onOpenDrawer("monitor")}
+                className="btn btn-ghost px-1.5 py-0.5 text-xs"
+                title="Monitor: every watched pair's 1H / 4H / 1D direction, RSI and zones in one table"
+              >
+                Monitor ›
+              </button>
+            }
             bodyClassName="[&>.card>div:first-child>div:first-child>div.text-sm.font-semibold:first-child]:hidden"
           >
             <WatchlistPanel
@@ -982,6 +992,24 @@ export function Dashboard({
       )}
 
       {/* ───────────── Drawers that drive this desk ───────────── */}
+      {/* MONITOR — the whole watchlist on one screen, for framing a manual trade. Picking a pair (or
+          one of its timeframe cells) charts it here and closes the drawer. */}
+      <Drawer
+        open={drawer === "monitor"}
+        title="Monitor"
+        subtitle="Every watched pair at a glance: which way 1H, 4H and 1D point, how hard, where RSI sits, and whether price is on a demand or supply zone."
+        onClose={onCloseDrawer}
+        widthClass="max-w-[84rem]"
+      >
+        <MarketMonitor
+          currentSymbol={symbol}
+          onSelect={(p) => {
+            if (p.timeframe) setTimeframe(p.timeframe);
+            openPositionSymbol(p);
+          }}
+        />
+      </Drawer>
+
       {/* SCANNER — where candidates come from. Nothing here opens a trade by itself unless you
           tell it to; picking a pair charts it on the desk and closes the drawer. */}
       <Drawer

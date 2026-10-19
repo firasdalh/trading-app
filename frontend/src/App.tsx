@@ -23,7 +23,7 @@ const VIEWS: View[] = ["desk", "journal", "backtest"];
 const LEGACY_VIEWS: Record<string, View> = { trade: "desk", scan: "desk", book: "desk", risk: "desk" };
 
 function initialDrawer(storedView: string): DrawerId | null {
-  // ?drawer=scanner|risk|advisor opens a drawer straight from a link (and lets a headless browser
+  // ?drawer=monitor|scanner|risk|advisor opens a drawer straight from a link (and lets a headless browser
   // screenshot one, which cannot click).
   try {
     const q = new URLSearchParams(window.location.search).get("drawer");
@@ -46,7 +46,7 @@ export default function App() {
   useEffect(() => {
     if (stored !== view) setStored(view);
   }, [stored, view, setStored]);
-  // Scanner and Advisor are rendered BY the desk, so they can only be open while the desk is the
+  // Monitor, Scanner and Advisor are rendered BY the desk, so they can only be open while the desk is the
   // view (e.g. a ?drawer=scanner link opened while the app was last left on Journal).
   useEffect(() => {
     if (drawer && drawer !== "risk" && view !== "desk") setStored("desk");
@@ -118,6 +118,15 @@ export default function App() {
       onClick: () => goView("desk"),
       alert: pendingN,
       hint: "Chart, analysis, and your open positions and pending approvals beside it",
+    },
+    {
+      id: "monitor",
+      label: "Monitor",
+      icon: "monitor",
+      kind: "drawer",
+      active: drawer === "monitor",
+      onClick: () => toggleDrawer("monitor"),
+      hint: "Every watched pair at a glance: 1H / 4H / 1D direction, RSI, and demand/supply zones (opens over the desk)",
     },
     {
       id: "scanner",

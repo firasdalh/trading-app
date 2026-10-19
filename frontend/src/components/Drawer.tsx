@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 /** The pop-ups that slide over the desk without leaving it. */
-export type DrawerId = "scanner" | "risk" | "advisor";
-export const DRAWER_IDS: DrawerId[] = ["scanner", "risk", "advisor"];
+export type DrawerId = "monitor" | "scanner" | "risk" | "advisor";
+export const DRAWER_IDS: DrawerId[] = ["monitor", "scanner", "risk", "advisor"];
 
 interface Props {
   open: boolean;
