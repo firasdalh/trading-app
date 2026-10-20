@@ -157,7 +157,7 @@ class CcxtBrokerAdapter(BrokerAdapter):
             ))
         return views
 
-    def close_position(self, symbol: str) -> OrderResult:
+    def close_position(self, symbol: str, direction: str | None = None) -> OrderResult:
         for pos in self.get_open_positions():
             if pos.symbol == symbol:
                 side = OrderSide.SELL if pos.direction == "long" else OrderSide.BUY

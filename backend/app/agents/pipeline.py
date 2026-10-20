@@ -51,6 +51,35 @@ def _timeframes_for(primary: str) -> list[str]:
     return list(dict.fromkeys([primary, *_CONTEXT_TIMEFRAMES]))
 
 
+_MIN_CONTEXT_BARS = 60
+
+
+def _missing_context(series: list[OHLCVSeries], timeframe: str) -> str | None:
+    """Which timeframe the decision would be made WITHOUT, if any.
+
+    A failed fetch was dropped and an empty one (MT5 returns no rows for a few seconds after a
+    terminal restart) read as trend 'sideways' - which PASSES the next-timeframe gate (only up/down
+    block) and removes that timeframe's levels from the htf_level check. So a decision made on
+    partial context was LOOSER than the full engine, not more cautious (full review 2026-10-20)."""
+    have = {s.timeframe: len(s.candles or []) for s in series}
+    short = [tf for tf in _timeframes_for(timeframe) if have.get(tf, 0) < _MIN_CONTEXT_BARS]
+    if not short:
+        return None
+    return ", ".join(f"{tf} ({have.get(tf, 0)} bars)" for tf in short)
+
+
+def _no_trade_for_missing_context(proposal, missing: str):
+    """Keep the read-outs, drop the trade: the setup is not judged on partial data."""
+    from app.models.enums import Direction
+
+    return proposal.model_copy(update={
+        "direction": Direction.NO_TRADE, "entry": None, "stop_loss": None, "take_profit": None,
+        "confidence": 0.0, "watch": False, "conditional": None,
+        "rationale": f"Context data missing ({missing}) - not deciding on a partial picture. "
+                     f"Retry in a moment.",
+    })
+
+
 def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timeframe: str = "1h",
                    use_llm: bool = False, cache=None, read_llm: bool | None = None,
                    rsi_over: bool = False, rsi_confirm: bool = True, rsi_macd: bool = False,
@@ -105,6 +134,9 @@ def preview_symbol(session: Session, symbol: str, asset_class: AssetClass, timef
         from app.agents.ai_decider import ai_decide_trade
         proposal = ai_decide_trade(session, symbol, asset_class, timeframe, proposal,
                                    technical, fundamental, now)
+    missing = _missing_context(series, timeframe)
+    if missing:
+        proposal = _no_trade_for_missing_context(proposal, missing)
     decision = assess(session, proposal, cache=cache)
     return proposal, decision
 
@@ -211,6 +243,11 @@ def analyze_symbol(
         record_shadow(session, symbol, asset_class.value, timeframe, now,
                       ind0.get("last_close"), ind0.get("atr14"), proposal, det_proposal)
 
+    # Fail closed on partial context (see _missing_context).
+    missing = _missing_context(series, timeframe)
+    if missing:
+        proposal = _no_trade_for_missing_context(proposal, missing)
+
     # 2b. MEASURED ODDS: what this plan's stop/target distances have historically been worth on this
     # symbol (agents/odds.py). Read-out only — it never changes the decision, it just stops a plan whose
     # stop sits closer than its target from looking better than it is.
@@ -241,7 +278,7 @@ def analyze_symbol(
 
         macro_ctx = macro_context(session, symbol, asset_class.value, now=now)
         proposal.macro = macro_ctx
-        if macro_ctx.get("blocked") and proposal.is_actionable():
+        if macro_ctx.get("blocked") and proposal.is_actionable:   # a property - calling it raised TypeError and the hold never happened
             # Keep the candidate VISIBLE (watch=True) instead of discarding it, so the desk can see
             # a good setup was found AND why it was held. Levels, direction and confidence survive.
             proposal.macro_wait = True

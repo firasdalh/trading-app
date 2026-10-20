@@ -25,6 +25,13 @@ T = TypeVar("T", bound=BaseModel)
 # Cache the provider clients (keyed by "provider:api_key" so re-config rebuilds them).
 _clients: dict[str, object] = {}
 
+# Every LLM call in this app sits on a decision path (an armed setup's trigger review, the Hybrid's
+# final re-gate, Run analysis). The SDK defaults are a 600 s timeout with 2 retries - one stalled
+# request could hold the single armed-setup watcher for ~30 min while other arms' levels broke and
+# stale arms went uncancelled (full review 2026-10-20). Fail fast; callers already fall back.
+_LLM_TIMEOUT_S = 30.0
+_LLM_RETRIES = 1
+
 
 def llm_available() -> bool:
     """True if the active provider has an API key configured."""
@@ -39,7 +46,8 @@ def _anthropic_client(api_key: str):
     key = f"anthropic:{api_key}"
     if key not in _clients:
         import anthropic
-        _clients[key] = anthropic.Anthropic(api_key=api_key)
+        _clients[key] = anthropic.Anthropic(api_key=api_key, timeout=_LLM_TIMEOUT_S,
+                                            max_retries=_LLM_RETRIES)
     return _clients[key]
 
 
@@ -47,7 +55,9 @@ def _gemini_client(api_key: str):
     key = f"gemini:{api_key}"
     if key not in _clients:
         from google import genai
-        _clients[key] = genai.Client(api_key=api_key)
+        from google.genai import types
+        _clients[key] = genai.Client(api_key=api_key,
+                                     http_options=types.HttpOptions(timeout=int(_LLM_TIMEOUT_S * 1000)))
     return _clients[key]
 
 
@@ -55,7 +65,7 @@ def _openai_client(api_key: str):
     key = f"openai:{api_key}"
     if key not in _clients:
         from openai import OpenAI
-        _clients[key] = OpenAI(api_key=api_key)
+        _clients[key] = OpenAI(api_key=api_key, timeout=_LLM_TIMEOUT_S, max_retries=_LLM_RETRIES)
     return _clients[key]
 
 

@@ -225,15 +225,15 @@ class _Broker:
         self.sltp = []
         self.partials = []
 
-    def close_position(self, symbol):
+    def close_position(self, symbol, direction=None):
         self.closed.append(symbol)
         return _Result("filled")
 
-    def close_partial(self, symbol, fraction):
+    def close_partial(self, symbol, fraction, direction=None):
         self.partials.append((symbol, fraction))
         return _Result("filled")
 
-    def set_sl_tp(self, symbol, sl, tp):
+    def set_sl_tp(self, symbol, sl=None, tp=None, direction=None):
         self.sltp.append((symbol, sl, tp))
         return _Result("filled")
 
@@ -584,7 +584,7 @@ def test_auto_execute_partial_skips_when_too_small(db_session, monkeypatch):
     """A min-lot position can't be split 50%; the advisor must skip gracefully (not spam a failed
     take_partial every tick) and mark it so it manages the whole position instead."""
     class _SmallBroker(_Broker):
-        def close_partial(self, symbol, fraction):
+        def close_partial(self, symbol, fraction, direction=None):
             self.partials.append((symbol, fraction))
             return _Result("rejected", error="position too small to partial-close (min lot)")
 
@@ -604,7 +604,7 @@ def test_auto_execute_defers_stop_when_market_closed(db_session, monkeypatch):
     """A stop-modify rejected for a benign/temporary reason (market closed) is recorded as a
     'deferred' action, not a red ✗ — the original broker-side stop still protects the trade."""
     class _ClosedBroker(_Broker):
-        def set_sl_tp(self, symbol, sl, tp):
+        def set_sl_tp(self, symbol, sl=None, tp=None, direction=None):
             self.sltp.append((symbol, sl, tp))
             return _Result("rejected", error="market closed")
 
@@ -799,3 +799,53 @@ def test_scenario_awareness_uses_deterministic_macro(monkeypatch):
 
     # no context -> no plan check (returns None, never crashes)
     assert advisor._scenario_awareness(p_long, None) is None
+
+
+# ---------------------------------------------------------------- full review 2026-10-20
+
+def _adv_case(**ctx_over):
+    from types import SimpleNamespace as NS
+
+    from app.models.schemas import PositionAdvice
+
+    p = NS(symbol="EURUSDm", direction="long", entry_price=1.1000, stop_loss=1.0980, take_profit=1.1060,
+           last_price=1.1036, qty=0.30, unrealized_pnl=108.0)
+    ctx = {"atr": 0.0010, "last": 1.1036, "regime": "trending", "near_res": None, "near_sup": None,
+           "macd_hist": 0.0002, "rsi": 60, "rsi_prev": 58, "swing_low": 1.0975, "swing_high": None,
+           "choch": False}
+    ctx.update(ctx_over)
+    a = PositionAdvice(symbol="EURUSDm", direction="long", unrealized_pnl=108.0, has_stop=True,
+                       severity="info", headline="", detail="", thesis="intact", r_multiple=1.8)
+    return a, p, ctx
+
+
+def test_let_it_run_never_removes_the_target_with_the_stop_still_below_entry():
+    """Before: +1.8R, structure trail not tightening -> run_target kept the ORIGINAL -1R stop and
+    deleted the take-profit."""
+    import app.agents.position_advisor as pa
+
+    a, p, ctx = _adv_case()
+    for kw in ({"tranche": 2, "has_plan": True}, {"tranche": 0, "has_plan": True, "scale_out": False}):
+        d = pa._auto_decision(a, p, ctx, 0.0020, **kw)
+        if d and d["action"] == "run_target":
+            assert d["stop"] >= p.entry_price
+
+
+def test_the_wall_banks_only_the_first_third_early():
+    """Before: at +1.2R into a wall the first pass booked a third and the NEXT pass the second third."""
+    from types import SimpleNamespace as NS
+
+    import app.agents.position_advisor as pa
+    from app.models.schemas import PositionAdvice
+
+    p = NS(symbol="EURUSDm", direction="long", entry_price=1.1000, stop_loss=1.0980, take_profit=1.1060,
+           last_price=1.1024, qty=0.30, unrealized_pnl=72.0)
+    ctx = {"atr": 0.0010, "last": 1.1024, "regime": "trending", "near_res": (1.1028, "4h"), "near_sup": None,
+           "macd_hist": -0.00001, "rsi": 72, "rsi_prev": 74, "swing_low": 1.1005, "swing_high": None,
+           "choch": False}
+    a = PositionAdvice(symbol="EURUSDm", direction="long", unrealized_pnl=72.0, has_stop=True,
+                       severity="info", headline="", detail="", thesis="intact", r_multiple=1.2)
+    first = pa._auto_decision(a, p, ctx, 0.0020, tranche=0, has_plan=True)
+    second = pa._auto_decision(a, p, ctx, 0.0020, tranche=1, has_plan=True)
+    assert first and first["action"] == "take_partial"
+    assert not (second and second["action"] == "take_partial")

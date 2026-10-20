@@ -85,14 +85,24 @@ export function BacktestView() {
         </button>
       </div>
 
+      {/* This replays a SIMPLIFIED engine: the entry timeframe only (no 4H/1D filters, which the
+          faithful audit showed carry the edge) and no spread costs. Its curve can disagree in sign
+          with the live desk, so it must never be read as "the system's backtest" (full review
+          2026-10-20). The faithful replay is analysis/loss_audit/bt.py. */}
+      <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+        Sandbox, not the live engine: this replay uses only the chosen timeframe (none of the 4H/1D
+        filters the live desk applies) and charges no spread. Use it to explore, not to decide
+        settings or size.
+      </div>
+
       {error && (
         <div className="rounded-md border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">{error}</div>
       )}
 
       {!result && !busy && !error && (
         <div className="card text-sm text-neutral-400">
-          Press <span className="font-semibold text-neutral-200">Run backtest</span> to replay the
-          deterministic strategy over historical candles and see the equity curve, win rate, R-multiples,
+          Press <span className="font-semibold text-neutral-200">Run backtest</span> to replay a
+          simplified, single-timeframe version of the strategy over historical candles and see the equity curve, win rate, R-multiples,
           drawdown and every trade.
           <div className="mt-1 text-xs text-neutral-500">
             Use <code>metal</code> / <code>forex</code> / <code>crypto</code> for your Exness pairs

@@ -149,7 +149,7 @@ class AlpacaBrokerAdapter(BrokerAdapter):
             )
         return views
 
-    def close_position(self, symbol: str) -> OrderResult:
+    def close_position(self, symbol: str, direction: str | None = None) -> OrderResult:
         try:
             order = self._client().close_position(symbol)
             return OrderResult(broker_order_id=str(order.id), status=OrderStatus.SUBMITTED, raw={"id": str(order.id)})

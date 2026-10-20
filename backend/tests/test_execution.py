@@ -28,7 +28,7 @@ def test_close_pnl_scales_by_contract_size(db_session):
         def contract_size(self, symbol):
             return 100.0
 
-        def close_position(self, symbol):  # already closed by the broker's own SL
+        def close_position(self, symbol, direction=None):  # already closed by the broker's own SL
             return OrderResult(status=OrderStatus.REJECTED, error="no position")
 
     pos = Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
@@ -333,7 +333,7 @@ def test_failed_broker_close_keeps_position_open(db_session):
     class _Broker:
         is_paper = True
 
-        def close_position(self, symbol):
+        def close_position(self, symbol, direction=None):
             return OrderResult(status=OrderStatus.ERROR, error="MT5 positions_get failed")
 
     pos = Position(symbol="XAUUSDm", asset_class="metal", direction="long", qty=0.01,
@@ -356,7 +356,7 @@ def test_manual_close_reports_failure(db_session, monkeypatch):
         def get_quote(self, symbol):
             return Quote(symbol=symbol, price=99.0, ts=NOW)
 
-        def close_position(self, symbol):
+        def close_position(self, symbol, direction=None):
             return OrderResult(status=OrderStatus.ERROR, error="off quotes")
 
     pos = _open_position(db_session, direction=Direction.LONG, entry=100.0, stop=90.0, tp=110.0)
@@ -660,7 +660,7 @@ class _HedgingBroker:
     def get_open_positions(self):
         return list(self.book.values())
 
-    def close_position(self, symbol):
+    def close_position(self, symbol, direction=None):
         from app.models.schemas import OrderResult
         if symbol in self.fail:
             return OrderResult(status=OrderStatus.ERROR, error="off quotes")

@@ -19,6 +19,7 @@ an injected fake module.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timezone
 
 from app.brokers.base import BrokerAdapter, BrokerError
@@ -101,6 +102,9 @@ _RETCODE_MSG = {
 # No new tick for this many seconds = the session is CLOSED (weekend / holiday / out-of-hours). Well
 # above any liquid symbol's tick gap in-session, well below a weekend, so a live market never trips it.
 _MARKET_STALE_SECONDS = 600
+_PAPER_RECHECK_S = 5.0      # how stale the demo/real reading may be (see is_paper)
+_CLOSED_MEMORY_S = 1800.0   # how long a 'market closed' refusal marks the symbol closed
+_CLOSED_REFUSALS: dict[str, float] = {}   # symbol -> when the broker last said 'market closed'
 
 
 def _retcode_error(result, fallback: str) -> str:
@@ -137,21 +141,61 @@ class Mt5BrokerAdapter(BrokerAdapter):
         if creds["login"]:
             kwargs.update(login=creds["login"], password=creds["password"], server=creds["server"])
 
-        if not mt5.initialize(**kwargs):
+        with _MT5_LOCK:                 # never initialize while another thread is mid-call
+            ok = mt5.initialize(**kwargs)
+        if not ok:
             err = mt5.last_error()
             raise BrokerError(f"MT5 initialize failed: {err}. Is the terminal running and logged in?")
 
-        info = mt5.account_info()
+        with _MT5_LOCK:
+            info = mt5.account_info()
         if info is None:
             raise BrokerError("MT5 connected but no account info — check terminal login")
         # trade_mode: 0 DEMO, 1 CONTEST, 2 REAL
         self._paper = getattr(info, "trade_mode", 2) != getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
-        log.info("MT5 connected", extra={"login": getattr(info, "login", None),
+        self._paper_checked = time.monotonic()
+        self._login = getattr(info, "login", None)
+        log.info("MT5 connected", extra={"login": self._login,
                                          "server": getattr(info, "server", None), "paper": self._paper})
 
     @property
     def is_paper(self) -> bool:
+        """Whether the terminal is on a DEMO account RIGHT NOW (re-read at most every 5 s).
+
+        It used to be read once at connect. Exness puts a demo and a real account in the same
+        terminal, and switching the terminal to the real one left this saying "paper" for the life
+        of the process - so every real-money gate (live confirmation, paper-only Mode B, paper-only
+        auto-trade) waved real orders through (full review 2026-10-20). An unreadable account
+        counts as REAL: the strict gates apply until it can be read.
+        """
+        now = time.monotonic()
+        if now - getattr(self, "_paper_checked", 0.0) < _PAPER_RECHECK_S:
+            return self._paper
+        try:
+            info = self._mt5.account_info()
+        except Exception:  # noqa: BLE001
+            info = None
+        if info is None:
+            return False
+        self._paper = getattr(info, "trade_mode", 2) != getattr(self._mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
+        self._paper_checked = now
         return self._paper
+
+    def _account_switched(self) -> str | None:
+        """A reason to refuse, when the terminal is now logged into a different account than the one
+        this process connected to (its book, equity and risk state all belong to the old one)."""
+        try:
+            info = self._mt5.account_info()
+        except Exception:  # noqa: BLE001
+            info = None
+        if info is None:
+            return "MT5 account unreadable - not sending"
+        login = getattr(info, "login", None)
+        start = getattr(self, "_login", None)
+        if start is not None and login is not None and login != start:
+            return (f"the MT5 terminal is now on account #{login}, not #{start} that the app connected "
+                    "to - restart the app before trading")
+        return None
 
     # ---- helpers ----
 
@@ -405,6 +449,10 @@ class Mt5BrokerAdapter(BrokerAdapter):
         if not allowed:
             log.warning("order blocked: algo trading disabled", extra={"symbol": request.symbol, "reason": why})
             return OrderResult(status=OrderStatus.REJECTED, error=why)
+        switched = self._account_switched()
+        if switched:
+            log.error("order blocked: account changed", extra={"symbol": request.symbol, "reason": switched})
+            return OrderResult(status=OrderStatus.REJECTED, error=switched)
         try:
             sym = self._resolve_symbol(request.symbol)
             info = self._symbol_info(sym)
@@ -436,13 +484,20 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 return OrderResult(status=OrderStatus.ERROR, error=f"order_send returned None: {mt5.last_error()}")
 
             done = result.retcode == mt5.TRADE_RETCODE_DONE
+            # DONE_PARTIAL (10010) leaves a REAL position at the broker for the filled volume. It was
+            # reported as REJECTED with nothing filled, so the app kept no row for a live trade.
+            partial = result.retcode == getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)
+            if result.retcode == getattr(mt5, "TRADE_RETCODE_MARKET_CLOSED", 10018) or                     "closed" in str(getattr(result, "comment", "")).lower():
+                _CLOSED_REFUSALS[sym] = time.monotonic()        # see market_open
+            filled = done or partial
             return OrderResult(
                 broker_order_id=str(getattr(result, "order", "") or getattr(result, "deal", "")),
-                status=OrderStatus.FILLED if done else OrderStatus.REJECTED,
-                filled_qty=float(getattr(result, "volume", lots)) if done else 0.0,
-                avg_fill_price=float(getattr(result, "price", price)) if done else None,
+                status=(OrderStatus.FILLED if done else OrderStatus.PARTIALLY_FILLED if partial
+                        else OrderStatus.REJECTED),
+                filled_qty=float(getattr(result, "volume", lots)) if filled else 0.0,
+                avg_fill_price=float(getattr(result, "price", price)) if filled else None,
                 raw={"retcode": result.retcode, "comment": getattr(result, "comment", "")},
-                error=None if done else getattr(result, "comment", f"retcode={result.retcode}"),
+                error=None if filled else _retcode_error(result, "order rejected"),
             )
         except Exception as exc:
             log.exception("MT5 submit_order error")
@@ -461,7 +516,9 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 entry_price=float(p.price_open),
                 stop_loss=float(p.sl) or None, take_profit=float(p.tp) or None,
                 status="open", last_price=float(p.price_current),
-                unrealized_pnl=float(p.profit),
+                # profit + accrued swap: swap on a multi-day hold was invisible until the close,
+                # so the floating loss (and the daily-loss breaker's view of it) read too small.
+                unrealized_pnl=float(p.profit) + float(getattr(p, "swap", 0.0) or 0.0),
                 cost_usd=self._position_margin(p),
                 # WHEN the position was opened, straight from the broker. Broker-truth positions are
                 # the ones the chart draws from, so without this the UI can't mark the entry CANDLE —
@@ -596,16 +653,34 @@ class Mt5BrokerAdapter(BrokerAdapter):
         out.sort(key=lambda v: v.closed_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return out
 
-    def close_position(self, symbol: str) -> OrderResult:
+    def _side(self, positions, direction: str | None) -> list:
+        """Only the tickets on ``direction``'s side (None = all). The callers mean ONE trade: acting on
+        every ticket of the symbol also closed / re-stopped an opposite hedge or a trade placed from
+        the terminal or phone - the DB shows long+short pairs closed in the same microsecond
+        (full review 2026-10-20)."""
+        positions = list(positions)
+        if direction is None:
+            return positions
+        buy = getattr(self._mt5, "POSITION_TYPE_BUY", 0)
+        want_long = direction == "long"
+        return [p for p in positions if (p.type == buy) == want_long]
+
+    def close_position(self, symbol: str, direction: str | None = None) -> OrderResult:
         mt5 = self._mt5
         sym = self._resolve_symbol(symbol)
         try:
-            positions = list(self._positions(symbol=sym))
+            positions = self._side(self._positions(symbol=sym), direction)
         except BrokerError as exc:  # a failed read is NOT "already closed" — callers keep it open
             return OrderResult(status=OrderStatus.ERROR, error=str(exc))
         if not positions:
             return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
-        last: OrderResult | None = None
+        allowed, why = self.algo_trading_allowed()
+        if not allowed:
+            return OrderResult(status=OrderStatus.ERROR, error=why)
+        # Every ticket must close for the result to say "closed". Reporting only the LAST ticket's
+        # result once recorded a position as closed while an earlier ticket's close had failed.
+        failures: list[str] = []
+        codes: list = []
         for p in positions:
             is_long = p.type == getattr(mt5, "POSITION_TYPE_BUY", 0)
             tick = mt5.symbol_info_tick(sym)
@@ -618,20 +693,23 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 "comment": "ai-trading-app close",
             }
             result = mt5.order_send(req)
-            done = result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
-            last = OrderResult(status=OrderStatus.SUBMITTED if done else OrderStatus.ERROR,
-                               raw={"retcode": getattr(result, "retcode", None)},
-                               error=None if done else "close failed")
-        return last or OrderResult(status=OrderStatus.ERROR, error="no close result")
+            codes.append(getattr(result, "retcode", None))
+            if not (result is not None and result.retcode == mt5.TRADE_RETCODE_DONE):
+                failures.append(_retcode_error(result, "close failed") if result is not None
+                                else f"close failed: {self._last_error()}")
+        if failures:
+            return OrderResult(status=OrderStatus.ERROR, raw={"retcodes": codes},
+                               error="; ".join(dict.fromkeys(failures)))
+        return OrderResult(status=OrderStatus.SUBMITTED, raw={"retcodes": codes})
 
-    def close_partial(self, symbol: str, fraction: float) -> OrderResult:
+    def close_partial(self, symbol: str, fraction: float, direction: str | None = None) -> OrderResult:
         """Close ``fraction`` of the open position (partial profit-take). The remainder keeps the
         same ticket and stops. Volume is floored to the lot step; a position already at the broker
         minimum can't be split, so we reject (the caller then leaves it whole)."""
         mt5 = self._mt5
         try:
             sym = self._resolve_symbol(symbol)
-            positions = list(self._positions(symbol=sym))   # BrokerError -> ERROR below, not "none open"
+            positions = self._side(self._positions(symbol=sym), direction)   # BrokerError -> ERROR below
             if not positions:
                 return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
             info = mt5.symbol_info(sym)
@@ -670,11 +748,11 @@ class Mt5BrokerAdapter(BrokerAdapter):
             return OrderResult(status=OrderStatus.ERROR, error=str(exc))
 
     def set_sl_tp(self, symbol: str, stop_loss: float | None = None,
-                  take_profit: float | None = None) -> OrderResult:
+                  take_profit: float | None = None, direction: str | None = None) -> OrderResult:
         mt5 = self._mt5
         try:
             sym = self._resolve_symbol(symbol)
-            positions = self._positions(symbol=sym)   # BrokerError -> ERROR below, not "none open"
+            positions = self._side(self._positions(symbol=sym), direction)   # BrokerError -> ERROR below
             if not positions:
                 return OrderResult(status=OrderStatus.REJECTED, error=f"no open MT5 position for {sym}")
 
@@ -771,6 +849,13 @@ class Mt5BrokerAdapter(BrokerAdapter):
         of UTC (Exness is), so a live tick is never mis-read as old, while a closed session is hours/days
         stale — far past the threshold. Advisory: the executor's order attempt is still the final gate."""
         name = self._resolve_symbol(symbol)
+        # The broker just refused an order here with "market closed": index and oil CFDs keep
+        # QUOTING through their daily break, so the tick-age test reads them open and the Hybrid /
+        # arms kept walking into "session closed" rejections (18 Hybrid ticks lost, arms consumed;
+        # full review 2026-10-20). Trust the refusal for _CLOSED_MEMORY_S.
+        closed_at = _CLOSED_REFUSALS.get(name)
+        if closed_at is not None and time.monotonic() - closed_at < _CLOSED_MEMORY_S:
+            return False
         try:
             mode = getattr(self._symbol_info(name), "trade_mode", 4)
             if mode in (0, 3):                       # DISABLED / CLOSEONLY -> not tradeable now

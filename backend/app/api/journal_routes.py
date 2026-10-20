@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.agents.reflection import latest_reflection, run_reflection
 from app.core.database import get_session
 from app.core.state import get_or_create_risk_config, get_or_create_settings
+from app.models.db import entry_risk
 from app.models.db import Position
 from app.models.enums import PositionStatus
 from app.models.schemas import PositionView, ReflectionReport, ScorecardView
@@ -48,7 +49,7 @@ def calibration(session: Session = Depends(get_session)) -> list[CalibrationBuck
         b = [r for r in rows if lo <= (r.confidence or 0.0) < hi]
         n = len(b)
         wins = sum(1 for r in b if (r.realized_pnl or 0.0) > 0)
-        rs = [(r.realized_pnl or 0.0) / r.risk_amount for r in b if r.risk_amount]
+        rs = [(r.realized_pnl or 0.0) / entry_risk(r) for r in b if entry_risk(r)]
         out.append(CalibrationBucket(
             bucket=f"{int(lo * 100)}-{int(min(hi, 1.0) * 100)}%",
             trades=n, wins=wins,
@@ -148,14 +149,14 @@ def stats(session: Session = Depends(get_session)) -> JournalStats:
     rows = session.scalars(
         select(Position).where(*conds).order_by(Position.closed_at.asc())
     ).all()
-    rows = [r for r in rows if r.risk_amount]  # need risk_amount > 0 for an R-multiple
+    rows = [r for r in rows if entry_risk(r)]  # need the entry risk for an R-multiple
     n = len(rows)
     if n == 0:
         return JournalStats(trades=0, wins=0, losses=0, win_rate=None, expectancy_r=None,
                             avg_win_r=None, avg_loss_r=None, profit_factor=None,
                             total_r=None, max_drawdown_r=None)
 
-    rs = [(r.realized_pnl or 0.0) / r.risk_amount for r in rows]
+    rs = [(r.realized_pnl or 0.0) / entry_risk(r) for r in rows]
     wins = [x for x in rs if x > 0]
     losses = [x for x in rs if x < 0]
     gross_win = sum((r.realized_pnl or 0.0) for r in rows if (r.realized_pnl or 0.0) > 0)
@@ -215,7 +216,7 @@ def _stat(label: str, rows: list) -> GroupStat:
     wins = sum(1 for r in rows if (r.realized_pnl or 0.0) > 0)
     losses = sum(1 for r in rows if (r.realized_pnl or 0.0) < 0)
     net = sum((r.realized_pnl or 0.0) for r in rows)
-    rs = [(r.realized_pnl or 0.0) / r.risk_amount for r in rows if r.risk_amount]
+    rs = [(r.realized_pnl or 0.0) / entry_risk(r) for r in rows if entry_risk(r)]
     return GroupStat(
         label=label, trades=n, wins=wins, losses=losses,
         win_rate=round(wins / n, 3) if n else None,

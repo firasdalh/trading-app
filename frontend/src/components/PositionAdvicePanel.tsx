@@ -81,10 +81,19 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
     // Turning ON means the advisor may close an invalidated trade / lock a winner's stop by itself.
     if (!autoExecute) {
       const ok = window.confirm(
-        "Enable AUTO-EXECUTE?\n\nThe advisor will then act on its own on open positions:\n" +
-          "• CLOSE a position when its thesis is invalidated (trend flipped against you)\n" +
-          "• move a winning trade's stop to breakeven before high-impact news\n\n" +
-          "It never opens, sizes up, or flips a trade, respects the kill switch, and needs live\n" +
+        // Every autonomous action is listed: the old text named 2 of the 7, and it did not say the
+        // advisor also manages trades you opened in MT5 yourself (full review 2026-10-20).
+        "Enable AUTO-EXECUTE?\n\nThe advisor will then act on its own on ALL open positions -\n" +
+          "including trades you opened yourself in MT5 or on your phone:\n" +
+          "• CLOSE a position when its thesis is invalidated (confirmed on two checks)\n" +
+          "• CLOSE PART of a winner: a third at +1.5R and a third at +3R (or a first third early\n" +
+          "  at a strong level when momentum fades)\n" +
+          "• MOVE THE STOP: to breakeven / behind structure, trailing a winner, tightening on weakness\n" +
+          "• REMOVE THE TAKE-PROFIT to let a strong trend run (only once the stop is at breakeven)\n" +
+          "• ATTACH a protective stop to a position that has none\n" +
+          "• close a trade that has gone nowhere for too long (time-stop, if set)\n\n" +
+          "It never opens, sizes up, loosens a stop or flips a trade; it skips symbols with two\n" +
+          "positions open and closed markets; it respects the kill switch and needs live\n" +
           "confirmation for a live account. Proceed?",
       );
       if (!ok) return;

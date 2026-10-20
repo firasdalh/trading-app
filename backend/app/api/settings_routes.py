@@ -21,7 +21,7 @@ from app.core.logging import get_logger
 from app.core.state import get_or_create_daily_state, get_or_create_risk_config, get_or_create_settings
 from app.execution.kill_switch import flatten_all
 from app.execution.monitor import monitor_positions
-from app.models.db import Position
+from app.models.db import AgentRun, Position
 from app.models.enums import AssetClass, ExecutionMode, PositionStatus
 from app.models.schemas import PositionAdvice, PositionView, SettingsResponse
 
@@ -177,6 +177,10 @@ def set_broker_map(req: BrokerMapRequest, session: Session = Depends(get_session
     return build_settings_response(session)
 
 
+_DAILY_LOSS_CEILING = 0.10    # RISK.md: max_daily_loss override 2026-06-04
+_EXPOSURE_CEILING = 0.09      # RISK.md: max_total_exposure override 2026-06-05
+
+
 @router.post("/settings/risk", response_model=SettingsResponse)
 def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session)) -> SettingsResponse:
     """Update risk parameters. Hard ceilings from RISK.md are enforced server-side; values
@@ -195,13 +199,18 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
         if req.max_open_positions < 1:
             raise HTTPException(status_code=400, detail="max_open_positions must be >= 1")
         risk.max_open_positions = req.max_open_positions
+    # RISK.md's documented ceilings (each already a user-approved override of a lower default). The
+    # API accepted up to 100% before - exactly the "loosen it after a losing streak" click RISK.md
+    # warns about (full review 2026-10-20). Raising either needs a RISK.md change first.
     if req.max_daily_loss is not None:
-        if not (0 < req.max_daily_loss <= 1):
-            raise HTTPException(status_code=400, detail="max_daily_loss must be in (0, 1]")
+        if not (0 < req.max_daily_loss <= _DAILY_LOSS_CEILING):
+            raise HTTPException(status_code=400,
+                                detail=f"max_daily_loss must be in (0, {_DAILY_LOSS_CEILING}] per RISK.md")
         risk.max_daily_loss = req.max_daily_loss
     if req.max_total_exposure is not None:
-        if not (0 < req.max_total_exposure <= 1):
-            raise HTTPException(status_code=400, detail="max_total_exposure must be in (0, 1]")
+        if not (0 < req.max_total_exposure <= _EXPOSURE_CEILING):
+            raise HTTPException(status_code=400,
+                                detail=f"max_total_exposure must be in (0, {_EXPOSURE_CEILING}] per RISK.md")
         risk.max_total_exposure = req.max_total_exposure
     if req.per_pair_cooldown_minutes is not None:
         if req.per_pair_cooldown_minutes < 0:
@@ -505,12 +514,20 @@ def set_ai_review(req: AiReviewRequest, session: Session = Depends(get_session))
 
 
 def _try_mt5_connect() -> dict:
-    """Attempt an MT5 connection and return a status dict (never raises)."""
+    """Report the MT5 connection (never raises), through the registry's SHARED adapter.
+
+    This is polled every 30 s. It used to construct a brand-new Mt5BrokerAdapter each time - its
+    __init__ runs mt5.initialize() (and the login, when credentials are saved) OUTSIDE the lock that
+    serializes terminal calls, concurrently with the monitor/arms/advisor threads mid order_send or
+    close (full review 2026-10-20). Reading through the cached adapter keeps every call on the lock;
+    after new credentials are saved the registry is reset, so this rebuilds exactly once."""
     from app.brokers.base import BrokerError
-    from app.brokers.mt5_adapter import Mt5BrokerAdapter
+    from app.brokers.registry import UnavailableBroker, get_broker
 
     try:
-        broker = Mt5BrokerAdapter()
+        broker = get_broker("mt5")
+        if isinstance(broker, UnavailableBroker):
+            return {"connected": False, "error": broker.reason}
         acct = broker.get_account()
         allowed, why = broker.algo_trading_allowed()
         return {"connected": True, "is_paper": broker.is_paper,
@@ -664,6 +681,17 @@ def live_positions(session: Session = Depends(get_session)) -> list[PositionView
         _fill_initial_stops(session, out)
     except Exception as exc:  # noqa: BLE001
         log.warning("initial stop lookup failed", extra={"error": str(exc)})
+
+    # WHO opened it, from the app's open row on the same symbol + side. Missing before, so an app
+    # trade looked exactly like one placed in the terminal. None (shown as "Terminal") = no app row.
+    try:
+        open_rows = session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
+        src = {(_norm_symbol(r.symbol), r.direction): r.source for r in open_rows if r.source}
+        for p in out:
+            if getattr(p, "source", None) is None:
+                p.source = src.get((_norm_symbol(p.symbol), p.direction))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("source lookup failed", extra={"error": str(exc)})
 
     for i, p in enumerate(out):
         p.id = i + 1
@@ -901,6 +929,9 @@ def advisor_activity(limit: int = 30, session: Session = Depends(get_session)) -
 class LiveCloseRequest(BaseModel):
     symbol: str
     asset_class: AssetClass
+    # The side of the trade being closed. Without it every ticket on the symbol closed, including an
+    # opposite hedge or a trade placed from the terminal (None = all, the old behaviour).
+    direction: str | None = None
 
 
 class SlTpRequest(BaseModel):
@@ -920,27 +951,48 @@ def live_close(req: LiveCloseRequest, session: Session = Depends(get_session)) -
 
     from app.brokers.registry import get_broker_for
 
+    from app.execution.monitor import fill_realized_pnl_from_broker
+
     settings = get_or_create_settings(session)
     broker = get_broker_for(req.asset_class, settings.broker_map)
-    result = broker.close_position(req.symbol)
+    result = broker.close_position(req.symbol, direction=req.direction)
 
-    # Reconcile DB-tracked positions for this symbol (book their last unrealized as realized).
+    # Only a close the broker CONFIRMED (or a position it no longer holds) may touch the app's rows.
+    # The rows used to be marked closed and their mark booked BEFORE the result was checked, so a
+    # refused close (Algo Trading off, market closed, IPC hiccup) left a live Exness position with no
+    # OPEN row - outside the exposure budget, so the Hybrid could open another 3% on top of it.
+    gone = (result.status.value == "rejected"
+            and "no open" in (result.error or "").lower())
+    if result.status.value in ("error", "rejected") and not gone:
+        raise HTTPException(status_code=409, detail=result.error or "broker close failed")
+
     rows = session.scalars(
         select(Position).where(Position.symbol == req.symbol,
                                Position.status == PositionStatus.OPEN.value)
     ).all()
+    if req.direction:
+        rows = [r for r in rows if r.direction == req.direction]
     if rows:
-        daily = get_or_create_daily_state(session)
+        now = datetime.now(timezone.utc)
+        marks = {r.id: (r.unrealized_pnl or 0.0) for r in rows}
         for r in rows:
             r.status = PositionStatus.CLOSED.value
-            r.closed_at = datetime.now(timezone.utc)
-            r.realized_pnl = r.unrealized_pnl or 0.0
-            daily.realized_pnl = round(daily.realized_pnl + (r.unrealized_pnl or 0.0), 2)
+            r.closed_at = now
+            r.realized_pnl = None              # broker truth first (fill price, swap, commission)
+        session.flush()
+        try:
+            fill_realized_pnl_from_broker(session, list(rows))
+        except Exception as exc:  # noqa: BLE001 - best effort; the mark below is the fallback
+            log.warning("close P&L backfill failed", extra={"symbol": req.symbol, "error": str(exc)})
+        daily = get_or_create_daily_state(session)
+        for r in rows:
+            if r.realized_pnl is None:
+                r.realized_pnl = marks[r.id]   # broker history not there yet: the last mark
+            daily.realized_pnl = round(daily.realized_pnl + r.realized_pnl, 2)
+        session.add(AgentRun(agent="manual", symbol=req.symbol, event="position_closed",
+                             detail={"rows": [r.id for r in rows], "broker_status": result.status.value}))
         session.commit()
-
-    if result.status.value in ("error", "rejected"):
-        raise HTTPException(status_code=409, detail=result.error or "broker close failed")
-    return {"status": result.status.value, "symbol": req.symbol}
+    return {"status": "closed" if not gone else "already_closed", "symbol": req.symbol}
 
 
 @router.post("/positions/{position_id}/close", tags=["positions"])

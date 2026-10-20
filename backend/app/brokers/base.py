@@ -80,7 +80,7 @@ class BrokerAdapter(ABC):
         ...
 
     @abstractmethod
-    def close_position(self, symbol: str) -> OrderResult:
+    def close_position(self, symbol: str, direction: str | None = None) -> OrderResult:
         ...
 
     @abstractmethod
@@ -88,14 +88,14 @@ class BrokerAdapter(ABC):
         """Flatten everything. Used by the kill-switch."""
 
     def set_sl_tp(self, symbol: str, stop_loss: float | None = None,
-                  take_profit: float | None = None) -> OrderResult:
+                  take_profit: float | None = None, direction: str | None = None) -> OrderResult:
         """Attach/modify the stop-loss and/or take-profit on an existing open position.
 
         Default: not supported. Brokers that can modify positions (MT5, sim) override this.
         """
         return OrderResult(status=OrderStatus.REJECTED, error="set_sl_tp not supported by this broker")
 
-    def close_partial(self, symbol: str, fraction: float) -> OrderResult:
+    def close_partial(self, symbol: str, fraction: float, direction: str | None = None) -> OrderResult:
         """Close ``fraction`` (0..1) of the open position — a partial profit-take; the rest stays
         open. Default: not supported. MT5/sim override it. Brokers that can't partial-close return
         REJECTED, and the caller simply leaves the position whole.

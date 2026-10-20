@@ -34,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.models.db import entry_risk
 from app.models.db import Position, WatchItem
 from app.models.enums import PositionStatus
 
@@ -128,7 +129,7 @@ def build_scorecard(session: Session, *, min_trades: int = 30,
     scores: list[SymbolScore] = []
     for symbol, ps in by_symbol.items():
         # R per trade needs a recorded risk; trades without one can't be scored in R.
-        rs = [p.realized_pnl / p.risk_amount for p in ps if p.risk_amount]
+        rs = [p.realized_pnl / entry_risk(p) for p in ps if entry_risk(p)]
         n = len(rs)
         wins = sum(1 for p in ps if (p.realized_pnl or 0) > 0)
         pnl = sum(p.realized_pnl or 0.0 for p in ps)

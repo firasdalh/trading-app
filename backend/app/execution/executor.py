@@ -105,6 +105,9 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
     # --- stale-plan / price-drift guard (see constants above) ---
     _guard_price_drift(broker, record)
 
+    # --- the Risk Manager, again, HERE: inside the lock, at the live fill price ---
+    _final_risk_gate(session, broker, record)
+
     side = OrderSide.BUY if record.direction == Direction.LONG.value else OrderSide.SELL
     req = OrderRequest(
         symbol=record.symbol,
@@ -161,6 +164,7 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
             status=PositionStatus.OPEN.value,
             last_price=entry_price,
             risk_amount=record.risk_amount,
+            initial_risk_amount=record.risk_amount,   # the R denominator, never modified
             confidence=record.confidence,  # kept for confidence-vs-outcome calibration
             source=getattr(record, "source", None),  # who opened it -> journal breakdown by source
             broker=broker.name,
@@ -178,6 +182,58 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
 
     session.commit()
     return result
+
+
+def _fill_side_price(broker, record: TradeProposalRecord) -> float | None:
+    """The price a market order would actually fill at: ask for a buy, bid for a sell. Quotes are
+    mid; candles (and so plan entries) are bid - a long pays the whole spread on top of its plan."""
+    try:
+        mid = broker.get_quote(record.symbol).price
+    except Exception:  # noqa: BLE001
+        return None
+    if not mid or mid <= 0:
+        return None
+    try:
+        spread = broker.spread(record.symbol) or 0.0
+    except Exception:  # noqa: BLE001
+        spread = 0.0
+    return mid + spread / 2 if record.direction == Direction.LONG.value else mid - spread / 2
+
+
+def _final_risk_gate(session: Session, broker, record: TradeProposalRecord) -> None:
+    """Re-run the Risk Manager inside _EXEC_LOCK, sized at the live fill price, and only ever SHRINK.
+
+    The earlier check (when the setup was assessed, or when a pending proposal was created) is not
+    enough on its own:
+      - two openers (the Hybrid's scheduled tick and a 'Run now', an arm firing, an approval) can
+        each pass max positions / exposure / the daily pause before either order fills - seen in the
+        DB as three Hybrid fills within 40 s (2026-07-29);
+      - approving a pending proposal without a lot size skipped every check: a probe with the daily
+        loss breaker tripped still opened the trade;
+      - the size was derived from the PLANNED entry, but a long fills at the ask: with the 25% drift
+        allowance the real loss at the stop could reach ~1.33x the approved risk.
+    The fraction of equity the trade was approved at is preserved; the lots are re-derived from the
+    actual fill-to-stop distance and capped at the approved lots.
+    """
+    from app.risk.service import assess, current_equity, proposal_from_record
+
+    equity = current_equity(session)
+    if not equity or equity <= 0:
+        raise ExecutionBlocked("can't read the account equity - not opening without a fresh risk check")
+    fresh = proposal_from_record(record)
+    fill = _fill_side_price(broker, record)
+    if fill is not None:
+        fresh = fresh.model_copy(update={"entry": fill})
+    fraction = (record.risk_amount or 0.0) / equity if record.risk_amount else None
+    decision = assess(session, fresh, override_risk_fraction=fraction)
+    if not decision.approved or not decision.approved_qty or decision.approved_qty <= 0:
+        raise ExecutionBlocked(f"risk check at execution: {decision.reason}")
+    if decision.approved_qty < (record.approved_qty or 0.0) - 1e-9:
+        log.warning("execution resized by the final risk check",
+                    extra={"symbol": record.symbol, "approved": record.approved_qty,
+                           "now": decision.approved_qty, "risk": decision.risk_amount})
+        record.approved_qty = decision.approved_qty
+        record.risk_amount = decision.risk_amount
 
 
 def _guard_price_drift(broker, record: TradeProposalRecord) -> None:

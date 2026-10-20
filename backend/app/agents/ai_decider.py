@@ -116,7 +116,7 @@ def _calibration_note(session: Session, confidence: float) -> str:
     """The engine's REAL history: overall win/expectancy + the same-confidence bucket, so the AI can
     ground its probability in what actually happened rather than vibes. Empty-safe."""
     from app.core.state import get_or_create_settings
-    from app.models.db import Position
+    from app.models.db import Position, entry_risk
 
     conds = [Position.status == PositionStatus.CLOSED.value,
              Position.realized_pnl.is_not(None), Position.risk_amount.is_not(None)]
@@ -132,7 +132,7 @@ def _calibration_note(session: Session, confidence: float) -> str:
         if not n:
             return None
         wins = sum(1 for r in sample if (r.realized_pnl or 0.0) > 0)
-        rs = [(r.realized_pnl or 0.0) / r.risk_amount for r in sample if r.risk_amount]
+        rs = [(r.realized_pnl or 0.0) / entry_risk(r) for r in sample if entry_risk(r)]
         exp = sum(rs) / len(rs) if rs else 0.0
         return n, wins / n, exp
 

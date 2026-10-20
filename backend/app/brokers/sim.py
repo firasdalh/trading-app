@@ -161,7 +161,7 @@ class SimPaperBroker(BrokerAdapter):
             )
         return views
 
-    def close_position(self, symbol: str) -> OrderResult:
+    def close_position(self, symbol: str, direction: str | None = None) -> OrderResult:
         pos = self._positions.get(symbol)
         if not pos or pos.net_qty == 0:
             return OrderResult(status=OrderStatus.REJECTED, error=f"no open position for {symbol}")
@@ -176,7 +176,7 @@ class SimPaperBroker(BrokerAdapter):
             )
         )
 
-    def close_partial(self, symbol: str, fraction: float) -> OrderResult:
+    def close_partial(self, symbol: str, fraction: float, direction: str | None = None) -> OrderResult:
         pos = self._positions.get(symbol)
         if not pos or pos.net_qty == 0:
             return OrderResult(status=OrderStatus.REJECTED, error=f"no open position for {symbol}")
@@ -190,7 +190,7 @@ class SimPaperBroker(BrokerAdapter):
         )
 
     def set_sl_tp(self, symbol: str, stop_loss: float | None = None,
-                  take_profit: float | None = None) -> OrderResult:
+                  take_profit: float | None = None, direction: str | None = None) -> OrderResult:
         pos = self._positions.get(symbol)
         if not pos or pos.net_qty == 0:
             return OrderResult(status=OrderStatus.REJECTED, error=f"no open position for {symbol}")

@@ -152,6 +152,7 @@ def current_equity(session: Session) -> float | None:
     bm = settings.broker_map or {}
     seen: set[str] = set()
     equities: dict[str, float] = {}
+    unreachable = False
     for ac in AssetClass:
         name = bm.get(ac.value, "sim")
         if name in seen:
@@ -161,10 +162,16 @@ def current_equity(session: Session) -> float | None:
             broker = get_broker_for(ac, bm)
             equities[broker.name] = broker.get_account().equity
         except Exception as exc:  # noqa: BLE001
+            unreachable = True
             _log.warning("equity lookup failed", extra={"broker": name, "error": str(exc)})
     if not equities:
         return None
     real = {k: v for k, v in equities.items() if k != "sim"}
+    # A configured broker failed to answer and no real one did (terminal down): the equity is
+    # UNKNOWN. Falling back to the simulator here once made $100,000 the account's daily-loss
+    # baseline. (An unconfigured broker that runs on the sim is not a failure - fresh install.)
+    if not real and unreachable:
+        return None
     use = real or equities
     return round(sum(use.values()), 2)
 
@@ -265,9 +272,12 @@ def _position_is_loss(row: Position) -> bool | None:
 
 def _position_r_multiple(row: Position) -> float | None:
     """Realized R (P&L ÷ risk-at-entry) of a closed position, or None if not computable."""
-    if row.realized_pnl is None or not row.risk_amount or row.risk_amount <= 0:
+    from app.models.db import entry_risk
+
+    risk = entry_risk(row)
+    if row.realized_pnl is None or not risk:
         return None
-    return row.realized_pnl / row.risk_amount
+    return row.realized_pnl / risk
 
 
 def entry_breaker_reason(session: Session) -> str | None:
@@ -403,6 +413,40 @@ def _scan_open_book(session: Session, cache: ScanCache | None) -> list[tuple[str
     return book
 
 
+def _untracked_broker_risk(session: Session, broker, open_rows, equity: float, cache=None) -> float:
+    """Risk of REAL broker positions the app has no OPEN row for - placed from the terminal or the
+    phone, or an order that executed although order_send reported nothing. They counted as ZERO in
+    the exposure budget, so the Hybrid could stack a full 3% on top of them (full review 2026-10-20).
+    With a stop: the account-currency loss at that stop. Without one: a full per-trade allowance (an
+    unprotected trade can lose anything). Unreadable book: 0, i.e. the previous behaviour."""
+    if not getattr(broker, "reconciles_positions", False):
+        return 0.0
+    key = f"untracked:{broker.name}"
+    if cache is not None and key in cache.accounts:
+        return cache.accounts[key]
+    try:
+        book = broker.get_open_positions()
+    except Exception:  # noqa: BLE001
+        return 0.0
+    tracked = {(_norm_symbol(r.symbol), r.direction) for r in open_rows}
+    per_trade = equity * get_or_create_risk_config(session).risk_per_trade
+    extra = 0.0
+    for v in book:
+        if (_norm_symbol(v.symbol), v.direction) in tracked:
+            continue
+        if not v.stop_loss:
+            extra += per_trade
+            continue
+        try:
+            pnl = broker.position_profit(v.symbol, v.direction, v.qty, v.entry_price, v.stop_loss)
+        except Exception:  # noqa: BLE001
+            pnl = None
+        extra += max(0.0, -pnl) if pnl is not None else per_trade
+    if cache is not None:
+        cache.accounts[key] = extra
+    return extra
+
+
 def build_account_state(session: Session, broker: BrokerAdapter,
                         cache: ScanCache | None = None) -> AccountState:
     # The broker round-trip (get_account) is the expensive part; memoize it per broker for a scan.
@@ -417,6 +461,7 @@ def build_account_state(session: Session, broker: BrokerAdapter,
         select(Position).where(Position.status == PositionStatus.OPEN.value)
     ).all()
     total_risk = sum((p.risk_amount or 0.0) for p in open_positions)
+    total_risk += _untracked_broker_risk(session, broker, open_positions, acct.equity, cache)
 
     daily = get_or_create_daily_state(session, starting_equity=acct.equity)
     if daily.starting_equity is None:
@@ -520,10 +565,19 @@ def _live_spread(broker, symbol: str) -> float | None:
         return None
 
 
+def _real_broker(broker) -> bool:
+    """A broker holding a REAL (durable) account - MT5. The simulator and test doubles are not."""
+    return bool(getattr(broker, "reconciles_positions", False))
+
+
 def _risk_per_lot(broker, symbol: str, entry: float | None, stop: float | None) -> float | None:
     """Account-currency risk of 1 lot over the stop — the broker's value if available (currency-
     correct via order_calc_profit), else ``|entry-stop| × contract_size`` (correct only when the
-    quote currency IS the account currency, e.g. the sim/USD path)."""
+    quote currency IS the account currency, e.g. the sim/USD path).
+
+    For a REAL broker there is no fallback: when the broker can't price it, the answer is None and
+    the Risk Manager vetoes. Its contract_size answers 1.0 when symbol_info fails, so the fallback
+    turned a momentary read failure into a 100x oversized gold trade."""
     if not entry or not stop or entry == stop:
         return None
     try:
@@ -532,6 +586,8 @@ def _risk_per_lot(broker, symbol: str, entry: float | None, stop: float | None) 
             return rpl
     except Exception:  # noqa: BLE001
         pass
+    if _real_broker(broker):
+        return None
     try:
         contract = broker.contract_size(symbol) or 1.0
     except Exception:  # noqa: BLE001
@@ -615,6 +671,7 @@ def assess(
         breaker_reason=breaker,
         risk_per_lot=_risk_per_lot(broker, proposal.symbol, proposal.entry, proposal.stop_loss),
         spread=_live_spread(broker, proposal.symbol),
+        risk_per_lot_required=_real_broker(broker),
     )
 
 
@@ -673,8 +730,11 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
     # Size used for the economics: the approved LOTS when allowed; otherwise the would-be sized lots
     # (so the cost still shows even when a gate would block it). Both honour the clamped risk
     # fraction + exposure budget, sized off the account-currency risk-per-lot.
+    unpriced = rpl is None and _real_broker(broker)     # never show a guessed size (see _risk_per_lot)
     if decision.approved and decision.approved_qty > 0:
         lots = decision.approved_qty
+    elif unpriced:
+        lots = 0.0
     else:
         rf = min(override_rf if override_rf is not None else limits.risk_per_trade, ceiling)
         lots, risk_amt = size_position(
@@ -692,7 +752,7 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
     # The per-trade ceiling expressed in lots, so the UI can show/limit the cap. Floored to the
     # broker minimum so the UI shows the size that would ACTUALLY open (never a sub-min figure).
     max_lots = None
-    if equity > 0:
+    if equity > 0 and not unpriced:
         ceiling_lots, _ = size_position(
             equity=equity, risk_fraction=ceiling, entry=entry, stop_loss=stop,
             qty_step=qty_step, risk_per_lot=rpl,

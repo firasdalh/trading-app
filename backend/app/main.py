@@ -213,19 +213,55 @@ async def lifespan(app: FastAPI):
         },
     )
     init_db()
+    lease = _take_scheduler_lease()
     with session_scope() as session:
         get_or_create_settings(session)
         get_or_create_risk_config(session)
         if kill_switch_active(session):
             log.warning("KILL SWITCH ACTIVE at startup — no new orders will be submitted")
-        _reconcile_brokers(session)
-    start_scheduler()
-    _register_monitor_job()
+        if lease is not None:
+            _reconcile_brokers(session)
+    if lease is not None:
+        start_scheduler()
+        _register_monitor_job()
     try:
         yield
     finally:
-        shutdown_scheduler()
+        if lease is not None:
+            shutdown_scheduler()
+            lease.close()
         log.info("backend stopped")
+
+
+_LEASE_PORT = 8799
+SCHEDULER_STANDBY = False
+
+
+def _take_scheduler_lease():
+    """Exclusive right to run the scheduler (Hybrid, arms, monitor, advisor) on this machine.
+
+    Two backends against the same database and MT5 terminal would both fire the same armed setups and
+    both run the Hybrid - the order lock is per process, so it cannot stop a double open. Nothing
+    enforced "never run a second backend" (a dev `uvicorn --reload` beside the desktop app was
+    enough; full review 2026-10-20). A bound localhost socket is the lease: the OS frees it when the
+    process dies, so a crash never leaves it stuck. A backend that cannot take it runs in STANDBY -
+    it serves the UI and the API but never trades or manages positions."""
+    import socket
+
+    global SCHEDULER_STANDBY
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):          # Windows: no port sharing, ever
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        s.bind(("127.0.0.1", _LEASE_PORT))
+        s.listen(1)
+    except OSError:
+        s.close()
+        SCHEDULER_STANDBY = True
+        log.critical("another backend already runs the scheduler - this one is in STANDBY "
+                     "(no trading, no position management)")
+        return None
+    return s
 
 
 app = FastAPI(
@@ -244,6 +280,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+@app.middleware("http")
+async def _require_desk_header(request, call_next):
+    """Refuse state-changing API calls that did not come from this app's own frontend.
+
+    There is no login: anything that can reach 127.0.0.1:8001 is trusted. CORS stops another site
+    from READING responses, not from SENDING a request - fetch(url, {method: "POST", mode:
+    "no-cors"}) with no body needs no permission, and routes like /api/execution/flatten,
+    /api/kill-switch/false and /api/proposals/{id}/approve take no body. A custom header cannot be
+    added cross-site without a CORS preflight, which only the dev origin above passes. The frontend's
+    request() always sends it (full review 2026-10-20)."""
+    if (request.method not in _SAFE_METHODS and request.url.path.startswith("/api")
+            and request.headers.get("x-desk") != "1"):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse({"detail": "refused: request did not come from the trading desk app"},
+                            status_code=403)
+    return await call_next(request)
 
 app.include_router(router)
 app.include_router(market_router)

@@ -402,6 +402,12 @@ def approve_proposal(
         log.warning("proposal resized by user before approval",
                     extra={"proposal_id": proposal_id, "lots": req.lots, "approved_qty": decision.approved_qty})
 
+    # A setup an automation left in the queue and YOU approved is your decision, not the auto-pilot's.
+    # Keeping 'hybrid'/'auto_trade' booked 18 manual approvals (7 of them below the Hybrid's own bar)
+    # as auto-pilot trades - mixing the evidence for or against the auto-pilot (full review
+    # 2026-10-20). Approving is always manual: say where it came from.
+    if row.source in ("hybrid", "auto_trade", "armed_hybrid"):
+        row.source = f"manual_from_{row.source}"[:24]
     row.status = ProposalStatus.APPROVED.value
     session.commit()
     try:

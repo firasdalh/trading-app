@@ -191,7 +191,7 @@ class OandaBrokerAdapter(BrokerAdapter):
             ))
         return views
 
-    def close_position(self, symbol: str) -> OrderResult:
+    def close_position(self, symbol: str, direction: str | None = None) -> OrderResult:
         import oandapyV20.endpoints.positions as positions
 
         inst = normalize_instrument(symbol)

@@ -77,7 +77,7 @@ def _close_position(session: Session, pos: Position, broker, exit_price: float, 
     # MT5 account (Exness default) an opposing market order opens a NEW opposite position
     # instead of closing, which would silently flip a short into a long.
     try:
-        result = broker.close_position(pos.symbol)
+        result = broker.close_position(pos.symbol, direction=pos.direction)   # this trade's side only
     except Exception as exc:  # noqa: BLE001 - treat like a failed close: keep it open, retry later
         log.warning("broker close raised — position kept OPEN",
                     extra={"symbol": pos.symbol, "id": pos.id, "reason": reason, "error": str(exc)})
@@ -345,6 +345,18 @@ def monitor_positions(session: Session) -> dict:
             select(Position).where(Position.status == PositionStatus.OPEN.value)
         ).all()
 
+    from app.risk.service import _norm_symbol
+
+    books: dict[str, list | None] = {}
+
+    def broker_book(broker) -> list | None:
+        if broker.name not in books:
+            try:
+                books[broker.name] = list(broker.get_open_positions())
+            except Exception:  # noqa: BLE001 - unreadable: keep the app's levels this pass
+                books[broker.name] = None
+        return books[broker.name]
+
     checked, closed = 0, 0
     for pos in open_positions:
         checked += 1
@@ -358,7 +370,23 @@ def monitor_positions(session: Session) -> dict:
         pos.last_price = price
         pos.unrealized_pnl = _pnl(broker, pos, price)  # broker-truth (currency-correct) when available
 
-        reason = _exit_reason(pos.direction, price, pos.stop_loss, pos.take_profit)
+        # A broker that holds the stop and target ITSELF (MT5): its ticket is the truth. Edits made in
+        # the MT5 terminal or phone used to be ignored - the monitor market-closed at the app's old
+        # target anyway - and targets were fired here on the MID quote, half a spread before the
+        # broker's own would (full review 2026-10-20). So: copy the ticket's levels onto the row, let
+        # the broker take the target, and keep only the STOP check here as a backstop.
+        server_side = bool(getattr(broker, "reconciles_positions", False))
+        if server_side:
+            book = broker_book(broker)
+            if book is not None:
+                mine = [v for v in book if _norm_symbol(v.symbol) == _norm_symbol(pos.symbol)
+                        and v.direction == pos.direction]
+                if len(mine) == 1:
+                    pos.stop_loss = mine[0].stop_loss or None
+                    pos.take_profit = mine[0].take_profit or None
+
+        reason = _exit_reason(pos.direction, price, pos.stop_loss,
+                              None if server_side else pos.take_profit)
         if reason and _close_position(session, pos, broker, price, reason):
             closed += 1
         else:

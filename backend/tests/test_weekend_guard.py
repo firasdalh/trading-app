@@ -158,7 +158,7 @@ def test_flatten_closes_only_non_crypto_in_the_window(db_session, monkeypatch):
 
     closed: list[str] = []
 
-    def _close(sym):
+    def _close(sym, direction=None):
         closed.append(sym)
         # Shaped like a real OrderResult — _close_position records the broker status on the exit.
         return SimpleNamespace(avg_fill_price=100.0,

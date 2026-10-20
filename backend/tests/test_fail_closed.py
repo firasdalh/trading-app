@@ -138,7 +138,7 @@ class _SlBroker:
     def risk_per_lot(self, symbol, entry, stop):
         return abs(entry - stop) * 10.0
 
-    def set_sl_tp(self, symbol, stop_loss=None, take_profit=None):
+    def set_sl_tp(self, symbol, stop_loss=None, take_profit=None, direction=None):
         self.calls.append((stop_loss, take_profit))
         return OrderResult(status=OrderStatus.SUBMITTED)
 

@@ -687,7 +687,10 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
         wall = (ctx or {}).get("near_res") if d == "long" else (ctx or {}).get("near_sup")
         wall_note = ""
         at_wall = False
-        if wall is not None and r >= _WALL_MIN_R:
+        # Early "bank into a wall" is for the FIRST third only. With the same wall, R and fading
+        # momentum still true after it, the next pass booked the SECOND third at the same +1.2R -
+        # two-thirds out a pass apart, where the plan was 1/3 at 1.5R and 1/3 at 3R.
+        if wall is not None and r >= _WALL_MIN_R and tranche == 0:
             wall_px, wall_tf = wall
             if abs(wall_px - last) <= _WALL_NEAR_ATR * atr:
                 mh, rsi, rsi_prev = (ctx or {}).get("macd_hist"), (ctx or {}).get("rsi"), (ctx or {}).get("rsi_prev")
@@ -739,9 +742,14 @@ def _auto_decision(a: PositionAdvice, p, ctx: dict, plan_risk: float | None,
         if r >= run_r and regime == "trending" and a.thesis == "intact" and p.take_profit is not None:
             trail, basis = _trail_stop(d, last, atr, ctx or {}, regime)
             stop = trail if _tightens(d, p.stop_loss, trail) else (p.stop_loss if p.stop_loss is not None else trail)
-            return {"action": "run_target", "kind": "run", "stop": round(stop, 5),
-                    "reason": (f"+{r:.1f}R in a strong trend — letting it run: removing the target "
-                               f"and trailing the stop ({basis})")}
+            # Never remove the target while the stop can still lose: with the structure trail not
+            # tightening, the stop stayed at the ORIGINAL -1R and the TP was deleted anyway - a
+            # +1.8R trade could round-trip to a full loss with nothing to bank it.
+            at_or_past_entry = (stop >= p.entry_price) if d == "long" else (stop <= p.entry_price)
+            if at_or_past_entry:
+                return {"action": "run_target", "kind": "run", "stop": round(stop, 5),
+                        "reason": (f"+{r:.1f}R in a strong trend — letting it run: removing the target "
+                                   f"and trailing the stop ({basis}) at {round(stop, 5)}")}
         if r >= trail_r:
             trail, basis = _trail_stop(d, last, atr, ctx or {}, regime)
             if _tightens(d, p.stop_loss, trail):
@@ -852,7 +860,14 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
     max_hold_hours = _adv_cfg.max_hold_hours or 0.0
     scale_out = getattr(_adv_cfg, "scale_out_enabled", True)
     try:
-        positions = {p.symbol: p for p in live_broker_positions(session)}
+        book = live_broker_positions(session)
+        positions = {p.symbol: p for p in book}
+        # Everything here (advice, streaks, partial memory, cooldowns) is keyed by SYMBOL, so with two
+        # positions on one symbol (a hedge, or a terminal trade beside an app trade) it would act on
+        # the wrong one - or on both. Leave those to the user (full review 2026-10-20).
+        tickets: dict[str, int] = {}
+        for p in book:
+            tickets[p.symbol] = tickets.get(p.symbol, 0) + 1
     except Exception as exc:  # noqa: BLE001 - never act on a book we can't see
         log.warning("advisor auto-execute skipped: broker positions unavailable", extra={"error": str(exc)})
         return actions
@@ -865,6 +880,21 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
     for a in advice:
         p = positions.get(a.symbol)
         if p is None:
+            continue
+        if tickets.get(a.symbol, 0) > 1:
+            actions.append({"symbol": a.symbol, "action": "skipped", "kind": "skipped", "ok": True,
+                            "reason": "two positions open on this symbol - not auto-managing either"})
+            continue
+
+        # A closed market: the candles are frozen at the last session, so every pass re-read the same
+        # data and "confirmed" an invalidation twice over the weekend - then closed at Sunday's open
+        # into the week's widest spread without a fresh read. Skip, and require fresh reads after.
+        try:
+            mkt_open = get_broker_for(AssetClass(p.asset_class), settings.broker_map).market_open(p.symbol)
+        except Exception:  # noqa: BLE001
+            mkt_open = True
+        if not mkt_open:
+            _INVALID_STREAK[a.symbol] = 0
             continue
 
         # Track consecutive invalidations for the close-hysteresis gate.
@@ -911,14 +941,15 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
 
         try:
             if action == "close":
-                result = broker.close_position(p.symbol)
+                result = broker.close_position(p.symbol, direction=p.direction)
                 ok = result.status.value not in ("error", "rejected")
                 if ok:
                     _reconcile_closed_symbol(session, p.symbol)
                     _LAST_CLOSE_AT[a.symbol] = now
                     _INVALID_STREAK[a.symbol] = 0
             elif action == "take_partial":
-                result = broker.close_partial(p.symbol, decision.get("fraction", _PARTIAL_FRACTION))
+                result = broker.close_partial(p.symbol, decision.get("fraction", _PARTIAL_FRACTION),
+                                             direction=p.direction)
                 ok = result.status.value not in ("error", "rejected")
                 if ok:
                     if not decision.get("has_plan"):
@@ -932,7 +963,7 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                         else round(p.entry_price, 5)
                     if _tightens(p.direction, p.stop_loss, be):
                         try:
-                            be_res = broker.set_sl_tp(p.symbol, be, p.take_profit)
+                            be_res = broker.set_sl_tp(p.symbol, be, p.take_profit, direction=p.direction)
                             if be_res.status.value in ("error", "rejected"):
                                 log.warning("advisor: breakeven move after partial rejected",
                                             extra={"symbol": a.symbol, "error": be_res.error})
@@ -951,7 +982,7 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                 # Let the winner run: trail the stop AND clear the take-profit (0.0 clears it on
                 # MT5) so neither the broker nor the Monitor caps the trade at the planned target.
                 # The trailing stop — broker-side, enforced between ticks — becomes the exit.
-                result = broker.set_sl_tp(p.symbol, decision["stop"], 0.0)
+                result = broker.set_sl_tp(p.symbol, decision["stop"], 0.0, direction=p.direction)
                 ok = result.status.value not in ("error", "rejected")
                 if ok:
                     _clear_db_take_profit(session, p.symbol)  # so the Monitor won't close at the old TP
@@ -959,7 +990,7 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
                     action, kind = "stop_deferred", "deferred"
                     reason = f"deferred — {result.error} (target/stop unchanged; will retry)"
             else:  # set_stop (protect | breakeven | trail)
-                result = broker.set_sl_tp(p.symbol, decision["stop"], p.take_profit)
+                result = broker.set_sl_tp(p.symbol, decision["stop"], p.take_profit, direction=p.direction)
                 ok = result.status.value not in ("error", "rejected")
                 if not ok and _is_deferrable(result.error):
                     # Benign + temporary: the market is closed, or the stop is already where we

@@ -115,15 +115,29 @@ def evaluate_proposal(
     breaker_reason: str | None = None,
     risk_per_lot: float | None = None,
     spread: float | None = None,
+    risk_per_lot_required: bool = False,
 ) -> RiskDecision:
     """Deterministically evaluate a proposal. Returns an APPROVED/RESIZED/VETOED decision.
 
     ``override_risk_fraction`` lets the user size a single trade up or down (Mode A manual size).
     It is ALWAYS re-clamped to the hard per-trade ceiling here, so a manual size can never exceed
     RISK.md's 3% cap — the user can size up to the cap, never past it.
+
+    ``risk_per_lot_required`` (real brokers): without the broker's account-currency risk of one lot
+    the size is NOT guessed. The ``|entry - stop|`` fallback means "one lot = one unit", which is
+    right for the simulator and 100x wrong for gold - a brief MT5 read failure once approved 2.58
+    lots of gold recorded as $38.70 of risk that was really ~$3,870 (full review 2026-10-20).
     """
     symbol = proposal.symbol
     checks: dict[str, bool] = {}
+    # A setup the macro/news layer HELD stays visible (watch) but is not executable. Nothing read
+    # this flag before, so a "held" setup was still risk-approved and auto-opened.
+    if getattr(proposal, "macro_wait", False):
+        return _veto(symbol, "held for high-impact news (macro gate) - the setup is shown, not traded",
+                     {"macro_ok": False})
+    if risk_per_lot_required and not (risk_per_lot and risk_per_lot > 0):
+        return _veto(symbol, "can't price the risk: the broker returned no contract data for this "
+                             "symbol (retry in a moment)", {"risk_priced": False})
 
     # --- choose the risk fraction, then clamp to the hard ceiling, defensively ---
     desired = override_risk_fraction if override_risk_fraction is not None else limits.risk_per_trade

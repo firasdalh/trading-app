@@ -312,9 +312,9 @@ export function Dashboard({
   // GET; the advisor itself runs on the backend scheduler.
   const { data: advisor } = usePolling(() => api.advisorState(), 15000, [posBump]);
 
-  const closePosition = async (p: { symbol: string; asset_class: string }) => {
+  const closePosition = async (p: { symbol: string; asset_class: string; direction?: string }) => {
     try {
-      await api.liveClose(p.symbol, p.asset_class as AssetClass);
+      await api.liveClose(p.symbol, p.asset_class as AssetClass, p.direction);
       onPositionsChanged(); // refresh immediately
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

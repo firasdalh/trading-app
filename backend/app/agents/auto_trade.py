@@ -474,4 +474,9 @@ def auto_trade_tick(session: Session) -> dict:
         last = cfg.last_run_at if cfg.last_run_at.tzinfo else cfg.last_run_at.replace(tzinfo=timezone.utc)
         if (now - last).total_seconds() < cfg.interval_seconds:
             return {"ran": False, "reason": "interval not elapsed"}
+    # Stamp BEFORE running, as the Hybrid does: stamped only at the end, a pass that raised was
+    # retried every 60 s instead of waiting its interval (full review 2026-10-20).
+    cfg.last_run_at = now
+    session.add(cfg)
+    session.commit()
     return run_auto_trade(session)

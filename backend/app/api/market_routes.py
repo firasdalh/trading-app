@@ -270,10 +270,13 @@ def test_order(
     if kill_switch_active(session):
         raise HTTPException(status_code=423, detail="Kill-switch active — no orders accepted")
     broker = _broker_for(request.asset_class, session)
-    if not broker.is_paper:
+    # SIMULATOR only. "Paper" is not enough: an Exness DEMO account is paper, and this route sends
+    # any size with no stop, no Risk Manager and no Position row - invisible to the exposure budget
+    # and the journal. The UI never calls it.
+    if broker.name != "sim":
         raise HTTPException(
             status_code=403,
-            detail="test-order is paper-only; resolved broker is live",
+            detail=f"test-order only runs on the simulator; '{broker.name}' trades a real account",
         )
     log.warning("test-order (paper) submitted", extra={"symbol": request.symbol, "qty": request.qty})
     return broker.submit_order(request)

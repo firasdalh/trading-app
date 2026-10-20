@@ -22,8 +22,12 @@ import type {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    // X-Desk marks the request as coming from this app. The backend refuses state-changing calls
+    // without it: a web page in another tab can POST to 127.0.0.1:8001 (a body-less "simple"
+    // request needs no CORS permission), but it cannot add a custom header without the backend's
+    // permission - which it never gets. Merged AFTER init so no call can drop it.
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}), "X-Desk": "1" },
   });
   if (!res.ok) {
     let detail = res.statusText;
@@ -134,10 +138,11 @@ export const api = {
       `/api/positions/${id}/close`,
       { method: "POST" },
     ),
-  liveClose: (symbol: string, assetClass: AssetClass) =>
+  // `direction` closes only that side - without it a hedge on the same symbol closed too.
+  liveClose: (symbol: string, assetClass: AssetClass, direction?: string) =>
     request<{ status: string; symbol: string }>("/api/positions/live/close", {
       method: "POST",
-      body: JSON.stringify({ symbol, asset_class: assetClass }),
+      body: JSON.stringify({ symbol, asset_class: assetClass, direction: direction ?? null }),
     }),
   setSlTp: (symbol: string, assetClass: AssetClass, stopLoss: number | null, takeProfit: number | null) =>
     request<{ status: string; warning?: string | null }>("/api/positions/sl-tp", {

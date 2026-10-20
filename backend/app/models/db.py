@@ -308,8 +308,13 @@ class Position(Base):
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     realized_pnl: Mapped[float | None] = mapped_column(Float)
 
-    # Risk at entry (used for exposure accounting).
+    # CURRENT risk to the stop - used for the exposure budget, so it follows stop moves.
     risk_amount: Mapped[float | None] = mapped_column(Float)
+    # Risk AT ENTRY - the R denominator. Set once at open, never modified. R statistics used
+    # risk_amount, which /positions/sl-tp rewrites on every stop move: a widened stop halved a -1.97R
+    # loss to -1.01R, and a stop dragged just short of entry made a +$40 win "+80R" (full review
+    # 2026-10-20). Use entry_risk(pos) for any R-multiple.
+    initial_risk_amount: Mapped[float | None] = mapped_column(Float)
     # The proposal's confidence at entry — kept so closed trades can be bucketed by confidence to
     # CALIBRATE the score against real outcomes (does "70%" actually win ~70%?).
     confidence: Mapped[float | None] = mapped_column(Float)
@@ -781,3 +786,9 @@ class TradeMacroContext(Base):
 
     blocked_by_news: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     payload: Mapped[dict | None] = mapped_column(JSON)   # the full context, for later re-analysis
+
+
+def entry_risk(pos) -> float | None:
+    """The R denominator of a position: its risk at entry (older rows fall back to risk_amount)."""
+    v = getattr(pos, "initial_risk_amount", None) or getattr(pos, "risk_amount", None)
+    return v if v and v > 0 else None

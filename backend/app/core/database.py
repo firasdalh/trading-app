@@ -86,6 +86,7 @@ _SQLITE_ADDED_COLUMNS = {
     "positions": [
         ("confidence", "FLOAT"),
         ("source", "VARCHAR(24)"),
+        ("initial_risk_amount", "FLOAT"),
     ],
     "hybrid_config": [
         ("conditional_enabled", "BOOLEAN DEFAULT 1"),
@@ -134,6 +135,36 @@ def init_db() -> None:
     """Create all tables, then add any columns missing on a pre-existing DB. Idempotent."""
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite()
+    _backfill_initial_risk()
+
+
+def _backfill_initial_risk() -> None:
+    """Fill positions.initial_risk_amount for rows opened before it existed: the proposal's approved
+    risk via the order that opened it (same symbol, filled within 2 minutes before the position),
+    else the row's risk_amount. Runs once per row (only NULLs), never touches a set value."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from app.models.db import Order, Position, TradeProposalRecord
+
+    with SessionLocal() as s:
+        rows = s.scalars(select(Position).where(Position.initial_risk_amount.is_(None))).all()
+        if not rows:
+            return
+        for pos in rows:
+            risk = None
+            if pos.opened_at is not None:
+                order = s.scalars(
+                    select(Order).where(Order.symbol == pos.symbol, Order.proposal_id.is_not(None),
+                                        Order.created_at <= pos.opened_at + timedelta(seconds=5),
+                                        Order.created_at >= pos.opened_at - timedelta(minutes=2))
+                    .order_by(Order.created_at.desc())).first()
+                if order is not None:
+                    rec = s.get(TradeProposalRecord, order.proposal_id)
+                    risk = rec.risk_amount if rec is not None else None
+            pos.initial_risk_amount = risk if risk and risk > 0 else pos.risk_amount
+        s.commit()
 
 
 def get_session() -> Iterator[Session]:

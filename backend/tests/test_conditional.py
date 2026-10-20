@@ -570,3 +570,70 @@ def test_arm_conditional_dedups_same_symbol_direction(db_session, monkeypatch):
                                  direction="short", order_type="sell_stop", trigger_price=78.2,
                                  stop_loss=78.4, take_profit=77.4, confidence=0.6, rr=2.0)
     assert first is not None and again is None
+
+
+# ---------------------------------------------------------------- full review 2026-10-20
+
+def test_cancelling_an_arm_while_it_is_firing_wins(db_session, monkeypatch):
+    """Before: the user's Cancel landed during the 5-15 s re-check, the trade opened anyway and
+    TRIGGERED overwrote CANCELLED."""
+    import app.agents.orchestrator as orch
+    from sqlalchemy import update
+
+    s = _arm(db_session, direction="long", order_type="buy_stop", trigger_price=100.0,
+             stop_loss=98.0, take_profit=106.0, confidence=0.9)
+    _stub_market_series(monkeypatch, [99.0] * 59 + [100.2, 100.3])
+    _stub_fire(monkeypatch)
+    opened = []
+    import app.execution.executor as executor
+    monkeypatch.setattr(executor, "execute_proposal", lambda session, record: opened.append(record.id))
+
+    def review_while_user_cancels(*a, **k):
+        db_session.execute(update(ConditionalSetup).where(ConditionalSetup.id == s.id).values(status="cancelled"))
+        db_session.commit()
+        return True, "re-confirmed"
+
+    monkeypatch.setattr(orch, "review_armed_setup", review_while_user_cancels)
+    out = cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert opened == []
+    assert s.status == "cancelled" and out["triggered"] == 0
+
+
+def test_a_blocked_execution_rearms_instead_of_killing_the_arm(db_session, monkeypatch):
+    """Exposure full / daily pause / drift are transient - the arm must survive to retry."""
+    import app.execution.executor as executor
+
+    s = _arm(db_session, direction="long", order_type="buy_stop", trigger_price=100.0,
+             stop_loss=98.0, take_profit=106.0, confidence=0.9)     # above the auto-open bar
+    _stub_market_series(monkeypatch, [99.0] * 59 + [100.2, 100.3])
+    _stub_fire(monkeypatch)
+
+    def blocked(session, record):
+        raise executor.ExecutionBlocked("risk check at execution: no exposure budget left")
+
+    monkeypatch.setattr(executor, "execute_proposal", blocked)
+    cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert s.status == "armed"
+    assert "execution blocked" in (s.last_note or "") and s.cooldown_until is not None
+
+
+def test_an_arm_does_not_fire_inside_a_high_impact_news_window(db_session, monkeypatch):
+    import app.agents.fundamental as fundamental
+    import app.execution.executor as executor
+    from app.models.schemas import FundamentalRead
+
+    s = _arm(db_session, direction="long", order_type="buy_stop", trigger_price=100.0,
+             stop_loss=98.0, take_profit=106.0, confidence=0.9)
+    _stub_market_series(monkeypatch, [99.0] * 59 + [100.2, 100.3])
+    _stub_fire(monkeypatch)
+    opened = []
+    monkeypatch.setattr(executor, "execute_proposal", lambda session, record: opened.append(1))
+    now = datetime.now(timezone.utc)
+    window = SimpleNamespace(start=now - timedelta(minutes=5), end=now + timedelta(minutes=25))
+    monkeypatch.setattr(fundamental, "run_fundamental",
+                        lambda *a, **k: SimpleNamespace(stand_aside_windows=[window]))
+    cond.check_conditional_setups(db_session)
+    db_session.refresh(s)
+    assert opened == [] and s.status == "armed" and "news window" in (s.last_note or "")

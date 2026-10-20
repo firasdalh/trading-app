@@ -235,10 +235,18 @@ def currencies_for_symbol(symbol: str, asset_class: str | None = None) -> list[s
 class TradingViewCalendarProvider(EconomicCalendarProvider):
     """Pulls high-impact economic events from TradingView's public calendar JSON.
 
-    No API key required. Results are cached per country-set per hour to avoid hammering it,
-    and any failure degrades to an empty list (the agent then treats fundamentals as neutral).
+    No API key required. Results are cached per country-set per hour to avoid hammering it.
     The instrument's currencies determine which countries' events matter.
+
+    A failed fetch keeps serving the LAST GOOD list for that country-set (events do not move within
+    hours) and is retried after ``_FAIL_TTL_S``. It used to cache an EMPTY list for a full hour, which
+    silently switched the news blackout off: desktop.log had 88 fetch failures (DNS, a self-signed
+    certificate), one stretch of ~6 hours with no blackout on most of the watchlist (full review
+    2026-10-20). Only with no good fetch since startup does a failure read as "no events".
     """
+
+    _OK_TTL_S = 3600
+    _FAIL_TTL_S = 180
 
     name = "tradingview"
     _URL = "https://economic-calendar.tradingview.com/events"
@@ -246,6 +254,7 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
     def __init__(self, stand_aside_minutes: int = 30) -> None:
         self.stand_aside_minutes = stand_aside_minutes
         self._cache: dict[str, tuple[datetime, list[CalendarEvent]]] = {}
+        self._failed_at: dict[str, datetime] = {}   # country-set -> last failed fetch
 
     def _countries(self, symbol: str, asset_class: str | None = None) -> list[str]:
         return countries_for_symbol(symbol, asset_class)
@@ -259,8 +268,11 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
         cache_key = ",".join(sorted(countries)) + ("|med" if include_medium else "")
         now = datetime.now(timezone.utc)
         cached = self._cache.get(cache_key)
-        if cached and (now - cached[0]).total_seconds() < 3600:
+        if cached and (now - cached[0]).total_seconds() < self._OK_TTL_S:
             return cached[1]
+        failed = self._failed_at.get(cache_key)
+        if failed and (now - failed).total_seconds() < self._FAIL_TTL_S:
+            return cached[1] if cached else []      # just failed: last good list, retry shortly
 
         try:
             import httpx
@@ -295,12 +307,18 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
                     actual=_f(e.get("actual")),
                 ))
             self._cache[cache_key] = (now, events)
+            self._failed_at.pop(cache_key, None)
             _log.info("calendar fetched", extra={"symbol": symbol, "countries": cache_key, "high_events": len(events)})
             return events
-        except Exception as exc:  # noqa: BLE001 - degrade to neutral
-            _log.warning("calendar fetch failed; treating as no events",
+        except Exception as exc:  # noqa: BLE001 - keep the last good list; never invent "no events"
+            self._failed_at[cache_key] = now      # short back-off instead of an hour of "no events"
+            if cached:
+                _log.warning("calendar fetch failed; serving the last good list",
+                             extra={"symbol": symbol, "error": str(exc),
+                                    "age_min": round((now - cached[0]).total_seconds() / 60)})
+                return cached[1]
+            _log.warning("calendar fetch failed and nothing cached yet; no events known",
                          extra={"symbol": symbol, "error": str(exc)})
-            self._cache[cache_key] = (now, [])  # cache the empty to avoid retry storms
             return []
 
 

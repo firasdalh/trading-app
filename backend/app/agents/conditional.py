@@ -535,7 +535,10 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
     #     the 0.25R cap a planned 2.0:1 arrives as 1.4:1. The setup was only worth taking because of
     #     its R:R, so that number has to still hold at the fill or the reason to be here is gone.
     if s.stop_loss is not None and s.take_profit is not None:
-        fill = ref if s.break_level is not None else s.trigger_price
+        # Every arm fills AT MARKET, so measure at the live price. Measuring a stop-arm at its trigger
+        # never failed here, and the executor then refused modest overshoots and killed the arm for
+        # good - while bigger overshoots were only declined (full review 2026-10-20).
+        fill = ref
         risk_now = abs(fill - s.stop_loss)
         reward_now = abs(s.take_profit - fill)
         if risk_now > 0:
@@ -547,6 +550,21 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
                     f"{round(s.stop_loss, 6)}, target {round(s.take_profit, 6)}) — armed for a much "
                     f"better price; not taking a {rr_now:.2f}:1 trade",
                     terminal=False)
+
+    # 1d. News blackout. Every analysis path stands aside inside a high-impact event window; an arm
+    #     did not - it fired at market straight into NFP/CPI spreads and whipsaw, and the AI review
+    #     that was meant to catch "an imminent high-impact event" was never shown the calendar (full
+    #     review 2026-10-20). Deterministic, no LLM; a decline here re-arms after the cooldown.
+    try:
+        from app.agents.fundamental import run_fundamental
+        from app.agents.orchestrator import _now_in_stand_aside
+
+        fund = run_fundamental(s.symbol, now=datetime.now(timezone.utc), use_llm=False,
+                               asset_class=s.asset_class)
+        if _now_in_stand_aside(fund, datetime.now(timezone.utc)):
+            return _decline(session, s, "inside a high-impact news window", terminal=False)
+    except Exception as exc:  # noqa: BLE001 - a calendar hiccup keeps the last good list (providers)
+        log.warning("conditional news check failed", extra={"symbol": s.symbol, "error": str(exc)})
 
     # 2. Build the proposal from the ARMED levels (trigger = entry) — the whole point: the R:R is
     #    measured from the trigger, where it is real.
@@ -571,6 +589,20 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
         proposal.review_decision = "veto" if not ok else "confirm"
         if not ok:
             return _decline(session, s, why, terminal=False)
+
+    # 3b. The re-read and AI review above take 5-15 s. A Cancel or an edit made in that window was
+    #     ignored: the trade still opened and TRIGGERED overwrote CANCELLED. Re-read the arm now.
+    armed_levels = (s.trigger_price, s.stop_loss, s.take_profit, s.direction)
+    triggered_at = s.triggered_at
+    session.refresh(s)
+    if s.status != ConditionalStatus.ARMED.value:
+        log.info("conditional changed while firing - not opening",
+                 extra={"symbol": s.symbol, "status": s.status})
+        return 0
+    s.triggered_at = triggered_at
+    if (s.trigger_price, s.stop_loss, s.take_profit, s.direction) != armed_levels:
+        return _decline(session, s, "levels were edited while it was firing - re-checking on the new levels",
+                        terminal=False)
 
     # 4. Deterministic Risk Manager — final gate, sized on the armed levels.
     try:
@@ -641,13 +673,20 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
 
         record.status = ProposalStatus.APPROVED.value
         session.commit()
+        session.refresh(s)                       # last look: cancelled in the meantime?
+        if s.status != ConditionalStatus.ARMED.value:
+            record.status = ProposalStatus.EXPIRED.value
+            session.commit()
+            return 0
         try:
             execute_proposal(session, record)
         except ExecutionBlocked as exc:
-            s.status = ConditionalStatus.REJECTED.value
-            s.last_note = f"execution blocked: {exc}"
-            session.add(s)
-            return 0
+            # Usually transient (exposure budget full, daily pause, price drift, a book-read hiccup):
+            # keep the arm and retry after its cooldown instead of killing a valid level for good.
+            record.status = ProposalStatus.RISK_VETOED.value
+            record.risk_reason = f"execution blocked: {exc}"
+            session.commit()
+            return _decline(session, s, f"execution blocked: {exc}", terminal=False)
         session.refresh(record)
         if record.status == ProposalStatus.EXECUTED.value:
             s.status = ConditionalStatus.TRIGGERED.value
