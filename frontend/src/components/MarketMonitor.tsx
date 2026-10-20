@@ -11,12 +11,14 @@ interface Props {
 }
 
 const TFS = ["1h", "4h", "1d"] as const;
+// +DI and -DI must differ by at least this much before either side "owns" the ADX strength.
+const DI_MARGIN = 5;
 // The backend rebuilds the table at most every 20s and the slow timeframes far less often, so a
 // minute between polls loses nothing while the drawer is open (it stops polling when closed).
 const POLL_MS = 60_000;
 
 type Filter = "all" | "aligned" | "pullback" | "zone" | "stretched";
-type Sort = "clarity" | "alpha" | "move";
+type Sort = "clarity" | "strength" | "alpha" | "move";
 
 const FILTERS: { id: Filter; label: string; hint: string }[] = [
   { id: "all", label: "All", hint: "Every watched pair" },
@@ -62,6 +64,18 @@ function stretched(t: MonitorTf | null | undefined): boolean {
 function avgAdx(r: MonitorRow): number {
   const v = TFS.map((tf) => r.tfs[tf]?.adx).filter((x): x is number => x != null);
   return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0;
+}
+
+/** Directional trend strength: ADX signed by each timeframe's arrow, summed and divided by THREE. ADX
+ *  alone is direction-blind, so a pair whose timeframes trend hard against each other ranked top;
+ *  dividing by the readable count let one readable timeframe outrank three. */
+function trendStrength(r: MonitorRow): number {
+  const s = TFS.reduce((acc, tf) => {
+    const t = r.tfs[tf];
+    if (t?.adx == null) return acc;
+    return acc + (t.trend === "up" ? t.adx : t.trend === "down" ? -t.adx : 0);
+  }, 0);
+  return Math.abs(s) / TFS.length;
 }
 
 function ago(iso: string | undefined, now: number): string {
@@ -134,6 +148,11 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
     const by = [...kept];
     if (sort === "alpha") by.sort((a, b) => a.symbol.localeCompare(b.symbol));
     else if (sort === "move") by.sort((a, b) => Math.abs(b.change_pct ?? 0) - Math.abs(a.change_pct ?? 0));
+    else if (sort === "strength")
+      by.sort(
+        (a, b) =>
+          Number(a.market_open === false) - Number(b.market_open === false) || trendStrength(b) - trendStrength(a),
+      );
     // Clearest first: aligned, then dips/bounces, then counter, then mixed; within a tier the
     // stronger average ADX first. Closed markets sink - their readings are a session old.
     else
@@ -186,6 +205,7 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
             Sort
             <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} className="field py-0.5 text-xs">
               <option value="clarity">Clearest trend first</option>
+              <option value="strength">Strongest trend (ADX)</option>
               <option value="move">Biggest move today</option>
               <option value="alpha">A–Z</option>
             </select>
@@ -416,6 +436,16 @@ function RangeUsed({ v }: { v: number | null }) {
   );
 }
 
+const STRUCT: Record<MonitorTf["structure"], { label: string; cls: string; words: string }> = {
+  up: { label: "HH·HL", cls: "bg-bull/10 text-bull", words: "higher highs and higher lows" },
+  down: { label: "LH·LL", cls: "bg-bear/10 text-bear", words: "lower highs and lower lows" },
+  range: { label: "Range", cls: "bg-neutral-800 text-neutral-400", words: "no clean higher-high/low or lower-high/low sequence" },
+};
+
+function fmtLevel(v: number | null): string {
+  return v == null ? "—" : fmtPrice(Number(v.toPrecision(6)));
+}
+
 function TfCell({ tf, t, onClick }: { tf: string; t: MonitorTf | null | undefined; onClick: () => void }) {
   if (!t) {
     return <div className="px-2 py-1 text-xs text-neutral-600">no data</div>;
@@ -425,6 +455,23 @@ function TfCell({ tf, t, onClick }: { tf: string; t: MonitorTf | null | undefine
   const weak = t.strength === "weak";
   const dirCls = up ? "text-bull" : down ? "text-bear" : "text-neutral-400";
   const bars = t.strength === "strong" ? 3 : t.strength === "moderate" ? 2 : t.strength === "weak" ? 1 : 0;
+  // Which side owns the ADX strength. Shown only when it DISAGREES with the arrow - agreeing is the
+  // normal case and would just be one more symbol to read.
+  // A side only counts with a clear gap between +DI and -DI, and only matters when there IS strength
+  // (ADX 20+): a 0.9-point gap at ADX 12 painted a quarter of the table amber for nothing.
+  const diSide =
+    t.plus_di != null && t.minus_di != null && Math.abs(t.plus_di - t.minus_di) >= DI_MARGIN
+      ? t.plus_di > t.minus_di ? "up" : "down"
+      : null;
+  const diConflict = diSide != null && (t.adx ?? 0) >= 20 && (up || down) && diSide !== t.trend;
+  // Swing structure vs the arrow: ✓ when the swings confirm the EMA direction, ≠ when they contradict it.
+  // Neither once the structure has just BROKEN (CHoCH): the label is then the old structure, and a ✓
+  // would assert a confirmation price has already invalidated - the CHoCH tag carries the meaning.
+  const st = STRUCT[t.structure] ?? STRUCT.range;
+  const broken = t.choch_side != null;
+  const structAgrees = !broken && t.structure !== "range" && t.structure === t.trend;
+  const structFights = !broken && t.structure !== "range" && (up || down) && t.structure !== t.trend;
+  const v = t.volume;
   const z = t.zones;
   const insideKinds = z.inside_kinds?.length ? z.inside_kinds : z.inside ? [z.inside.kind] : [];
   // Every zone within 0.5 ATR, nearest first - when price is squeezed between a demand and a supply
@@ -439,12 +486,22 @@ function TfCell({ tf, t, onClick }: { tf: string; t: MonitorTf | null | undefine
       ).sort((a, b) => a.dist - b.dist);
   const title = [
     `${tf.toUpperCase()}: ${t.trend ?? "?"}${t.ema_stacked ? " (EMA 20/50/200 fully stacked)" : ""}`,
-    t.adx != null ? `ADX ${t.adx.toFixed(0)}${t.adx_dir ? `, ${t.adx_dir}` : ""} - ${t.strength} trend` : null,
+    t.adx != null
+      ? `ADX ${t.adx.toFixed(1)}${t.adx_dir ? `, ${t.adx_dir}` : ""} - ${t.strength} trend` +
+        (t.plus_di != null && t.minus_di != null
+          ? ` | +DI ${t.plus_di.toFixed(1)} / -DI ${t.minus_di.toFixed(1)} (${diSide === "up" ? "buyers" : diSide === "down" ? "sellers" : "neither side"} own the strength)`
+          : "")
+      : null,
+    `structure: ${st.words} | last swing high ${fmtLevel(t.swing_high)}, last swing low ${fmtLevel(t.swing_low)}` +
+      (t.choch_side ? ` - ${t.choch_side === "up" ? "bullish" : "bearish"} change of character` : ""),
     t.rsi != null ? `RSI ${t.rsi.toFixed(1)}${t.rsi_prev != null ? ` (prev ${t.rsi_prev.toFixed(1)})` : ""}` : null,
+    v
+      ? `volume (last completed bar) ${v.ratio.toFixed(2)}x its 20-bar average${v.trend ? `, ${v.trend}` : ""}` +
+        (v.up_share != null ? ` | ${Math.round(v.up_share * 100)}% of the last 20 bars' volume on up bars` : "")
+      : "volume: not enough completed bars",
     t.price_vs_ema200 ? `price ${t.price_vs_ema200} the EMA 200` : null,
     t.state_headline ? `now: ${t.state_headline}` : null,
     insideKinds.length ? `inside a ${insideKinds.join(" and a ")} zone` : null,
-    `structure ${t.structure}${t.choch_side ? ` - ${t.choch_side === "up" ? "bullish" : "bearish"} change of character` : ""}`,
     "Click to open this chart",
   ]
     .filter(Boolean)
@@ -454,10 +511,10 @@ function TfCell({ tf, t, onClick }: { tf: string; t: MonitorTf | null | undefine
     <button
       onClick={onClick}
       title={title}
-      className="w-full min-w-[8.5rem] rounded-md px-2 py-1 text-left transition hover:bg-neutral-800/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50"
+      className="w-full min-w-[9rem] rounded-md px-2 py-1 text-left transition hover:bg-neutral-800/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50"
     >
-      {/* line 1: direction + strength */}
-      <div className="flex items-center gap-1.5">
+      {/* line 1: direction + trend strength (ADX) */}
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
         <span className={`text-sm font-semibold ${dirCls} ${weak ? "opacity-60" : ""}`}>
           {up ? "▲ Up" : down ? "▼ Down" : "■ Flat"}
         </span>
@@ -470,15 +527,53 @@ function TfCell({ tf, t, onClick }: { tf: string; t: MonitorTf | null | undefine
             />
           ))}
         </span>
-        {t.adx_dir === "rising" && <span className="text-[10px] text-neutral-400" aria-label="strength rising">↗</span>}
-        {t.adx_dir === "falling" && <span className="text-[10px] text-neutral-600" aria-label="strength fading">↘</span>}
+        {t.adx != null && (
+          <span
+            className={`text-[11px] tabular-nums ${
+              t.strength === "strong" ? "font-semibold text-neutral-200" : t.strength === "moderate" ? "text-neutral-300" : "text-neutral-500"
+            }`}
+          >
+            {/* floored: the 20/25 thresholds are lower bounds, so 24.9 must not print as "25" */}
+            ADX {Math.floor(t.adx)}
+            {t.adx_dir === "rising" && <span className="ml-0.5 text-neutral-400" aria-label="strength rising">↗</span>}
+            {t.adx_dir === "falling" && <span className="ml-0.5 text-neutral-600" aria-label="strength fading">↘</span>}
+          </span>
+        )}
+        {diConflict && (
+          <span
+            className="rounded bg-warn/15 px-1 text-[10px] font-semibold text-warn"
+            title={`+DI ${t.plus_di?.toFixed(1)} / -DI ${t.minus_di?.toFixed(1)}: the ADX strength belongs to the ${diSide === "up" ? "buyers" : "sellers"}, against the arrow`}
+          >
+            {diSide === "up" ? "+DI" : "−DI"} ≠
+          </span>
+        )}
       </div>
-      {/* line 2: RSI */}
-      <div className="mt-1 flex items-center gap-1.5">
-        <RsiPill t={t} />
+      {/* line 2: swing structure (+ does it agree with the arrow) and what the bar is doing */}
+      <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        <span
+          className={`rounded px-1.5 py-px text-[11px] font-semibold ${st.cls} ${broken ? "line-through opacity-50" : ""}`}
+          title={broken ? "This structure has just been broken - see the CHoCH tag" : undefined}
+        >
+          {st.label}
+          {structAgrees && <span className="ml-1 font-normal opacity-80" aria-label="agrees with the arrow">✓</span>}
+          {structFights && <span className="ml-1 font-bold text-warn" aria-label="contradicts the arrow">≠</span>}
+        </span>
+        {t.choch_side && (
+          <span
+            className={`text-[11px] font-semibold ${t.choch_side === "up" ? "text-bull" : "text-bear"}`}
+            title={`${t.choch_side === "up" ? "Bullish" : "Bearish"} change of character: closed ${t.choch_side === "up" ? "above the last swing high" : "below the last swing low"}`}
+          >
+            CHoCH {t.choch_side === "up" ? "▲" : "▼"}
+          </span>
+        )}
         {STATE_LABEL[t.state] && <span className="text-[11px] text-neutral-500">{STATE_LABEL[t.state]}</span>}
       </div>
-      {/* line 3: zone(s) */}
+      {/* line 3: momentum + volume */}
+      <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        <RsiPill t={t} />
+        <VolumeTag v={v} />
+      </div>
+      {/* line 4: zone(s) */}
       {insideKinds.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-1">
           {insideKinds.map((k) => (
@@ -499,6 +594,28 @@ function TfCell({ tf, t, onClick }: { tf: string; t: MonitorTf | null | undefine
         </div>
       ))}
     </button>
+  );
+}
+
+/** Volume status of the last COMPLETED bar: how big vs its average, building or fading, and which
+ *  side the recent volume traded on. */
+function VolumeTag({ v }: { v: MonitorTf["volume"] }) {
+  if (!v) return <span className="text-[11px] text-neutral-600">Vol —</span>;
+  const lvl =
+    v.level === "high" ? "font-semibold text-neutral-100" : v.level === "low" ? "text-neutral-600" : "text-neutral-400";
+  const share = v.up_share;
+  const shareCls = share == null ? "" : share >= 0.6 ? "text-bull" : share <= 0.4 ? "text-bear" : "text-neutral-500";
+  return (
+    <span className="text-[11px] tabular-nums">
+      <span className={lvl}>
+        {/* two decimals, as the backend rounds: one decimal printed 0.69 and 0.72 both as "0.7x", one
+            dimmed and one not */}
+        Vol {v.ratio.toFixed(2)}×
+        {v.trend === "expanding" && <span className="ml-0.5" aria-label="volume building">↑</span>}
+        {v.trend === "fading" && <span className="ml-0.5 opacity-70" aria-label="volume fading">↓</span>}
+      </span>
+      {share != null && <span className={`ml-1 ${shareCls}`}>· {Math.round(share * 100)}% up</span>}
+    </span>
   );
 }
 
@@ -568,8 +685,10 @@ function Legend() {
   return (
     <dl className="grid gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/60 p-3 text-xs md:grid-cols-2">
       {item("▲ / ▼", "Direction from the EMA 20 vs EMA 50 (and the 200 when all three stack) - the same read the engine uses for its higher-timeframe filter. Faded = weak trend.")}
-      {item("Bars ↗ ↘", "Trend strength from ADX: 3 bars strong (25+), 2 moderate (20-25), 1 weak (under 20). ↗ strength building, ↘ fading.")}
+      {item("ADX ↗ ↘", "Trend STRENGTH (not direction): 25+ strong (3 bars), 20-25 moderate (2), under 20 weak (1). ↗ strength building, ↘ fading. Amber +DI≠ / −DI≠ = with ADX 20+ and a clear gap (5+ points), the strength belongs to the other side than the arrow. Hover a cell for +DI / −DI.")}
+      {item("HH·HL / LH·LL", "Swing structure: higher highs + higher lows (up), lower highs + lower lows (down), or Range. ✓ = it agrees with the arrow, amber ≠ = it contradicts it (the EMAs have turned before the swings, or the other way round). CHoCH ▲▼ = price just closed beyond the last opposite swing - the old structure is then struck through and gets no ✓/≠. Hover for the two swing prices.")}
       {item("RSI", "14-period. Green above 50, red below. Amber OB/OS = 70+ or 30- (stretched, either way). ↑↓ = turning since the last bar.")}
+      {item("Vol", "The last COMPLETED bar's volume (a still-forming bar is ignored - its volume is partial) vs the SAME HOUR in about 20 earlier sessions on 1H/4H, so the US open is not a 'spike' every day; vs the last 20 sessions on 1D. Bold = 1.5x+, dim = 0.7x or less. ↑ building / ↓ fading. “62% up” = share of the last 20 bars' volume on up bars (green 60%+, red 40%-). MT5 tick volume - a proxy for real volume.")}
       {item("State", "What the latest bar is doing: pullback, breakout, rejection, range, impulse or reversal.")}
       {item("in / near zone", "Order blocks on that timeframe - the same zones as the chart's Order-blocks overlay. Cyan = demand, amber = supply. Near = within 0.5 ATR.")}
       {item("Bias", "How the three timeframes line up. Dip in uptrend = 4H and 1D up, 1H down. Up vs the 1D = 1H and 4H up against the daily.")}

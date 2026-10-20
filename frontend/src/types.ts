@@ -948,11 +948,17 @@ export interface MonitorTf {
   adx: number | null;
   strength: "strong" | "moderate" | "weak" | null;
   adx_dir: "rising" | "falling" | "flat" | null;
+  /** ADX is strength only; +DI vs -DI says which side owns it. */
+  plus_di: number | null;
+  minus_di: number | null;
   supertrend: "up" | "down" | null;
   rsi: number | null;
   rsi_prev: number | null;
   rsi_zone: "overbought" | "oversold" | "bullish" | "bearish" | null;
   structure: "up" | "down" | "range";
+  /** The two swings that define the structure - a close beyond the opposite one breaks it. */
+  swing_high: number | null;
+  swing_low: number | null;
   choch: boolean;
   /** Which way the change of character broke (measured against the swing structure). */
   choch_side: "up" | "down" | null;
@@ -962,6 +968,13 @@ export interface MonitorTf {
   /** Which way the latest bar's pattern leans. */
   pattern_side: "up" | "down" | null;
   atr: number | null;
+  /** From COMPLETED bars only (the forming bar's volume is partial). MT5 tick volume. */
+  volume: {
+    ratio: number;
+    level: "high" | "normal" | "low";
+    trend: "expanding" | "fading" | "flat" | null;
+    up_share: number | null;
+  } | null;
   zones: {
     inside: (MonitorZoneBox & { kind: "demand" | "supply" }) | null;
     /** Every zone kind price is inside (both when a demand and a supply block overlap price). */

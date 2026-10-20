@@ -316,3 +316,193 @@ def test_refresh_waits_for_a_build_in_flight_instead_of_rebuilding():
     t2.join(5)
     assert len(builds) == 1                     # the refresh got the in-flight build
     assert result["r"][0] == [{"symbol": "X"}]
+
+
+def test_swing_structure_against_the_bias_is_flagged():
+    row = _row("aligned_up", **{"1h": {"trend": "up", "structure": "up"},
+                                "4h": {"trend": "up", "structure": "down"},
+                                "1d": {"trend": "up", "structure": "range"}})
+    notes = [n for n in notes_for(row) if "swing structure" in n["text"]]
+    assert len(notes) == 1
+    assert notes[0]["tone"] == "caution"
+    assert "4H swing structure is still making lower highs and lower lows, against the up bias" in notes[0]["text"]
+
+
+def test_swing_structure_that_agrees_or_ranges_is_not_flagged():
+    row = _row("aligned_down", **{"1h": {"trend": "down", "structure": "down"},
+                                  "4h": {"trend": "down", "structure": "range"},
+                                  "1d": {"trend": "down", "structure": "down"}})
+    assert not any("swing structure" in n["text"] for n in notes_for(row))
+
+
+def _zigzag(n=260, px=100.0):
+    """Clear swings: 6 bars up, 4 bars down, each leg higher than the last - higher highs and lows."""
+    out, i = [], 0
+    while len(out) < n:
+        for step in [1.0] * 6 + [-0.6] * 4:
+            o = px + 0.3 * step          # open a little in the bar's direction, so a turn bar never
+            px += step                   # ties its neighbour's high/low and real pivots form
+            out.append(Candle(ts=T0 + dt.timedelta(hours=len(out)), open=o, high=max(o, px) + 0.1,
+                              low=min(o, px) - 0.1, close=px, volume=1000))
+    return out[:n]
+
+
+def test_read_exposes_adx_sides_and_the_swings_that_define_structure():
+    r = read_timeframe(_series(_zigzag()))
+    assert r["plus_di"] is not None and r["minus_di"] is not None
+    assert r["plus_di"] > r["minus_di"]              # an uptrend: buyers own the strength
+    assert r["structure"] == "up"
+    assert r["swing_low"] is not None and r["swing_high"] is not None
+    assert r["swing_low"] < r["swing_high"]
+
+
+def _vbars(vols, ups=None, step=dt.timedelta(days=1), start=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)):
+    """Bars with given volumes; `ups` marks which bars close up (default all up)."""
+    out = []
+    for i, v in enumerate(vols):
+        up = True if ups is None else ups[i]
+        o, c = (100.0, 100.5) if up else (100.5, 100.0)
+        out.append(Candle(ts=start + step * i, open=o, high=101, low=99.5, close=c, volume=v))
+    return out
+
+
+def _forming(bars, tf="1d"):
+    """A clock that puts us inside the last bar's window - it is still forming."""
+    return bars[-1].ts + dt.timedelta(minutes=10)
+
+
+def test_volume_ignores_the_forming_bar():
+    # 30 completed days of 100, the last completed one 300, then a forming day with only 5 so far
+    bars = _vbars([100.0] * 29 + [300.0] + [5.0])
+    v = mm._volume_read(bars, "1d", now=_forming(bars))
+    assert v["ratio"] == 3.0                     # 300 vs the 20 before it - the 5 is not read
+    assert v["level"] == "high"
+
+
+def test_a_closed_markets_last_bar_is_complete_and_is_read():
+    """On a closed market the last bar is NOT forming - dropping it made 'the last completed bar' mean
+    the one before."""
+    bars = _vbars([100.0] * 30 + [300.0])
+    later = bars[-1].ts + dt.timedelta(days=3)               # the weekend: its window closed long ago
+    assert mm.completed(bars, "1d", now=later) is bars
+    assert mm._volume_read(bars, "1d", now=later)["ratio"] == 3.0
+
+
+def test_volume_trend_and_up_share():
+    vols = [100.0] * 22 + [100.0] * 5 + [200.0] * 3 + [1.0]          # last 3 completed = 2x the 5 before
+    ups = [True] * 10 + [False] * 20 + [True]                        # last 20 completed: all down bars
+    bars = _vbars(vols, ups)
+    v = mm._volume_read(bars, "1d", now=_forming(bars))
+    assert v["trend"] == "expanding"
+    assert v["up_share"] == 0.0
+
+
+def test_intraday_volume_is_compared_with_the_same_hour_not_the_clock():
+    """The live bug: against the 20 bars just before it, the US-open hour read as a 2x 'spike' on 96%
+    of days. Against the same hour in earlier sessions an ordinary US open is ordinary."""
+    start = dt.datetime(2026, 3, 2, tzinfo=dt.timezone.utc)
+    vols = [(300.0 if (i % 24) == 14 else 100.0) for i in range(24 * 21 + 16)]   # every 14:00 = 3x
+    bars = _vbars(vols, step=dt.timedelta(hours=1), start=start)
+    assert bars[-2].ts.hour == 14                          # last COMPLETED bar is a 14:00 bar
+    v = mm._volume_read(bars, "1h", now=_forming(bars))
+    assert 0.9 <= v["ratio"] <= 1.1                        # an ordinary US open, not a spike
+    assert v["level"] == "normal"
+    # ...while a REAL spike at that hour still shows
+    vols[-2] = 900.0
+    v2 = mm._volume_read(_vbars(vols, step=dt.timedelta(hours=1), start=start), "1h", now=_forming(bars))
+    assert v2["ratio"] >= 2.9 and v2["level"] == "high"
+
+
+def test_volume_against_the_bias_is_flagged_and_spike_reported():
+    row = _row("aligned_up", **{"1h": {"trend": "up", "volume": {"ratio": 2.4, "level": "high",
+                                                                 "trend": "expanding", "up_share": 0.5}},
+                                "4h": {"trend": "up", "volume": {"ratio": 1.0, "level": "normal",
+                                                                 "trend": "flat", "up_share": 0.3}},
+                                "1d": {"trend": "up"}})
+    texts = [n["text"] for n in notes_for(row)]
+    assert any("70% of recent volume traded on down bars - selling pressure under the up bias" in t for t in texts)
+    assert any("1H volume spike" in t and "2.4x" in t for t in texts)
+
+
+def test_volume_in_line_with_the_bias_is_not_flagged():
+    row = _row("aligned_down", **{"1h": {"trend": "down"}, "1d": {"trend": "down"},
+                                  "4h": {"trend": "down", "volume": {"ratio": 1.0, "level": "normal",
+                                                                     "trend": "flat", "up_share": 0.3}}})
+    assert not any("pressure" in n["text"] for n in notes_for(row))
+
+
+def _day(d, o, h, l, c, v):
+    return Candle(ts=dt.datetime(2026, 10, d, tzinfo=dt.timezone.utc), open=o, high=h, low=l, close=c, volume=v)
+
+
+def test_sunday_stub_is_folded_into_monday():
+    # Fri 16, Sun 18 (stub), Mon 19 - plus enough weekdays before to look like a 5-day instrument
+    days = [_day(d, 100, 101, 99, 100, 1000) for d in (5, 6, 7, 8, 9, 12, 13, 14, 15)]
+    days += [_day(16, 100, 102, 99, 101, 1000), _day(18, 101.5, 103, 101, 102, 30), _day(19, 102, 104, 100.5, 103, 900)]
+    s = mm.session_days(days)
+    assert [c.ts.day for c in s][-2:] == [16, 19]            # no Sunday bar left
+    mon = s[-1]
+    assert (mon.open, mon.high, mon.low, mon.close, mon.volume) == (101.5, 104, 100.5, 103, 930)
+
+
+def test_weekend_bars_of_a_24_7_market_are_real_days():
+    days = [Candle(ts=dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=i),
+                   open=100, high=101, low=99, close=100, volume=1000) for i in range(35)]
+    assert mm.session_days(days) is days                     # crypto: unchanged
+
+
+def test_daily_volume_is_not_read_off_a_sunday_stub():
+    """The live bug: the forming Monday bar dropped, the 'last completed day' was the Sunday stub
+    (2-4% of a weekday's volume) and every FX/index row read 1D volume ~0.03x."""
+    start = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)      # a Monday
+    bars = []
+    for i in range(140):
+        d = start + dt.timedelta(days=i)
+        if d.weekday() == 5:
+            continue                                              # no Saturday bars
+        vol = 30.0 if d.weekday() == 6 else 1000.0                # Sunday = stub
+        bars.append(Candle(ts=d, open=100, high=101, low=99, close=100.2, volume=vol))
+    while bars[-1].ts.weekday() != 0:                             # end on a (forming) Monday
+        bars.pop()
+    now = bars[-1].ts + dt.timedelta(hours=1)                    # Monday is forming
+    raw = mm._volume_read(bars, "1d", now=now)
+    folded = mm._volume_read(mm.session_days(bars), "1d", now=now)
+    assert raw["ratio"] < 0.1                                     # the bug, reproduced
+    assert 0.9 <= folded["ratio"] <= 1.1                          # Friday vs normal days
+
+
+def test_a_structure_already_broken_in_the_bias_direction_is_not_still_making_anything():
+    """USOIL 1D in the live sample: structure 'down' but price closed above the last lower high (a
+    bullish CHoCH) - the note said 'still making lower highs and lower lows, against the up bias'."""
+    row = _row("aligned_up", **{"1h": {"trend": "up"}, "4h": {"trend": "up"},
+                                "1d": {"trend": "up", "structure": "down", "choch": True, "choch_side": "up"}})
+    texts = [n["text"] for n in notes_for(row)]
+    assert not any("still making" in t for t in texts)
+    assert any(t.startswith("1D bullish change of character") and "in line with the up bias" in t for t in texts)
+
+
+def test_structure_note_does_not_restate_the_counter_note():
+    row = _row("counter_down", **{"1h": {"trend": "down"}, "4h": {"trend": "down"},
+                                  "1d": {"trend": "up", "structure": "up"}})
+    texts = [n["text"] for n in notes_for(row)]
+    assert any("1D points the other way" in t for t in texts)
+    assert not any("swing structure" in t for t in texts)
+
+
+def test_no_volume_spike_note_on_a_closed_market():
+    row = _row("mixed", **{"1h": {"trend": "up", "volume": {"ratio": 3.0, "level": "high", "trend": None,
+                                                            "up_share": 0.5}},
+                           "4h": {"trend": "down"}, "1d": {"trend": "up"}})
+    assert any("1H volume spike" in n["text"] for n in notes_for(row))
+    row["market_open"] = False
+    assert not any("1H volume spike" in n["text"] for n in notes_for(row))
+
+
+def test_a_weekday_holiday_stub_is_folded_like_a_weekend_one():
+    days = [_day(d, 100, 101, 99, 100, 1000) for d in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 19, 20, 21)]
+    days += [_day(22, 100, 100.5, 99.8, 100.2, 90),         # Thursday half-holiday: 9% of normal
+             _day(23, 100.2, 102, 99, 101, 1000), _day(26, 101, 102, 100, 101.5, 400)]   # Fri, forming Mon
+    s = mm.session_days(days)
+    assert [c.ts.day for c in s][-3:] == [21, 23, 26]       # the 22nd folded into the 23rd
+    assert s[-2].volume == 1090 and s[-2].open == 100
+    assert s[-1].ts.day == 26                               # today's small forming bar is never folded
