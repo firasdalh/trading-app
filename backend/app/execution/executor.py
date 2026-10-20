@@ -106,7 +106,15 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
     _guard_price_drift(broker, record)
 
     # --- the Risk Manager, again, HERE: inside the lock, at the live fill price ---
-    _final_risk_gate(session, broker, record)
+    # On a FRESH session: the caller's session (a Hybrid tick, an arm firing) caches the settings,
+    # risk config and daily state it read when the tick started, so a kill switch, a daily-loss pause
+    # or a lowered limit written meanwhile by another session was not seen (full review 2026-10-20).
+    from app.core import database as _db
+
+    with _db.SessionLocal() as fresh:
+        if kill_switch_active(fresh):
+            raise ExecutionBlocked("kill-switch active — order submission halted")
+        _final_risk_gate(fresh, broker, record)
 
     side = OrderSide.BUY if record.direction == Direction.LONG.value else OrderSide.SELL
     req = OrderRequest(
@@ -165,7 +173,10 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
             last_price=entry_price,
             risk_amount=record.risk_amount,
             initial_risk_amount=record.risk_amount,   # the R denominator, never modified
-            confidence=record.confidence,  # kept for confidence-vs-outcome calibration
+            # kept for confidence-vs-outcome calibration - but a manual trade has no engine score
+            confidence=None if getattr(record, "source", None) == "manual" else record.confidence,
+            review=({"note": (record.reasoning or {}).get("note"), "tags": (record.reasoning or {}).get("tags") or []}
+                    if getattr(record, "source", None) == "manual" else None),
             source=getattr(record, "source", None),  # who opened it -> journal breakdown by source
             broker=broker.name,
             broker_env=settings.broker_env,

@@ -38,7 +38,10 @@ def calibration(session: Session = Depends(get_session)) -> list[CalibrationBuck
     engine's confidence actually predict outcomes? (Does "70%" win ~70%?) Use it to recalibrate
     the score and the Hybrid auto-open threshold once enough trades have accumulated."""
     conds = [Position.status == PositionStatus.CLOSED.value,
-             Position.confidence.is_not(None), Position.realized_pnl.is_not(None)]
+             Position.confidence.is_not(None), Position.realized_pnl.is_not(None),
+             # Manual trades were stored with confidence 1.0 and filled the top bucket with
+             # discretionary trades; they carry no engine score (full review 2026-10-20).
+             (Position.source.is_(None)) | (~Position.source.like("manual%"))]
     reset = get_or_create_settings(session).journal_reset_at
     if reset is not None:
         conds.append(Position.closed_at >= reset)
@@ -377,3 +380,59 @@ def scorecard(
 @router.get("/reflection/latest", response_model=ReflectionReport | None)
 def reflection_latest(session: Session = Depends(get_session)) -> ReflectionReport | None:
     return latest_reflection(session)
+
+
+@router.get("/review")
+def daily_review(session: Session = Depends(get_session)) -> dict:
+    """The day in one card: today's closed trades with their R, source and the trader's own reason
+    and tags; today's totals and longest losing run; and avg R per tag over the whole journal (only
+    once a tag has 10+ trades). The data to tell planned trades from impulsive ones was never
+    captured before (full review 2026-10-20)."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.models.db import Position, entry_risk
+    from app.models.enums import PositionStatus
+
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    reset = get_or_create_settings(session).journal_reset_at
+    rows = session.scalars(select(Position).where(Position.status == PositionStatus.CLOSED.value,
+                                                  Position.realized_pnl.is_not(None))
+                           .order_by(Position.closed_at)).all()
+
+    def aware(dt):
+        return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    if reset is not None:
+        rows = [r for r in rows if aware(r.closed_at) and aware(r.closed_at) >= aware(reset)]
+
+    def r_of(p):
+        risk = entry_risk(p)
+        return round(p.realized_pnl / risk, 2) if risk else None
+
+    today = [p for p in rows if aware(p.closed_at) and aware(p.closed_at) >= day_start]
+    streak = longest = 0
+    for p in today:
+        streak = streak + 1 if (p.realized_pnl or 0) < 0 else 0
+        longest = max(longest, streak)
+    tags: dict[str, list[float]] = {}
+    for p in rows:
+        for t in ((p.review or {}).get("tags") or []):
+            r = r_of(p)
+            if r is not None:
+                tags.setdefault(t, []).append(r)
+    return {
+        "date": day_start.date().isoformat(),
+        "trades": [{"symbol": p.symbol, "direction": p.direction, "source": p.source,
+                    "pnl": round(p.realized_pnl or 0.0, 2), "r": r_of(p),
+                    "note": (p.review or {}).get("note"), "tags": (p.review or {}).get("tags") or [],
+                    "closed_at": aware(p.closed_at).isoformat()} for p in today],
+        "net_pnl": round(sum(p.realized_pnl or 0.0 for p in today), 2),
+        "total_r": round(sum(r for p in today if (r := r_of(p)) is not None), 2),
+        "longest_losing_run": longest,
+        "by_tag": [{"tag": t, "trades": len(v), "avg_r": round(sum(v) / len(v), 2)}
+                   for t, v in sorted(tags.items()) if len(v) >= 10],
+        "tags_below_10": sorted(t for t, v in tags.items() if len(v) < 10),
+    }

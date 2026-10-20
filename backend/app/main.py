@@ -281,6 +281,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Only answer requests addressed to this machine. A "DNS rebinding" page (attacker.example resolved to
+# 127.0.0.1) is same-origin to the browser, so it could send X-Desk and read every response; its
+# Host header still names the attacker's domain (full review 2026-10-20). "testserver" = TestClient.
+from starlette.middleware.trustedhost import TrustedHostMiddleware  # noqa: E402
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
@@ -294,12 +301,17 @@ async def _require_desk_header(request, call_next):
     /api/kill-switch/false and /api/proposals/{id}/approve take no body. A custom header cannot be
     added cross-site without a CORS preflight, which only the dev origin above passes. The frontend's
     request() always sends it (full review 2026-10-20)."""
-    if (request.method not in _SAFE_METHODS and request.url.path.startswith("/api")
-            and request.headers.get("x-desk") != "1"):
+    if request.method not in _SAFE_METHODS and request.url.path.startswith("/api"):
         from fastapi.responses import JSONResponse
 
-        return JSONResponse({"detail": "refused: request did not come from the trading desk app"},
-                            status_code=403)
+        if request.headers.get("x-desk") != "1":
+            return JSONResponse({"detail": "refused: request did not come from the trading desk app"},
+                                status_code=403)
+        # A STANDBY backend (another one holds the scheduler lease) is read-only: its order lock is
+        # per process, so an approve or a 'Run now' here could race the primary's openers.
+        if SCHEDULER_STANDBY:
+            return JSONResponse({"detail": "this backend is in STANDBY (another one is running) - "
+                                           "read-only; use the main app window"}, status_code=503)
     return await call_next(request)
 
 app.include_router(router)

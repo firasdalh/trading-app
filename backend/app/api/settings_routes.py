@@ -8,6 +8,7 @@ positions view.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -931,7 +932,7 @@ class LiveCloseRequest(BaseModel):
     asset_class: AssetClass
     # The side of the trade being closed. Without it every ticket on the symbol closed, including an
     # opposite hedge or a trade placed from the terminal (None = all, the old behaviour).
-    direction: str | None = None
+    direction: Literal["long", "short"] | None = None
 
 
 class SlTpRequest(BaseModel):

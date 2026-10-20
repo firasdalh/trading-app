@@ -637,3 +637,31 @@ def test_an_arm_does_not_fire_inside_a_high_impact_news_window(db_session, monke
     cond.check_conditional_setups(db_session)
     db_session.refresh(s)
     assert opened == [] and s.status == "armed" and "news window" in (s.last_note or "")
+
+
+def test_one_malformed_arm_does_not_stop_the_others(db_session, monkeypatch):
+    bad = _arm(db_session, asset_class="nonsense")
+    good = _arm(db_session, symbol="EURUSDm", asset_class="forex", direction="long", order_type="buy_stop",
+                trigger_price=100.0, stop_loss=98.0, take_profit=106.0)
+    _stub_market_series(monkeypatch, [99.0] * 59 + [99.5, 99.6])     # good one not triggered yet
+    cond.check_conditional_setups(db_session)                        # must not raise
+    db_session.refresh(bad)
+    db_session.refresh(good)
+    assert bad.status == "rejected" and good.status == "armed"
+
+
+def test_the_arm_api_rejects_malformed_requests():
+    import pytest
+    from pydantic import ValidationError
+
+    from app.api.conditional_routes import ArmRequest
+
+    with pytest.raises(ValidationError):
+        ArmRequest(symbol="EURUSDm", asset_class="nonsense", direction="long", order_type="buy_stop",
+                   trigger_price=1.1)
+    with pytest.raises(ValidationError):
+        ArmRequest(symbol="EURUSDm", asset_class="forex", direction="buy", order_type="buy_stop",
+                   trigger_price=1.1)
+    with pytest.raises(ValidationError):
+        ArmRequest(symbol="EURUSDm", asset_class="forex", direction="long", order_type="buy_stop",
+                   trigger_price=0)

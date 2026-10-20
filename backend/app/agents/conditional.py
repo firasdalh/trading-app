@@ -762,7 +762,16 @@ def check_conditional_setups(session: Session) -> dict:
         if s.cooldown_until and _aware(s.cooldown_until) > now:
             continue
 
-        broker = get_broker_for(AssetClass(s.asset_class), settings.broker_map)
+        # One malformed row (an asset class the app doesn't know) raised HERE, outside any try, and
+        # aborted the whole pass - no armed setup could fire (full review 2026-10-20). Retire it.
+        try:
+            broker = get_broker_for(AssetClass(s.asset_class), settings.broker_map)
+        except Exception as exc:  # noqa: BLE001
+            s.status = ConditionalStatus.REJECTED.value
+            s.last_note = f"invalid setup ({exc}) - rejected"
+            session.add(s)
+            log.warning("conditional setup invalid", extra={"id": s.id, "error": str(exc)})
+            continue
 
         # MARKET HOURS: a closed session still returns the LAST tick, so every price test below would
         # run on a stale Friday quote — an arm could "trigger" on hours-old data and try to open into

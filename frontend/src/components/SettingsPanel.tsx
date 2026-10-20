@@ -204,7 +204,8 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             </div>
             <div className="text-xs text-neutral-400">
               Trade only clear (ADX≥25) trends; stand aside in moderate / ranging / volatile.
-              Backtests: same return, ~40% less drawdown.
+              Its old "same return, less drawdown" result had look-ahead; the faithful backtest
+              shows ~0R - not recommended on that basis.
             </div>
           </button>
 
@@ -230,7 +231,8 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             <div className="text-xs text-neutral-400">
               At an ambiguous pullback (MACD rolling over / RSI stretched), the AI classifies it as a
               healthy pullback, weak momentum, or probable reversal — the deterministic engine then
-              decides enter / wait / reject / arm. The AI only labels; it never overrides.
+              decides enter / wait / reject / arm - so the label DOES change trades.
+              <span className="mt-1 block font-semibold text-warn">UNTESTED: changes decisions the backtest never saw.</span>
             </div>
           </button>
 
@@ -256,7 +258,8 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             <div className="text-xs text-neutral-400">
               Only at the grey zone between trend and range (moderate ADX), the AI reads the texture as an
               emerging trend, choppy range, or transition — the engine then treats it as a trend, a range,
-              or stands pat. The AI only labels; every gate still runs.
+              or stands pat - the label changes trades; every gate still runs.
+              <span className="mt-1 block font-semibold text-warn">UNTESTED: changes decisions the backtest never saw.</span>
             </div>
           </button>
 
@@ -282,7 +285,8 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             <div className="text-xs text-neutral-400">
               When a major level sits in a trade's path, the AI reads whether price is likely to reject,
               break through, or is undecided — the engine then waits or takes the trade through the level.
-              The AI only labels; it never overrides.
+              The label changes which trades the engine takes.
+              <span className="mt-1 block font-semibold text-warn">UNTESTED: changes decisions the backtest never saw.</span>
             </div>
           </button>
         </section>
@@ -392,7 +396,10 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
         <section className="border-t border-neutral-800 pt-3">
           <button
             disabled={busy}
-            onClick={() => run(async () => {
+            onClick={() => {
+              // One click used to close the whole book. It reduces risk, but it is irreversible.
+              if (!window.confirm("Close EVERY open position now, at market?")) return;
+              void run(async () => {
               const res = await api.flatten();
               const failed = res.failed ?? [];
               // Anything listed is STILL OPEN at the broker — never report "all flattened" over it.
@@ -400,7 +407,8 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
                 throw new Error(`Closed ${res.closed}, but ${failed.length} could NOT be closed — check MT5 now: ` +
                   failed.map((f) => `${f.symbol ?? f.broker}: ${f.error}`).join("; "));
               }
-            }, "All positions flattened.")}
+            }, "All positions flattened.");
+            }}
             className="btn border border-bear bg-bear/15 text-bear hover:bg-bear/25"
           >
             Flatten all positions

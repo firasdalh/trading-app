@@ -284,7 +284,7 @@ export function OpenPositionsList({
     <ul className="divide-y divide-neutral-800/80">
       {positions.map((p) => (
         <PositionCard
-          key={p.id}
+          key={`${p.symbol}-${p.direction}-${p.opened_at ?? ''}-${p.entry_price}`}
           p={p}
           advice={
             advice?.find(

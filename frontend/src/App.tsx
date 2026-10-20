@@ -63,8 +63,8 @@ export default function App() {
   // drawers. `posBump` forces an immediate re-poll after anything that opens/closes/modifies a trade.
   const [posBump, setPosBump] = useState(0);
   const bumpPositions = useCallback(() => setPosBump((b) => b + 1), []);
-  const { data: account } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
-  const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
+  const { data: account, error: accountError } = usePolling(() => api.account(assetClass), 4000, [assetClass]);
+  const { data: positions, error: positionsError } = usePolling(() => api.livePositions(), 4000, [posBump]);
   const { data: risk } = usePolling(() => api.riskState(), 5000, [bump]);
   // The approval badge. Polled here (not in the desk) so it is still right while you read the Journal.
   const { data: pending } = usePolling(
@@ -76,6 +76,28 @@ export default function App() {
   // Whether the Hybrid auto-pilot is running — it opens trades on its own, so the nav says so even
   // while its controls are tucked away in the Scanner drawer.
   const { data: hybrid } = usePolling(() => api.hybridState(), 30000, [bump]);
+  // EVERYTHING that can act without a click, in one place. Only the Hybrid had a live dot; RSI-Over
+  // auto-watch, the per-pair auto-trader, the advisor's auto-execute and armed setups were each
+  // buried in their own panel (full review 2026-10-20).
+  const { data: automation } = usePolling(async () => {
+    const [rsi, auto, adv, arms] = await Promise.allSettled([
+      api.rsiOverConfig(), api.autoTrade(), api.advisorState(), api.conditionals(),
+    ]);
+    const on: string[] = [];
+    if (rsi.status === "fulfilled" && rsi.value.enabled) {
+      on.push((rsi.value as { auto_approve?: boolean }).auto_approve ? "RSI-Over (auto-opens)" : "RSI-Over watch");
+    }
+    if (auto.status === "fulfilled" && auto.value.enabled && (auto.value.pairs ?? []).length) {
+      on.push(`Auto-trade ×${auto.value.pairs.length}`);
+    }
+    if (adv.status === "fulfilled" && adv.value.enabled && adv.value.auto_execute) on.push("Advisor auto-execute");
+    if (arms.status === "fulfilled") {
+      const n = arms.value.filter((c) => c.status === "armed").length;
+      if (n) on.push(`${n} armed`);
+    }
+    return on;
+  }, 30000, [bump]);
+  const automationOn = [...(hybrid?.enabled ? ["Hybrid"] : []), ...(automation ?? [])];
 
   // Publish the sticky header's real height as --hdr-h. The desk sidebar sticks under it and drawers
   // open below it; both would otherwise hard-code a height that changes whenever an alert strip
@@ -181,6 +203,8 @@ export default function App() {
           risk={risk}
           positions={positions}
           nav={nav}
+          automation={automationOn}
+          onOpenAutomation={() => toggleDrawer("scanner")}
           onKillSwitchChange={refresh}
           onOpenSettings={() => setSettingsOpen(true)}
         />
@@ -193,6 +217,16 @@ export default function App() {
         />
       )}
 
+      {/* The broker could not be read. usePolling keeps the LAST good data, so without this the desk
+          showed hours-old positions and equity as if live when MT5 was down (full review 2026-10-20). */}
+      {!error && (accountError || positionsError) && (
+        <div className="px-3 pt-3">
+          <div className="rounded-lg border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">
+            Broker unreachable - the positions and equity on screen are the LAST KNOWN values, not live.
+            Check that MetaTrader 5 is running and logged in. ({positionsError || accountError})
+          </div>
+        </div>
+      )}
       {error && (
         <div className="px-3 pt-3">
           <div className="rounded-lg border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">

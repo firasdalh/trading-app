@@ -41,6 +41,13 @@ class ManualTradeRequest(BaseModel):
     take_profit: float | None = Field(None, gt=0)   # optional — if omitted, a default R-multiple target
     entry: float | None = Field(None, gt=0)         # default: current market
     lots: float | None = Field(None, gt=0)          # default: the Risk Manager's 3%-capped size
+    # Risk for THIS trade as a fraction of equity (0.005 = 0.5%). The chart ticket always traded the
+    # full risk_per_trade before - one discretionary trade could not be smaller without changing the
+    # global setting. Re-clamped to the per-trade ceiling by the Risk Manager.
+    risk_pct: float | None = Field(None, gt=0, le=0.03)
+    # Why you took it, for the journal's review (optional; stored with the trade).
+    note: str | None = Field(None, max_length=200)
+    tags: list[str] = Field(default_factory=list, max_length=6)
     timeframe: str = "1h"                            # timeframe the auto ATR stop is measured on
     execute: bool = True                            # True = open now if approved; False = queue for approval
 
@@ -195,7 +202,7 @@ def manual_trade_preview(req: ManualTradeRequest, session: Session = Depends(get
     from app.risk.service import assess
 
     proposal = _build_manual_proposal(req, session)
-    decision = assess(session, proposal)
+    decision = assess(session, proposal, override_risk_fraction=req.risk_pct)
 
     spread = None
     try:
@@ -227,12 +234,16 @@ def manual_trade(req: ManualTradeRequest, session: Session = Depends(get_session
 
     proposal = _build_manual_proposal(req, session)   # validates direction/side + defaults entry to market
     d = proposal.direction
-    decision = assess(session, proposal)   # deterministic Risk Manager — sizes + gates
+    decision = assess(session, proposal, override_risk_fraction=req.risk_pct)   # sizes + gates
 
+    tags = [t.strip().lower()[:20] for t in req.tags if t and t.strip()]
     record = TradeProposalRecord(
         symbol=req.symbol, asset_class=req.asset_class.value, timeframe="manual", direction=d.value,
         entry=proposal.entry, stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
-        confidence=1.0, rationale=proposal.rationale, review_decision=None, reasoning={"manual": True},
+        # No engine score: a manual trade stored as confidence 1.0 filled the top bucket of the
+        # calibration card with discretionary trades (full review 2026-10-20).
+        confidence=0.0, rationale=proposal.rationale, review_decision=None,
+        reasoning={"manual": True, "note": (req.note or "").strip() or None, "tags": tags},
         source="manual",
         risk_decision=decision.decision.value, risk_reason=decision.reason,
         approved_qty=decision.approved_qty, risk_amount=decision.risk_amount,

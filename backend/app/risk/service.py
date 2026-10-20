@@ -58,7 +58,9 @@ def live_broker_positions(session: Session) -> list[PositionView]:
 
 
 def total_unrealized(session: Session) -> float:
-    return round(sum(p.unrealized_pnl for p in live_broker_positions(session)), 2)
+    # Price P&L + accrued swap: a multi-day hold's swap is a real open loss the breaker must see.
+    return round(sum(p.unrealized_pnl + (getattr(p, "swap", 0.0) or 0.0)
+                     for p in live_broker_positions(session)), 2)
 
 
 def broker_closed_trades(session: Session, lookback_days: int = 120) -> list[PositionView] | None:

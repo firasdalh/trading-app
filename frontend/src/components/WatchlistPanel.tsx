@@ -69,8 +69,9 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
         <div>
           <div className="text-sm font-semibold">Watchlist</div>
           <div className="text-xs text-neutral-500">
-            Pairs the Hybrid auto-pilot scans. <span className="text-amber-400">★</span> = walk-forward
-            validated core — add your own pairs anytime.
+            Pairs the Hybrid auto-pilot scans - add your own pairs anytime. <span className="text-neutral-500">★</span>{" "}
+            = the original core list (its "validated" result came from a backtest later found to see
+            the future; not an edge).
           </div>
         </div>
         <div className="flex items-center gap-1.5">
@@ -121,7 +122,7 @@ export function WatchlistPanel({ currentSymbol, currentAsset, currentTimeframe, 
                   }${it.recommended && !active ? " ring-1 ring-amber-500/50" : ""}`}
                 >
                   {it.recommended && (
-                    <span title="Walk-forward validated core pair" className="text-amber-400">★</span>
+                    <span title="Original core pair. Its walk-forward result was measured with look-ahead and does not hold; this is not a proven edge." className="text-neutral-500">★</span>
                   )}
                   <button
                     onClick={() => onSelect?.(it)}

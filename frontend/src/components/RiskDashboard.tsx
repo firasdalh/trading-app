@@ -188,6 +188,24 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
             <span className="font-normal text-neutral-500">— pause new entries</span>
           </summary>
           <div className="space-y-2 px-2.5 pb-2.5 pt-1">
+            {/* One click to the anti-tilt limits - YOUR click, with the values spelled out first.
+                These are process limits against revenge trading, not a strategy filter (the old
+                breaker backtest predates the look-ahead fix, so they are justified as tilt control,
+                not as edge). Full review 2026-10-20. */}
+            <button
+              onClick={() => {
+                if (!window.confirm(
+                  "Apply the discipline preset?\n\n" +
+                  "- Pause new entries after 3 losses in a row, for 120 minutes\n" +
+                  "- At most 6 new trades a day\n\n" +
+                  "Applies to manual trades too. You can change or turn off each one below.")) return;
+                void saveRisk({ max_consecutive_losses: 3, breaker_cooldown_minutes: 120, max_trades_per_day: 6 });
+              }}
+              className="w-full rounded border border-neutral-700 py-1 text-xs text-neutral-200 hover:bg-neutral-800"
+              title="Fills in: 3 losses in a row -> 120 min pause, max 6 trades/day"
+            >
+              Apply discipline preset (3 losses → pause · max 6 trades/day)
+            </button>
             <NumField
               label="Max trades / day"
               hint="Backstop against a runaway loop. 0 = off. Counts trades opened per UTC day."

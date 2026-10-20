@@ -170,6 +170,9 @@ export const api = {
     take_profit?: number | null; // omit → default R-multiple target
     entry?: number | null;
     lots?: number | null;
+    risk_pct?: number | null;    // this trade's risk as a fraction of equity (0.005 = 0.5%)
+    note?: string | null;        // why you took it (journal review)
+    tags?: string[];
     timeframe?: string;          // timeframe the auto ATR stop is measured on
     execute?: boolean;
   }) => request<AnalyzeResponse>("/api/proposals/manual", { method: "POST", body: JSON.stringify(body) }),
@@ -180,6 +183,7 @@ export const api = {
     asset_class: AssetClass;
     direction: "long" | "short";
     stop_loss?: number | null;
+    risk_pct?: number | null;
     timeframe?: string;
   }) =>
     request<{
@@ -414,6 +418,23 @@ export const api = {
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
   journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
   journalBreakdown: () => request<import("../types").JournalBreakdown>("/api/journal/breakdown"),
+  // Today's trades with your own reasons + avg R per tag (daily review).
+  journalReview: () =>
+    request<{
+      date: string;
+      trades: { symbol: string; direction: string; source: string | null; pnl: number; r: number | null;
+                note: string | null; tags: string[]; closed_at: string }[];
+      net_pnl: number;
+      total_r: number;
+      longest_losing_run: number;
+      by_tag: { tag: string; trades: number; avg_r: number }[];
+      tags_below_10: string[];
+    }>("/api/journal/review"),
+  // Latest price for one symbol (price alerts).
+  quote: (symbol: string, assetClass: AssetClass) =>
+    request<{ symbol: string; price: number; ts: string }>(
+      `/api/market/quote?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+    ),
   // Every watched pair's 1h / 4h / 1d direction, RSI and zones in one call (read-only).
   monitor: (refresh = false) =>
     request<import("../types").MonitorResponse>(`/api/monitor${refresh ? "?refresh=true" : ""}`),

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
+import { SourceRecord } from "./SourceRecord";
 import { usePolling } from "../hooks/usePolling";
 import { ArmSetupButton } from "./ArmSetupButton";
 import { RegimeBadge } from "./RegimeBadge";
@@ -61,8 +62,18 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
     setError(null);
     try {
       const res = await api.analyze(o.symbol, o.asset_class, o.timeframe);
-      // Mode A leaves it pending approval; approve to execute. Mode B already auto-executed.
+      // The fresh run is what would be approved - not the card you clicked. It used to be approved
+      // blindly: a flipped direction opened the OTHER way, and a veto looked like success
+      // (full review 2026-10-20). Approve only the trade you saw.
+      const fresh = res.proposal;
+      if (fresh.direction !== o.direction) {
+        throw new Error(`The setup changed since the scan: it is now ${fresh.direction.toUpperCase()} - ` +
+          "nothing was opened. Open it on the chart to review.");
+      }
       if (res.status === "pending_approval") await api.approve(res.proposal_id);
+      else if (res.status !== "executed") {
+        throw new Error(`Not opened: ${res.risk?.reason || res.status}`);
+      }
       onOpened?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -178,8 +189,9 @@ export function OpportunitiesPanel({ onSelect, onOpened }: Props) {
                     </span>
                   )}
                   {best && (
-                    <span className="rounded bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
-                      best
+                    <span className="rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-200"
+                          title="Highest engine score on this scan. The score has not been shown to rank outcomes.">
+                      top score
                     </span>
                   )}
                   {canOpen && (
@@ -301,6 +313,13 @@ function HybridControl({ onOpened, timeframe }: { onOpened?: () => void; timefra
   const save = async () => {
     const mins = clampInt(Number(form.interval) || intervalMin, HYB_MIN_MINUTES, HYB_MAX_MINUTES);
     const conf = clampInt(Number(form.conf) || confPct, HYB_MIN_CONF, HYB_MAX_CONF);
+    // The 67% gate is the one engine component the research found working: live trades below it
+    // averaged -0.25R. Lowering it is allowed, but never by accident (full review 2026-10-20).
+    if (conf < 67 && conf < confPct && !window.confirm(
+      `Lower the auto-pilot's bar to ${conf}%?\n\nLive trades below 67% averaged -0.25R each - the bar is ` +
+      "the one part of the engine shown to filter losers. More signals is not better here.")) {
+      return;
+    }
     setBusy(true);
     try {
       await api.setHybridConfig({
@@ -352,6 +371,10 @@ function HybridControl({ onOpened, timeframe }: { onOpened?: () => void; timefra
             {busy ? "…" : "Run now"}
           </button>
         )}
+      </div>
+      <div className="mt-1">
+        <SourceRecord sources={["hybrid"]} label="Auto-pilot record" />
+        <SourceRecord sources={["armed_hybrid"]} label="Its armed setups" />
       </div>
 
       <p className="mt-1 text-xs text-neutral-500">
@@ -464,8 +487,11 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
   // sample (≥3 real setups) before colouring, so a lone 1/1 doesn't flash red.
   const totalSetups = s.candidates + s.skipped_low_conf;
   const skipRatio = totalSetups >= 3 ? s.skipped_low_conf / totalSetups : 0;
-  const skipTone =
-    skipRatio >= 0.85 ? "text-bear" : skipRatio >= 0.6 ? "text-amber-300" : "text-neutral-400";
+  // Neutral on purpose. It used to turn amber/red when most setups were skipped, hinting that the
+  // threshold was "too high" - but skipping sub-threshold setups IS the gate working (below 67%
+  // measured -0.25R/trade live). Kept for the count only.
+  void skipRatio;
+  const skipTone = "text-neutral-400";
   const cells: { label: string; value: number; tone: string; title: string }[] = [
     { label: "Scans", value: s.scans, tone: "text-neutral-200",
       title: "Watchlist scans the auto-pilot ran today" },
@@ -482,16 +508,11 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
     { label: "Triggered", value: s.triggered_armed, tone: "text-amber-200",
       title: "Armed setups whose level broke and fired" },
     { label: "Skipped <thr", value: s.skipped_low_conf, tone: skipTone,
-      title: "Real setups skipped for being below the confidence threshold. Amber ≥60% / red ≥85% of today's real setups skipped — the threshold may be too high for current conditions" },
+      title: "Setups below the confidence threshold, not taken. That is the gate working: trades below 67% averaged -0.25R live." },
   ];
-  // Colour the acceptance rate: green = AI broadly agrees with the engine (coherent pipeline),
-  // amber = it's filtering meaningfully, red = it's vetoing most setups (engine/AI friction — look).
-  const rate = s.accept_rate;
-  const acceptTone =
-    rate == null ? "text-neutral-300"
-    : rate >= 0.66 ? "text-bull"
-    : rate >= 0.4 ? "text-amber-300"
-    : "text-bear";
+  // Neutral: a high acceptance rate is not a sign of health (more signals is not better), and a
+  // low one is not a fault. Shown as a plain number.
+  const acceptTone = "text-neutral-300";
   return (
     <div className="mt-2 rounded-md border border-neutral-800 bg-neutral-900/40 p-2">
       <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
@@ -507,7 +528,7 @@ function HybridActivity({ s }: { s: import("../types").HybridStats }) {
         ))}
       </div>
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
-        <span title="Of the pairs the engine evaluated today, the share that produced an open OR arm SIGNAL ÷ scanned. Green ≥66% · amber 40–66% · red <40%">
+        <span title="Of the pairs the engine evaluated today, the share that produced an open OR arm SIGNAL ÷ scanned. More signals is not better: the filter is what removes losers.">
           Signal rate:{" "}
           <span className={`font-semibold ${acceptTone}`}>
             {s.accept_rate == null ? "—" : `${Math.round(s.accept_rate * 100)}%`}

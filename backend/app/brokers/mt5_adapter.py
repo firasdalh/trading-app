@@ -516,9 +516,11 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 entry_price=float(p.price_open),
                 stop_loss=float(p.sl) or None, take_profit=float(p.tp) or None,
                 status="open", last_price=float(p.price_current),
-                # profit + accrued swap: swap on a multi-day hold was invisible until the close,
-                # so the floating loss (and the daily-loss breaker's view of it) read too small.
-                unrealized_pnl=float(p.profit) + float(getattr(p, "swap", 0.0) or 0.0),
+                # PRICE P&L only - the UI derives $ per price unit from it (P&L / price move), so
+                # swap must not be mixed in. Accrued swap travels separately and the daily-loss
+                # breaker adds it (it was invisible until the close).
+                unrealized_pnl=float(p.profit),
+                swap=float(getattr(p, "swap", 0.0) or 0.0),
                 cost_usd=self._position_margin(p),
                 # WHEN the position was opened, straight from the broker. Broker-truth positions are
                 # the ones the chart draws from, so without this the UI can't mark the entry CANDLE —

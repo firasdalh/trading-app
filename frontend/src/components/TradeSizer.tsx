@@ -111,7 +111,7 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
             onChange={(e) => { setLots(e.target.value); reprice(e.target.value); }}
             className="w-24 rounded bg-neutral-800 px-2 py-1 text-sm tabular-nums text-neutral-100"
           />
-          {maxLots != null && <div className="mt-0.5 text-[10px] text-neutral-600">max {maxLots} (3% cap)</div>}
+          {maxLots != null && <div className="mt-0.5 text-[10px] text-neutral-600">max {maxLots} (risk cap)</div>}
         </label>
         <Stat label="Risk" value={fmtUsd(riskUsd)} cls="text-bear" />
         <Stat label="Reward" value={fmtUsd(rewardUsd)} cls="text-bull" />
@@ -129,7 +129,7 @@ export function TradeSizer({ preview, entry, stopLoss, takeProfit, onLots, onCom
         )}
       </div>
       {capped && (
-        <div className="mt-1 text-[10px] text-warn">Capped to the 3% per-trade limit.</div>
+        <div className="mt-1 text-[10px] text-warn">Capped to your per-trade risk limit.</div>
       )}
     </div>
   );

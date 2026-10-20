@@ -116,6 +116,7 @@ export function JournalView() {
     // Full width with the desk's own gutter (p-3 / gap-3): a centred max-w-7xl column made the
     // Journal look like a different app from the edge-to-edge desk you switch from.
     <div className="space-y-3 p-3">
+      <DailyReview />
       <div className="card space-y-3">
         <div className="flex items-center justify-between gap-2">
           <button
@@ -417,10 +418,11 @@ function CalibrationCard({ calib }: { calib: CalibrationBucket[] | null }) {
   const total = withTrades.reduce((n, b) => n + b.trades, 0);
   return (
     <div className="card">
-      <div className="mb-1 text-sm font-semibold">Confidence calibration</div>
+      <div className="mb-1 text-sm font-semibold">Score bucket vs result</div>
       <p className="mb-2 text-xs text-neutral-500">
-        Does a “70%” setup actually win ~70%? Realized win rate per confidence bucket. Needs a
-        decent sample (≈20+ trades per bucket) before it’s trustworthy.
+        Do higher-scored setups actually make more? Judge by Avg R, not win rate: the score is a
+        checklist, not a win probability, and with ~3R targets a sound engine wins only 35–45%.
+        Manual trades carry no score and are left out. Needs ≈20+ trades per bucket.
       </p>
       {total === 0 ? (
         <div className="text-sm text-neutral-500">
@@ -438,9 +440,10 @@ function CalibrationCard({ calib }: { calib: CalibrationBucket[] | null }) {
           </thead>
           <tbody>
             {withTrades.map((b) => {
-              const wr = b.win_rate ?? 0;
-              const mid = bucketMid(b.bucket);
-              const wrClass = wr >= mid ? "text-bull" : wr >= mid - 0.1 ? "text-warn" : "text-bear";
+              // Win rate is shown plainly: comparing it to the bucket's "%" painted every bucket red
+              // for an engine that targets 3R (full review 2026-10-20). Avg R carries the colour.
+              void bucketMid;
+              const wrClass = "text-neutral-300";
               return (
                 <tr key={b.bucket} className="border-t border-neutral-800">
                   <td className="py-1 pr-3">{b.bucket}</td>
@@ -466,6 +469,58 @@ function Tile({ label, value, valueClass }: { label: string; value: string; valu
     <div className="rounded bg-neutral-800/60 p-2">
       <div className="text-xs text-neutral-400">{label}</div>
       <div className={`text-lg tabular-nums ${valueClass ?? ""}`}>{value}</div>
+    </div>
+  );
+}
+
+
+/**
+ * Today, in one card: the trades closed today with your own reason and tags, the totals, the longest
+ * losing run, and avg R per tag once a tag has 10+ trades. The manual book could not learn before -
+ * nothing recorded WHY a trade was taken (full review 2026-10-20).
+ */
+function DailyReview() {
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.journalReview>> | null>(null);
+  useEffect(() => {
+    void api.journalReview().then(setData).catch(() => setData(null));
+  }, []);
+  if (!data) return null;
+  const r = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`);
+  return (
+    <div className="card">
+      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+        <span className="text-sm font-semibold">Today&apos;s review · {data.date}</span>
+        <span className="text-xs text-neutral-400">
+          {data.trades.length} closed · <span className={data.net_pnl >= 0 ? "text-bull" : "text-bear"}>
+            {data.net_pnl >= 0 ? "+" : "-"}${Math.abs(data.net_pnl).toFixed(2)}</span> · {r(data.total_r)}
+          {data.longest_losing_run >= 3 && (
+            <span className="ml-2 font-semibold text-warn">{data.longest_losing_run} losses in a row today</span>
+          )}
+        </span>
+      </div>
+      {data.trades.length === 0 ? (
+        <div className="text-xs text-neutral-500">No trades closed today.</div>
+      ) : (
+        <ul className="space-y-0.5 text-xs">
+          {data.trades.map((t, i) => (
+            <li key={i} className="flex flex-wrap gap-x-2 text-neutral-300">
+              <span className="font-medium">{t.symbol}</span>
+              <span className="text-neutral-500">{t.direction} · {t.source ?? "terminal"}</span>
+              <span className={(t.r ?? t.pnl) >= 0 ? "text-bull" : "text-bear"}>{r(t.r)}</span>
+              {t.tags.length > 0 && <span className="text-neutral-500">[{t.tags.join(", ")}]</span>}
+              {t.note && <span className="italic text-neutral-500">“{t.note}”</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-2 text-[11px] text-neutral-500">
+        {data.by_tag.length > 0 ? (
+          <>By your tags (all time): {data.by_tag.map((b) => `${b.tag} ${b.trades} trades ${r(b.avg_r)}`).join(" · ")}</>
+        ) : (
+          <>Tag your chart trades (plan / with-trend / revenge …) - after 10 trades per tag this shows which
+            kind of trade actually pays.{data.tags_below_10.length > 0 && ` Collecting: ${data.tags_below_10.join(", ")}.`}</>
+        )}
+      </div>
     </div>
   );
 }

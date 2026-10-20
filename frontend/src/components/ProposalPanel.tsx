@@ -452,9 +452,9 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
             {capped && (
               <span
                 className="rounded bg-warn/20 px-2 py-0.5 text-xs font-medium text-warn"
-                title="Your size was reduced to fit the 3% per-trade risk cap (RISK.md) or the exposure budget."
+                title="Your size was reduced to fit your per-trade risk cap (Settings) or the exposure budget."
               >
-                capped at 3%
+                capped at your risk cap
               </span>
             )}
           </div>
@@ -494,9 +494,9 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
                   type="button"
                   onClick={() => reprice(String(maxLots))}
                   className="mb-0.5 text-xs text-neutral-400 hover:text-neutral-200"
-                  title="Set the maximum size allowed by the 3% per-trade risk cap"
+                  title="Set the maximum size allowed by your per-trade risk cap"
                 >
-                  max {maxLots} lots (3% cap)
+                  max {maxLots} lots (risk cap)
                 </button>
               )}
             </div>
@@ -1106,27 +1106,23 @@ function SetupSignals({ proposal, standAside, onToggleScenLevels, scenLevelsShow
       {scenarios.length > 0 && (
         <div className="mt-3 border-t border-neutral-800 pt-2.5">
           <div className="mb-1.5 flex items-center justify-between">
+            {/* No percentages: these weights are hand-picked, not measured - printing "62% most
+                likely" claimed an accuracy nobody has tested (full review 2026-10-20). */}
             <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
-              Probability outlook
+              Scenarios to plan for
             </span>
-            <span className="text-[10px] text-neutral-600">from the read · not a guarantee</span>
-          </div>
-          {/* stacked odds bar (continue / stall / reverse) */}
-          <div className="mb-2 flex h-1.5 overflow-hidden rounded-full bg-neutral-800">
-            {scenarios.map((sc) => (
-              <div key={sc.key} className={sc.bar} style={{ width: `${sc.prob}%` }} title={`${sc.label} — ${sc.prob}%`} />
-            ))}
+            <span className="text-[10px] text-neutral-600">paths, not odds - unmeasured</span>
           </div>
           <div className="space-y-2">
             {[...scenarios].sort((a, b) => b.prob - a.prob).map((sc) => (
               <div key={sc.key} className="flex gap-2 text-sm">
-                <span className={`w-9 shrink-0 text-right font-semibold tabular-nums ${sc.tone}`}>{sc.prob}%</span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
                     <span className={`font-medium ${sc.tone}`}>{sc.label}</span>
                     {sc.key === chosenKey && (
-                      <span className="rounded bg-neutral-700 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-neutral-300">
-                        most likely
+                      <span className="rounded bg-neutral-800 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-neutral-400"
+                            title="The path the read leans toward. It is not a measured probability.">
+                        the read leans here
                       </span>
                     )}
                   </div>
@@ -1491,7 +1487,8 @@ function DirectionBadge({ direction }: { direction: string }) {
 }
 
 // Trend-alignment grade — how clearly the direction stacks up across TFs + strength + momentum.
-// A+ (≥0.85) = the clearest "price is going up/down"; the highest-conviction setups to lean into.
+// A+ (≥0.85) = every timeframe, strength and momentum read points the same way. It describes
+// agreement; it has NOT been shown to predict outcomes (confidence does not rank trades).
 function AlignmentBadge({ alignment }: { alignment?: number | null }) {
   if (alignment == null) return null;
   const grade = alignment >= 0.85 ? "A+" : alignment >= 0.7 ? "A" : alignment >= 0.5 ? "B" : "C";
@@ -1503,7 +1500,7 @@ function AlignmentBadge({ alignment }: { alignment?: number | null }) {
   return (
     <span
       className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${cls}`}
-      title={`Trend alignment ${(alignment * 100).toFixed(0)}% (${grade}) — how clearly every timeframe + strength + momentum stack the same way. A+ = the clearest, highest-conviction direction.`}
+      title={`Trend alignment ${(alignment * 100).toFixed(0)}% (${grade}) — how clearly every timeframe + strength + momentum stack the same way. It measures agreement, not odds: it has not been shown to predict outcomes.`}
     >
       {grade === "A+" ? "★ A+" : grade} align
     </span>

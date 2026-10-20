@@ -26,7 +26,10 @@ const DIR: Record<string, { label: string; cls: string }> = {
 };
 
 function ago(iso: string): string {
-  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  // The API sends naive UTC ("2026-10-20T14:32:36"); parsed as LOCAL time every setup looked 3 h
+  // older on a UTC+3 PC. Mark it UTC unless it already carries a zone.
+  const utc = /[Zz]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const mins = Math.max(0, Math.round((Date.now() - new Date(utc).getTime()) / 60000));
   if (mins < 60) return `${mins}m ago`;
   const h = Math.floor(mins / 60);
   return `${h}h ${mins % 60}m ago`;
@@ -40,6 +43,7 @@ export function PendingProposalsPanel({ onSelect, onChanged, embedded = false, s
     () => api.proposals({ status: "pending_approval", limit: 50 }),
     8000,
     [bump],
+    { whileHidden: true },   // the chime exists to reach you while you are NOT looking
   );
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);

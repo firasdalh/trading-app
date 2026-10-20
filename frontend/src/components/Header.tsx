@@ -10,6 +10,9 @@ interface Props {
   risk: RiskState | null;
   positions: PositionView[] | null;
   nav: NavItem[];
+  /** What can trade or manage positions on its own right now (empty = nothing). */
+  automation?: string[];
+  onOpenAutomation?: () => void;
   onKillSwitchChange: () => void;
   onOpenSettings: () => void;
 }
@@ -26,7 +29,7 @@ interface Props {
  * Alert strips (live auto-execution, MT5 refusing orders, kill-switch, paused) hang under it and
  * stay sticky with it.
  */
-export function Header({ settings, account, risk, positions, nav, onKillSwitchChange, onOpenSettings }: Props) {
+export function Header({ settings, account, risk, positions, nav, automation, onKillSwitchChange, onOpenSettings, onOpenAutomation }: Props) {
   const [busy, setBusy] = useState(false);
   // Two-step power off: the first click arms it, the second does it. A single click on a control
   // that stops trade management is too easy to hit by accident.
@@ -143,6 +146,17 @@ export function Header({ settings, account, risk, positions, nav, onKillSwitchCh
             >
               ↻
             </button>
+            {automation && (
+              <button
+                onClick={onOpenAutomation}
+                className={`btn px-2 py-1 text-xs ${automation.length ? "bg-warn/15 text-warn hover:bg-warn/25" : "btn-ghost text-neutral-500"}`}
+                title={automation.length
+                  ? `Acting on their own right now: ${automation.join(", ")}. Click to see the controls.`
+                  : "Nothing is trading or managing positions on its own."}
+              >
+                {automation.length ? `Auto: ${automation.join(" · ")}` : "Auto: off"}
+              </button>
+            )}
             <button onClick={onOpenSettings} className="btn btn-ghost px-2" title="Settings" aria-label="Settings">
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={1.7}
                    strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

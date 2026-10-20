@@ -12,8 +12,8 @@ import type { ScorecardView, ScoreVerdict, SymbolScore } from "../types";
 
 const VERDICT: Record<ScoreVerdict, { label: string; cls: string; icon: string; blurb: string }> = {
   proven: {
-    label: "Proven", icon: "✓", cls: "bg-bull/15 text-bull",
-    blurb: "Makes money by more than luck explains — this is where the edge is.",
+    label: "Positive so far", icon: "✓", cls: "bg-bull/15 text-bull",
+    blurb: "Made money so far, beyond its own noise - but with dozens of symbols graded, one or two pass this test by luck alone. Not proof of an edge.",
   },
   watching: {
     label: "Watching", icon: "•", cls: "bg-neutral-700/60 text-neutral-400",

@@ -2,7 +2,8 @@ import { useState } from "react";
 import { api } from "../api/client";
 import type { AiScenarioRead, AssetClass } from "../types";
 
-const MEDAL = ["🥇", "🥈"];
+// No medals: the ranking is the AI's own guess, not a measurement (full review 2026-10-20).
+const MEDAL = ["1.", "2."];
 
 function dirArrow(d: string): string {
   if (d === "up") return "▲";
@@ -120,8 +121,9 @@ export function ScenarioCard({ read, onShowLevels, levelsShown, assetClass, time
                 <span className="font-semibold text-neutral-100">
                   {MEDAL[i] ?? "•"} {s.label} <span className="text-neutral-500">{dirArrow(s.direction)}</span>
                 </span>
-                <span className={`font-bold tabular-nums ${primary ? "text-violet-200" : "text-neutral-300"}`}>
-                  {s.prob}%
+                <span className="tabular-nums text-[11px] text-neutral-500"
+                      title="The AI's own estimate. It is not calibrated: nobody has checked that its 60% happens 60% of the time.">
+                  AI guess {s.prob}%
                 </span>
               </div>
               {/* likelihood bar */}
@@ -198,7 +200,7 @@ export function ScenarioCard({ read, onShowLevels, levelsShown, assetClass, time
           {actMsg && <div className="rounded bg-bull/15 px-2 py-1 text-[11px] text-bull">✅ {actMsg}</div>}
           {actErr && <div className="rounded bg-bear/15 px-2 py-1 text-[11px] text-bear">✗ {actErr}</div>}
           <div className="text-[10px] text-neutral-600">
-            Risk-Manager-sized &amp; gated — the 3% cap, exposure, max-trades &amp; kill-switch all still apply.
+            Risk-Manager-sized &amp; gated — the per-trade risk cap, exposure, max-trades &amp; kill-switch all still apply.
           </div>
         </div>
       )}

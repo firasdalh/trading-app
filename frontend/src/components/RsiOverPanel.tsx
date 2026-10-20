@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import type { RsiOverCandidate, RsiOverConfig, RsiOverScanResult } from "../types";
+import { SourceRecord } from "./SourceRecord";
 
 const TIMEFRAMES = ["15m", "30m", "1h", "4h", "1d"];
 
@@ -158,6 +159,7 @@ export function RsiOverPanel({ onStaged, onSelect }: {
         <span className="whitespace-nowrap text-sm font-semibold">📉 RSI-Over</span>
         <span className="text-xs text-neutral-500">overbought ≥72 → short · oversold ≤28 → long</span>
       </div>
+      <div className="mb-2"><SourceRecord sources={["rsi_over"]} /></div>
 
       {/* controls — grouped so they read cleanly and wrap gracefully */}
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -200,7 +202,7 @@ export function RsiOverPanel({ onStaged, onSelect }: {
 
           <div className="flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-900/40 px-2.5 py-1.5">
             <Toggle checked={autoApprove} onChange={changeAutoApprove} label="Auto-approve" tone="amber"
-                    title="Open a found pair DIRECTLY without your click. Every gate still applies (3% cap, kill-switch, live-confirmation, anti-stacking, drift guard)." />
+                    title="Open a found pair DIRECTLY without your click. Every gate still applies (per-trade risk cap, kill-switch, live-confirmation, anti-stacking, drift guard)." />
             <span className="text-[10px] uppercase text-neutral-500">every</span>
             <select value={everyMin} onChange={(e) => changeEvery(Number(e.target.value))} title="Auto-watch interval"
                     className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-100">

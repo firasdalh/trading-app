@@ -10,6 +10,7 @@ opens it (Modes B/C + Hybrid) or queues it for approval (Mode A) — all risk ga
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,7 +26,7 @@ from app.agents.conditional import (
 from app.core.database import get_session
 from app.core.state import get_or_create_settings
 from app.models.db import ConditionalSetup
-from app.models.enums import ConditionalStatus, ExecutionMode
+from app.models.enums import AssetClass, ConditionalStatus, ExecutionMode
 from app.models.schemas import SizePreviewResponse, TradeEconomics
 
 router = APIRouter(prefix="/api/conditionals", tags=["conditionals"])
@@ -36,15 +37,17 @@ class LotRequest(BaseModel):
 
 
 class ArmRequest(BaseModel):
-    symbol: str
-    asset_class: str
+    # Typed and bounded: free strings here were stored as-is, and one bad asset class later stopped
+    # every armed setup from firing (full review 2026-10-20).
+    symbol: str = Field(min_length=1)
+    asset_class: AssetClass
     timeframe: str = "1h"
-    direction: str                      # "long" | "short"
-    order_type: str                     # ConditionalOrderType value
-    trigger_price: float
-    stop_loss: float | None = None
-    take_profit: float | None = None
-    confidence: float = 0.0
+    direction: Literal["long", "short"]
+    order_type: Literal["buy_stop", "sell_stop", "buy_limit", "sell_limit"]
+    trigger_price: float = Field(gt=0)
+    stop_loss: float | None = Field(None, gt=0)
+    take_profit: float | None = Field(None, gt=0)
+    confidence: float = Field(0.0, ge=0, le=1)
     rr: float | None = None
     reason: str = ""
     valid_hours: int = Field(12, ge=1, le=168)
@@ -146,7 +149,7 @@ def arm(req: ArmRequest, session: Session = Depends(get_session)) -> Conditional
     settings = get_or_create_settings(session)
     auto = settings.execution_mode != ExecutionMode.A_PROPOSE_APPROVE.value
     s = arm_conditional(
-        session, symbol=req.symbol, asset_class=req.asset_class, timeframe=req.timeframe,
+        session, symbol=req.symbol, asset_class=req.asset_class.value, timeframe=req.timeframe,
         direction=req.direction, order_type=req.order_type, trigger_price=req.trigger_price,
         stop_loss=req.stop_loss, take_profit=req.take_profit, confidence=req.confidence,
         rr=req.rr, rationale=req.reason, source="manual", auto_execute=auto,

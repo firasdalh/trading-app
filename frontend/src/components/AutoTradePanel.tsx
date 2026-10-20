@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import type { AssetClass, AutoTradeResult, AutoTradeView } from "../types";
 import { ago, localTime } from "./advisorFormat";
+import { SourceRecord, sourceRecord } from "./SourceRecord";
 
 // One line per pair: what happened last pass + why (green if it opened, muted if it stood aside).
 function resultRow(r: AutoTradeResult) {
@@ -81,10 +82,16 @@ export function AutoTradePanel({
     setBusy(true);
     try {
       if (!on) {
+        const rec = await sourceRecord(["auto_trade"]);
+        const recLine = rec.trades
+          ? `Its record so far: ${rec.trades} trades, avg ${rec.avgR == null ? "?" : rec.avgR.toFixed(2)}R, ` +
+            `net ${rec.net >= 0 ? "+" : "-"}$${Math.abs(rec.net).toFixed(0)}.\n\n`
+          : "";
         const ok = window.confirm(
           `Auto-trade ${symbol} (${stratName})?\n\nEvery ~${Math.round((cfg?.interval_seconds ?? 900) / 60)} min it ` +
             `will check ${symbol} and AUTO-OPEN (paper) when it can ${opensWhat}, riding it to ` +
             `target/stop and re-entering after a ${cfg?.cooldown_minutes ?? 5}-min cooldown.\n\n` +
+            recLine +
             `Every risk gate + the kill-switch still apply. Proceed?`,
         );
         if (!ok) {
@@ -126,6 +133,7 @@ export function AutoTradePanel({
       {/* Collapsible: this panel carries a lot of controls (strategy, timeframe, per-pair list,
           last-run results) that you set once and rarely revisit. Collapsed it still reports the two
           things that matter at a glance — whether THIS pair is armed, and how many pairs are on. */}
+      <div className="mb-1"><SourceRecord sources={["auto_trade"]} /></div>
       <button
         onClick={() => setOpen((o) => !o)}
         className="mb-2 flex w-full items-center gap-2 text-left"
@@ -133,6 +141,8 @@ export function AutoTradePanel({
       >
         <span className="text-xs text-neutral-500">{open ? "▾" : "▸"}</span>
         <span className="text-sm font-semibold text-neutral-200">🤖 Auto-trade — {symbol}</span>
+        <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] font-semibold text-warn"
+              title="Its strategies have not passed the faithful backtest">experimental</span>
         {on && (
           <span className="rounded bg-bull/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-bull">
             on

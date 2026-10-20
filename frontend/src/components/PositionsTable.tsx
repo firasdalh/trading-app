@@ -37,7 +37,7 @@ export function PositionsTable({ positions, onClose, onSetSlTp, onSelect }: Prop
             </thead>
             <tbody>
               {positions.map((p) => (
-                <PositionRow key={p.id} p={p} onClose={onClose} onSetSlTp={onSetSlTp} onSelect={onSelect} />
+                <PositionRow key={`${p.symbol}-${p.direction}-${p.opened_at ?? ''}-${p.entry_price}`} p={p} onClose={onClose} onSetSlTp={onSetSlTp} onSelect={onSelect} />
               ))}
             </tbody>
           </table>
@@ -60,6 +60,17 @@ function PositionRow({
 }) {
   const [sl, setSl] = useState(p.stop_loss != null ? fmtPrice(p.stop_loss) : "");
   const [tp, setTp] = useState(p.take_profit != null ? fmtPrice(p.take_profit) : "");
+  // Which box the user has typed in. Untouched boxes follow the broker's live levels; before, they
+  // kept the value from when the row first rendered, and 'Set' sent both - so changing only the TP
+  // could quietly put back an old stop (full review 2026-10-20).
+  const [slDirty, setSlDirty] = useState(false);
+  const [tpDirty, setTpDirty] = useState(false);
+  useEffect(() => {
+    if (!slDirty) setSl(p.stop_loss != null ? fmtPrice(p.stop_loss) : "");
+  }, [p.stop_loss, slDirty]);
+  useEffect(() => {
+    if (!tpDirty) setTp(p.take_profit != null ? fmtPrice(p.take_profit) : "");
+  }, [p.take_profit, tpDirty]);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
@@ -119,7 +130,7 @@ function PositionRow({
           name={`sl-${p.id}`}
           autoComplete="off"
           value={sl}
-          onChange={(e) => setSl(e.target.value)}
+          onChange={(e) => { setSl(e.target.value); setSlDirty(true); }}
           placeholder="SL"
           inputMode="decimal"
           className={`w-20 rounded bg-neutral-800 px-2 py-1 text-xs tabular-nums ${
@@ -130,7 +141,7 @@ function PositionRow({
       <td>
         <input
           value={tp}
-          onChange={(e) => setTp(e.target.value)}
+          onChange={(e) => { setTp(e.target.value); setTpDirty(true); }}
           name={`tp-${p.id}`}
           autoComplete="off"
           placeholder="TP"
@@ -143,7 +154,11 @@ function PositionRow({
           {onSetSlTp && (
             <button
               disabled={busy}
-              onClick={() => run(() => onSetSlTp(p, sl ? Number(sl) : null, tp ? Number(tp) : null))}
+              onClick={() => run(async () => {
+                await onSetSlTp(p, slDirty && sl ? Number(sl) : null, tpDirty && tp ? Number(tp) : null);
+                setSlDirty(false);
+                setTpDirty(false);
+              })}
               className="btn bg-neutral-700 text-white hover:bg-neutral-600"
               title="Attach/modify stop-loss and take-profit on this position"
             >

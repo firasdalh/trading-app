@@ -18,7 +18,7 @@ const PEAK = 0.14;                       // gentle; this plays unprompted
 
 let ctx: AudioContext | null = null;
 
-function play(): void {
+export function play(): void {
   try {
     type WithWebkit = typeof globalThis & { webkitAudioContext?: typeof AudioContext };
     const Ctor = window.AudioContext ?? (globalThis as WithWebkit).webkitAudioContext;

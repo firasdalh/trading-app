@@ -95,6 +95,12 @@ export function AccountKpis({ account, risk, settings, positions }: Props) {
                   {dayPct.toFixed(2)}%)
                 </span>
               )}
+              {/* How busy the day has been, next to its result - the discipline state was invisible. */}
+              {risk?.trades_count != null && (
+                <span className="ml-1.5 text-[11px] font-normal text-neutral-500" title="Trades opened today">
+                  · {risk.trades_count} today
+                </span>
+              )}
             </>
           ) : (
             "—"

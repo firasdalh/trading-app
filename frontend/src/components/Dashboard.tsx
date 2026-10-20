@@ -68,6 +68,7 @@ import { PositionsTable } from "./PositionsTable";
 import { SymbolPicker } from "./SymbolPicker";
 import { WatchlistPanel } from "./WatchlistPanel";
 import { MarketMonitor } from "./MarketMonitor";
+import { PriceAlerts } from "./PriceAlerts";
 
 interface Favorite {
   symbol: string;
@@ -792,7 +793,7 @@ export function Dashboard({
                 adviceR={chartedAdvice?.r_multiple ?? null}
                 equity={equity}
                 riskCap={riskCap}
-                onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class })}
+                onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class, direction: p.direction })}
               />
               <Chart
                 symbol={symbol}
@@ -944,6 +945,10 @@ export function Dashboard({
                 revealChart();
               }}
             />
+          </SideSection>
+
+          <SideSection title="Price alerts" hint="Be told when price reaches a level - never places an order" body="flush">
+            <PriceAlerts symbol={symbol} assetClass={assetClass} />
           </SideSection>
         </aside>
 

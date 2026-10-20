@@ -1070,6 +1070,21 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // A quick-arm line waiting for you to pick a side. Held until confirmed: placing a line that
   // opens a real trade on one stray click is not a mistake worth being able to make.
   const [armDraft, setArmDraft] = useState<{ price: number; y: number } | null>(null);
+  // Risk for a ONE-CLICK trade, as a fraction of equity (null = the full per-trade budget). The ticket
+  // always traded the maximum before (full review 2026-10-20). Remembered between tickets; starts small.
+  const [tradeRisk, setTradeRisk] = useState<number | null>(() => {
+    try {
+      const v = localStorage.getItem("ticket.riskPct");
+      return v === "max" ? null : v ? Number(v) : 0.0025;
+    } catch {
+      return 0.0025;
+    }
+  });
+  const [tradeNote, setTradeNote] = useState("");
+  const [newsAck, setNewsAck] = useState(false);   // second click needed when news is under 60 min away
+  const [tradeTags, setTradeTags] = useState<string[]>([]);
+  // Pre-trade checklist inputs, fetched when a ticket opens (warn only, never block).
+  const [tradeCheck, setTradeCheck] = useState<{ bias: string | null; tradesToday: number | null; lossStreak: number | null } | null>(null);
   const [armBusy, setArmBusy] = useState(false);
   const [armErr, setArmErr] = useState<string | null>(null);
   const [drawList, setDrawList] = useState(false);
@@ -1879,6 +1894,13 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     setCtx(null);
     setScen(null);
+    // A half-finished trade/arm ticket belongs to the pair it was drawn on. Left open, it re-priced
+    // the OLD stop on the NEW pair and submitted there (full review 2026-10-20).
+    setTradeDraft(null);
+    setTradePrev(null);
+    setTradeErr(null);
+    setArmDraft(null);
+    setArmErr(null);
   }, [symbol]);
 
   const loadContext = async () => {
@@ -3049,7 +3071,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       api
         .manualPreview({
           symbol, asset_class: assetClass, direction: tradeDraft.dir,
-          stop_loss: tradeDraft.stop, timeframe,
+          stop_loss: tradeDraft.stop, timeframe, risk_pct: tradeRisk,
         })
         .then((p) => { if (!dead) setTradePrev(p); })
         .catch((e) => { if (!dead) setTradeErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, "") : String(e)); });
@@ -3060,7 +3082,44 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // a stale lot count, not just a stale number on screen.
     const id = window.setInterval(pull, 2000);
     return () => { dead = true; window.clearInterval(id); };
-  }, [tradeDraft, symbol, assetClass, timeframe]);
+  }, [tradeDraft, symbol, assetClass, timeframe, tradeRisk]);
+
+  // Checklist data for an open ticket: the Monitor's 1H/4H/1D read for this pair, trades today and
+  // the current run of losses. Fetched once per ticket - these change slowly.
+  const ticketOpen = tradeDraft != null;
+  useEffect(() => {
+    if (!ticketOpen) {
+      setTradeCheck(null);
+      return;
+    }
+    let dead = false;
+    void (async () => {
+      const [mon, risk, recent] = await Promise.allSettled([api.monitor(), api.riskState(), api.journalTrades(20)]);
+      if (dead) return;
+      let bias: string | null = null;
+      if (mon.status === "fulfilled") {
+        const row = mon.value.rows.find((r) => r.symbol.toUpperCase() === symbol.toUpperCase());
+        if (row) {
+          const t = (tf: string) => row.tfs[tf]?.trend ?? "?";
+          bias = `${t("1h")}/${t("4h")}/${t("1d")}`;
+        }
+      }
+      const tradesToday = risk.status === "fulfilled" ? (risk.value.trades_count ?? null) : null;
+      let lossStreak: number | null = null;
+      if (recent.status === "fulfilled") {
+        const closed = [...recent.value]
+          .filter((p) => p.closed_at && p.realized_pnl != null)
+          .sort((a, b) => Date.parse(b.closed_at ?? "") - Date.parse(a.closed_at ?? ""));
+        lossStreak = 0;
+        for (const p of closed) {
+          if ((p.realized_pnl ?? 0) < 0) lossStreak += 1;
+          else break;
+        }
+      }
+      setTradeCheck({ bias, tradesToday, lossStreak });
+    })();
+    return () => { dead = true; };
+  }, [ticketOpen, symbol]);
 
   // Recompute the pulse whenever the position or the candles move. Driven off the 4-second
   // positions poll rather than every tick — these are bar-based readings, so a per-tick recompute
@@ -3079,6 +3138,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     onPulseRef.current?.(p ? positionPulse(candlesRef.current, p) : null);
   }, [positions, symbol, timeframe, dataV]);
 
+  const setRisk = (v: number | null) => {
+    setTradeRisk(v);
+    try {
+      localStorage.setItem("ticket.riskPct", v == null ? "max" : String(v));
+    } catch {
+      /* private mode - not remembered */
+    }
+  };
+
   const submitTrade = async () => {
     if (!tradeDraft) return;
     setTradeBusy(true);
@@ -3087,9 +3155,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       await api.manualTrade({
         symbol, asset_class: assetClass, direction: tradeDraft.dir,
         stop_loss: tradeDraft.stop, timeframe, execute: true,
+        risk_pct: tradeRisk, note: tradeNote.trim() || null, tags: tradeTags,
       });
       setTradeDraft(null);
       setTradePrev(null);
+      setTradeNote("");
+      setTradeTags([]);
       onOpened?.();
     } catch (err) {
       setTradeErr(err instanceof Error ? err.message.replace(/^\d+:\s*/, "") : String(err));
@@ -3438,7 +3509,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
             ["t", "╱ Trend", "Trend line — press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
             ["h", "─ Level", "Level — one click puts a horizontal line across the whole chart, with its price on the axis."],
             ["arm", "⚡ Arm", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
-            ["trade", "▶ Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance at the 3% risk cap."],
+            ["trade", "▶ Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance and the risk you pick on the ticket (never above your per-trade cap)."],
           ] as const).map(([mode, label, tip]) => (
             <button
               key={mode}
@@ -3950,9 +4021,26 @@ Click for the full breakdown. Info only — it gates nothing.`}
               >
                 <span className={`font-semibold ${long ? "text-bull" : "text-bear"}`}>
                   <span className="mr-1 text-neutral-600">⠿</span>
-                  {long ? "▲ Buy now" : "▼ Sell now"} · stop {fmtPrice(tradeDraft.stop)}
+                  {long ? "▲ Buy" : "▼ Sell"} {symbol} now · stop {fmtPrice(tradeDraft.stop)}
                 </span>
-                <button onClick={() => { setTradeDraft(null); setTradePrev(null); }} className="text-neutral-500 hover:text-neutral-200">✕</button>
+                <button onClick={() => { setTradeDraft(null); setTradePrev(null); setNewsAck(false); }} className="text-neutral-500 hover:text-neutral-200">✕</button>
+              </div>
+
+              {/* Risk for THIS trade. Smallest by default: a discretionary click should not have to
+                  carry the full automated budget. The Risk Manager re-clamps to the per-trade cap. */}
+              <div className="mb-2 flex items-center gap-1" role="group" aria-label="Risk for this trade">
+                <span className="mr-1 text-neutral-500">Risk</span>
+                {([0.0025, 0.005, 0.01, null] as (number | null)[]).map((v) => (
+                  <button
+                    key={String(v)}
+                    onClick={() => setRisk(v)}
+                    aria-pressed={tradeRisk === v}
+                    className={`rounded px-1.5 py-0.5 tabular-nums ${tradeRisk === v ? "bg-sky-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"}`}
+                    title={v == null ? "The full per-trade budget (your risk setting)" : `${(v * 100).toFixed(2)}% of equity`}
+                  >
+                    {v == null ? "Max" : `${+(v * 100).toFixed(2)}%`}
+                  </button>
+                ))}
               </div>
 
               {!tradePrev && !tradeErr && <div className="py-2 text-center text-neutral-500">sizing…</div>}
@@ -3999,6 +4087,59 @@ Click for the full breakdown. Info only — it gates nothing.`}
                 </table>
               )}
 
+              {/* Pre-trade checklist: what the engine would have weighed, shown before a manual click.
+                  Warnings only - the decision stays yours. */}
+              {(() => {
+                const mins = (e: MarketEvent) => Math.round((Date.parse(e.when) - Date.now()) / 60000);
+                const nextHigh = (events ?? []).filter((e) => mins(e) >= 0 && e.importance.toLowerCase() === "high")[0];
+                const newsMins = nextHigh ? mins(nextHigh) : null;
+                const bias = tradeCheck?.bias;
+                const against = bias ? bias.split("/").slice(1).filter((t) => t !== (long ? "up" : "down") && t !== "?").length : 0;
+                const rows: { warn: boolean; text: string }[] = [
+                  newsMins != null && newsMins <= 60
+                    ? { warn: true, text: `High-impact news in ${newsMins}m: ${nextHigh!.label.slice(0, 32)}` }
+                    : { warn: false, text: "No high-impact news in the next hour" },
+                  bias
+                    ? { warn: against > 0, text: `1H/4H/1D: ${bias}${against ? ` - ${against} higher timeframe${against > 1 ? "s" : ""} against this ${long ? "buy" : "sell"}` : " - in line"}` }
+                    : { warn: false, text: "Higher-timeframe read loading…" },
+                  tradeCheck?.lossStreak != null && tradeCheck.lossStreak >= 2
+                    ? { warn: true, text: `${tradeCheck.lossStreak} losses in a row - is this a plan or a recovery trade?` }
+                    : { warn: false, text: `Losses in a row: ${tradeCheck?.lossStreak ?? "…"}` },
+                  { warn: (tradeCheck?.tradesToday ?? 0) >= 5, text: `Trades today: ${tradeCheck?.tradesToday ?? "…"}` },
+                ];
+                return (
+                  <ul className="mb-2 space-y-0.5 rounded border border-neutral-800 bg-neutral-950/60 px-2 py-1.5">
+                    {rows.map((r, i) => (
+                      <li key={i} className={`flex gap-1.5 leading-snug ${r.warn ? "text-warn" : "text-neutral-500"}`}>
+                        <span aria-hidden="true">{r.warn ? "!" : "✓"}</span>
+                        <span>{r.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                );
+              })()}
+
+              {/* Why - one line and a tag or two, kept with the trade so the journal can tell planned
+                  trades from impulsive ones. Optional. */}
+              <input
+                value={tradeNote}
+                onChange={(e) => setTradeNote(e.target.value.slice(0, 200))}
+                placeholder="Why this trade? (optional)"
+                className="mb-1 w-full rounded bg-neutral-800 px-2 py-1 text-neutral-200 placeholder:text-neutral-600"
+              />
+              <div className="mb-2 flex flex-wrap gap-1">
+                {["plan", "with-trend", "counter-trend", "news", "revenge"].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTradeTags((cur) => (cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]))}
+                    aria-pressed={tradeTags.includes(t)}
+                    className={`rounded px-1.5 py-0.5 text-[10px] ${tradeTags.includes(t) ? "bg-neutral-600 text-white" : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"}`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+
               {/* The Risk Manager's own words when it refuses — never paraphrased, and never
                   overridable from here. */}
               {blocked && (
@@ -4009,20 +4150,31 @@ Click for the full breakdown. Info only — it gates nothing.`}
               {tradeErr && <div className="mb-2 rounded bg-bear/15 px-2 py-1 text-bear">{tradeErr}</div>}
 
               <button
-                onClick={() => void submitTrade()}
+                onClick={() => {
+                  const next = (events ?? []).find((e) => e.importance.toLowerCase() === "high"
+                    && Date.parse(e.when) - Date.now() >= 0 && Date.parse(e.when) - Date.now() <= 3600000);
+                  if (next && !newsAck) {
+                    setNewsAck(true);          // the first click only acknowledges the news warning
+                    return;
+                  }
+                  setNewsAck(false);
+                  void submitTrade();
+                }}
                 disabled={tradeBusy || !tradePrev || !!blocked}
                 className={`w-full rounded py-1.5 font-semibold disabled:opacity-40 ${
                   long ? "bg-bull/25 text-bull hover:bg-bull/35" : "bg-bear/25 text-bear hover:bg-bear/35"
                 }`}
               >
-                {tradeBusy ? "…" : blocked ? "Blocked by risk" : long
-                  ? `▲ Buy ${tradePrev?.max_lots ?? ""} lots at market`
-                  : `▼ Sell ${tradePrev?.max_lots ?? ""} lots at market`}
+                {tradeBusy ? "…" : blocked ? "Blocked by risk" : newsAck
+                  ? `${long ? "▲ Buy" : "▼ Sell"} anyway - news within the hour (click again)`
+                  : long
+                  ? `▲ Buy ${tradePrev?.max_lots ?? ""} ${symbol} at market`
+                  : `▼ Sell ${tradePrev?.max_lots ?? ""} ${symbol} at market`}
               </button>
               <p className="mt-1.5 text-[10px] leading-snug text-neutral-500">
                 Fills immediately at the market, re-priced every 2s while this is open. Size comes
-                from your stop at the 3% cap — move the stop to change the size. Target defaults to
-                2R and both are draggable afterwards.
+                from your stop and the risk chosen above (never above your per-trade cap). Target
+                defaults to 2R and both are draggable afterwards.
               </p>
             </div>
           );

@@ -100,7 +100,8 @@ def _classify(n: int, mean_r: float, se: float, min_trades: int) -> tuple[str, s
                 "than luck explains", True)
     if lo > 0:
         return (PROVEN,
-                f"made {mean_r:+.2f}R per trade over {n} trades — a real edge, not luck", True)
+                f"made {mean_r:+.2f}R per trade over {n} trades — positive so far; with dozens of "
+                f"symbols graded, one or two look this good by luck alone", True)
     if mean_r < 0:
         return (WEAK,
                 f"losing {abs(mean_r):.2f}R per trade over {n} trades, but still inside the range "
@@ -118,13 +119,21 @@ def build_scorecard(session: Session, *, min_trades: int = 30,
     if limit_days:
         from datetime import timedelta
         q = q.where(Position.closed_at >= datetime.now(timezone.utc) - timedelta(days=limit_days))
+    # Honour the journal reset like every other journal view (it was ignored here).
+    from app.core.state import get_or_create_settings
+
+    reset = get_or_create_settings(session).journal_reset_at
+    if reset is not None:
+        q = q.where(Position.closed_at >= reset)
     rows = list(session.scalars(q).all())
 
     enabled = {w.symbol: w.enabled for w in session.scalars(select(WatchItem)).all()}
 
     by_symbol: dict[str, list[Position]] = {}
     for p in rows:
-        by_symbol.setdefault(p.symbol, []).append(p)
+        # One row per instrument: "EURUSDM" and "EURUSDm" were graded as two symbols.
+        key = p.symbol[:-1] + "m" if p.symbol.upper().endswith("M") and len(p.symbol) > 4 else p.symbol
+        by_symbol.setdefault(key, []).append(p)
 
     scores: list[SymbolScore] = []
     for symbol, ps in by_symbol.items():

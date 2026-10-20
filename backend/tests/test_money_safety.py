@@ -526,3 +526,41 @@ def test_a_market_closed_refusal_marks_the_symbol_closed():
                                 qty=0.1, order_type=OrderType.MARKET, stop_loss=99.0))
     assert a.market_open("UK100m") is False
     m._CLOSED_REFUSALS.clear()
+
+
+def test_a_kill_switch_pressed_during_a_tick_is_seen_by_the_executor(db_session):
+    """Before: the tick's session still held kill_switch=False from when it started."""
+    import pytest
+
+    from app.core import database as db
+    from app.core.state import get_or_create_settings
+    from app.execution import executor as ex
+
+    rec = _pending_stock(db_session)
+    rec.status = "approved"
+    db_session.commit()
+    get_or_create_settings(db_session)                    # the tick has read the settings (switch OFF)
+    with db.SessionLocal() as other:                       # the user presses KILL elsewhere
+        get_or_create_settings(other).kill_switch_engaged = True
+        other.commit()
+    with pytest.raises(ex.ExecutionBlocked, match="kill-switch"):
+        ex.execute_proposal(db_session, rec)
+
+
+def test_the_daily_review_reports_today_and_tags(db_session):
+    from datetime import timedelta
+
+    from app.api.journal_routes import daily_review
+    from app.models.db import Position
+    from app.models.enums import PositionStatus
+
+    now = datetime.now(timezone.utc)
+    for i, pnl in enumerate((-10.0, -10.0, 20.0)):
+        db_session.add(Position(symbol="EURUSDm", asset_class="forex", direction="long", qty=0.1, entry_price=1.1,
+                                status=PositionStatus.CLOSED.value, realized_pnl=pnl, risk_amount=10.0,
+                                initial_risk_amount=10.0, closed_at=now - timedelta(minutes=30 - i),
+                                review={"note": "x", "tags": ["plan"]}))
+    db_session.commit()
+    out = daily_review(db_session)
+    assert len(out["trades"]) == 3 and out["total_r"] == 0.0 and out["longest_losing_run"] == 2
+    assert out["by_tag"] == [] and out["tags_below_10"] == ["plan"]

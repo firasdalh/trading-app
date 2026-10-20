@@ -315,6 +315,9 @@ class Position(Base):
     # loss to -1.01R, and a stop dragged just short of entry made a +$40 win "+80R" (full review
     # 2026-10-20). Use entry_risk(pos) for any R-multiple.
     initial_risk_amount: Mapped[float | None] = mapped_column(Float)
+    # The trader's own words at entry for a manual trade: {"note": str | None, "tags": [str]}. Lets the
+    # journal tell planned trades from impulsive ones (full review 2026-10-20).
+    review: Mapped[dict | None] = mapped_column(JSON)
     # The proposal's confidence at entry — kept so closed trades can be bucketed by confidence to
     # CALIBRATE the score against real outcomes (does "70%" actually win ~70%?).
     confidence: Mapped[float | None] = mapped_column(Float)

@@ -350,6 +350,7 @@ class PositionView(BaseModel):
     unrealized_pnl: float = 0.0
     realized_pnl: float | None = None
     source: str | None = None   # who opened it (ai / rsi_over / armed / hybrid / manual / …)
+    swap: float = 0.0           # accrued overnight swap (account ccy), NOT in unrealized_pnl
     opened_at: datetime | None = None   # when the position was opened (app-tracked rows)
     # Margin required to hold the position, in the account currency (USD) — the "cost to open".
     # Broker-computed (MT5) with full currency conversion; None when the broker can't supply it.

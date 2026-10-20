@@ -87,6 +87,7 @@ _SQLITE_ADDED_COLUMNS = {
         ("confidence", "FLOAT"),
         ("source", "VARCHAR(24)"),
         ("initial_risk_amount", "FLOAT"),
+        ("review", "JSON"),
     ],
     "hybrid_config": [
         ("conditional_enabled", "BOOLEAN DEFAULT 1"),
