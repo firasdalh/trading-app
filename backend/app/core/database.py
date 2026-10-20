@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -26,6 +26,22 @@ engine = create_engine(
     future=True,
     connect_args=_connect_args,
 )
+
+
+if _settings.is_sqlite:
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record) -> None:  # pragma: no cover - exercised on every connect
+        """WAL + a 15 s busy wait. The scheduler, the monitor and API requests write from different
+        threads; on the default rollback journal a reader could block a writer and a write failed at
+        once with "database is locked" - e.g. the row for a trade the broker had just filled.
+        (Full review 2026-10-20, API-11.)"""
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("PRAGMA busy_timeout=15000")
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cur.close()
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
@@ -69,6 +85,7 @@ _SQLITE_ADDED_COLUMNS = {
         ("timeframe", "VARCHAR DEFAULT '1h'"),
     ],
     "app_settings": [
+        ("mt5_account_login", "INTEGER"),
         ("trend_only_mode", "BOOLEAN DEFAULT 1"),
         ("st_band_mode", "BOOLEAN DEFAULT 0"),
         ("ai_momentum_read", "BOOLEAN DEFAULT 1"),

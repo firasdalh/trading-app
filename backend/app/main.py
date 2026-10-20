@@ -301,6 +301,13 @@ async def _require_desk_header(request, call_next):
     /api/kill-switch/false and /api/proposals/{id}/approve take no body. A custom header cannot be
     added cross-site without a CORS preflight, which only the dev origin above passes. The frontend's
     request() always sends it (full review 2026-10-20)."""
+    # Any method, GET included: a few GETs do work (run an analysis, call the LLM, fetch from the
+    # broker), and an <img src> on another website could fire them. Browsers label every request's
+    # origin in Sec-Fetch-Site; tools like curl send none and pass (full review 2026-10-20, API-7).
+    if request.url.path.startswith("/api") and request.headers.get("sec-fetch-site") == "cross-site":
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse({"detail": "refused: cross-site request"}, status_code=403)
     if request.method not in _SAFE_METHODS and request.url.path.startswith("/api"):
         from fastapi.responses import JSONResponse
 

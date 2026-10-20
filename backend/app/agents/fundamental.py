@@ -152,6 +152,7 @@ def _deterministic_read(symbol: str, now: datetime, asset_class: str | None = No
 
     drivers = surprise_drivers + [n.headline for n in news[:3]]
     windows = _high_impact_windows(events, now)
+    cal_down = get_calendar_provider().unavailable(symbol, asset_class)
 
     return FundamentalRead(
         symbol=symbol,
@@ -161,6 +162,7 @@ def _deterministic_read(symbol: str, now: datetime, asset_class: str | None = No
         stand_aside_windows=windows,
         confidence=confidence,
         notes="deterministic read from economic-calendar surprise + sentiment (no LLM)",
+        calendar_unavailable=cal_down,
     )
 
 
@@ -179,10 +181,12 @@ def run_fundamental(symbol: str, now: datetime | None = None, use_llm: bool = Tr
         # Calendar events are cheap (no tokens) + drive the stand-aside windows, so fetch them every
         # call and ALWAYS recompute the windows fresh — only the LLM bias read below is cached.
         events = get_calendar_provider().get_events(symbol, asset_class=asset_class)
+        cal_down = get_calendar_provider().unavailable(symbol, asset_class)
         key = symbol.upper()
         hit = _FUND_CACHE.get(key)
         if hit is not None and (time.monotonic() - hit[0]) < _FUND_TTL_SEC:
-            return hit[1].model_copy(update={"stand_aside_windows": _high_impact_windows(events, now)})
+            return hit[1].model_copy(update={"stand_aside_windows": _high_impact_windows(events, now),
+                                             "calendar_unavailable": cal_down})
 
         sentiment = get_sentiment_provider().get_sentiment(symbol)
         news = get_news_provider().get_news(symbol, limit=10)
@@ -202,6 +206,7 @@ def run_fundamental(symbol: str, now: datetime | None = None, use_llm: bool = Tr
             # The calendar is the single source of truth for stand-aside windows — replace the
             # model's (which can duplicate or mis-time the same event).
             result.stand_aside_windows = _high_impact_windows(events, now)
+            result.calendar_unavailable = cal_down      # from the provider, never the model
             _FUND_CACHE[key] = (time.monotonic(), result)
             log.info("fundamental read via LLM", extra={"symbol": symbol, "bias": result.bias.value})
             return result

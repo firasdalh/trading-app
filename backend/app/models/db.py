@@ -52,6 +52,8 @@ class AppSettings(Base):
     )
     # Mirrors env BROKER_ENV but persisted so the app remembers the user's choice.
     broker_env: Mapped[str] = mapped_column(String(8), default="paper")
+    # The MT5 account (login) the app's open trades, journal and daily baseline belong to.
+    mt5_account_login: Mapped[int | None] = mapped_column(Integer)
 
     # Asset class -> broker adapter name (e.g. {"stock": "alpaca", "crypto": "ccxt"}).
     broker_map: Mapped[dict] = mapped_column(JSON, default=dict)

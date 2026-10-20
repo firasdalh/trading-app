@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { usePolling } from "../hooks/usePolling";
 import { AccountAlerts, AccountKpis } from "./AccountBar";
 import { NavTabs, type NavItem } from "./Tabs";
 import type { AccountState, PositionView, RiskState, SettingsResponse } from "../types";
@@ -63,6 +64,12 @@ export function Header({ settings, account, risk, positions, nav, automation, on
 
   const env = settings?.app.broker_env ?? "paper";
   const isLive = env === "live";
+  // What the TERMINAL is logged into, read from MT5 itself. The badge used to read only the app's
+  // broker_env setting, so it said "PAPER - no real money" while the terminal sat on a real account
+  // (real-money audit 2026-10-21).
+  const { data: mt5 } = usePolling(() => api.mt5Status(), 15000, [], { whileHidden: true });
+  const realAccount = !!mt5?.connected && mt5.is_paper === false;
+  const [killErr, setKillErr] = useState<string | null>(null);
   const mode = settings?.app.execution_mode ?? "A_PROPOSE_APPROVE";
   const killEngaged = settings?.app.kill_switch_engaged ?? false;
   const envKill = settings?.env_kill_switch ?? false;
@@ -71,9 +78,14 @@ export function Header({ settings, account, risk, positions, nav, automation, on
 
   const toggleKill = async () => {
     setBusy(true);
+    setKillErr(null);
     try {
       await api.setKillSwitch(!killEngaged);
       onKillSwitchChange();
+    } catch (e) {
+      // A safety control that fails must SAY so: this used to fail silently and leave you
+      // believing trading was halted (full review 2026-10-20, FE-09).
+      setKillErr(`Kill-switch NOT ${killEngaged ? "released" : "engaged"}: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -99,11 +111,14 @@ export function Header({ settings, account, risk, positions, nav, automation, on
             <span className="hidden text-sm font-semibold tracking-tight 2xl:inline">Trading Desk</span>
             <span
               className={`rounded-md px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
-                isLive ? "bg-bear text-white" : "bg-bull/15 text-bull ring-1 ring-inset ring-bull/30"
+                realAccount || isLive ? "bg-bear text-white" : "bg-bull/15 text-bull ring-1 ring-inset ring-bull/30"
               }`}
-              title={isLive ? "Connected to a REAL-money account" : "Paper / demo account — no real money"}
+              title={realAccount
+                ? (isLive ? `REAL-money account #${mt5?.account_login ?? "?"} - live trading confirmed`
+                          : `The terminal is on a REAL-money account (#${mt5?.account_login ?? "?"}). Orders are refused until you confirm LIVE in Settings.`)
+                : isLive ? "Live mode, but the terminal is on a demo account" : "Paper / demo account — no real money"}
             >
-              {isLive ? "LIVE" : "PAPER"}
+              {realAccount ? (isLive ? "LIVE · REAL $" : "REAL · locked") : isLive ? "LIVE · demo" : "PAPER"}
             </span>
             <span
               className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] ${
@@ -212,6 +227,29 @@ export function Header({ settings, account, risk, positions, nav, automation, on
       {liveAutoExec && (
         <div className="bg-bear px-4 py-1.5 text-center text-sm font-semibold text-white">
           ⚠ LIVE AUTO-EXECUTION ACTIVE — orders place automatically with real money.
+        </div>
+      )}
+      {killErr && (
+        <div className="flex items-center justify-center gap-3 bg-bear px-4 py-1.5 text-center text-sm font-semibold text-white">
+          {killErr}
+          <button onClick={() => setKillErr(null)} className="underline">dismiss</button>
+        </div>
+      )}
+      {isLive && settings?.live_re_confirm_required && (
+        <div className="bg-bear px-4 py-1.5 text-center text-sm font-semibold text-white">
+          LIVE is not confirmed for this session (the app restarted) - every real-money order is refused.
+          Settings &gt; type the phrase &gt; Re-confirm.
+        </div>
+      )}
+      {realAccount && !isLive && (
+        <div className="bg-warn/90 px-4 py-1.5 text-center text-sm font-semibold text-neutral-950">
+          The MT5 terminal is on a REAL account and the app is in paper mode - every order is refused until
+          you enable LIVE in Settings.
+        </div>
+      )}
+      {mt5?.account_block && (
+        <div className="bg-bear px-4 py-1.5 text-center text-sm font-semibold text-white">
+          ⚠ Not trading: {mt5.account_block}
         </div>
       )}
       {/* MT5 refusing orders / kill-switch / paused — one strip per cause. */}

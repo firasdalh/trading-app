@@ -787,3 +787,67 @@ def test_journal_stats_expectancy_and_drawdown(db_session):
     assert s.avg_win_r == 1.5 and s.avg_loss_r == -1.0
     assert s.profit_factor == 3.0          # gross win 30 / gross loss 10
     assert s.max_drawdown_r == 1.0         # cum 2 -> 1 -> 2; worst dip from peak = 1R
+
+
+# ---- news gate (full review 2026-10-20, API-4) ----
+
+class _DownCalendar:
+    """A calendar that has never loaded: no events, and it says so."""
+    name = "down"
+
+    def get_events(self, symbol, lookahead_hours=24, include_medium=False, asset_class=None):
+        return []
+
+    def unavailable(self, symbol, asset_class=None):
+        return True
+
+
+def test_automated_entry_stands_aside_when_the_calendar_cannot_be_read(db_session):
+    from app.data import providers
+
+    providers.set_providers(calendar=_DownCalendar())
+    try:
+        rec = _make_record(db_session)
+        rec.source = "hybrid"
+        db_session.commit()
+        with pytest.raises(ExecutionBlocked, match="calendar"):
+            execute_proposal(db_session, rec)
+        assert db_session.scalars(select(Order)).all() == []
+
+        manual = _make_record(db_session, symbol="MSFT")
+        manual.source = "manual"          # a hand-placed trade is the user's call
+        db_session.commit()
+        assert execute_proposal(db_session, manual).status == OrderStatus.FILLED
+    finally:
+        providers.set_providers(calendar=providers.StubCalendarProvider())
+
+
+def test_automated_entry_blocked_inside_a_news_window(db_session):
+    from app.data import providers
+    from app.data.providers import CalendarEvent
+
+    soon = datetime.now(timezone.utc) + timedelta(minutes=10)
+    providers.set_providers(calendar=providers.StubCalendarProvider(
+        [CalendarEvent(label="US: CPI", when=soon, importance="high")]))
+    try:
+        rec = _make_record(db_session)
+        rec.source = "rsi_over"
+        db_session.commit()
+        with pytest.raises(ExecutionBlocked, match="news window"):
+            execute_proposal(db_session, rec)
+    finally:
+        providers.set_providers(calendar=providers.StubCalendarProvider())
+
+
+def test_tradingview_calendar_unreachable_since_start_reads_as_unavailable(monkeypatch):
+    import httpx
+
+    from app.data.providers import TradingViewCalendarProvider
+
+    def boom(*a, **k):
+        raise httpx.ConnectError("no route")
+
+    monkeypatch.setattr(httpx, "get", boom)
+    cal = TradingViewCalendarProvider()
+    assert cal.get_events("EURUSD", asset_class="forex") == []
+    assert cal.unavailable("EURUSD", "forex") is True      # "no events" is unknown, not none

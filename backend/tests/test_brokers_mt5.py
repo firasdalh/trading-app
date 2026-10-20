@@ -317,3 +317,51 @@ def test_can_open_honors_trade_mode():
     assert a.can_open("X", "short")[0] is False and a.can_open("X", "long") == (True, None)
     with_mode(2)  # SHORTONLY -> long refused, short ok
     assert a.can_open("X", "long")[0] is False and a.can_open("X", "short") == (True, None)
+
+
+# ---- account identity (real-money audit 2026-10-21) ----
+
+def _switch_adapter(login):
+    a = _adapter()
+    a._login = login
+    return a
+
+
+def _info(login, equity=500.0):
+    return SimpleNamespace(login=login, equity=equity, trade_mode=2, server="Exness-Real")
+
+
+def test_new_account_with_old_trades_open_is_refused_everywhere(db_session):
+    from app.core.state import get_or_create_settings
+    from app.models.db import Position
+    from app.models.enums import OrderStatus as OS
+
+    get_or_create_settings(db_session).mt5_account_login = 111      # the demo the app traded
+    db_session.add(Position(symbol="UK100m", asset_class="index", direction="long", qty=0.5,
+                            entry_price=10700.0, status="open", broker="mt5"))
+    db_session.commit()
+    a = _switch_adapter(123)                     # the terminal is now on #123 (FakeMt5 login)
+    a._bind_account(_info(123))
+    assert a.account_block() and "#111" in a.account_block()
+    # Nothing touches the new account: no read, no close, no stop change, no order.
+    import pytest
+
+    from app.brokers.base import BrokerError
+    with pytest.raises(BrokerError):
+        a.get_open_positions()
+    assert a.close_position("EURUSD", "long").status == OS.ERROR
+    assert a.set_sl_tp("EURUSD", stop_loss=1.09, direction="long").status == OS.ERROR
+
+
+def test_new_account_with_nothing_open_rebases_the_daily_baseline(db_session):
+    from app.core.state import get_or_create_daily_state, get_or_create_settings
+
+    get_or_create_settings(db_session).mt5_account_login = 111
+    get_or_create_daily_state(db_session).starting_equity = 1290.0
+    db_session.commit()
+    a = _switch_adapter(123)
+    a._bind_account(_info(123, equity=500.0))
+    db_session.expire_all()
+    assert get_or_create_settings(db_session).mt5_account_login == 123
+    assert get_or_create_daily_state(db_session).starting_equity == 500.0
+    assert a.account_block() is None

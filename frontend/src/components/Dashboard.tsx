@@ -313,26 +313,36 @@ export function Dashboard({
   // GET; the advisor itself runs on the backend scheduler.
   const { data: advisor } = usePolling(() => api.advisorState(), 15000, [posBump]);
 
+  // The error strip sits outside the chart, so in full screen a refused close or stop move showed
+  // nothing at all - the line just stayed where it was dropped (full review 2026-10-20, FE-10).
+  const refused = (what: string, e: unknown) => {
+    const msg = `${what}: ${e instanceof Error ? e.message : String(e)}`;
+    setError(msg);
+    if (document.fullscreenElement) window.alert(msg);
+  };
+
   const closePosition = async (p: { symbol: string; asset_class: string; direction?: string }) => {
     try {
       await api.liveClose(p.symbol, p.asset_class as AssetClass, p.direction);
       onPositionsChanged(); // refresh immediately
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      refused(`Close ${p.symbol} refused`, e);
     }
   };
 
   const setSlTp = async (
-    p: { symbol: string; asset_class: string },
+    p: { symbol: string; asset_class: string; direction?: string },
     sl: number | null,
     tp: number | null,
   ) => {
     try {
-      const res = await api.setSlTp(p.symbol, p.asset_class as AssetClass, sl, tp);
+      const res = await api.setSlTp(p.symbol, p.asset_class as AssetClass, sl, tp, p.direction);
       setSlTpWarning(res.warning ? `${p.symbol}: ${res.warning}` : null);
+      if (res.warning && document.fullscreenElement) window.alert(`${p.symbol}: ${res.warning}`);
       onPositionsChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      refused(`SL/TP change on ${p.symbol} refused`, e);
+      onPositionsChanged();     // the dragged line snaps back to the stop the broker really has
     }
   };
 
@@ -422,11 +432,18 @@ export function Dashboard({
     }
   };
 
+  // A scenario read and its pinned chart lines belong to one symbol + timeframe: they stayed up after
+  // switching to another pair, drawn at the old pair's prices (full review 2026-10-20, FE-15).
+  useEffect(() => {
+    setScenario(null);
+    setScenLevels(null);
+  }, [symbol, timeframe]);
+
   // Opt-in AI scenario read for the CURRENT symbol (info-only; costs tokens) — fetched only on request.
   const loadScenarios = async () => {
     setScenarioBusy(true);
     try {
-      setScenario(await api.scenarios(symbol, assetClass));
+      setScenario(await api.scenarios(symbol, assetClass, timeframe));
     } catch {
       setScenario(null);
     } finally {
@@ -803,7 +820,7 @@ export function Dashboard({
                 liveQuote={liveQuote}
                 positions={positions}
                 armed={armedLevels}
-                onSetSlTp={(sl, tp) => setSlTp({ symbol, asset_class: assetClass }, sl, tp)}
+                onSetSlTp={(sl, tp, direction) => setSlTp({ symbol, asset_class: assetClass, direction }, sl, tp)}
                 onSetArmedLevels={async (id, levels) => {
                   try {
                     await api.setConditionalLevels(id, levels);

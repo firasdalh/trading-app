@@ -633,7 +633,7 @@ def test_an_arm_does_not_fire_inside_a_high_impact_news_window(db_session, monke
     now = datetime.now(timezone.utc)
     window = SimpleNamespace(start=now - timedelta(minutes=5), end=now + timedelta(minutes=25))
     monkeypatch.setattr(fundamental, "run_fundamental",
-                        lambda *a, **k: SimpleNamespace(stand_aside_windows=[window]))
+                        lambda *a, **k: SimpleNamespace(stand_aside_windows=[window], calendar_unavailable=False))
     cond.check_conditional_setups(db_session)
     db_session.refresh(s)
     assert opened == [] and s.status == "armed" and "news window" in (s.last_note or "")

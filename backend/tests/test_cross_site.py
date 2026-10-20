@@ -40,3 +40,9 @@ def test_a_standby_backend_is_read_only(db_session, monkeypatch):
 def test_a_rebound_hostname_is_refused(db_session):
     r = _client().get("/health", headers={"Host": "attacker.example:8001"})
     assert r.status_code == 400
+
+
+def test_a_cross_site_get_is_refused(db_session):
+    r = _client().get("/api/settings", headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+    assert _client().get("/api/settings", headers={"Sec-Fetch-Site": "same-origin"}).status_code == 200

@@ -304,7 +304,7 @@ interface Props {
   positions: PositionView[] | null;
   armed?: ArmedLevel[];
   // Commit a dragged SL/TP for the charted symbol's open position (null = leave that one unchanged).
-  onSetSlTp?: (sl: number | null, tp: number | null) => void;
+  onSetSlTp?: (sl: number | null, tp: number | null, direction?: string) => void;
   // Commit a dragged trigger/SL/TP for an armed setup (only the changed level is sent).
   onSetArmedLevels?: (id: number, levels: { trigger_price?: number; stop_loss?: number; take_profit?: number }) => void;
   // The AI scenario's cited S/R to plot on the chart — lifted to the Dashboard so BOTH the floating
@@ -1154,6 +1154,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // colour — 30 seconds means something very different on a 5m bar than on a 4h one.
   const [barLeft, setBarLeft] = useState<{ text: string; left: number; frac: number } | null>(null);
   const [events, setEvents] = useState<MarketEvent[] | null>(null);
+  const [calDown, setCalDown] = useState(false);      // the calendar could not be read at all
   const [evOpen, setEvOpen] = useState(false);
 
   const [ctx, setCtx] = useState<MarketContext | null>(null);
@@ -2145,7 +2146,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           key: `pos-sl-${p.id ?? p.symbol}`, label: "SL", refPos: p, line: slLine, price: p.stop_loss,
           validate: (x) => (isLong ? x < mkt() : x > mkt()),
           why: `a ${p.direction} stop must stay ${isLong ? "below" : "above"} the current price — it would trigger immediately`,
-          commit: (x) => onSetSlTpRef.current?.(x, p.take_profit ?? null),
+          commit: (x) => onSetSlTpRef.current?.(x, p.take_profit ?? null, p.direction),
         });
       }
       if (tpLine && p.take_profit != null) {
@@ -2153,7 +2154,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           key: `pos-tp-${p.id ?? p.symbol}`, label: "TP", refPos: p, line: tpLine, price: p.take_profit,
           validate: (x) => (isLong ? x > mkt() : x < mkt()),
           why: `a ${p.direction} target must stay ${isLong ? "above" : "below"} the current price — it would fill immediately`,
-          commit: (x) => onSetSlTpRef.current?.(p.stop_loss ?? null, x),
+          commit: (x) => onSetSlTpRef.current?.(p.stop_loss ?? null, x, p.direction),
         });
       }
     }
@@ -2320,8 +2321,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     let dead = false;
     const pull = () =>
       api.marketEvents(symbol, assetClass, 24)
-        .then((r) => { if (!dead) setEvents(r.events ?? []); })
-        .catch(() => { if (!dead) setEvents(null); });
+        .then((r) => { if (!dead) { setEvents(r.events ?? []); setCalDown(!!r.unavailable); } })
+        .catch(() => { if (!dead) { setEvents(null); setCalDown(true); } });
     void pull();
     const id = window.setInterval(pull, 600_000);
     return () => { dead = true; window.clearInterval(id); };
@@ -4096,7 +4097,9 @@ Click for the full breakdown. Info only — it gates nothing.`}
                 const bias = tradeCheck?.bias;
                 const against = bias ? bias.split("/").slice(1).filter((t) => t !== (long ? "up" : "down") && t !== "?").length : 0;
                 const rows: { warn: boolean; text: string }[] = [
-                  newsMins != null && newsMins <= 60
+                  calDown
+                    ? { warn: true, text: "News calendar unavailable - check the news yourself before trading" }
+                    : newsMins != null && newsMins <= 60
                     ? { warn: true, text: `High-impact news in ${newsMins}m: ${nextHigh!.label.slice(0, 32)}` }
                     : { warn: false, text: "No high-impact news in the next hour" },
                   bias

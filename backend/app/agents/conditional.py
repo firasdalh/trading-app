@@ -561,10 +561,13 @@ def _fire(session: Session, s: ConditionalSetup, ref: float) -> int:
 
         fund = run_fundamental(s.symbol, now=datetime.now(timezone.utc), use_llm=False,
                                asset_class=s.asset_class)
+        if fund.calendar_unavailable:
+            return _decline(session, s, "the economic calendar can't be read - news unknown", terminal=False)
         if _now_in_stand_aside(fund, datetime.now(timezone.utc)):
             return _decline(session, s, "inside a high-impact news window", terminal=False)
-    except Exception as exc:  # noqa: BLE001 - a calendar hiccup keeps the last good list (providers)
+    except Exception as exc:  # noqa: BLE001 - unknown news is not "no news": wait, re-check next tick
         log.warning("conditional news check failed", extra={"symbol": s.symbol, "error": str(exc)})
+        return _decline(session, s, "news check failed", terminal=False)
 
     # 2. Build the proposal from the ARMED levels (trigger = entry) — the whole point: the R:R is
     #    measured from the trigger, where it is real.

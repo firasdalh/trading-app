@@ -75,7 +75,10 @@ def get_or_create_daily_state(session: Session, starting_equity: float | None = 
 def live_reconfirm_required(settings: AppSettings) -> bool:
     """Mode C requires re-confirmation each restart: the stored confirmation must be
     *after* this process started, otherwise the user must confirm again."""
-    if settings.execution_mode != "C_AUTO_LIVE":
+    # Keyed on LIVE, not on Mode C: Mode C was removed, so this always said False and the UI's
+    # re-confirm button never showed - after a restart a live account could not be re-armed from the
+    # app at all (real-money audit 2026-10-21).
+    if settings.broker_env != "live":
         return False
     if settings.live_confirmed_at is None:
         return True

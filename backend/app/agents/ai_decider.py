@@ -458,7 +458,9 @@ def ai_decide_trade(session: Session, symbol: str, asset_class: AssetClass, time
         proposal.direction = Direction.NO_TRADE
         proposal.entry = proposal.stop_loss = proposal.take_profit = None
         proposal.strategy = "stand_aside"
-        proposal.rationale = "Standing aside: inside a high-impact event window (AI decision suppressed)."
+        proposal.rationale = ("Standing aside: the economic calendar can't be read (AI decision suppressed)."
+                              if fundamental.calendar_unavailable
+                              else "Standing aside: inside a high-impact event window (AI decision suppressed).")
         return proposal
 
     if not llm_available():

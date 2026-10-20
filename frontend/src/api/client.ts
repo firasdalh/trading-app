@@ -144,10 +144,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ symbol, asset_class: assetClass, direction: direction ?? null }),
     }),
-  setSlTp: (symbol: string, assetClass: AssetClass, stopLoss: number | null, takeProfit: number | null) =>
+  setSlTp: (symbol: string, assetClass: AssetClass, stopLoss: number | null, takeProfit: number | null,
+           direction?: string) =>
     request<{ status: string; warning?: string | null }>("/api/positions/sl-tp", {
       method: "POST",
-      body: JSON.stringify({ symbol, asset_class: assetClass, stop_loss: stopLoss, take_profit: takeProfit }),
+      body: JSON.stringify({ symbol, asset_class: assetClass, stop_loss: stopLoss, take_profit: takeProfit,
+                             direction: direction ?? null }),
     }),
   brokerInfo: (assetClass: AssetClass) =>
     request<{ name: string; is_paper: boolean }>(`/api/broker/info?asset_class=${assetClass}`),

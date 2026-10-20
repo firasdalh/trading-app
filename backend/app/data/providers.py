@@ -67,6 +67,11 @@ class EconomicCalendarProvider(ABC):
                    include_medium: bool = False,
                    asset_class: str | None = None) -> list[CalendarEvent]: ...
 
+    def unavailable(self, symbol: str, asset_class: str | None = None) -> bool:
+        """True when this instrument's calendar can NOT be trusted right now (no good fetch, or the
+        last good one too old). An empty event list then means "unknown", not "no news"."""
+        return False
+
 
 class SentimentProvider(ABC):
     name = "abstract"
@@ -247,6 +252,9 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
 
     _OK_TTL_S = 3600
     _FAIL_TTL_S = 180
+    # A good list older than this no longer counts: it was fetched with a 24 h lookahead, so after
+    # ~12 h the far half of "upcoming events" is no longer covered.
+    _STALE_S = 12 * 3600
 
     name = "tradingview"
     _URL = "https://economic-calendar.tradingview.com/events"
@@ -255,6 +263,7 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
         self.stand_aside_minutes = stand_aside_minutes
         self._cache: dict[str, tuple[datetime, list[CalendarEvent]]] = {}
         self._failed_at: dict[str, datetime] = {}   # country-set -> last failed fetch
+        self._ok_at: dict[str, datetime] = {}       # countries (any variant) -> last good fetch
 
     def _countries(self, symbol: str, asset_class: str | None = None) -> list[str]:
         return countries_for_symbol(symbol, asset_class)
@@ -265,7 +274,9 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
         countries = self._countries(symbol, asset_class)
         if not countries:
             return []
-        cache_key = ",".join(sorted(countries)) + ("|med" if include_medium else "")
+        country_key = ",".join(sorted(countries))
+        # The lookahead is part of the key: a 6 h list cached first used to be served for a 24 h ask.
+        cache_key = f"{country_key}|{lookahead_hours}" + ("|med" if include_medium else "")
         now = datetime.now(timezone.utc)
         cached = self._cache.get(cache_key)
         if cached and (now - cached[0]).total_seconds() < self._OK_TTL_S:
@@ -308,6 +319,7 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
                 ))
             self._cache[cache_key] = (now, events)
             self._failed_at.pop(cache_key, None)
+            self._ok_at[country_key] = now
             _log.info("calendar fetched", extra={"symbol": symbol, "countries": cache_key, "high_events": len(events)})
             return events
         except Exception as exc:  # noqa: BLE001 - keep the last good list; never invent "no events"
@@ -320,6 +332,18 @@ class TradingViewCalendarProvider(EconomicCalendarProvider):
             _log.warning("calendar fetch failed and nothing cached yet; no events known",
                          extra={"symbol": symbol, "error": str(exc)})
             return []
+
+    def unavailable(self, symbol: str, asset_class: str | None = None) -> bool:
+        """No good fetch for this instrument's countries since startup, or none in ``_STALE_S``.
+
+        Callers ask right after ``get_events`` (which has just tried a fetch). The automated openers
+        then stand aside instead of reading the empty list as "no news" - after a restart with the
+        calendar unreachable there used to be no blackout at all (full review 2026-10-20, API-4)."""
+        countries = self._countries(symbol, asset_class)
+        if not countries:
+            return False
+        ok = self._ok_at.get(",".join(sorted(countries)))
+        return ok is None or (datetime.now(timezone.utc) - ok).total_seconds() > self._STALE_S
 
 
 # --------------------------------------------------------------------------- #

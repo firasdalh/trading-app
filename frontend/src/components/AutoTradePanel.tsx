@@ -100,6 +100,8 @@ export function AutoTradePanel({
         }
       }
       setCfg(await api.autoTradePair(symbol, assetClass, !on, timeframe));
+    } catch (e) {
+      window.alert(`Auto-trade on/off was NOT saved: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -121,6 +123,8 @@ export function AutoTradePanel({
     setBusy(true);
     try {
       setCfg(await api.autoTradeConfig(patch));
+    } catch (e) {
+      window.alert(`Auto-trade setting was NOT saved: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }

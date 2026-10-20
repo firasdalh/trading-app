@@ -15,6 +15,7 @@ never moves money on its own. Can be run on demand or on a user-set auto-watch i
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -1012,8 +1013,28 @@ def _auto_execute(session: Session, advice: list[PositionAdvice],
     return actions
 
 
+_RUN_LOCK = threading.Lock()
+
+
 def run_advisor(session: Session) -> dict:
-    """Compute advisories now, optionally auto-execute, record to the audit log, stamp last_run."""
+    """Compute advisories now, optionally auto-execute, record to the audit log, stamp last_run.
+
+    One run at a time. The scheduler tick and the "Run now" button could overlap, and each read the
+    same untouched tranche - two scale-outs of the same third, or a partial close racing a stop move
+    on the same ticket (full review 2026-10-20, API-9). A run that finds another in progress skips."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        log.info("advisor run skipped: another run is in progress")
+        cfg = get_or_create_advisor_config(session)
+        return {"last_run_at": cfg.last_run_at.isoformat() if cfg.last_run_at else None,
+                "advice": [], "actions": [], "skipped": "another advisor run is in progress"}
+    try:
+        session.expire_all()        # read the rows as the previous run left them
+        return _run_advisor(session)
+    finally:
+        _RUN_LOCK.release()
+
+
+def _run_advisor(session: Session) -> dict:
     advice, contexts = _advise_with_context(session)
     cfg = get_or_create_advisor_config(session)
     cfg.last_run_at = datetime.now(timezone.utc)

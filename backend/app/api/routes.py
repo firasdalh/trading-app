@@ -85,7 +85,22 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
     open_rows = session.scalars(
         select(Position).where(Position.status == PositionStatus.OPEN.value)
     ).all()
-    total_risk = round(sum((p.risk_amount or 0.0) for p in open_rows), 2)
+    total_risk = sum((p.risk_amount or 0.0) for p in open_rows)
+    # Plus trades opened outside the app (terminal, phone): the openers' budget already counts them,
+    # so the number shown must too, or the panel shows room the Risk Manager won't give (FE-13).
+    try:
+        from app.brokers.registry import get_broker
+        from app.core.state import get_or_create_settings
+        from app.risk.service import _untracked_broker_risk, current_equity
+
+        equity = current_equity(session)
+        if equity:
+            names = set((get_or_create_settings(session).broker_map or {}).values())
+            for name in names:
+                total_risk += _untracked_broker_risk(session, get_broker(name), open_rows, equity)
+    except Exception as exc:  # noqa: BLE001 - display only
+        log.warning("risk state: untracked broker risk unavailable", extra={"error": str(exc)})
+    total_risk = round(total_risk, 2)
     # The pause only blocks while the breaker is armed; with it OFF the badge/banner shouldn't claim
     # "paused" (the manager already skips the veto). The stored flag is kept for the new UTC day reset.
     effective_paused = state.trading_paused and risk.daily_loss_breaker_enabled
@@ -114,7 +129,11 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
 def resume_trading(session: Session = Depends(get_session)) -> RiskStateView:
     """Manually clear today's daily-loss trading pause (the 'Resume trading' button). The breaker
     stays armed and can pause again if the day's realized loss hits the limit later today."""
+    from app.models.db import AgentRun
+
     state = get_or_create_daily_state(session)
+    session.add(AgentRun(agent="manual", event="trading_resumed", level="WARNING",
+                         detail={"was_paused": state.trading_paused, "reason": state.pause_reason}))
     state.trading_paused = False
     state.pause_reason = None
     session.commit()
@@ -172,8 +191,12 @@ def set_kill_switch(engage: bool, session: Session = Depends(get_session)) -> di
 
     Note: the env ``KILL_SWITCH`` is a separate backstop and cannot be cleared from the UI.
     """
+    from app.models.db import AgentRun
+
     settings = get_or_create_settings(session)
     settings.kill_switch_engaged = engage
+    session.add(AgentRun(agent="manual", event="kill_switch_engaged" if engage else "kill_switch_released",
+                         level="WARNING", detail={"engaged": engage}))
     session.commit()
     log.warning("kill_switch toggled", extra={"engaged": engage})
     return {

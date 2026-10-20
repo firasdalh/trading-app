@@ -11,6 +11,7 @@ the proposal EXECUTED.
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -64,8 +65,39 @@ _MAX_RISK_DRIFT = 0.25      # refuse if the actual stop distance exceeds 125% of
 def execute_proposal(session: Session, record: TradeProposalRecord) -> OrderResult:
     """Submit an approved proposal (serialized via _EXEC_LOCK). Raises ExecutionBlocked if a safety
     gate refuses."""
+    _news_gate(record)      # before the lock: it may make one (cached, 8 s max) calendar fetch
     with _EXEC_LOCK:
         return _execute_proposal(session, record)
+
+
+def _user_clicked(record: TradeProposalRecord) -> bool:
+    """A trade the user placed or approved by hand (the chart ticket, an approval of a queued one)."""
+    src = getattr(record, "source", None) or ""
+    return src == "manual" or src.startswith("manual_from_")
+
+
+def _news_gate(record: TradeProposalRecord) -> None:
+    """No AUTOMATED entry inside a high-impact news window, or while the calendar can't be read.
+
+    The analysis pipeline already stood aside around news, but the mechanical openers (RSI-Over,
+    the SuperTrend auto-trader) never looked at the calendar, and every path read "calendar
+    unreachable" as "no news" (full review 2026-10-20, API-4). One gate here covers every opener.
+    A hand-placed trade is the user's call: the chart ticket shows the news warning instead.
+    """
+    if _user_clicked(record):
+        return
+    from app.agents.fundamental import run_fundamental
+    from app.agents.orchestrator import _now_in_stand_aside
+
+    now = datetime.now(timezone.utc)
+    try:
+        fund = run_fundamental(record.symbol, now=now, use_llm=False, asset_class=record.asset_class)
+    except Exception as exc:  # noqa: BLE001 - unknown news is not "no news"
+        raise ExecutionBlocked(f"can't check the news calendar ({exc}) - automated entry not opened") from exc
+    if fund.calendar_unavailable:
+        raise ExecutionBlocked("the economic calendar can't be read - automated entries stand aside until it loads")
+    if _now_in_stand_aside(fund, now):
+        raise ExecutionBlocked("inside a high-impact news window - automated entry not opened")
 
 
 def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderResult:

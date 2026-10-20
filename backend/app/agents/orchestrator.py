@@ -63,6 +63,9 @@ Return strict JSON: decision ("confirm"|"veto"), confidence (0-1), rationale, co
 
 
 def _now_in_stand_aside(fundamental: FundamentalRead, now: datetime) -> bool:
+    # Fail closed: with the calendar unreadable we cannot know we are OUTSIDE a news window.
+    if fundamental.calendar_unavailable:
+        return True
     for w in fundamental.stand_aside_windows:
         start = w.start if w.start.tzinfo else w.start.replace(tzinfo=timezone.utc)
         end = w.end if w.end.tzinfo else w.end.replace(tzinfo=timezone.utc)
@@ -1499,7 +1502,9 @@ def _deterministic_decision(
     )
 
     if _now_in_stand_aside(fundamental, now):
-        base.rationale = "Standing aside: inside a high-impact event window."
+        base.rationale = ("Standing aside: the economic calendar can't be read, so a news window can't be ruled out."
+                          if fundamental.calendar_unavailable
+                          else "Standing aside: inside a high-impact event window.")
         return base
 
     # The ENTRY-timeframe read. Select it by matching the requested timeframe — NOT by position:

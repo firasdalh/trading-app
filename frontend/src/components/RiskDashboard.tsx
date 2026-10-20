@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, createContext, useContext } from "react";
 import { api } from "../api/client";
 import { fmtUsd } from "../format";
 import type { AccountState, RiskState, SettingsResponse } from "../types";
@@ -25,6 +25,14 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
   // Breaker state: prefer the settings value, fall back to risk-state echo.
   const breakerOn = limits?.daily_loss_breaker_enabled ?? risk?.daily_loss_breaker_enabled ?? true;
   const [busy, setBusy] = useState(false);
+  // A refused or failed save must SAY so: these are safety controls, and a silent failure left the
+  // switch looking on while the server still had it off (full review 2026-10-20, FE-09).
+  const [err, setErr] = useState<string | null>(null);
+  const [rev, setRev] = useState(0);      // bumped on a failure: number fields drop the refused value
+  const fail = (what: string, e: unknown) => {
+    setErr(`${what} NOT saved: ${e instanceof Error ? e.message : String(e)}`);
+    setRev((r) => r + 1);
+  };
 
   // How many of the extra entry breakers are currently armed (for the collapsed-row status).
   const activeBreakers =
@@ -42,9 +50,12 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
       if (!ok) return;
     }
     setBusy(true);
+    setErr(null);
     try {
       await api.updateRisk({ daily_loss_breaker_enabled: next });
       onChanged?.();
+    } catch (e) {
+      fail("Daily-loss breaker change", e);
     } finally {
       setBusy(false);
     }
@@ -57,9 +68,12 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
     );
     if (!ok) return;
     setBusy(true);
+    setErr(null);
     try {
       await api.resumeTrading();
       onChanged?.();
+    } catch (e) {
+      fail("Resume", e);
     } finally {
       setBusy(false);
     }
@@ -67,9 +81,12 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
 
   async function saveRisk(patch: Record<string, number | boolean>) {
     setBusy(true);
+    setErr(null);
     try {
       await api.updateRisk(patch);
       onChanged?.();
+    } catch (e) {
+      fail("Risk setting", e);
     } finally {
       setBusy(false);
     }
@@ -91,7 +108,14 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
   const posPct = posLimit ? posCount / posLimit : 0;
 
   return (
+    <RevCtx.Provider value={rev}>
     <div className="card space-y-3">
+      {err && (
+        <div className="flex items-start justify-between gap-2 rounded border border-bear/50 bg-bear/15 px-2 py-1.5 text-xs font-semibold text-bear">
+          <span>{err}</span>
+          <button onClick={() => setErr(null)} className="shrink-0 underline">dismiss</button>
+        </div>
+      )}
       {risk?.trading_paused && (
         <div className="flex items-center justify-end">
           <div className="flex items-center gap-2">
@@ -397,6 +421,7 @@ export function RiskDashboard({ risk, account, settings, onChanged }: Props) {
         </details>
       )}
     </div>
+    </RevCtx.Provider>
   );
 }
 
@@ -412,6 +437,9 @@ function StatePill({ on }: { on: boolean }) {
     </span>
   );
 }
+
+// Bumped by RiskDashboard when a save fails, so every NumField re-mounts with the server's value.
+const RevCtx = createContext(0);
 
 // A compact number field that commits on blur / Enter (so typing doesn't fire a request per keystroke).
 function NumField({
@@ -433,6 +461,7 @@ function NumField({
   active?: boolean;
   onCommit: (value: number) => void;
 }) {
+  const rev = useContext(RevCtx);
   const commit = (raw: string) => {
     const v = Number(raw);
     if (!Number.isFinite(v) || v === value) return;
@@ -451,7 +480,7 @@ function NumField({
         min={min}
         disabled={busy}
         defaultValue={value}
-        key={value}
+        key={`${value}-${rev}`}
         onBlur={(e) => commit(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();

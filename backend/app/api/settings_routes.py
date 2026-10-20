@@ -12,7 +12,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.routes import build_settings_response
@@ -131,6 +131,7 @@ def set_broker_env(req: BrokerEnvRequest, session: Session = Depends(get_session
         _check_phrase(req.confirm_phrase)
         settings.broker_env = "live"
         settings.live_confirmed_at = datetime.now(timezone.utc)
+        session.add(AgentRun(agent="manual", event="live_enabled", level="WARNING", detail={}))
         log.warning("broker env -> LIVE (confirmed)")
     else:
         settings.broker_env = "paper"
@@ -165,14 +166,27 @@ def set_broker_map(req: BrokerMapRequest, session: Session = Depends(get_session
     Merges into the existing map. Unknown asset classes or brokers are rejected.
     """
     settings = get_or_create_settings(session)
-    merged = dict(settings.broker_map or {})
+    before = dict(settings.broker_map or {})
+    merged = dict(before)
     for asset, broker in req.broker_map.items():
         if asset not in _VALID_ASSETS:
             raise HTTPException(status_code=400, detail=f"unknown asset class: {asset}")
         if broker not in _VALID_BROKERS:
             raise HTTPException(status_code=400, detail=f"unknown broker: {broker}")
+        # Re-pointing a class with trades still open on its broker orphans them: the monitor, the
+        # advisor and every close would then ask the NEW broker, which has never heard of them
+        # (full review 2026-10-20, API-13). Close them first.
+        old = before.get(asset, "sim")
+        if broker != old:
+            n = session.scalar(select(func.count()).select_from(Position).where(
+                Position.status == PositionStatus.OPEN.value, Position.asset_class == asset)) or 0
+            if n:
+                raise HTTPException(status_code=409, detail=(
+                    f"{n} {asset} trade(s) are open on {old} - close them before moving {asset} to {broker}"))
         merged[asset] = broker
     settings.broker_map = merged
+    session.add(AgentRun(agent="settings", event="broker_map_changed", level="WARNING",
+                         detail={"before": before, "after": merged}))
     session.commit()
     log.info("broker_map updated", extra={"broker_map": merged})
     return build_settings_response(session)
@@ -188,6 +202,7 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
     that would weaken protection beyond the ceiling are rejected (never silently clamped up)."""
     cfg = get_settings()
     risk = get_or_create_risk_config(session)
+    before = {c.name: getattr(risk, c.name) for c in risk.__table__.columns}
 
     if req.risk_per_trade is not None:
         if not (0 < req.risk_per_trade <= cfg.risk_per_trade_ceiling):
@@ -310,8 +325,15 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
                     "ENABLED — symbols may be switched off automatically"
                     if req.scorecard_auto_disable else "disabled (warn only)")
 
+    # Every protection change goes in the audit log, before and after - the log lines above were only
+    # in desktop.log, and "who raised the risk, when" could not be answered from the app (API-8).
+    changed = {k: [v, getattr(risk, k)] for k, v in before.items() if getattr(risk, k) != v}
+    if changed:
+        session.add(AgentRun(agent="settings", event="risk_changed", level="WARNING",
+                             detail={k: [str(a) if a is not None else None, str(b) if b is not None else None]
+                                     for k, (a, b) in changed.items()}))
     session.commit()
-    log.info("risk config updated")
+    log.info("risk config updated", extra={"changed": list(changed)})
     return build_settings_response(session)
 
 
@@ -531,7 +553,11 @@ def _try_mt5_connect() -> dict:
             return {"connected": False, "error": broker.reason}
         acct = broker.get_account()
         allowed, why = broker.algo_trading_allowed()
+        block = broker.account_block() if hasattr(broker, "account_block") else None
+        info = broker._mt5.account_info() if hasattr(broker, "_mt5") else None
         return {"connected": True, "is_paper": broker.is_paper,
+                "account_login": getattr(info, "login", None), "account_server": getattr(info, "server", None),
+                "account_block": block,
                 "equity": acct.equity, "cash": acct.cash, "open_positions": acct.open_positions,
                 # "connected" alone is misleading: the terminal can be connected with Algo Trading
                 # off, in which case nothing automated can trade. Report it separately.
@@ -940,6 +966,9 @@ class SlTpRequest(BaseModel):
     asset_class: AssetClass
     stop_loss: float | None = None
     take_profit: float | None = None
+    # The side the chart line / table row belongs to. Checked against the book and passed to the
+    # broker, so the change can only ever land on that side's ticket(s) (full review, FE-14).
+    direction: Literal["long", "short"] | None = None
 
 
 @router.post("/positions/live/close", tags=["positions"])
@@ -1048,6 +1077,9 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
         raise HTTPException(status_code=409, detail=(
             f"both a long and a short are open in {req.symbol} — one stop can't fit both; set them in MT5"))
     direction = held[0].direction
+    if req.direction and req.direction != direction:
+        raise HTTPException(status_code=409, detail=(
+            f"the open {req.symbol} position is {direction}, not {req.direction} - refresh and try again"))
     long_ = direction == "long"
     price = held[0].last_price
 
@@ -1074,7 +1106,7 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
         raise HTTPException(status_code=400, detail=(
             f"a {direction} target must be {'above' if long_ else 'below'} the current price ({price})"))
 
-    result = broker.set_sl_tp(req.symbol, req.stop_loss, req.take_profit)
+    result = broker.set_sl_tp(req.symbol, req.stop_loss, req.take_profit, direction=direction)
     if result.status.value in ("error", "rejected"):
         raise HTTPException(status_code=409, detail=result.error or "could not set SL/TP")
 
@@ -1099,6 +1131,34 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
                                               "over_risk": warning is not None})
     return {"status": result.status.value, "symbol": req.symbol,
             "stop_loss": req.stop_loss, "take_profit": req.take_profit, "warning": warning}
+
+
+def _quiesce(timeout: float = 20.0) -> None:
+    """Stop starting new work, then wait (bounded) for an order or advisor action in flight.
+
+    os._exit used to land wherever the threads were: mid order_send, the order could fill at the
+    broker with its PENDING row never updated and no Position recorded - a real trade the app did
+    not know it had (full review 2026-10-20, API-10). Holding the executor and advisor locks when
+    exiting means nothing is half-sent; a job that wakes up afterwards blocks on them and dies with
+    the process before it can send anything."""
+    import time
+
+    from app.agents.position_advisor import _RUN_LOCK
+    from app.core.scheduler import get_scheduler
+    from app.execution.executor import _EXEC_LOCK
+
+    try:
+        sched = get_scheduler()
+        if sched.running:
+            sched.pause()           # no new ticks; running ones finish or block on the locks below
+    except Exception:  # noqa: BLE001 - shutting down regardless
+        pass
+    deadline = time.monotonic() + timeout
+    got_exec = _EXEC_LOCK.acquire(timeout=max(0.1, deadline - time.monotonic()))
+    got_adv = _RUN_LOCK.acquire(timeout=max(0.1, deadline - time.monotonic()))
+    if not (got_exec and got_adv):
+        log.error("shutdown: an order or advisor action was still running after the wait",
+                  extra={"exec_free": got_exec, "advisor_free": got_adv})
 
 
 @router.post("/app/shutdown", tags=["safety"])
@@ -1139,6 +1199,7 @@ def app_shutdown(session: Session = Depends(get_session)) -> dict:
     # and the UI could never tell the difference between "stopped" and "crashed".
     def _stop() -> None:
         time.sleep(0.4)
+        _quiesce()
         os._exit(0)
 
     threading.Thread(target=_stop, daemon=True).start()

@@ -9,6 +9,7 @@ Agent/event streaming can be layered on the same pattern in later milestones.
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -26,6 +27,12 @@ _INTERVAL_SECONDS = 2.0
 
 @router.websocket("/ws/quotes")
 async def quotes_ws(websocket: WebSocket) -> None:
+    # Only the app's own page. A WebSocket is not covered by the browser's same-origin rules or by
+    # the X-Desk header check, so any website open in a browser on this PC could connect.
+    origin = websocket.headers.get("origin")
+    if origin and urlsplit(origin).hostname not in ("127.0.0.1", "localhost"):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     symbol = websocket.query_params.get("symbol", "AAPL")
     asset_class_raw = websocket.query_params.get("asset_class", "stock")
@@ -36,7 +43,10 @@ async def quotes_ws(websocket: WebSocket) -> None:
 
     with session_scope() as session:
         broker_map = get_or_create_settings(session).broker_map
-    broker = get_broker_for(asset_class, broker_map)
+    # Off the event loop: building the MT5 adapter and every terminal call can block for seconds (a
+    # waking terminal, the shared MT5 lock held by an order). Called inline they froze EVERY request
+    # the server was handling, the UI and the order routes included (full review 2026-10-20, API-12).
+    broker = await asyncio.to_thread(get_broker_for, asset_class, broker_map)
 
     try:
         while True:
@@ -45,7 +55,7 @@ async def quotes_ws(websocket: WebSocket) -> None:
             # send raises WebSocketDisconnect and unwinds to the clean handler below (no double-send,
             # which was the "Cannot call send once a close message has been sent" RuntimeError).
             try:
-                quote = broker.get_quote(symbol)
+                quote = await asyncio.to_thread(broker.get_quote, symbol)
                 payload = {"type": "quote", "symbol": quote.symbol,
                            "price": quote.price, "ts": quote.ts.isoformat()}
             except Exception as exc:  # noqa: BLE001 - transient broker/data error; keep streaming

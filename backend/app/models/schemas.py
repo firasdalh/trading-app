@@ -72,6 +72,9 @@ class FundamentalRead(BaseModel):
     stand_aside_windows: list[EventWindow] = Field(default_factory=list)
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     notes: str = ""
+    # The economic calendar could not be read, so the blackout windows are UNKNOWN (not "none").
+    # Set from the provider, never from a model; it makes every opener stand aside.
+    calendar_unavailable: bool = False
 
 
 class TimeframeRead(BaseModel):

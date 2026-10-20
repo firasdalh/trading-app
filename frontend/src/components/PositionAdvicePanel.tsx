@@ -72,6 +72,8 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
     setBusy(true);
     try {
       setState(await api.advisorConfig({ enabled: !enabled }));
+    } catch (e) {
+      window.alert(`Advisor on/off was NOT saved: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -105,6 +107,8 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
     setBusy(true);
     try {
       setState(await api.advisorConfig({ auto_execute: !autoExecute }));
+    } catch (e) {
+      window.alert(`Advisor auto-execute was NOT saved: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -115,6 +119,8 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
     setBusy(true);
     try {
       setState(await api.advisorConfig({ interval_seconds: secs }));
+    } catch (e) {
+      window.alert(`Advisor interval was NOT saved: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -125,6 +131,8 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
     setBusy(true);
     try {
       setState(await api.advisorConfig({ max_hold_hours: h }));
+    } catch (e) {
+      window.alert(`Max hold time was NOT saved: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }

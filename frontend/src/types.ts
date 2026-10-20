@@ -440,6 +440,8 @@ export interface MarketEvent {
   actual: number | null;
 }
 export interface MarketEvents {
+  /** True when the calendar could not be read: no events listed means UNKNOWN, not none. */
+  unavailable?: boolean;
   symbol: string;
   events: MarketEvent[];
   error?: string;
@@ -655,6 +657,10 @@ export interface Mt5Status {
   // connection is fine, and then every automated order is refused.
   algo_trading?: boolean;
   algo_trading_reason?: string | null;
+  /** The account the terminal is on right now, and why it may not be traded (null = fine). */
+  account_login?: number | null;
+  account_server?: string | null;
+  account_block?: string | null;
 }
 
 export interface ReflectionReport {

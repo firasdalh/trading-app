@@ -157,6 +157,70 @@ class Mt5BrokerAdapter(BrokerAdapter):
         self._login = getattr(info, "login", None)
         log.info("MT5 connected", extra={"login": self._login,
                                          "server": getattr(info, "server", None), "paper": self._paper})
+        try:
+            self._bind_account(info)
+        except Exception as exc:  # noqa: BLE001 - never let bookkeeping stop the connection
+            log.warning("MT5 account bookkeeping failed", extra={"error": str(exc)})
+
+    def _bind_account(self, info) -> None:
+        """Remember which account the app trades, across restarts, and handle a change of account.
+
+        The open app trades, today's loss baseline and the journal all belong to ONE account. A
+        different login used to be adopted silently: the old account's open rows went missing from
+        the book and were phantom-closed, and today's daily-loss limit stayed computed from the
+        demo's equity (full review 2026-10-20, API-3; real-money audit 2026-10-21).
+          - same account (or the first one seen): just remembered;
+          - a new account while app trades of the old one are still OPEN: refused - every order,
+            close and stop change says why, until the terminal is back on the old account or those
+            trades are closed;
+          - a new account with nothing open: adopted, and today's loss baseline restarts from ITS
+            equity (an audit row records the switch).
+        """
+        from sqlalchemy import func, or_, select
+
+        from app.core import database as _db
+        from app.core.state import get_or_create_daily_state
+        from app.models.db import AgentRun, AppSettings, Position
+
+        login = getattr(info, "login", None)
+        if login is None:
+            return
+        with _db.SessionLocal() as s:
+            st = s.get(AppSettings, 1)
+            if st is None:
+                return
+            prev = st.mt5_account_login
+            if prev is None or prev == login:
+                if prev is None:
+                    st.mt5_account_login = login
+                    s.commit()
+                return
+            open_n = s.scalar(select(func.count()).select_from(Position).where(
+                Position.status == "open", or_(Position.broker == "mt5", Position.broker.is_(None)))) or 0
+            if open_n:
+                self._login = prev
+                self._bind_block = (
+                    f"the MT5 terminal is on account #{login}, but {open_n} open app trade(s) belong to "
+                    f"account #{prev}. Put the terminal back on #{prev} and close them (or let them "
+                    "finish) before switching accounts")
+                s.add(AgentRun(agent="broker", event="account_switch_blocked", level="ERROR",
+                               detail={"from": prev, "to": login, "open_trades": open_n}))
+                s.commit()
+                log.error("MT5 account switch refused: open trades on the old account",
+                          extra={"from": prev, "to": login, "open": open_n})
+                return
+            st.mt5_account_login = login
+            daily = get_or_create_daily_state(s)
+            old_base = daily.starting_equity
+            daily.starting_equity = float(getattr(info, "equity", 0.0) or 0.0) or None
+            s.add(AgentRun(agent="broker", event="account_switched", level="WARNING",
+                           detail={"from": prev, "to": login, "paper": self._paper,
+                                   "server": getattr(info, "server", None),
+                                   "daily_baseline_before": old_base,
+                                   "daily_baseline_now": daily.starting_equity}))
+            s.commit()
+            log.warning("MT5 account switched; today's loss baseline re-based",
+                        extra={"from": prev, "to": login, "equity": daily.starting_equity})
 
     @property
     def is_paper(self) -> bool:
@@ -193,9 +257,14 @@ class Mt5BrokerAdapter(BrokerAdapter):
         login = getattr(info, "login", None)
         start = getattr(self, "_login", None)
         if start is not None and login is not None and login != start:
-            return (f"the MT5 terminal is now on account #{login}, not #{start} that the app connected "
-                    "to - restart the app before trading")
+            return getattr(self, "_bind_block", None) or (
+                f"the MT5 terminal is now on account #{login}, not #{start} that the app connected to - "
+                "reconnect in Settings > MT5 (or restart the app) before trading")
         return None
+
+    def account_block(self) -> str | None:
+        """Why this account may not be traded right now (None = fine). For the status display."""
+        return self._account_switched()
 
     # ---- helpers ----
 
@@ -293,6 +362,13 @@ class Mt5BrokerAdapter(BrokerAdapter):
         (IPC down, terminal waking from sleep) and an empty tuple when nothing is open — treating
         None as "nothing open" once made the monitor mark every open trade CLOSED (19 phantom
         closes) and let the openers see free room. An unknown book must never look empty."""
+        # Every reader AND every close / partial / stop change goes through here, so this one check
+        # keeps all of them off an account the app did not connect to: after a switch in the
+        # terminal, closing "the UK100 long" by symbol could close a REAL ticket for a demo row, and
+        # the reconciler would phantom-close the old account's rows (real-money audit 2026-10-21).
+        switched = self._account_switched() if getattr(self, "_login", None) is not None else None
+        if switched:
+            raise BrokerError(switched)
         positions = self._mt5.positions_get(**kwargs)
         if positions is None:
             raise BrokerError(f"MT5 positions_get failed: {self._last_error()}")

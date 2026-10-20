@@ -129,7 +129,7 @@ def market_events(
         events = get_calendar_provider().get_events(
             symbol, lookahead_hours=hours, include_medium=True, asset_class=asset_class.value)
     except Exception as exc:  # noqa: BLE001 — the calendar is advisory; never break the chart over it
-        return {"symbol": symbol, "events": [], "error": str(exc)}
+        return {"symbol": symbol, "events": [], "error": str(exc), "unavailable": True}
 
     out = []
     for e in events:
@@ -144,7 +144,8 @@ def market_events(
             "forecast": e.forecast, "previous": e.previous, "actual": e.actual,
         })
     out.sort(key=lambda x: x["minutes_away"])
-    return {"symbol": symbol, "events": out}
+    return {"symbol": symbol, "events": out,
+            "unavailable": get_calendar_provider().unavailable(symbol, asset_class.value)}
 
 
 @router.get("/market/keylevels")

@@ -31,8 +31,10 @@ export function ConditionalsPanel({ onSelect }: {
     try {
       await api.cancelConditional(id);
       setBump((b) => b + 1);
-    } catch {
-      /* ignore — the next poll reflects the true state */
+    } catch (e) {
+      // NOT ignored: a cancel that failed leaves the setup ARMED - it can still fire.
+      window.alert(`Cancel (the setup is still ARMED) was NOT saved: ${e instanceof Error ? e.message : String(e)}`);
+      setBump((b) => b + 1);
     }
   };
 

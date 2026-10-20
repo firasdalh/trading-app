@@ -299,9 +299,28 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
             type="text"
             value={phrase}
             onChange={(e) => setPhrase(e.target.value)}
-            placeholder="Required to enable live trading"
+            placeholder="Type: I understand this trades real money"
             className="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm"
           />
+          {/* There was no way to switch to LIVE from the app: every order on a real account was
+              refused with nowhere to fix it (real-money audit 2026-10-21). The typed phrase, a
+              confirm naming the consequences, and a re-confirm after every restart. */}
+          {!isLive && (
+            <button
+              disabled={busy || !phrase.trim()}
+              onClick={() => {
+                if (!window.confirm(
+                  "Enable LIVE trading?\n\n" +
+                  "Orders will go to a REAL-money account when the MT5 terminal is on one. Everything that " +
+                  "is switched on (Hybrid, RSI-Over, auto-trade, armed setups, advisor auto-execute) will " +
+                  "then trade real money.\n\nYou must confirm again after every app restart.")) return;
+                void run(() => api.setBrokerEnv("live", phrase), "LIVE trading enabled for this session.");
+              }}
+              className="btn bg-bear text-white hover:bg-red-700"
+            >
+              Enable LIVE trading (real money)
+            </button>
+          )}
           {isLive && reconfirm && (
             <button
               disabled={busy || !phrase.trim()}
