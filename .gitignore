@@ -43,3 +43,7 @@ logs/
 
 # Rotated desktop log (desktop.py keeps one previous file). *.log alone misses the .1 suffix.
 *.log.1
+
+# SQLite WAL side files (journal_mode=WAL since 2026-10-21)
+*.sqlite3-wal
+*.sqlite3-shm
