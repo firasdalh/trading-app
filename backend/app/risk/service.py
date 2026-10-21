@@ -197,9 +197,12 @@ def evaluate_daily_pause(session: Session) -> bool:
         return False
 
     daily = get_or_create_daily_state(session)
-    if daily.starting_equity is None:
+    # A baseline of 0 is no baseline: read from an account before its deposit landed, it switched the
+    # daily-loss pause off for the whole day (seen on the real account 2026-10-21). Re-read until the
+    # account shows real equity.
+    if not daily.starting_equity or daily.starting_equity <= 0:
         eq = current_equity(session)
-        if eq is not None:
+        if eq is not None and eq > 0:
             daily.starting_equity = eq
             session.add(daily)
             session.commit()
@@ -465,9 +468,9 @@ def build_account_state(session: Session, broker: BrokerAdapter,
     total_risk = sum((p.risk_amount or 0.0) for p in open_positions)
     total_risk += _untracked_broker_risk(session, broker, open_positions, acct.equity, cache)
 
-    daily = get_or_create_daily_state(session, starting_equity=acct.equity)
-    if daily.starting_equity is None:
-        daily.starting_equity = acct.equity
+    daily = get_or_create_daily_state(session, starting_equity=acct.equity if acct.equity > 0 else None)
+    if (not daily.starting_equity or daily.starting_equity <= 0) and acct.equity > 0:
+        daily.starting_equity = acct.equity      # never a 0 baseline (see evaluate_daily_pause)
         session.commit()
 
     # The daily-loss pause only COUNTS while the breaker is armed. With it OFF (demo/testing) a pause

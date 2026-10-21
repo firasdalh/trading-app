@@ -317,11 +317,20 @@ def arm_conditional(
     confidence: float, rr: float | None, rationale: str = "", source: str = "manual",
     auto_execute: bool = False, valid_hours: int = _DEFAULT_VALID_HOURS,
     require_close_confirm: bool = True, break_level: float | None = None,
+    why_not: list[str] | None = None,
 ) -> ConditionalSetup | None:
     """Arm a conditional setup. Returns None if it has NO STOP-LOSS, a duplicate is already armed,
     the symbol is already open at the broker (never stack a pending on a live position), or the
     broker won't let us OPEN this symbol/direction (a disabled / close-only instrument would just
-    get stuck re-arming and being vetoed at the trigger)."""
+    get stuck re-arming and being vetoed at the trigger).
+
+    ``why_not``: pass a list to receive the refusal reason. Every refusal used to reach the user as
+    "already armed ... or the symbol is already open" - including a symbol the broker has DISABLED
+    (IN50m on Exness, 2026-10-21), where neither was true."""
+    def refuse(reason: str) -> None:
+        if why_not is not None:
+            why_not.append(reason)
+
     # A stopless arm is a ZOMBIE: position size is derived from the stop distance, so the Risk
     # Manager's first gate vetoes it ("proposal missing entry/stop or not actionable") every single
     # time it triggers. It then re-arms, triggers, is vetoed again... until it expires, all while
@@ -331,13 +340,16 @@ def arm_conditional(
     if stop_loss is None:
         log.info("arm refused — no stop-loss (would be vetoed at every trigger)",
                  extra={"symbol": symbol, "order_type": order_type, "source": source})
+        refuse("this setup has no stop-loss - position size is derived from the stop")
         return None
     norm = _norm_symbol(symbol)
     for e in active_armed(session):
         if _norm_symbol(e.symbol) == norm and e.direction == direction:
+            refuse(f"a {direction} setup is already armed on {symbol} (#{e.id}) - cancel or edit that one")
             return None
     try:
         if any(_norm_symbol(p.symbol) == norm for p in live_broker_positions(session)):
+            refuse(f"{symbol} already has an open position - an arm is never stacked on a live trade")
             return None
     except Exception:  # noqa: BLE001 - if we can't read the book, still allow arming (no open)
         pass
@@ -350,6 +362,7 @@ def arm_conditional(
         ok_open, why = get_broker_for(AssetClass(asset_class), bm).can_open(symbol, direction)
         if not ok_open:
             log.info("arm refused — not tradeable", extra={"symbol": symbol, "reason": why})
+            refuse(f"the broker won't open {symbol} {direction}: {why}")
             return None
     except Exception:  # noqa: BLE001 - a tradeability lookup failure shouldn't block arming
         pass

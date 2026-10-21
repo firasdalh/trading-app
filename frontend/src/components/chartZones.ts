@@ -86,6 +86,7 @@ const usd = (v: number) => fmtUsd(v, { sign: true }).replace("-", "−");
 const rTxt = (r: number) => `${r >= 0 ? "" : "−"}${Math.abs(r).toFixed(Math.abs(r) >= 10 ? 0 : 1)}R`;
 
 type Label = { text: string; x: number; y: number; w: number; fg: string; bg: string; border?: string };
+type Rect = { x: number; y: number; w: number; h: number };
 type Box = {
   z: TradeZone;
   xL: number;            // where the (faded) lead-in starts; == x0 when the box is wide enough
@@ -140,6 +141,34 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
   }
 
   // --- geometry (media pixels) ------------------------------------------------------------------
+  /** Every visible candle as a rectangle (its bar width x its high-low), so tags can keep off them. */
+  private candleRects(paneW: number): Rect[] {
+    const chart = this.chart;
+    const series = this.series;
+    if (!chart || !series) return [];
+    const ts = chart.timeScale();
+    const range = ts.getVisibleLogicalRange();
+    if (!range) return [];
+    const data = series.data() as readonly { high?: number; low?: number; value?: number }[];
+    const half = Math.max(2, ts.options().barSpacing / 2);
+    const out: Rect[] = [];
+    for (let i = Math.max(0, Math.floor(range.from)); i <= Math.min(data.length - 1, Math.ceil(range.to)); i++) {
+      const d = data[i];
+      const hi = d.high ?? d.value;
+      const lo = d.low ?? d.value;
+      if (hi == null || lo == null) continue;
+      const x = ts.logicalToCoordinate(i as Logical);
+      const yh = series.priceToCoordinate(hi);
+      const yl = series.priceToCoordinate(lo);
+      if (x == null || yh == null || yl == null) continue;
+      const xc = Number(x);
+      if (xc + half < 0 || xc - half > paneW) continue;
+      const t = Math.min(Number(yh), Number(yl)) - 2;
+      out.push({ x: xc - half, y: t, w: half * 2, h: Math.max(Number(yh), Number(yl)) + 2 - t });
+    }
+    return out;
+  }
+
   private boxes(paneW: number): Box[] {
     const chart = this.chart;
     const series = this.series;
@@ -278,6 +307,12 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
       const live = this.src.liveBar();
       // 22px top margin keeps a label for an off-screen level clear of the OHLC legend row.
       const clampY = (yy: number) => Math.max(22, Math.min(H - LABEL_H - 2, yy));
+      // The candles are obstacles. The tags used to sit at the box's LEFT edge - on a young trade that
+      // is exactly where the newest candles are, so TP / LONG / SL covered the price action you were
+      // watching (2026-10-21). They now start in the empty space right of the newest candle and, if a
+      // candle is still in the way, slide along their row past it.
+      const candles = this.candleRects(W);
+      const lastRight = candles.reduce((m, c) => Math.max(m, c.x + c.w), -Infinity);
 
       // Each zone first works out where its own labels WANT to be; they are then placed for all zones
       // together. Two trades on one pair (a scale-in, a re-entry) stack their boxes, and their tags —
@@ -303,7 +338,11 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
         const atLevel = (lv: number) => (z.usdPerPrice != null ? usd((lv - z.entry) * z.usdPerPrice) : null);
         // At the LEFT end of the band: the chart already prints each line's title ("SL −$57 · drag")
         // against the price axis on the right, and a label there would sit on top of it.
-        const xAt = (w: number) => Math.max(2, Math.min(b.xL + 6, W - w - 4));
+        const xAt = (w: number) => {
+          const afterCandles = lastRight + 10;
+          if (Number.isFinite(lastRight) && afterCandles + w <= W - RIGHT_RESERVE) return Math.max(afterCandles, b.xL + 6);
+          return Math.max(2, Math.min(b.xL + 6, W - w - 4));
+        };
 
         // Entry tag, centred on the entry line: what the trade is and how it is doing right now.
         const parts: string[] = [];
@@ -387,10 +426,16 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
       const overlaps = (a: Label, o: Label) =>
         a.x < o.x + o.w + LABEL_GAP && a.x + a.w + LABEL_GAP > o.x
         && a.y < o.y + LABEL_H + 1 && a.y + LABEL_H + 1 > o.y;
+      const onCandle = (a: Label) =>
+        candles.find((r) => a.x < r.x + r.w && a.x + a.w > r.x && a.y < r.y + r.h && a.y + LABEL_H > r.y);
+      const blocker = (a: Label): Rect | null => {
+        const p = placed.find((q) => overlaps(a, q));
+        return p ? { x: p.x, y: p.y, w: p.w, h: LABEL_H } : onCandle(a) ?? null;
+      };
       const slide = (l: Label, dir: 1 | -1): Label | null => {
         let c = l;
-        for (let i = 0; i < 12; i++) {
-          const hit = placed.find((p) => overlaps(c, p));
+        for (let i = 0; i < 400; i++) {
+          const hit = blocker(c);
           if (!hit) return c;
           const x = dir > 0 ? hit.x + hit.w + LABEL_GAP : hit.x - c.w - LABEL_GAP;
           if (dir > 0 ? x > W - RIGHT_RESERVE - c.w : x < 2) return null;
@@ -403,7 +448,7 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
         for (const k of [1, -1, 2, -2, 3, -3]) {
           if (c) break;
           const row = { ...l, y: clampY(l.y + k * (LABEL_H + 3)) };
-          if (!placed.some((p) => overlaps(row, p))) c = row;
+          if (!blocker(row)) c = row;
         }
         c ??= l;   // nowhere free: draw it where it belongs rather than drop it
         placed.push(c);

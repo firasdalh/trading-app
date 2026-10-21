@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useAlertWatcher } from "./hooks/priceAlerts";
 import { api } from "./api/client";
 import { Header } from "./components/Header";
 import { Dashboard } from "./components/Dashboard";
@@ -76,6 +77,8 @@ export default function App() {
   // Whether the Hybrid auto-pilot is running — it opens trades on its own, so the nav says so even
   // while its controls are tucked away in the Scanner drawer.
   const { data: hybrid } = usePolling(() => api.hybridState(), 30000, [bump]);
+  // Price alerts are checked HERE, once, so they fire whichever view is open (not only the desk).
+  useAlertWatcher();
   // EVERYTHING that can act without a click, in one place. Only the Hybrid had a live dot; RSI-Over
   // auto-watch, the per-pair auto-trader, the advisor's auto-execute and armed setups were each
   // buried in their own panel (full review 2026-10-20).

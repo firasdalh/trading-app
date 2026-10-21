@@ -1,4 +1,7 @@
-"""Watchlist MONITOR - every watched pair's direction, momentum and zones on 1h / 4h / 1d at a glance.
+"""Watchlist MONITOR - every watched pair's direction, momentum and zones on 15m / 1h / 4h / 1d at a glance.
+
+The 15m is the ENTRY-timing column: it is shown and described, but the bias (aligned / dip / counter)
+is still read from 1h / 4h / 1d only, so a 15-minute wiggle never relabels a pair's trend.
 
 A manual trader scanning twenty charts asks the same four questions of each one: which way is it
 going on the timeframes that matter, how hard, is momentum stretched, and is price sitting on a zone
@@ -33,13 +36,17 @@ from app.models.schemas import OHLCVSeries
 
 log = get_logger("agents.market_monitor")
 
-MONITOR_TFS = ("1h", "4h", "1d")
+MONITOR_TFS = ("15m", "1h", "4h", "1d")
+BIAS_TFS = ("1h", "4h", "1d")        # the timeframes the bias label is read from
 _FETCH_BARS = 500        # what the chart's order-block overlay reads - same zones as the chart
+# The 15m volume baseline compares a bar with the SAME 15-minute slot in ~20 earlier sessions, which
+# needs ~20 days of 15m bars. Zones still use only the last _FETCH_BARS (what the chart draws).
+_FETCH_BARS_TF = {"15m": 2000}
 _ENGINE_BARS = 200       # what the pipeline feeds the engine - same indicator values as the engine
 _MIN_BARS = 60
 # A bar on the slow timeframes barely moves in a minute; refetching them that often only loads the
 # shared MT5 connection. The 1h carries the live price, so it stays fresh.
-_TTL = {"1h": 45.0, "4h": 120.0, "1d": 300.0}
+_TTL = {"15m": 30.0, "1h": 45.0, "4h": 120.0, "1d": 300.0}
 # Price this close to a zone edge (in ATRs of that timeframe) counts as "at" the zone.
 NEAR_ZONE_ATR = 0.5
 RSI_HIGH, RSI_LOW = 70.0, 30.0
@@ -103,7 +110,7 @@ VOL_SPIKE = 2.0
 VOL_SIDE_LO, VOL_SIDE_HI = 0.40, 0.60  # share of recent volume on up-close bars
 
 
-_TF_SECONDS = {"1h": 3600, "4h": 4 * 3600, "1d": 86400}
+_TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 4 * 3600, "1d": 86400}
 _SAME_HOUR_MIN = 8          # same-hour samples needed before an intraday ratio means anything
 
 
@@ -146,12 +153,15 @@ def _volume_read(candles, timeframe: str = "1h", now: datetime | None = None) ->
     if len(done) < 25:
         return None
     vols = [float(c.volume or 0.0) for c in done]
-    intraday = timeframe in ("1h", "4h")
+    intraday = timeframe in ("15m", "1h", "4h")
 
     def baseline(i: int) -> float | None:
         if intraday:
-            hour = done[i].ts.hour
-            same = [vols[j] for j in range(i - 1, -1, -1) if done[j].ts.hour == hour][:20]
+            # Same clock SLOT (hour and minute): on 1h/4h the minute is always :00, so this is the
+            # same-hour baseline; on 15m it keeps 14:30 from being judged against 14:00 (the US open).
+            slot = (done[i].ts.hour, done[i].ts.minute)
+            same = [vols[j] for j in range(i - 1, -1, -1)
+                    if (done[j].ts.hour, done[j].ts.minute) == slot][:20]
             if len(same) < _SAME_HOUR_MIN:
                 return None
         else:
@@ -183,7 +193,7 @@ def _volume_read(candles, timeframe: str = "1h", now: datetime | None = None) ->
         "level": "high" if ratio >= VOL_HIGH else "low" if ratio <= VOL_LOW else "normal",
         "trend": trend,
         "up_share": round(upv / (upv + dnv), 2) if (upv + dnv) > 0 else None,
-        "baseline": "same hour" if intraday else "20 sessions",
+        "baseline": ("same 15-min slot" if timeframe == "15m" else "same hour") if intraday else "20 sessions",
     }
 
 
@@ -287,7 +297,8 @@ def read_timeframe(series: OHLCVSeries) -> dict | None:
         "volume": _volume_read(session_days(candles) if daily else candles, series.timeframe),
         # Zone distances are display-only, so the daily ones use the session-day ATR - the same unit
         # as "% of day used" on the same row (the raw daily ATR is 14-23% smaller, deflated by stubs).
-        "zones": _zone_read(candles, candles[-1].close, (atr(session_days(eng)) or atr_v) if daily else atr_v),
+        "zones": _zone_read(candles[-_FETCH_BARS:], candles[-1].close,
+                            (atr(session_days(eng)) or atr_v) if daily else atr_v),
     }
 
 
@@ -350,6 +361,15 @@ def notes_for(row: dict) -> list[dict]:
         out.append({"tone": "info", "text": text})
     elif bias.startswith("counter_"):
         out.append({"tone": "caution", "text": f"1H + 4H point {side} but the 1D points the other way"})
+
+    # The 15m, for timing only: is the short-term move with the higher timeframes right now?
+    m15 = (tfs.get("15m") or {}).get("trend")
+    if side and m15 in ("up", "down"):
+        if bias.startswith("aligned_") and m15 == opp:
+            out.append({"tone": "info", "text": f"15M is moving {opp} against the aligned {side} trend - "
+                        "a short-term pullback for now"})
+        elif bias.startswith("pullback_") and m15 == side:
+            out.append({"tone": "info", "text": f"15M has turned back {side}, with the 4H + 1D"})
 
     # Zones. An OPPOSING zone (price inside one, or one just ahead) is the warning that matters, so it
     # is searched on every timeframe before an in-line zone is allowed to be the only zone note.
@@ -450,7 +470,7 @@ def notes_for(row: dict) -> list[dict]:
     if ru is not None and ru >= 1.0 and row.get("market_open") is not False:
         out.append({"tone": "info", "text": f"Today has already covered {ru * 100:.0f}% of a normal day's range"})
 
-    reads = [tfs.get(tf) for tf in MONITOR_TFS if tfs.get(tf)]
+    reads = [tfs.get(tf) for tf in BIAS_TFS if tfs.get(tf)]
     if reads and all(t.get("strength") == "weak" for t in reads):
         out.append({"tone": "info", "text": "No trend strength on any timeframe (ADX under 20) - choppy"})
     return out
@@ -481,7 +501,7 @@ def read_pair(broker, symbol: str, asset_class: str) -> dict:
     series: dict[str, OHLCVSeries] = {}
     for tf in MONITOR_TFS:
         try:
-            series[tf] = get_ohlcv_cached(broker, symbol, tf, _FETCH_BARS, ttl=_TTL[tf])
+            series[tf] = get_ohlcv_cached(broker, symbol, tf, _FETCH_BARS_TF.get(tf, _FETCH_BARS), ttl=_TTL[tf])
             row["tfs"][tf] = _read_cached(symbol, tf, series[tf])
             if row["tfs"][tf] is None:
                 row["errors"].append(f"{tf}: not enough history ({len(series[tf].candles)} bars)")

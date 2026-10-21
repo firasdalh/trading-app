@@ -219,3 +219,26 @@ def test_entry_filters_panel_does_not_offer_unproven_features(db_session):
 
     keys = {f.key for f in get_det_filters(db_session).filters}
     assert "ob_wall" not in keys and "ob_target" not in keys
+
+
+def test_the_forming_bar_alone_does_not_break_a_zone():
+    """The last bar is still forming - its close is only the latest tick. A zone must not vanish when
+    price pokes through intrabar (UK100 1h demand, 2026-10-21); a FINISHED bar's close breaks it."""
+    cs = bullish_setup()
+    ob = [o for o in find_order_blocks(cs) if o.kind == "bullish"][0]
+    n = len(cs)
+    below = ob.bottom - 2.0
+    cs.append(C(n, below, below + 0.1, below - 0.1, below))          # forming, below the zone
+    assert [o for o in find_order_blocks(cs) if o.origin_index == ob.origin_index]
+    cs.append(C(n + 1, below, below + 0.1, below - 0.1, below))      # the first one has now closed
+    assert not [o for o in find_order_blocks(cs) if o.origin_index == ob.origin_index]
+
+
+def test_the_forming_bar_alone_does_not_create_a_zone():
+    """A zone born from the still-forming bar's tick flickered on and off the chart (UK100 1h
+    "Supply 58", 2026-10-21): the break that creates a zone must be a finished bar."""
+    cs = bullish_setup()
+    ob = [o for o in find_order_blocks(cs) if o.kind == "bullish"][0]
+    b = ob.confirmed_index
+    assert not [o for o in find_order_blocks(cs[:b + 1]) if o.origin_index == ob.origin_index]
+    assert [o for o in find_order_blocks(cs[:b + 2]) if o.origin_index == ob.origin_index]

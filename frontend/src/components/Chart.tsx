@@ -20,6 +20,7 @@ import { api } from "../api/client";
 import { ScenarioCard } from "./ScenarioCard";
 import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
 import { OrderBlockPrimitive, type ObZone } from "./orderBlockZones";
+import { PICK_EVENT, addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
 import { fmtPrice, fmtUsd } from "../format";
 import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
@@ -1033,6 +1034,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const posLinesRef = useRef<IPriceLine[]>([]);
   const armedLinesRef = useRef<IPriceLine[]>([]);
+  const alertLinesRef = useRef<IPriceLine[]>([]);
+  const priceAlerts = usePriceAlerts();
   const scenLinesRef = useRef<IPriceLine[]>([]);   // the AI scenario's cited S/R, plotted on request
   // Drag-to-adjust price lines (position SL/TP + armed trigger/SL/TP). The overlay effects register
   // a DragHandle per draggable line; the (once-attached) mouse handlers read them from refs so they
@@ -1059,7 +1062,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   // Hand drawing: the saved set, the stroke in progress, and the canvas it's painted on.
   const [drawings, saveDrawings] = useDrawings(symbol);
-  const [drawMode, setDrawMode] = useState<"off" | "f" | "t" | "h" | "arm" | "trade">("off");
+  const [drawMode, setDrawMode] = useState<"off" | "f" | "t" | "h" | "arm" | "trade" | "alert">("off");
   // Quick market trade. The clicked price is the STOP, not the entry — the entry is wherever the
   // market is when you press the button, and the stop is the only number you actually get to choose.
   // It is also the number the Risk Manager sizes from, so choosing it IS choosing your risk.
@@ -2306,6 +2309,30 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
   }, [armed, symbol]);
 
+  // Price alerts on THIS pair, as lines that stay until price reaches them (then the watcher in App
+  // fires and removes them, and so the line). Drag one to move it.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    if (dragRef.current) return;  // mid-drag: don't rebuild under the pointer
+    alertLinesRef.current.forEach((l) => series.removePriceLine(l));
+    alertLinesRef.current = [];
+    handlesRef.current = handlesRef.current.filter((h) => !h.key.startsWith("alert-"));
+    for (const a of priceAlerts) {
+      if (a.symbol.toUpperCase() !== symbol.toUpperCase()) continue;
+      const line = series.createPriceLine({
+        price: a.price, color: "#facc15", lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true,
+        title: `🔔 ${a.side === "above" ? "↑" : "↓"} alert · drag`,
+      });
+      alertLinesRef.current.push(line);
+      handlesRef.current.push({
+        key: `alert-${a.id}`, label: "Alert", refPos: null, line, price: a.price,
+        validate: (x) => x > 0, why: "an alert needs a positive price",
+        commit: (x) => moveAlert(a.id, x, lastBarRef.current?.close ?? null),
+      });
+    }
+  }, [priceAlerts, symbol]);
+
   // Load the map in the background on every pair/timeframe change. It is fully deterministic —
   // no LLM, no tokens — and the server caches the candles it needs for 12s, so this costs a couple
   // of local MT5 reads and makes the rejection chip present without being asked for.
@@ -2863,6 +2890,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     return () => window.clearTimeout(t);
   }, [dragErr]);
 
+  // The sidebar's "Pick on chart": switch to the alert tool, so the next click on the chart sets it.
+  useEffect(() => {
+    const onPick = () => {
+      draftRef.current = null;
+      dirtyRef.current += 1;
+      setDrawMode("alert");
+    };
+    window.addEventListener(PICK_EVENT, onPick);
+    return () => window.removeEventListener(PICK_EVENT, onPick);
+  }, []);
+
   // Esc drops the tool and any half-drawn stroke.
   useEffect(() => {
     if (drawMode === "off") return;
@@ -2999,6 +3037,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       setTradeErr(null);
       setTradePrev(null);
       setTradeDraft({ stop, dir: stop < mkt ? "long" : "short", y: at.y });
+      setDrawMode("off");
+      return;
+    }
+    if (drawMode === "alert") {
+      // A price alert: a line that stays on the chart until price reaches it, then the chime and a
+      // notification, and the line goes. It never places an order.
+      const dec = inferDecimals(candlesRef.current);
+      const mkt = liveQuote?.price ?? lastBarRef.current?.close
+        ?? candlesRef.current[candlesRef.current.length - 1]?.close ?? null;
+      void addAlert(symbol, assetClass, Number(at.p.toFixed(dec)), mkt)
+        .catch((err) => setDragErr(`Alert not set: ${err instanceof Error ? err.message : String(err)}`));
       setDrawMode("off");
       return;
     }
@@ -3509,6 +3558,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
             ["f", "🖊 Pen", "Free hand — press and drag to draw any shape, exactly like a pen on paper."],
             ["t", "╱ Trend", "Trend line — press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
             ["h", "─ Level", "Level — one click puts a horizontal line across the whole chart, with its price on the axis."],
+            ["alert", "🔔 Alert", "Price alert — click a price to set an alert line. It stays on the chart until price reaches it, then you get the chime and a desktop notification and the line goes. It never places an order. Drag the line to move it; remove it from Price alerts in the sidebar."],
             ["arm", "⚡ Arm", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
             ["trade", "▶ Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance and the risk you pick on the ticket (never above your per-trade cap)."],
           ] as const).map(([mode, label, tip]) => (
@@ -3993,6 +4043,8 @@ Click for the full breakdown. Info only — it gates nothing.`}
                 ? "Click where your STOP goes — it opens at market from there"
                 : drawMode === "arm"
                   ? "Click the price to arm — the trade opens on a candle CLOSE beyond it"
+                : drawMode === "alert"
+                  ? "Click the price for your alert — you are told when price reaches it (no order)"
                 : drawMode === "f"
                   ? "Press and drag to draw"
                   : "Press at the start, drag to the end, release"}

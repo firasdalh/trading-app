@@ -60,6 +60,10 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
 
   const currentMode = settings?.app.execution_mode;
   const isLive = settings?.app.broker_env === "live";
+  // The server checks this exact phrase. Checked here as you type too: a typo ("trad") used to be
+  // refused with the error printed at the TOP of this scrolled window, out of sight (2026-10-21).
+  const LIVE_PHRASE = "I understand this trades real money";
+  const phraseOk = phrase.trim() === LIVE_PHRASE;
   const reconfirm = settings?.live_re_confirm_required;
 
   const run = async (fn: () => Promise<unknown>, ok: string) => {
@@ -305,9 +309,14 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
           {/* There was no way to switch to LIVE from the app: every order on a real account was
               refused with nowhere to fix it (real-money audit 2026-10-21). The typed phrase, a
               confirm naming the consequences, and a re-confirm after every restart. */}
+          {phrase.trim() && !phraseOk && (
+            <div className="text-xs text-warn">
+              Not matching yet - type exactly: <span className="font-semibold">{LIVE_PHRASE}</span>
+            </div>
+          )}
           {!isLive && (
             <button
-              disabled={busy || !phrase.trim()}
+              disabled={busy || !phraseOk}
               onClick={() => {
                 if (!window.confirm(
                   "Enable LIVE trading?\n\n" +
@@ -323,13 +332,16 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
           )}
           {isLive && reconfirm && (
             <button
-              disabled={busy || !phrase.trim()}
+              disabled={busy || !phraseOk}
               onClick={() => run(() => api.liveConfirm(phrase), "Live trading re-confirmed.")}
               className="btn bg-bear text-white hover:bg-red-700"
             >
               Re-confirm live trading (required after restart)
             </button>
           )}
+          {/* The result of the LIVE buttons, right under them (the top-of-window strip is out of view). */}
+          {error && <div className="rounded border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">{error}</div>}
+          {notice && <div className="rounded border border-bull/40 bg-bull/10 px-3 py-2 text-sm text-bull">{notice}</div>}
           {isLive && (
             <button
               disabled={busy}

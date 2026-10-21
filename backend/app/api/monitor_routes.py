@@ -37,7 +37,7 @@ _NEWS_WAIT_S = 2.5
 
 def _pairs(session: Session) -> list[tuple[str, str]]:
     """Every watched (symbol, asset_class) once, in watchlist order. A pair watched on two timeframes
-    is one row here - the monitor shows all three timeframes anyway."""
+    is one row here - the monitor shows every timeframe anyway."""
     seen: set[tuple[str, str]] = set()
     out: list[tuple[str, str]] = []
     for it in session.scalars(select(WatchItem).order_by(WatchItem.id)).all():

@@ -140,10 +140,10 @@ def test_endpoint_returns_one_row_per_pair_with_all_timeframes(db_session):
     ])
     db_session.commit()
     out = monitor(refresh=False, session=db_session)
-    assert out["timeframes"] == ["1h", "4h", "1d"]
+    assert out["timeframes"] == ["15m", "1h", "4h", "1d"]
     assert [r["symbol"] for r in out["rows"]] == ["EURUSD", "GBPUSD"]
     for r in out["rows"]:
-        assert set(r["tfs"]) == {"1h", "4h", "1d"}
+        assert set(r["tfs"]) == {"15m", "1h", "4h", "1d"}
         assert r["bias"] in {"aligned_up", "aligned_down", "pullback_up", "pullback_down",
                              "counter_up", "counter_down", "mixed"}
         assert isinstance(r["notes"], list)
@@ -506,3 +506,41 @@ def test_a_weekday_holiday_stub_is_folded_like_a_weekend_one():
     assert [c.ts.day for c in s][-3:] == [21, 23, 26]       # the 22nd folded into the 23rd
     assert s[-2].volume == 1090 and s[-2].open == 100
     assert s[-1].ts.day == 26                               # today's small forming bar is never folded
+
+
+# ---- 15M entry-timing column (2026-10-21) ----
+
+def test_the_15m_never_changes_the_bias():
+    trends = {"1h": "up", "4h": "up", "1d": "up"}
+    assert bias_of({**trends, "15m": "down"}) == "aligned_up"
+    assert bias_of({**trends, "15m": "up"}) == "aligned_up"
+
+
+def test_15m_timing_notes():
+    row = _row("aligned_down", **{"15m": {"trend": "up"}, "1h": {"trend": "down"},
+                                  "4h": {"trend": "down"}, "1d": {"trend": "down"}})
+    assert any("15M is moving up against the aligned down trend" in n["text"] for n in notes_for(row))
+    dip = _row("pullback_up", **{"15m": {"trend": "up"}, "1h": {"trend": "down"},
+                                 "4h": {"trend": "up"}, "1d": {"trend": "up"}})
+    assert any("15M has turned back up" in n["text"] for n in notes_for(dip))
+    # in line with an aligned trend: nothing to say
+    calm = _row("aligned_up", **{"15m": {"trend": "up"}, "1h": {"trend": "up"},
+                                 "4h": {"trend": "up"}, "1d": {"trend": "up"}})
+    assert not any("15M" in n["text"] for n in notes_for(calm))
+
+
+def test_15m_volume_is_judged_against_the_same_15_minute_slot():
+    # Every :30 bar trades 10x the others. Against the same SLOT the last :30 bar is normal; against
+    # the same HOUR (which mixes :00/:15/:30/:45) it would read as a spike.
+    start = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    bars = []
+    for i in range(96 * 22):
+        ts = start + dt.timedelta(minutes=15 * i)
+        v = 1000.0 if ts.minute == 30 else 100.0
+        bars.append(Candle(ts=ts, open=100.0, high=100.2, low=99.8, close=100.1, volume=v))
+    while bars[-1].ts.minute != 30:
+        bars.pop()
+    now = bars[-1].ts + dt.timedelta(minutes=20)      # the :30 bar has closed
+    v = mm._volume_read(bars, "15m", now=now)
+    assert v is not None and v["ratio"] == 1.0 and v["level"] == "normal"
+    assert v["baseline"] == "same 15-min slot"

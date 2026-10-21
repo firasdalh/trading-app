@@ -555,12 +555,31 @@ def test_the_daily_review_reports_today_and_tags(db_session):
     from app.models.enums import PositionStatus
 
     now = datetime.now(timezone.utc)
+    # Today in UTC even just after midnight ("30 min ago" at 00:06 UTC was yesterday).
+    base = max(now - timedelta(minutes=30), now.replace(hour=0, minute=0, second=0, microsecond=0))
     for i, pnl in enumerate((-10.0, -10.0, 20.0)):
         db_session.add(Position(symbol="EURUSDm", asset_class="forex", direction="long", qty=0.1, entry_price=1.1,
                                 status=PositionStatus.CLOSED.value, realized_pnl=pnl, risk_amount=10.0,
-                                initial_risk_amount=10.0, closed_at=now - timedelta(minutes=30 - i),
+                                initial_risk_amount=10.0, closed_at=base + timedelta(seconds=i),
                                 review={"note": "x", "tags": ["plan"]}))
     db_session.commit()
     out = daily_review(db_session)
     assert len(out["trades"]) == 3 and out["total_r"] == 0.0 and out["longest_losing_run"] == 2
     assert out["by_tag"] == [] and out["tags_below_10"] == ["plan"]
+
+
+def test_a_zero_equity_read_never_becomes_the_daily_baseline(db_session, monkeypatch):
+    """A real account read before its deposit landed (equity 0) used to fix today's baseline at 0,
+    which switched the daily-loss pause off for the day (2026-10-21)."""
+    import app.risk.service as svc
+    from app.core.state import get_or_create_daily_state
+
+    daily = get_or_create_daily_state(db_session)
+    daily.starting_equity = 0.0
+    db_session.commit()
+    monkeypatch.setattr(svc, "current_equity", lambda session: 0.0)
+    svc.evaluate_daily_pause(db_session)
+    assert not get_or_create_daily_state(db_session).starting_equity      # still unset, not 0-locked
+    monkeypatch.setattr(svc, "current_equity", lambda session: 500.0)    # the deposit lands
+    svc.evaluate_daily_pause(db_session)
+    assert get_or_create_daily_state(db_session).starting_equity == 500.0

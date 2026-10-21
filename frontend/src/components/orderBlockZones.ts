@@ -153,50 +153,111 @@ export class OrderBlockPrimitive implements ISeriesPrimitive<Time> {
     });
   }
 
+  /** Where the visible candles are, in media pixels: each one's x span and its high-low span. */
+  private candleRects(paneW: number): { l: number; r: number; t: number; b: number }[] {
+    const chart = this.chart;
+    const series = this.series;
+    if (!chart || !series) return [];
+    const ts = chart.timeScale();
+    const range = ts.getVisibleLogicalRange();
+    if (!range) return [];
+    const data = series.data() as readonly { high?: number; low?: number; value?: number }[];
+    const half = Math.max(2, ts.options().barSpacing / 2);
+    const out: { l: number; r: number; t: number; b: number }[] = [];
+    const from = Math.max(0, Math.floor(range.from));
+    const to = Math.min(data.length - 1, Math.ceil(range.to));
+    for (let i = from; i <= to; i++) {
+      const d = data[i];
+      const hi = d.high ?? d.value;
+      const lo = d.low ?? d.value;
+      if (hi == null || lo == null) continue;
+      const x = ts.logicalToCoordinate(i as never);
+      const yh = series.priceToCoordinate(hi);
+      const yl = series.priceToCoordinate(lo);
+      if (x == null || yh == null || yl == null) continue;
+      const xc = Number(x);
+      if (xc + half < 0 || xc - half > paneW) continue;
+      out.push({ l: xc - half, r: xc + half, t: Math.min(Number(yh), Number(yl)) - 2, b: Math.max(Number(yh), Number(yl)) + 2 });
+    }
+    return out;
+  }
+
   private drawLabels(target: Target) {
     // Labels sit on a dark pill with a coloured border, the same treatment as the SL/TP tags next
     // door. The first version wrote bare coloured text straight onto the chart, where it collided with
     // candles, moving averages and the engine's own "PB" markers - readable in a screenshot only if you
     // already knew what it said, which is no use on a tool meant for your eye.
+    //
+    // Placement looks for a spot CLEAR of the candles. The pill used to sit at the zone's origin
+    // edge, so a zone that began at a recent candle put its label right on top of the latest price
+    // action - the bars you most need to see (2026-10-21). It now slides along the zone, then tries
+    // just above / below it, and only falls back to the origin when the whole row is covered.
     target.useBitmapCoordinateSpace((s: Scope) => {
       const { context: g, horizontalPixelRatio: hpr, verticalPixelRatio: vpr } = s;
       const fontPx = Math.max(10, Math.round(10.5 * vpr));
-      const H = Math.round(16 * vpr);                 // pill height
-      const PAD = 6 * hpr;
       g.save();
       g.font = `600 ${fontPx}px system-ui, -apple-system, 'Segoe UI', sans-serif`;
       g.textBaseline = "middle";
+      // Geometry in MEDIA pixels; converted to bitmap only to paint.
+      const paneW = s.mediaSize.width;
+      const H = 16;
+      const PAD = 6;
+      const candles = this.candleRects(paneW);
       const placed: { x: number; y: number; w: number }[] = [];
-      for (const b of this.boxes(s.mediaSize.width)) {
+      const hitsCandle = (x: number, y: number, w: number) =>
+        candles.some((c) => x < c.r && c.l < x + w && y < c.b && c.t < y + H);
+      const hitsLabel = (x: number, y: number, w: number) =>
+        placed.some((q) => x < q.x + q.w && q.x < x + w && y < q.y + H && q.y < y + H);
+      for (const b of this.boxes(paneW)) {
         const rgb = b.z.kind === "bullish" ? CYAN : AMBER;
         const bits = [b.z.kind === "bullish" ? "Demand" : "Supply", `${b.z.strength}`];
         if (b.z.fvg) bits.push("FVG");
         if (b.z.touches > 0) bits.push(`${b.z.touches}x`);
         const text = bits.join(" · ");
-        const w = Math.round(g.measureText(text).width + PAD * 2);
-        const top = Math.round(Math.min(b.yTop, b.yBot) * vpr);
-        const bot = Math.round(Math.max(b.yTop, b.yBot) * vpr);
-        const x = Math.round(b.x0 * hpr) + Math.round(4 * hpr);
-        // Centred in the zone when it is tall enough; otherwise sitting ON its top edge. The first
-        // version skipped the label on thin zones, which on a zoomed-out chart is most of them -
-        // leaving coloured bands with nothing to say what they were.
-        let y = bot - top >= H + 2 * vpr ? Math.round((top + bot) / 2 - H / 2) : top - H - Math.round(2 * vpr);
-        // Overlapping zones would stack their pills on one row; step each clash down a row.
-        for (let guard = 0; guard < 8; guard++) {
-          const clash = placed.some((q) => x < q.x + q.w && q.x < x + w && Math.abs(q.y - y) < H);
-          if (!clash) break;
-          y += H + Math.round(2 * vpr);
+        const w = Math.round(g.measureText(text).width / hpr + PAD * 2);
+        const top = Math.min(b.yTop, b.yBot);
+        const bot = Math.max(b.yTop, b.yBot);
+        // A zone scrolled entirely above or below the view has no band on screen, so no label either.
+        if (bot < 0 || top > s.mediaSize.height) continue;
+        const x0 = b.x0 + 4;
+        const xMax = paneW - w - 4;
+        // Rows to try, best first: centred in the zone (if it is tall enough), on its top edge,
+        // just under its bottom edge.
+        const rows = [
+          ...(bot - top >= H + 2 ? [(top + bot) / 2 - H / 2] : []),
+          top - H - 2,
+          bot + 2,
+        ].filter((y) => y >= 0 && y + H <= s.mediaSize.height);
+        // A zone cut by the top/bottom edge: label it just inside the edge it crosses.
+        if (!rows.length) rows.push(Math.max(0, Math.min(s.mediaSize.height - H, top)));
+        let spot: { x: number; y: number } | null = null;
+        const step = 6;
+        for (const y of rows) {
+          for (let x = x0; x <= Math.max(x0, xMax); x += step) {
+            if (!hitsCandle(x, y, w) && !hitsLabel(x, y, w)) { spot = { x, y }; break; }
+          }
+          if (spot) break;
         }
-        placed.push({ x, y, w });
+        if (!spot) {
+          // Every row is covered by candles: keep the old place, stepping clear of other labels.
+          let y = rows[0];
+          for (let guard = 0; guard < 8 && hitsLabel(x0, y, w); guard++) y += H + 2;
+          spot = { x: x0, y };
+        }
+        placed.push({ x: spot.x, y: spot.y, w });
+        const X = Math.round(spot.x * hpr);
+        const Y = Math.round(spot.y * vpr);
+        const W = Math.round(w * hpr);
+        const HH = Math.round(H * vpr);
         g.fillStyle = "rgba(12,12,14,0.86)";
         g.beginPath();
-        roundRect(g, x, y, w, H, 3 * hpr);
+        roundRect(g, X, Y, W, HH, 3 * hpr);
         g.fill();
         g.strokeStyle = `rgba(${rgb},${b.z.mitigated ? 0.55 : 0.9})`;
         g.lineWidth = Math.max(1, Math.floor(hpr));
         g.stroke();
         g.fillStyle = `rgba(${rgb},${b.z.mitigated ? 0.75 : 1})`;
-        g.fillText(text, x + PAD, y + H / 2 + 0.5);
+        g.fillText(text, X + Math.round(PAD * hpr), Y + HH / 2 + 0.5);
       }
       g.restore();
     });

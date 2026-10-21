@@ -148,12 +148,14 @@ def arm(req: ArmRequest, session: Session = Depends(get_session)) -> Conditional
     # auto-executes (after the re-check), matching how the rest of the app treats the mode.
     settings = get_or_create_settings(session)
     auto = settings.execution_mode != ExecutionMode.A_PROPOSE_APPROVE.value
+    why_not: list[str] = []
     s = arm_conditional(
         session, symbol=req.symbol, asset_class=req.asset_class.value, timeframe=req.timeframe,
         direction=req.direction, order_type=req.order_type, trigger_price=req.trigger_price,
         stop_loss=req.stop_loss, take_profit=req.take_profit, confidence=req.confidence,
         rr=req.rr, rationale=req.reason, source="manual", auto_execute=auto,
         valid_hours=req.valid_hours, require_close_confirm=req.require_close_confirm,
+        why_not=why_not,
     )
     if s is None:
         if req.stop_loss is None:
@@ -161,8 +163,7 @@ def arm(req: ArmRequest, session: Session = Depends(get_session)) -> Conditional
                 status_code=400,
                 detail="this setup has no stop-loss — position size is derived from the stop, so it "
                        "would be risk-vetoed every time it triggers. Set a stop and arm it again.")
-        raise HTTPException(status_code=409,
-                            detail="already armed for this symbol/direction, or the symbol is open")
+        raise HTTPException(status_code=409, detail=(why_not[0] if why_not else "could not arm this setup"))
     return ConditionalSetupView.model_validate(s)
 
 
@@ -221,6 +222,7 @@ def quick_arm(req: QuickArmRequest, session: Session = Depends(get_session)) -> 
                   else ConditionalOrderType.SELL_STOP.value)
     rr = abs(target - trigger) / abs(trigger - stop) if trigger != stop else None
 
+    why_not: list[str] = []
     s = arm_conditional(
         session, symbol=req.symbol, asset_class=req.asset_class, timeframe=req.timeframe,
         direction=direction, order_type=order_type, trigger_price=trigger,
@@ -231,11 +233,10 @@ def quick_arm(req: QuickArmRequest, session: Session = Depends(get_session)) -> 
         rationale=f"Manual quick-arm from the chart at {trigger:g} — opens on a candle CLOSE beyond the line.",
         source="manual", auto_execute=True,
         valid_hours=req.valid_hours, require_close_confirm=True,
+        why_not=why_not,
     )
     if s is None:
-        raise HTTPException(
-            status_code=409,
-            detail="already armed for this symbol/direction, or the symbol is already open")
+        raise HTTPException(status_code=409, detail=(why_not[0] if why_not else "could not arm this setup"))
     return ConditionalSetupView.model_validate(s)
 
 

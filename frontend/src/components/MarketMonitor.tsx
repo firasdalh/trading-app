@@ -10,7 +10,10 @@ interface Props {
   onSelect: (p: { symbol: string; asset_class: string; timeframe?: string }) => void;
 }
 
-const TFS = ["1h", "4h", "1d"] as const;
+// Columns shown. The 15M is entry timing only: the bias, the filters and the sort are still read from
+// 1H / 4H / 1D (BIAS_TFS), so a 15-minute wiggle never relabels a pair.
+const TFS = ["15m", "1h", "4h", "1d"] as const;
+const BIAS_TFS = ["1h", "4h", "1d"] as const;
 // +DI and -DI must differ by at least this much before either side "owns" the ADX strength.
 const DI_MARGIN = 5;
 // The backend rebuilds the table at most every 20s and the slow timeframes far less often, so a
@@ -62,7 +65,7 @@ function stretched(t: MonitorTf | null | undefined): boolean {
 }
 
 function avgAdx(r: MonitorRow): number {
-  const v = TFS.map((tf) => r.tfs[tf]?.adx).filter((x): x is number => x != null);
+  const v = BIAS_TFS.map((tf) => r.tfs[tf]?.adx).filter((x): x is number => x != null);
   return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0;
 }
 
@@ -70,12 +73,12 @@ function avgAdx(r: MonitorRow): number {
  *  alone is direction-blind, so a pair whose timeframes trend hard against each other ranked top;
  *  dividing by the readable count let one readable timeframe outrank three. */
 function trendStrength(r: MonitorRow): number {
-  const s = TFS.reduce((acc, tf) => {
+  const s = BIAS_TFS.reduce((acc, tf) => {
     const t = r.tfs[tf];
     if (t?.adx == null) return acc;
     return acc + (t.trend === "up" ? t.adx : t.trend === "down" ? -t.adx : 0);
   }, 0);
-  return Math.abs(s) / TFS.length;
+  return Math.abs(s) / BIAS_TFS.length;
 }
 
 function ago(iso: string | undefined, now: number): string {
@@ -138,7 +141,7 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
         case "pullback":
           return r.bias === "pullback_up" || r.bias === "pullback_down";
         case "zone":
-          return TFS.some((tf) => nearZone(r.tfs[tf]));
+          return BIAS_TFS.some((tf) => nearZone(r.tfs[tf]));
         case "stretched":
           return stretched(r.tfs["1h"]) || stretched(r.tfs["4h"]);
         default:
@@ -171,7 +174,7 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
       all: all.length,
       aligned: all.filter((r) => r.bias.startsWith("aligned")).length,
       pullback: all.filter((r) => r.bias.startsWith("pullback")).length,
-      zone: all.filter((r) => TFS.some((tf) => nearZone(r.tfs[tf]))).length,
+      zone: all.filter((r) => BIAS_TFS.some((tf) => nearZone(r.tfs[tf]))).length,
       stretched: all.filter((r) => stretched(r.tfs["1h"]) || stretched(r.tfs["4h"])).length,
     } as Record<Filter, number>;
   }, [data]);
@@ -237,7 +240,7 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
 
       {!data && !error && (
         <div className="rounded-lg border border-neutral-800 px-3 py-6 text-center text-sm text-neutral-500">
-          Reading 1H, 4H and 1D for every watched pair…
+          Reading 15M, 1H, 4H and 1D for every watched pair…
         </div>
       )}
 
@@ -255,14 +258,17 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
 
       {rows.length > 0 && (
         <div className="overflow-x-auto rounded-lg border border-neutral-800">
-          <table className="w-full min-w-[46rem] border-collapse text-sm">
+          <table className="w-full min-w-[56rem] border-collapse text-sm">
             <thead>
               <tr className="border-b border-neutral-800 bg-neutral-900/80 text-left text-[11px] uppercase tracking-wider text-neutral-500">
                 <th className="sticky left-0 z-[1] bg-neutral-900 px-3 py-2 font-semibold">Pair</th>
                 <th className="px-3 py-2 font-semibold">Today</th>
                 {TFS.map((tf) => (
-                  <th key={tf} className="px-2 py-2 font-semibold" title={`Click a ${tf.toUpperCase()} cell to open that chart`}>
-                    {tf.toUpperCase()}
+                  <th key={tf} className="px-2 py-2 font-semibold"
+                      title={tf === "15m"
+                        ? "Entry timing - shown, but not part of the bias. Click a 15M cell to open that chart"
+                        : `Click a ${tf.toUpperCase()} cell to open that chart`}>
+                    {tf.toUpperCase()}{tf === "15m" && <span className="ml-1 normal-case tracking-normal text-neutral-600">timing</span>}
                   </th>
                 ))}
                 <th className="hidden px-3 py-2 font-semibold xl:table-cell">Bias</th>
@@ -374,7 +380,7 @@ function Row({ r, active, onSelect }: { r: MonitorRow; active: boolean; onSelect
           <RangeUsed v={r.range_used} />
         </td>
 
-        {/* 1H / 4H / 1D */}
+        {/* 15M / 1H / 4H / 1D */}
         {TFS.map((tf) => (
           <td key={tf} className="px-1 py-1.5">
             <TfCell
@@ -688,12 +694,13 @@ function Legend() {
       {item("ADX ↗ ↘", "Trend STRENGTH (not direction): 25+ strong (3 bars), 20-25 moderate (2), under 20 weak (1). ↗ strength building, ↘ fading. Amber +DI≠ / −DI≠ = with ADX 20+ and a clear gap (5+ points), the strength belongs to the other side than the arrow. Hover a cell for +DI / −DI.")}
       {item("HH·HL / LH·LL", "Swing structure: higher highs + higher lows (up), lower highs + lower lows (down), or Range. ✓ = it agrees with the arrow, amber ≠ = it contradicts it (the EMAs have turned before the swings, or the other way round). CHoCH ▲▼ = price just closed beyond the last opposite swing - the old structure is then struck through and gets no ✓/≠. Hover for the two swing prices.")}
       {item("RSI", "14-period. Green above 50, red below. Amber OB/OS = 70+ or 30- (stretched, either way). ↑↓ = turning since the last bar.")}
-      {item("Vol", "The last COMPLETED bar's volume (a still-forming bar is ignored - its volume is partial) vs the SAME HOUR in about 20 earlier sessions on 1H/4H, so the US open is not a 'spike' every day; vs the last 20 sessions on 1D. Bold = 1.5x+, dim = 0.7x or less. ↑ building / ↓ fading. “62% up” = share of the last 20 bars' volume on up bars (green 60%+, red 40%-). MT5 tick volume - a proxy for real volume.")}
+      {item("Vol", "The last COMPLETED bar's volume (a still-forming bar is ignored - its volume is partial) vs the SAME HOUR in about 20 earlier sessions on 1H/4H (the same 15-minute slot on 15M), so the US open is not a 'spike' every day; vs the last 20 sessions on 1D. Bold = 1.5x+, dim = 0.7x or less. ↑ building / ↓ fading. “62% up” = share of the last 20 bars' volume on up bars (green 60%+, red 40%-). MT5 tick volume - a proxy for real volume.")}
       {item("State", "What the latest bar is doing: pullback, breakout, rejection, range, impulse or reversal.")}
       {item("in / near zone", "Order blocks on that timeframe - the same zones as the chart's Order-blocks overlay. Cyan = demand, amber = supply. Near = within 0.5 ATR.")}
-      {item("Bias", "How the three timeframes line up. Dip in uptrend = 4H and 1D up, 1H down. Up vs the 1D = 1H and 4H up against the daily.")}
+      {item("Bias", "How the three timeframes line up (1H, 4H, 1D - the 15M is not part of it). Dip in uptrend = 4H and 1D up, 1H down. Up vs the 1D = 1H and 4H up against the daily.")}
+      {item("15M", "Entry timing: the same reading on 15-minute bars. It never changes the bias or the filters; it shows whether the short-term move is with the bigger picture right now.")}
       {item("% of day", "Today's range so far against a normal day's (daily ATR). Past 100% the day's move is already extended.")}
-      {item("Click", "A pair name opens it on the chart; a 1H / 4H / 1D cell opens that timeframe.")}
+      {item("Click", "A pair name opens it on the chart; a 15M / 1H / 4H / 1D cell opens that timeframe.")}
     </dl>
   );
 }

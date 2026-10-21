@@ -665,3 +665,22 @@ def test_the_arm_api_rejects_malformed_requests():
     with pytest.raises(ValidationError):
         ArmRequest(symbol="EURUSDm", asset_class="forex", direction="long", order_type="buy_stop",
                    trigger_price=0)
+
+
+def test_an_arm_refusal_says_which_check_refused_it(db_session, monkeypatch):
+    """Every refusal reached the user as 'already armed ... or already open' - even for IN50m, which
+    Exness has DISABLED, where neither was true (2026-10-21)."""
+    import app.brokers.registry as registry
+
+    kw = dict(symbol="IN50m", asset_class="index", timeframe="1h", direction="long", order_type="buy_stop",
+              trigger_price=100.0, stop_loss=99.0, take_profit=103.0, confidence=1.0, rr=3.0)
+    disabled = SimpleNamespace(can_open=lambda symbol, direction: (False, "broker has this instrument disabled"))
+    monkeypatch.setattr(registry, "get_broker_for", lambda ac, bm: disabled)
+    why: list[str] = []
+    assert cond.arm_conditional(db_session, why_not=why, **kw) is None
+    assert why and "disabled" in why[0] and "already" not in why[0]
+
+    _arm(db_session, symbol="IN50m", asset_class="index", direction="long")
+    why = []
+    assert cond.arm_conditional(db_session, why_not=why, **kw) is None
+    assert why and "already armed" in why[0]

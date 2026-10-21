@@ -1019,7 +1019,7 @@ export function Dashboard({
       <Drawer
         open={drawer === "monitor"}
         title="Monitor"
-        subtitle="Every watched pair at a glance: which way 1H, 4H and 1D point, how hard, where RSI sits, and whether price is on a demand or supply zone."
+        subtitle="Every watched pair at a glance: which way 15M, 1H, 4H and 1D point, how hard, where RSI sits, and whether price is on a demand or supply zone."
         onClose={onCloseDrawer}
         widthClass="max-w-[84rem]"
       >

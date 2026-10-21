@@ -263,6 +263,11 @@ def _mitigation(candles: list[Candle], ob: OrderBlock, from_index: int) -> None:
             ob.touches += 1
             ob.mitigated = True
         inside = overlap
+        # The last bar is normally still FORMING: its "close" is just the latest tick. Invalidating
+        # on it made a zone vanish whenever price poked through intrabar and reappear when it came
+        # back (UK100 1h demand, 2026-10-21). Only a finished bar's close breaks a zone.
+        if i == len(candles) - 1:
+            break
         if ob.kind == "bullish" and c.close < ob.bottom:
             ob.invalidated = True
             break
@@ -294,13 +299,18 @@ def find_order_blocks(candles: list[Candle], *, max_blocks: int = 8,
         return []
 
     atrs = _atr_series(candles)
-    highs, lows = _swing_pivots(candles, _PIVOT_L, _PIVOT_R, 0)
+    # The LAST candle handed in is treated as still forming (live, it is MT5's current bar: its close
+    # is only the latest tick). It may touch a zone, but it never confirms a swing, creates a zone or
+    # breaks one - otherwise a zone appeared when price ticked through a level mid-bar and vanished
+    # when it ticked back (UK100 1h "Supply 58", 2026-10-21). Pivots are found without it, and the
+    # break that creates a zone must be a finished bar.
+    highs, lows = _swing_pivots(candles[:-1], _PIVOT_L, _PIVOT_R, 0)
     found: list[OrderBlock] = []
 
     # ---- bullish: an up-move that closes above a confirmed swing HIGH ----------------------
     for p in highs:
         level = candles[p].high
-        b = next((i for i in range(p + _PIVOT_R + 1, n) if candles[i].close > level), None)
+        b = next((i for i in range(p + _PIVOT_R + 1, n - 1) if candles[i].close > level), None)
         if b is None:
             continue
         # the last DOWN candle before the impulse - where the buying was worked
@@ -327,7 +337,7 @@ def find_order_blocks(candles: list[Candle], *, max_blocks: int = 8,
     # ---- bearish: a down-move that closes below a confirmed swing LOW ----------------------
     for p in lows:
         level = candles[p].low
-        b = next((i for i in range(p + _PIVOT_R + 1, n) if candles[i].close < level), None)
+        b = next((i for i in range(p + _PIVOT_R + 1, n - 1) if candles[i].close < level), None)
         if b is None:
             continue
         o = next((i for i in range(b, max(b - _ORIGIN_LOOKBACK, 0) - 1, -1)
