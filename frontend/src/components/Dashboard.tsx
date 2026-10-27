@@ -54,6 +54,7 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
 import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
 import { ChartPositionBar } from "./ChartPositionBar";
+import { PairMonitor } from "./PairMonitor";
 import { Drawer, type DrawerId } from "./Drawer";
 import { OpenPositionsList, SideSection } from "./LiveBook";
 import { RegimeBadge } from "./RegimeBadge";
@@ -803,15 +804,30 @@ export function Dashboard({
                   </span>
                 )}
               </div>
-              {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close */}
-              <ChartPositionBar
-                pos={chartedPosition}
-                pulse={pulse}
-                adviceR={chartedAdvice?.r_multiple ?? null}
-                equity={equity}
-                riskCap={riskCap}
-                onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class, direction: p.direction })}
+              {/* The charted pair's indicators across 1M-1D: one line here, the full read as a popover
+                  over the chart. In full screen too - the timeframes you are not looking at matter
+                  most when the chart is all you can see. */}
+              <PairMonitor
+                symbol={symbol}
+                assetClass={assetClass}
+                timeframe={timeframe}
+                selectable={TIMEFRAMES}
+                onTimeframe={setTimeframe}
+                position={chartedPosition}
               />
+              {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close.
+                  Only where the sidebar is NOT beside the chart: full screen (hidden) and narrow
+                  windows (stacked below) - there this strip is the only view of the trade. */}
+              <div className={chartFull ? "shrink-0" : "lg:hidden"}>
+                <ChartPositionBar
+                  pos={chartedPosition}
+                  pulse={pulse}
+                  adviceR={chartedAdvice?.r_multiple ?? null}
+                  equity={equity}
+                  riskCap={riskCap}
+                  onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class, direction: p.direction })}
+                />
+              </div>
               <Chart
                 symbol={symbol}
                 assetClass={assetClass}

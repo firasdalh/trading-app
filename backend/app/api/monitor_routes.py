@@ -9,12 +9,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.market_monitor import (
     MONITOR_TFS,
+    PAIR_TFS,
     cached_table,
     notes_for,
     read_pair,
@@ -101,4 +102,36 @@ def monitor(
         "generated_at": datetime.fromtimestamp(at, timezone.utc).isoformat(),
         "timeframes": list(MONITOR_TFS),
         "rows": rows,
+    }
+
+
+@router.get("/pair")
+def monitor_pair(
+    symbol: str = Query(..., description="the charted symbol"),
+    asset_class: str = Query(...),
+    session: Session = Depends(get_session),
+) -> dict:
+    """``{generated_at, timeframes, row}`` - ONE pair on 1m / 15m / 1h / 4h / 1d, for the panel above
+    the chart. The same row shape as the table (read_pair + notes_for), with the 1m added. Not
+    table-cached: candles come from the short-lived OHLCV cache, so polling it costs one pair's reads."""
+    from app.api.watchlist_routes import _events_soon
+
+    settings = get_or_create_settings(session)
+    try:
+        broker = get_broker_for(AssetClass(asset_class), settings.broker_map)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"no broker for this pair: {exc}") from exc
+    news = _NEWS_POOL.submit(_events_soon, symbol)
+    row = read_pair(broker, symbol, asset_class, PAIR_TFS)
+    wait([news], timeout=_NEWS_WAIT_S)
+    row["news_pending"] = not news.done()
+    try:
+        row["events_soon"] = news.result(timeout=0) if news.done() else None
+    except Exception:  # noqa: BLE001 - the calendar is advisory; a failure reads as no news
+        row["events_soon"] = None
+    row["notes"] = notes_for(row) if any(row["tfs"].values()) else []
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "timeframes": list(PAIR_TFS),
+        "row": row,
     }

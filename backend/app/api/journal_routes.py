@@ -66,8 +66,10 @@ def _attribute_sources(session: Session, broker_trades: list[PositionView]) -> N
     """The broker's deal history has no 'source' (it doesn't know who opened a trade), so every row
     would read 'Unknown'. Attribute each broker trade to the app's own closed Position (which DOES
     carry the source) by normalized symbol + direction + entry (±0.5%) + nearest close time, one app
-    row per broker trade. A broker trade left with no match is genuinely external — a trade opened
-    directly in the MT5/Exness terminal — and correctly stays 'Unknown'."""
+    row per broker trade. A broker trade left with no match keeps the source the adapter read from
+    its entry-deal comment (mt5_adapter.source_from_comment): the app's own tag when it placed the
+    trade - including from ANOTHER machine on the same account, whose DB this one never sees - or
+    'manual' for an untagged trade placed in the terminal or on the phone."""
     from app.risk.service import _norm_symbol
 
     def _aware(dt):

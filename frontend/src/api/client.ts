@@ -440,6 +440,11 @@ export const api = {
   // Every watched pair's 1h / 4h / 1d direction, RSI and zones in one call (read-only).
   monitor: (refresh = false) =>
     request<import("../types").MonitorResponse>(`/api/monitor${refresh ? "?refresh=true" : ""}`),
+  // The charted pair alone on 1m / 15m / 1h / 4h / 1d (read-only).
+  monitorPair: (symbol: string, assetClass: string) =>
+    request<import("../types").MonitorPairResponse>(
+      `/api/monitor/pair?symbol=${encodeURIComponent(symbol)}&asset_class=${encodeURIComponent(assetClass)}`,
+    ),
   // Per-symbol scorecard. `days` limits it to recently-closed trades; `apply` acts on the verdict
   // but is a no-op unless auto-disable is turned on server-side.
   scorecard: (days?: number, apply = false) =>

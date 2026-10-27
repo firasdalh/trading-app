@@ -31,7 +31,7 @@ const FILTERS: { id: Filter; label: string; hint: string }[] = [
   { id: "stretched", label: "Stretched RSI", hint: "RSI 70+ or 30- on the 1H or 4H" },
 ];
 
-const BIAS: Record<MonitorBias, { label: string; cls: string; hint: string; rank: number }> = {
+export const BIAS: Record<MonitorBias, { label: string; cls: string; hint: string; rank: number }> = {
   aligned_up: { label: "Aligned up", cls: "bg-bull/15 text-bull ring-1 ring-inset ring-bull/30", rank: 0,
     hint: "1H, 4H and 1D all point up" },
   aligned_down: { label: "Aligned down", cls: "bg-bear/15 text-bear ring-1 ring-inset ring-bear/30", rank: 0,

@@ -320,6 +320,9 @@ class OrderRequest(BaseModel):
     limit_price: float | None = None
     stop_loss: float | None = None
     take_profit: float | None = None
+    # Who opened it (hybrid / manual / ...). Written into the broker's order comment so the journal
+    # can attribute the trade from broker history alone - on a machine whose DB never saw the order.
+    source: str | None = None
 
 
 class OrderResult(BaseModel):

@@ -2835,6 +2835,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       );
   }, [drawings, symbol, timeframe, dataV]);
 
+  // The loop below is mounted once, so calling the painters directly would freeze them at their
+  // first-render closures — `ovl`, `timeframe`, `positions` and the rest as they were at mount.
+  // That is how "Session shading" toggled on did nothing: the repaint still saw sessions: false.
+  // Re-pointed every render, so the loop always draws with the current state.
+  const paintRef = useRef(() => {});
+  paintRef.current = () => {
+    paintBackground();
+    paintOverlay();
+  };
+
   // Repaint whenever the picture could have moved. There is no single "view changed" event in
   // lightweight-charts — panning, zooming, autoscale and dragging the price axis are all separate
   // — so we watch a cheap signature of the view each frame and redraw only when it differs.
@@ -2857,8 +2867,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         ].join("|");
         if (next !== sig) {
           sig = next;
-          paintBackground();
-          paintOverlay();
+          paintRef.current();
         }
       }
       raf = requestAnimationFrame(tick);

@@ -37,6 +37,9 @@ from app.models.schemas import OHLCVSeries
 log = get_logger("agents.market_monitor")
 
 MONITOR_TFS = ("15m", "1h", "4h", "1d")
+# The chart's own per-pair panel adds the 1m: one pair is cheap enough to read live, and it is the
+# timeframe a trade is actually managed on. The bias is still 1h / 4h / 1d only.
+PAIR_TFS = ("1m", "15m", "1h", "4h", "1d")
 BIAS_TFS = ("1h", "4h", "1d")        # the timeframes the bias label is read from
 _FETCH_BARS = 500        # what the chart's order-block overlay reads - same zones as the chart
 # The 15m volume baseline compares a bar with the SAME 15-minute slot in ~20 earlier sessions, which
@@ -46,7 +49,7 @@ _ENGINE_BARS = 200       # what the pipeline feeds the engine - same indicator v
 _MIN_BARS = 60
 # A bar on the slow timeframes barely moves in a minute; refetching them that often only loads the
 # shared MT5 connection. The 1h carries the live price, so it stays fresh.
-_TTL = {"15m": 30.0, "1h": 45.0, "4h": 120.0, "1d": 300.0}
+_TTL = {"1m": 10.0, "15m": 30.0, "1h": 45.0, "4h": 120.0, "1d": 300.0}
 # Price this close to a zone edge (in ATRs of that timeframe) counts as "at" the zone.
 NEAR_ZONE_ATR = 0.5
 RSI_HIGH, RSI_LOW = 70.0, 30.0
@@ -110,7 +113,7 @@ VOL_SPIKE = 2.0
 VOL_SIDE_LO, VOL_SIDE_HI = 0.40, 0.60  # share of recent volume on up-close bars
 
 
-_TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 4 * 3600, "1d": 86400}
+_TF_SECONDS = {"1m": 60, "15m": 900, "1h": 3600, "4h": 4 * 3600, "1d": 86400}
 _SAME_HOUR_MIN = 8          # same-hour samples needed before an intraday ratio means anything
 
 
@@ -141,7 +144,9 @@ def _volume_read(candles, timeframe: str = "1h", now: datetime | None = None) ->
     before them. Against a trailing window the reading mostly reported the clock: replayed over 14
     months of Exness 1H bars, the 14:00 UTC bar (US cash open) read as a 2x "spike" on 96% of days for
     US500/USTEC and the 21-23 UTC bars read "low" on 89-100% of days; per-hour baselines bring the spike
-    rate down to 1-15% in every hour. Daily bars use the previous 20 sessions.
+    rate down to 1-15% in every hour. Daily bars use the previous 20 sessions. The 1m uses the previous
+    20 bars: a same-minute baseline would need 20 days of 1m history, and over 20 minutes the session
+    clock barely moves.
 
       ratio      the last completed bar's volume / its baseline
       level      high (>= 1.5x) | normal | low (<= 0.7x)
@@ -193,7 +198,8 @@ def _volume_read(candles, timeframe: str = "1h", now: datetime | None = None) ->
         "level": "high" if ratio >= VOL_HIGH else "low" if ratio <= VOL_LOW else "normal",
         "trend": trend,
         "up_share": round(upv / (upv + dnv), 2) if (upv + dnv) > 0 else None,
-        "baseline": ("same 15-min slot" if timeframe == "15m" else "same hour") if intraday else "20 sessions",
+        "baseline": (("same 15-min slot" if timeframe == "15m" else "same hour") if intraday
+                     else "20 sessions" if timeframe == "1d" else "20 bars"),
     }
 
 
@@ -277,6 +283,10 @@ def read_timeframe(series: OHLCVSeries) -> dict | None:
         # ADX measures strength only; +DI vs -DI says which side that strength belongs to.
         "plus_di": ind.get("plus_di"), "minus_di": ind.get("minus_di"),
         "supertrend": ("up" if st_dir and st_dir > 0 else "down" if st_dir and st_dir < 0 else None),
+        # Histogram and its previous bar: the sign says which side has momentum, the change says
+        # whether it is building or fading. cross: +1 bullish / -1 bearish signal-line cross this bar.
+        "macd_hist": ind.get("macd_hist"), "macd_hist_prev": ind.get("macd_hist_prev"),
+        "macd_cross": ind.get("macd_cross"),
         "rsi": ind.get("rsi14"), "rsi_prev": ind.get("rsi14_prev"), "rsi_zone": _rsi_zone(ind.get("rsi14")),
         "structure": structure,
         # The two swings that define the structure: a close beyond the opposite one breaks it.
@@ -495,11 +505,12 @@ def _read_cached(symbol: str, tf: str, series: OHLCVSeries) -> dict | None:
     return result
 
 
-def read_pair(broker, symbol: str, asset_class: str) -> dict:
-    """The full monitor row for one pair. Never raises: a timeframe that fails reads as missing."""
+def read_pair(broker, symbol: str, asset_class: str, tfs: tuple[str, ...] = MONITOR_TFS) -> dict:
+    """The full monitor row for one pair. Never raises: a timeframe that fails reads as missing.
+    ``tfs`` must include 1h and 1d - the price, today's change and the bias are read from them."""
     row: dict = {"symbol": symbol, "asset_class": asset_class, "tfs": {}, "errors": []}
     series: dict[str, OHLCVSeries] = {}
-    for tf in MONITOR_TFS:
+    for tf in tfs:
         try:
             series[tf] = get_ohlcv_cached(broker, symbol, tf, _FETCH_BARS_TF.get(tf, _FETCH_BARS), ttl=_TTL[tf])
             row["tfs"][tf] = _read_cached(symbol, tf, series[tf])

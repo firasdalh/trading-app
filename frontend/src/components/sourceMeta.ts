@@ -15,6 +15,9 @@ export const SOURCE_META: Record<string, { label: string; color: string }> = {
   deterministic: { label: "Deterministic", color: "text-blue-300" },
   analysis: { label: "Analysis (legacy)", color: "text-indigo-300" },
   supertrend: { label: "SuperTrend", color: "text-teal-300" },
+  // Placed by the app (its MT5 comment says so) but before the comment carried WHO opened it, and on
+  // a machine whose DB has no row for it - hybrid vs manual is not recoverable for these.
+  app: { label: "App · source not saved", color: "text-neutral-400" },
   unknown: { label: "Unknown", color: "text-neutral-500" },
 };
 

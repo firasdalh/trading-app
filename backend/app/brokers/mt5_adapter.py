@@ -114,6 +114,33 @@ def _retcode_error(result, fallback: str) -> str:
     return _RETCODE_MSG.get(rc) or getattr(result, "comment", None) or f"{fallback} (retcode {rc})"
 
 
+# Every order the app opens carries this comment, followed by who opened it ("ai-trading-app:hybrid").
+# The deal history keeps it, so a trade is attributable from the broker alone - on a second machine,
+# or after a fresh DB, where no Position row exists for it. MT5 caps comments at 31 characters.
+_APP_COMMENT = "ai-trading-app"
+_COMMENT_MAX = 31
+
+
+def app_comment(source: str | None) -> str:
+    return f"{_APP_COMMENT}:{source}"[:_COMMENT_MAX] if source else _APP_COMMENT
+
+
+def source_from_comment(comment: str | None) -> str | None:
+    """Who opened a trade, read back from its ENTRY deal's comment.
+
+    "ai-trading-app:<source>" -> that source ("manual_from_*", cut short by the length cap, reads as
+    manual). Bare "ai-trading-app" -> "app": the app placed it, but before sources were written into
+    the comment, so hybrid vs manual is not recoverable. Anything else -> "manual": the app tags
+    every order it sends, so an untagged one was placed by hand in the terminal or on the phone."""
+    c = (comment or "").strip()
+    if c.startswith(_APP_COMMENT + ":"):
+        src = c[len(_APP_COMMENT) + 1:]
+        return "manual" if src.startswith("manual") else src or "app"
+    if c.startswith(_APP_COMMENT):
+        return "app"
+    return "manual"
+
+
 class Mt5BrokerAdapter(BrokerAdapter):
     name = "mt5"
     supported_asset_classes = (AssetClass.FOREX, AssetClass.METAL, AssetClass.CRYPTO,
@@ -546,7 +573,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 "deviation": 20,
                 "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
                 "type_filling": self._filling(info),
-                "comment": "ai-trading-app",
+                "comment": app_comment(request.source),
             }
             if request.stop_loss is not None:
                 req["sl"] = float(request.stop_loss)
@@ -727,6 +754,9 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 unrealized_pnl=0.0,
                 realized_pnl=round(net, 2),
                 closed_at=datetime.fromtimestamp(close_ts, tz=timezone.utc) if close_ts else None,
+                # From the entry deal's comment. The journal prefers this machine's own Position row
+                # when it has one (it keeps the full source); this covers the trades it never saw.
+                source=source_from_comment(getattr(first_in, "comment", None)),
             ))
         out.sort(key=lambda v: v.closed_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return out

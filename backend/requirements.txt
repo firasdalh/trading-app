@@ -18,6 +18,7 @@ APScheduler>=3.10
 # ---- Agents (LLM) ----
 anthropic>=0.40
 google-genai>=1.0          # Gemini provider (optional; selectable from the UI)
+openai>=1.40,<2            # OpenAI provider (selectable from the UI); llm.py uses beta.chat.completions.parse
 
 # ---- Brokers / data ----
 alpaca-py>=0.21          # M2  US stocks + crypto (paper default)

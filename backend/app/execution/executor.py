@@ -157,6 +157,7 @@ def _execute_proposal(session: Session, record: TradeProposalRecord) -> OrderRes
         qty=record.approved_qty,
         stop_loss=record.stop_loss,
         take_profit=record.take_profit,
+        source=getattr(record, "source", None),
     )
 
     # --- log BEFORE submission ---

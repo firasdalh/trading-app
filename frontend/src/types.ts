@@ -958,6 +958,11 @@ export interface MonitorTf {
   plus_di: number | null;
   minus_di: number | null;
   supertrend: "up" | "down" | null;
+  /** MACD histogram now and one bar ago: the sign is the side, the change is building vs fading. */
+  macd_hist?: number | null;
+  macd_hist_prev?: number | null;
+  /** +1 bullish / -1 bearish signal-line cross on this bar, 0 none. */
+  macd_cross?: number | null;
   rsi: number | null;
   rsi_prev: number | null;
   rsi_zone: "overbought" | "oversold" | "bullish" | "bearish" | null;
@@ -1016,4 +1021,11 @@ export interface MonitorResponse {
   generated_at: string;
   timeframes: string[];
   rows: MonitorRow[];
+}
+
+/** GET /api/monitor/pair - one pair, with the 1m added (the panel above the chart). */
+export interface MonitorPairResponse {
+  generated_at: string;
+  timeframes: string[];
+  row: MonitorRow;
 }
