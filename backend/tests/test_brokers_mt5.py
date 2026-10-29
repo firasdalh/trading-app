@@ -6,9 +6,12 @@ and response mapping deterministically.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from app.brokers.mt5_adapter import Mt5BrokerAdapter, normalize_symbol
+import pytest
+
+from app.brokers.mt5_adapter import Mt5BrokerAdapter, _bars_from_ticks, _column, normalize_symbol
 from app.models.enums import AssetClass, OrderSide, OrderStatus, OrderType
 from app.models.schemas import OrderRequest
 
@@ -99,6 +102,60 @@ def test_ohlcv_mapping():
     s = _adapter().get_ohlcv("EURUSD", "1h", limit=20)
     assert len(s.candles) == 20
     assert s.candles[0].close == 1.105
+
+
+def test_bars_from_ticks_groups_bids_into_aligned_bars():
+    # 5s bars start on :00, :05, :10 ...; 110-114 had no tick, so no bar; the bid-less tick is skipped.
+    times = [100, 101, 103, 104, 106, 107, 116]
+    bids = [1.0, 1.2, 0.0, 0.9, 1.1, 1.05, 1.3]
+    assert _bars_from_ticks(times, bids, 5) == [
+        [100, 1.0, 1.2, 0.9, 0.9, 3],
+        [105, 1.1, 1.1, 1.05, 1.05, 2],
+        [115, 1.3, 1.3, 1.3, 1.3, 1],
+    ]
+
+
+class TickFakeMt5(FakeMt5):
+    COPY_TICKS_ALL = 1
+    BASE = 1_800_000_000             # a whole minute, far from today: the window must follow the bars
+
+    def __init__(self, ticks):
+        super().__init__()
+        self._ticks = ticks
+        self.calls = []
+
+    def copy_rates_from_pos(self, sym, tf, start, count):
+        self.calls.append(("rates", tf, count))
+        return [{"time": self.BASE + 60 * i} for i in range(count)]
+
+    def copy_ticks_range(self, sym, date_from, date_to, flags):
+        self.calls.append(("ticks", date_from, date_to, flags))
+        return None if self._ticks is None else [t for t in self._ticks if date_from <= t["time"] <= date_to]
+
+
+def test_seconds_ohlcv_is_built_from_the_ticks_of_the_last_m1_bars():
+    b = TickFakeMt5.BASE
+    fake = TickFakeMt5([{"time": b + 1, "bid": 1.1}, {"time": b + 2, "bid": 1.3}, {"time": b + 7, "bid": 1.2},
+                        {"time": b + 61, "bid": 1.25}, {"time": b + 62, "bid": 1.22}])
+    s = _adapter(fake).get_ohlcv("EURUSD", "5s", limit=2)
+    assert s.timeframe == "5s"
+    assert [c.ts for c in s.candles] == [datetime.fromtimestamp(b + 5, tz=timezone.utc),
+                                         datetime.fromtimestamp(b + 60, tz=timezone.utc)]
+    last = s.candles[-1]
+    assert (last.open, last.high, last.low, last.close, last.volume) == (1.25, 1.25, 1.22, 1.22, 2.0)
+    # 2 bars of 5s fit in one minute, plus the forming one; the ticks start at the first M1 bar.
+    assert fake.calls == [("rates", FakeMt5.TIMEFRAME_M1, 2), ("ticks", b, b + 180, TickFakeMt5.COPY_TICKS_ALL)]
+
+
+def test_seconds_ohlcv_is_empty_when_the_terminal_returns_no_ticks():
+    assert _adapter(TickFakeMt5(None)).get_ohlcv("EURUSD", "30s", limit=400).candles == []
+
+
+def test_column_reads_a_numpy_record_array_and_a_list_of_dicts():
+    np = pytest.importorskip("numpy")
+    rows = np.array([(1, 1.5), (2, 1.6)], dtype=[("time", "i8"), ("bid", "f8")])
+    assert _column(rows, "bid") == [1.5, 1.6]
+    assert _column([{"bid": 1.5}], "bid") == [1.5]
 
 
 def test_clamp_lots_to_step_and_min():

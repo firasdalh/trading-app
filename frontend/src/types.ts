@@ -1015,12 +1015,68 @@ export interface MonitorRow {
   events_soon?: string | null;
   news_pending?: boolean;
   errors: string[];
+  /** Next close / reopen (see MarketHours). null = could not be worked out. */
+  hours?: Omit<MarketHours, "symbol"> | null;
+  /** When the newest bar printed - years old for a symbol that no longer trades on the account. */
+  last_bar_at?: string | null;
+  /** What the Hybrid's last scan made of this pair. null = not scanned (off, or not since restart). */
+  hybrid?: HybridVerdict | null;
+}
+
+/** One pair in a Hybrid scan (backend agents/hybrid.py `_verdict`). */
+export interface HybridVerdict {
+  symbol: string;
+  outcome:
+    | "candidate" | "below_bar" | "risk_veto" | "arm" | "aside"
+    | "holding" | "pending" | "armed" | "closed" | "error";
+  direction?: string;
+  confidence?: number;
+  /** The confidence bar the setup had to clear. */
+  bar?: number;
+  strategy?: string | null;
+  /** The engine's own rationale. */
+  reason?: string;
+  /** Why the Risk Manager blocked it (risk_veto). */
+  risk?: string;
+  arm_side?: "long" | "short";
+  trigger?: number;
+  arm_confidence?: number;
+}
+
+export interface MonitorHybrid {
+  enabled: boolean;
+  /** Whether "wait for the break" setups are armed (Hybrid settings). */
+  arming: boolean;
+  min_confidence: number;
+  last_at: string | null;
+  last_reason: string | null;
+  /** The last tick that scanned (a "no room" tick skips the scan). */
+  scan_at: string | null;
 }
 
 export interface MonitorResponse {
   generated_at: string;
   timeframes: string[];
   rows: MonitorRow[];
+  hybrid?: MonitorHybrid | null;
+}
+
+/** GET /api/market/hours - open now, and the next close / reopen learned from the bar history. */
+export interface MarketHours {
+  symbol: string;
+  /** The broker's live check (fresh prices, tradeable). null = could not tell. */
+  open: boolean | null;
+  /** What the learned schedule says for this moment. null = not enough history. */
+  scheduled_open: boolean | null;
+  /** Never closed in the learned weeks (crypto). */
+  always_open: boolean;
+  closes_at: string | null;
+  /** When open: the reopen after the next close. When closed: the next open. */
+  opens_at: string | null;
+  closure: "daily_break" | "overnight" | "weekend" | "unscheduled" | null;
+  /** Live and schedule disagree right now (a holiday, or trading outside the usual hours). */
+  off_schedule: boolean;
+  learned_days: number | null;
 }
 
 /** GET /api/monitor/pair - one pair, with the 1m added (the panel above the chart). */

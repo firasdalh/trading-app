@@ -18,7 +18,9 @@ const PEAK = 0.14;                       // gentle; this plays unprompted
 
 let ctx: AudioContext | null = null;
 
-export function play(): void {
+export type Note = { hz: number; at: number; len: number };
+
+export function play(notes: Note[] = NOTES, peak: number = PEAK): void {
   try {
     type WithWebkit = typeof globalThis & { webkitAudioContext?: typeof AudioContext };
     const Ctor = window.AudioContext ?? (globalThis as WithWebkit).webkitAudioContext;
@@ -29,14 +31,14 @@ export function play(): void {
     // stay silent rather than throwing.
     void ctx.resume().catch(() => {});
     const now = ctx.currentTime;
-    for (const n of NOTES) {
+    for (const n of notes) {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sine";
       osc.frequency.value = n.hz;
       // Ramp both ends — a square-edged envelope clicks audibly.
       gain.gain.setValueAtTime(0.0001, now + n.at);
-      gain.gain.exponentialRampToValueAtTime(PEAK, now + n.at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(peak, now + n.at + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + n.at + n.len);
       osc.connect(gain).connect(ctx.destination);
       osc.start(now + n.at);

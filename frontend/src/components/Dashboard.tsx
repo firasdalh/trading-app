@@ -4,6 +4,7 @@ import { assetLabel, displaySymbol, fmtPrice, fmtUsd } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { useQuoteSocket } from "../hooks/useQuoteSocket";
+import { TF_SECONDS, analysisTimeframe, isSecondsTf } from "../timeframes";
 import type {
   AccountState,
   AnalyzeResponse,
@@ -54,6 +55,7 @@ function viewToResult(v: ProposalView): AnalyzeResponse {
 import { AdvisorActivity } from "./AdvisorActivity";
 import { Chart } from "./Chart";
 import { ChartPositionBar } from "./ChartPositionBar";
+import { MarketHoursChip } from "./MarketHoursChip";
 import { PairMonitor } from "./PairMonitor";
 import { Drawer, type DrawerId } from "./Drawer";
 import { OpenPositionsList, SideSection } from "./LiveBook";
@@ -96,23 +98,23 @@ interface Props {
   onCloseDrawer: () => void;
 }
 
-// This selector drives BOTH the chart and the analysis/trade the engine produces. 5m and 15m are
-// included so you can drop down to time an entry, but they are marked: measured over 959 signals,
-// 15m lost -0.159R per trade in BOTH halves of the data (the clearest negative result on this book)
-// because the win rate falls AND the fixed spread eats roughly twice as much of a smaller stop. 5m
-// is faster still. 1h is the tested baseline.
-const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
-const FAST_TF = new Set(["5m", "15m"]);
+// This selector drives BOTH the chart and the analysis/trade the engine produces. 1m, 5m and 15m
+// are included so you can drop down to time an entry, but they are marked: measured over 959
+// signals, 15m lost -0.159R per trade in BOTH halves of the data (the clearest negative result on
+// this book) because the win rate falls AND the fixed spread eats roughly twice as much of a
+// smaller stop. 5m and 1m are faster still. 1h is the tested baseline. 5s/10s/30s are chart-only:
+// the analysis and trading behind them run on 1m (../timeframes.ts).
+const TIMEFRAMES = ["5s", "10s", "30s", "1m", "5m", "15m", "1h", "4h", "1d"];
+const FAST_TF = new Set(["1m", "5m", "15m"]);
 
 // A plan is drawn on the chart (dashed lines + PLAN zone) only while it is still current: once 3+ bars
 // of its timeframe have closed since the analysis — the panel's own "stale, re-run it" rule — its levels
 // may no longer be true, and a 2,000-hour-old PLAN box looked exactly like a live idea.
-const TF_MINUTES: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440 };
 function planIsStale(analyzedAt: string | null | undefined, timeframe: string): boolean {
   if (!analyzedAt) return false;
   const iso = /[Z+]|[+-]\d\d:\d\d$/.test(analyzedAt) ? analyzedAt : `${analyzedAt}Z`;
-  const mins = (Date.now() - new Date(iso).getTime()) / 60000;
-  return mins / (TF_MINUTES[timeframe] ?? 60) >= 3;
+  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  return secs / (TF_SECONDS[timeframe] ?? 3600) >= 3;
 }
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
 
@@ -152,6 +154,8 @@ export function Dashboard({
   // Persisted across refresh / navigation so the desk reopens on the last pair you used.
   const [symbol, setSymbol] = useLocalStorage("ta.symbol", "EURUSD");
   const [timeframe, setTimeframe] = useLocalStorage("ta.timeframe", "1h");
+  // What the engine analyses and trades on: the chart's timeframe, or 1m under a seconds chart.
+  const aTf = analysisTimeframe(timeframe);
   const [favorites, setFavorites] = useLocalStorage<Favorite[]>("ta.favorites", []);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [scenario, setScenario] = useState<import("../types").AiScenarioRead | null>(null);
@@ -278,7 +282,7 @@ export function Dashboard({
     let cancelled = false;
     setError(null);
     api
-      .proposals({ symbol, timeframe, limit: 1 })
+      .proposals({ symbol, timeframe: aTf, limit: 1 })
       .then((list) => {
         if (cancelled) return;
         if (list.length) {
@@ -299,7 +303,7 @@ export function Dashboard({
     return () => {
       cancelled = true;
     };
-  }, [symbol, assetClass, timeframe]);
+  }, [symbol, assetClass, aTf]);
 
   // Armed conditional setups — overlaid on the chart (trigger/SL/TP) for the charted symbol.
   // condKey forces an immediate re-poll after a quick-arm, so the new trigger/SL/TP lines show up
@@ -420,7 +424,7 @@ export function Dashboard({
     setScenario(null);
     setScenLevels(null);   // clear pinned scenario lines from the previous read
     try {
-      const res = await api.analyze(symbol, assetClass, timeframe);
+      const res = await api.analyze(symbol, assetClass, aTf);
       setResult(res);
       setStatus(res.status);
       // The AI two-scenario read is INFO-ONLY — the engine's decision never uses it — so it's no longer
@@ -438,13 +442,13 @@ export function Dashboard({
   useEffect(() => {
     setScenario(null);
     setScenLevels(null);
-  }, [symbol, timeframe]);
+  }, [symbol, aTf]);
 
   // Opt-in AI scenario read for the CURRENT symbol (info-only; costs tokens) — fetched only on request.
   const loadScenarios = async () => {
     setScenarioBusy(true);
     try {
-      setScenario(await api.scenarios(symbol, assetClass, timeframe));
+      setScenario(await api.scenarios(symbol, assetClass, aTf));
     } catch {
       setScenario(null);
     } finally {
@@ -581,14 +585,16 @@ export function Dashboard({
           onClick={() => setTimeframe(t)}
           aria-pressed={t === timeframe}
           title={
-            FAST_TF.has(t)
-              ? `${t} — backtested as loss-making for entries; fine for timing`
-              : `Switch the chart and the analysis to ${t}`
+            isSecondsTf(t)
+              ? `${t} candles, built from the broker's ticks. Chart only: analysis, tickets and setups from it run on 1m`
+              : FAST_TF.has(t)
+                ? `${t} — backtested as loss-making for entries; fine for timing`
+                : `Switch the chart and the analysis to ${t}`
           }
           className={`rounded px-2 py-0.5 text-xs font-medium tabular-nums transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 ${
             t === timeframe
               ? "bg-brand-600 text-white"
-              : FAST_TF.has(t)
+              : FAST_TF.has(t) || isSecondsTf(t)
                 ? "text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
                 : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
           }`}
@@ -649,6 +655,14 @@ export function Dashboard({
                 title="Backtested over 959 signals: 15m lost -0.159R per trade in both halves of the data — the win rate drops and the fixed spread eats about twice as much of a smaller stop. Fine for reading price; poor for trading."
               >
                 ⚠ {timeframe}: timing only, tested loss-making
+              </span>
+            )}
+            {isSecondsTf(timeframe) && (
+              <span
+                className="shrink-0 rounded bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn"
+                title="MT5 has no candle under 1 minute, so these are built from the broker's ticks (the bid, as on every MT5 chart). Run analysis, the price map, AI scenarios, order blocks, chart tickets, armed setups and auto-trade all work on 1m from here."
+              >
+                ⚠ {timeframe}: chart only, analysis on 1m
               </span>
             )}
 
@@ -735,6 +749,8 @@ export function Dashboard({
                     <span className="hidden truncate text-xs text-neutral-500 md:inline">{descriptions[symbol]}</span>
                   )}
                 </span>
+                {/* Open or closed, and when it next closes / reopens - before a trade, not after. */}
+                <MarketHoursChip symbol={symbol} assetClass={assetClass} />
                 {result?.proposal?.regime && (
                   <RegimeBadge regime={result.proposal.regime} strategy={result.proposal.strategy} />
                 )}
@@ -970,7 +986,7 @@ export function Dashboard({
             <WatchlistPanel
               currentSymbol={symbol}
               currentAsset={assetClass}
-              currentTimeframe={timeframe}
+              currentTimeframe={aTf}
               onSelect={(it) => {
                 if (it.asset_class !== assetClass) setAssetClass(it.asset_class as AssetClass);
                 setSymbol(it.symbol);
@@ -991,7 +1007,7 @@ export function Dashboard({
           <div className="section-label">
             Analysis
             <span className="font-normal normal-case tracking-normal text-neutral-600">
-              {displaySymbol(symbol)} · {timeframe}
+              {displaySymbol(symbol)} · {aTf}
             </span>
           </div>
           <ProposalPanel
@@ -1035,12 +1051,13 @@ export function Dashboard({
       <Drawer
         open={drawer === "monitor"}
         title="Monitor"
-        subtitle="Every watched pair at a glance: which way 15M, 1H, 4H and 1D point, how hard, where RSI sits, and whether price is on a demand or supply zone."
+        subtitle="Every watched pair at a glance: which way 15M, 1H, 4H and 1D point, how hard, where RSI sits, whether price is on a demand or supply zone - plus your positions, market hours and what the Hybrid sees."
         onClose={onCloseDrawer}
         widthClass="max-w-[84rem]"
       >
         <MarketMonitor
           currentSymbol={symbol}
+          positions={positions}
           onSelect={(p) => {
             if (p.timeframe) setTimeframe(p.timeframe);
             openPositionSymbol(p);
@@ -1060,7 +1077,7 @@ export function Dashboard({
         <RsiOverPanel onStaged={onPositionsChanged} onSelect={openPositionSymbol} />
         {/* No extra section label above it: the card's own header already reads "Auto-trade — pair",
             and a second, differently styled title made three header styles in one drawer. */}
-        <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={timeframe} onSelect={openPositionSymbol} />
+        <AutoTradePanel symbol={symbol} assetClass={assetClass} timeframe={aTf} onSelect={openPositionSymbol} />
       </Drawer>
 
       {/* ADVISOR — the full detail behind the sidebar's position cards. */}

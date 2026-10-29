@@ -56,6 +56,19 @@ def ohlcv(
     return broker.get_ohlcv(symbol, timeframe, limit)
 
 
+@router.get("/market/hours")
+def market_hours_route(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.STOCK),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Is the market open now, and when does it next close / reopen? Open-now is the broker's live
+    check; the times come from the symbol's own bar history (app/data/market_hours.py). Read-only."""
+    from app.data.market_hours import market_hours
+
+    return market_hours(_broker_for(asset_class, session), symbol)
+
+
 @router.get("/market/levels")
 def market_levels(
     symbol: str = Query(...),

@@ -43,10 +43,49 @@ _TF_ATTR = {
     "30m": "TIMEFRAME_M30", "1h": "TIMEFRAME_H1", "4h": "TIMEFRAME_H4", "1d": "TIMEFRAME_D1",
 }
 
+# Timeframes under a minute, in seconds. MT5 has no bar shorter than M1, so these are built from the
+# tick history (_bars_from_ticks). They exist for the chart; nothing in the engine reads them.
+_SECOND_TFS = {"5s": 5, "10s": 10, "30s": 30}
+
 
 def normalize_symbol(symbol: str) -> str:
     """MT5/Exness symbols have no separator: EUR/USD -> EURUSD, XAU/USD -> XAUUSD."""
     return symbol.upper().replace("/", "").replace("_", "").replace("-", "")
+
+
+def _column(rows, field: str) -> list:
+    """One field of an MT5 result as a plain list. The terminal returns a numpy record array, which
+    slices a column in C; read row by row, 50k ticks take most of a second. The tests' fakes return
+    lists of dicts."""
+    try:
+        return rows[field].tolist()
+    except (TypeError, IndexError, KeyError, ValueError, AttributeError):
+        return [r[field] for r in rows]
+
+
+def _bars_from_ticks(times: list, prices: list, seconds: int) -> list[list]:
+    """Group time-ordered ticks into ``[start, open, high, low, close, ticks]`` bars of ``seconds``.
+
+    As in MT5: a bar starts on a whole multiple of its length (:00, :05, :10 ...), a stretch with no
+    tick has no bar, and the price is the bid. Grouped back into minutes, these bars give the
+    terminal's own M1 open/high/low/close exactly, and their tick counts its tick_volume to within a
+    few percent (checked on gold, EURUSD, US500 and BTC, 2026-10-29).
+    """
+    bars: list[list] = []
+    cur: list | None = None
+    for t, p in zip(times, prices):
+        if not p or p <= 0:         # no bid on this tick: it moves no bid bar
+            continue
+        start = int(t) - int(t) % seconds
+        if cur is None or start != cur[0]:
+            cur = [start, p, p, p, p, 1]
+            bars.append(cur)
+        else:
+            cur[2] = max(cur[2], p)
+            cur[3] = min(cur[3], p)
+            cur[4] = p
+            cur[5] += 1
+    return bars
 
 
 # The MetaTrader5 package talks to the terminal over a SINGLE connection that is NOT safe for
@@ -366,6 +405,9 @@ class Mt5BrokerAdapter(BrokerAdapter):
 
     def get_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> OHLCVSeries:
         name = self._resolve_symbol(symbol)
+        if timeframe in _SECOND_TFS:
+            return OHLCVSeries(symbol=name, timeframe=timeframe,
+                               candles=self._second_bars(name, _SECOND_TFS[timeframe], limit))
         rates = self._mt5.copy_rates_from_pos(name, self._tf(timeframe), 0, limit)
         candles = []
         for r in rates if rates is not None else []:
@@ -375,6 +417,31 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 close=float(r["close"]), volume=float(r["tick_volume"]),
             ))
         return OHLCVSeries(symbol=name, timeframe=timeframe, candles=candles)
+
+    def _second_bars(self, name: str, seconds: int, limit: int) -> list[Candle]:
+        """The last ``limit`` bars of ``seconds`` each, built from ticks.
+
+        The ticks fetched are those of the last minutes that HAVE an M1 bar, not of the last minutes
+        on the clock: on a weekend or in a session break the clock's window holds no tick at all,
+        and the chart would be empty instead of showing the last trading. Those minutes hold room
+        for ``limit`` bars; buckets without a tick make it fewer.
+        """
+        mt5 = self._mt5
+        minutes = -(-limit * seconds // 60) + 1        # ceil, plus the forming minute
+        rates = mt5.copy_rates_from_pos(name, mt5.TIMEFRAME_M1, 0, minutes)
+        if rates is None or len(rates) == 0:
+            return []
+        # The end is past the forming minute on purpose: MT5 stops at the newest tick.
+        ticks = mt5.copy_ticks_range(name, int(rates[0]["time"]), int(rates[-1]["time"]) + 120,
+                                     mt5.COPY_TICKS_ALL)
+        if ticks is None:
+            return []
+        bars = _bars_from_ticks(_column(ticks, "time"), _column(ticks, "bid"), seconds)[-limit:]
+        return [
+            Candle(ts=datetime.fromtimestamp(t, tz=timezone.utc), open=float(o), high=float(h),
+                   low=float(lo), close=float(c), volume=float(n))
+            for t, o, h, lo, c, n in bars
+        ]
 
     # ---- account ----
 

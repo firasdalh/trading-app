@@ -440,7 +440,12 @@ export const api = {
   // Every watched pair's 1h / 4h / 1d direction, RSI and zones in one call (read-only).
   monitor: (refresh = false) =>
     request<import("../types").MonitorResponse>(`/api/monitor${refresh ? "?refresh=true" : ""}`),
-  // The charted pair alone on 1m / 15m / 1h / 4h / 1d (read-only).
+  // Open now, and the next close / reopen (read-only).
+  marketHours: (symbol: string, assetClass: string) =>
+    request<import("../types").MarketHours>(
+      `/api/market/hours?symbol=${encodeURIComponent(symbol)}&asset_class=${encodeURIComponent(assetClass)}`,
+    ),
+  // The charted pair alone on 1m / 5m / 15m / 1h / 4h / 1d (read-only).
   monitorPair: (symbol: string, assetClass: string) =>
     request<import("../types").MonitorPairResponse>(
       `/api/monitor/pair?symbol=${encodeURIComponent(symbol)}&asset_class=${encodeURIComponent(assetClass)}`,

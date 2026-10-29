@@ -207,92 +207,26 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               </span>
             </div>
             <div className="text-xs text-neutral-400">
-              Trade only clear (ADX≥25) trends; stand aside in moderate / ranging / volatile.
-              Its old "same return, less drawdown" result had look-ahead; the faithful backtest
-              shows ~0R - not recommended on that basis.
+              Trade only clear (ADX≥23) trends; stand aside in moderate / ranging / volatile.
+              Faithful backtest (Oct 2026: 33 symbols, 18 months, net of spread): Hybrid +0.05R a
+              trade with it ON vs +0.02R OFF. With it OFF, Run analysis also offers range setups
+              (failed breaks, range breakouts, fades), which lost ~0.28R a trade.
             </div>
           </button>
 
-          <button
-            disabled={busy}
-            onClick={() =>
-              run(() => api.setAiMomentumRead(!settings?.app.ai_momentum_read),
-                  `AI momentum-read ${settings?.app.ai_momentum_read ? "OFF" : "ON"}.`)}
-            className={`mt-2 w-full rounded-md border px-3 py-2 text-left text-sm ${
-              settings?.app.ai_momentum_read
-                ? "border-blue-500 bg-blue-500/10"
-                : "border-neutral-700 hover:bg-neutral-800"
-            }`}
-          >
+          {/* The three AI reads (momentum / regime / price-action) were tested on 2026-10-28 with the live
+              model and prompts and none beat the engine without them, so their switches are off and no
+              longer offered here. Method and numbers: analysis/ai_reads/REPORT.md. */}
+          <div className="mt-2 rounded-md border border-neutral-800 px-3 py-2 text-xs text-neutral-400">
             <div className="flex items-center justify-between">
-              <span className="font-medium">AI momentum-read</span>
-              <span className={`text-xs font-semibold ${
-                settings?.app.ai_momentum_read ? "text-bull" : "text-neutral-400"
-              }`}>
-                {settings?.app.ai_momentum_read ? "ON" : "OFF"}
-              </span>
+              <span className="text-sm font-medium text-neutral-300">AI momentum / regime / price-action reads</span>
+              <span className="font-semibold text-neutral-500">REMOVED</span>
             </div>
-            <div className="text-xs text-neutral-400">
-              At an ambiguous pullback (MACD rolling over / RSI stretched), the AI classifies it as a
-              healthy pullback, weak momentum, or probable reversal — the deterministic engine then
-              decides enter / wait / reject / arm - so the label DOES change trades.
-              <span className="mt-1 block font-semibold text-warn">UNTESTED: changes decisions the backtest never saw.</span>
-            </div>
-          </button>
-
-          <button
-            disabled={busy}
-            onClick={() =>
-              run(() => api.setAiRegimeRead(!settings?.app.ai_regime_read),
-                  `AI regime-read ${settings?.app.ai_regime_read ? "OFF" : "ON"}.`)}
-            className={`mt-2 w-full rounded-md border px-3 py-2 text-left text-sm ${
-              settings?.app.ai_regime_read
-                ? "border-blue-500 bg-blue-500/10"
-                : "border-neutral-700 hover:bg-neutral-800"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <span className="font-medium">AI regime-read</span>
-              <span className={`text-xs font-semibold ${
-                settings?.app.ai_regime_read ? "text-bull" : "text-neutral-400"
-              }`}>
-                {settings?.app.ai_regime_read ? "ON" : "OFF"}
-              </span>
-            </div>
-            <div className="text-xs text-neutral-400">
-              Only at the grey zone between trend and range (moderate ADX), the AI reads the texture as an
-              emerging trend, choppy range, or transition — the engine then treats it as a trend, a range,
-              or stands pat - the label changes trades; every gate still runs.
-              <span className="mt-1 block font-semibold text-warn">UNTESTED: changes decisions the backtest never saw.</span>
-            </div>
-          </button>
-
-          <button
-            disabled={busy}
-            onClick={() =>
-              run(() => api.setAiPriceactionRead(!settings?.app.ai_priceaction_read),
-                  `AI price-action-read ${settings?.app.ai_priceaction_read ? "OFF" : "ON"}.`)}
-            className={`mt-2 w-full rounded-md border px-3 py-2 text-left text-sm ${
-              settings?.app.ai_priceaction_read
-                ? "border-blue-500 bg-blue-500/10"
-                : "border-neutral-700 hover:bg-neutral-800"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <span className="font-medium">AI price-action-read</span>
-              <span className={`text-xs font-semibold ${
-                settings?.app.ai_priceaction_read ? "text-bull" : "text-neutral-400"
-              }`}>
-                {settings?.app.ai_priceaction_read ? "ON" : "OFF"}
-              </span>
-            </div>
-            <div className="text-xs text-neutral-400">
-              When a major level sits in a trade's path, the AI reads whether price is likely to reject,
-              break through, or is undecided — the engine then waits or takes the trade through the level.
-              The label changes which trades the engine takes.
-              <span className="mt-1 block font-semibold text-warn">UNTESTED: changes decisions the backtest never saw.</span>
-            </div>
-          </button>
+            Tested Oct 2026 (33 symbols, 18 months, live model). Momentum: its "healthy pullback" entries
+            lost ~0.2R a trade. Regime: almost never called a range; its "emerging trend" calls picked no
+            better than taking every trade. Price-action: its "break" entries were about break-even, and
+            lost on your watchlist in recent months.
+          </div>
         </section>
 
         <section className="space-y-2">

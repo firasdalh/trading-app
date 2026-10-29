@@ -405,7 +405,15 @@ function PositionCard({
         </div>
       )}
 
-      <TradeRail entry={p.entry_price} sl={sl} tp={tp} last={last} />
+      <TradeRail
+        entry={p.entry_price}
+        sl={sl}
+        tp={tp}
+        last={last}
+        slUsd={usdAtLevel(p, sl)}
+        tpUsd={usdAtLevel(p, tp)}
+        pnl={p.unrealized_pnl}
+      />
 
       <div className="mt-2 flex items-center gap-1.5">
         <button
@@ -432,9 +440,21 @@ function PositionCard({
  * A slim stop -> target rail with the entry tick and a marker at the current price — the same
  * red/green reading the chart's zones give, small enough to scan three trades at a glance.
  * Left is always the stop and right always the target, for longs and shorts alike, so "marker moving
- * right" always means "going your way".
+ * right" always means "going your way". Under each end: the price AND what the trade pays there, so
+ * the reward waiting at the target is a number on the card, not arithmetic.
  */
-function TradeRail({ entry, sl, tp, last }: { entry: number; sl: number | null; tp: number | null; last: number | null }) {
+function TradeRail({
+  entry, sl, tp, last, slUsd, tpUsd, pnl,
+}: {
+  entry: number;
+  sl: number | null;
+  tp: number | null;
+  last: number | null;
+  /** Account-currency value at the stop / target (null until price has moved off entry). */
+  slUsd: number | null;
+  tpUsd: number | null;
+  pnl: number;
+}) {
   if (sl == null || tp == null || sl === tp) {
     return (
       <div className="mt-1.5 rounded bg-warn/10 px-2 py-1 text-[11px] text-warn">
@@ -463,9 +483,30 @@ function TradeRail({ entry, sl, tp, last }: { entry: number; sl: number | null; 
           />
         )}
       </div>
-      <div className="mt-1 flex justify-between text-[10px] tabular-nums">
-        <span className="text-bear">SL {fmtPrice(sl)}</span>
-        <span className="text-bull">TP {fmtPrice(tp)}</span>
+      <div className="mt-1 flex justify-between gap-2 text-[10px] tabular-nums">
+        <span className="text-bear">
+          SL {fmtPrice(sl)}
+          {slUsd != null && (
+            // A stop trailed past breakeven pays out rather than costs - coloured by what it does.
+            <span
+              className={`ml-1 font-semibold ${slUsd >= 0 ? "text-bull" : "text-bear"}`}
+              title={slUsd >= 0 ? "What the stop locks in if it is hit" : "What you lose if the stop is hit"}
+            >
+              {fmtUsd(slUsd, { sign: true })}
+            </span>
+          )}
+        </span>
+        <span className="text-bull">
+          TP {fmtPrice(tp)}
+          {tpUsd != null && (
+            <span
+              className="ml-1 rounded bg-bull/15 px-1 font-bold text-bull"
+              title={`What the trade pays at the target${tpUsd > pnl ? ` - ${fmtUsd(tpUsd - pnl)} still to go` : ""}`}
+            >
+              🎯 {fmtUsd(tpUsd, { sign: true })}
+            </span>
+          )}
+        </span>
       </div>
     </div>
   );

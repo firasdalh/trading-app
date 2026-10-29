@@ -22,6 +22,7 @@ import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
 import { OrderBlockPrimitive, type ObZone } from "./orderBlockZones";
 import { PICK_EVENT, addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
 import { fmtPrice, fmtUsd } from "../format";
+import { TF_SECONDS, analysisTimeframe, isSecondsTf } from "../timeframes";
 import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 
@@ -65,11 +66,8 @@ function usePersisted<T>(key: string, initial: T, merge = false) {
 // The offset is taken PER TIMESTAMP rather than once, because getTimezoneOffset() reports the
 // offset in force on THAT date. Bars either side of a daylight-saving change each get the right
 // one; a single constant would slide half the history by an hour twice a year.
-// Bar length per timeframe, for the candle-close countdown.
 // How many of the most recent swing pivots get an HH/HL/LH/LL label. All of them is unreadable.
 const STRUCT_LABELS = 8;
-
-const TF_MINUTES: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440 };
 
 // Which clock the axis is written in. In "utc" mode the shift is the identity, so the chart shows
 // broker/UTC time and the day separators land on 00:00 of the axis itself.
@@ -991,6 +989,9 @@ function PaneResizer({ height, onChange, label }: { height: number; onChange: (h
 
 export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, isFullscreen, onToggleFullscreen,
                         scenLevelsShown, onToggleScenLevels, onArmed, onOpened, onPulse }: Props) {
+  // The timeframe the analysis reads and tickets/setups are placed on: this chart's, or 1m when the
+  // chart is in seconds (../timeframes.ts).
+  const aTf = analysisTimeframe(timeframe);
   const containerRef = useRef<HTMLDivElement>(null);
   // Full screen is owned by the Dashboard (the position strip must travel with the chart).
   const isFull = !!isFullscreen;
@@ -1530,7 +1531,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         // Don't leave the PREVIOUS pair's chart up when this one fails to load — clear it so it's
         // obviously empty (not silently showing the wrong pair's data/scale).
         if (cancelled || !seriesRef.current || !volumeRef.current) return;
+        // A failed REFRESH of the chart already on screen (a bar rollover, every few seconds on a
+        // seconds chart) keeps it up: it is the right pair, and the next refresh catches it up.
+        if (candlesKeyRef.current === `${symbol}|${timeframe}`) return;
         candlesRef.current = [];
+        candlesKeyRef.current = "";
         seriesRef.current.setData([]);
         seriesRef.current.setMarkers([]);
         volumeRef.current.setData([]);
@@ -1554,6 +1559,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // tzMode is a dependency: every bar time is re-derived through utcToDisp, so switching clocks
     // has to rebuild the series rather than leave old timestamps on screen under a new label.
   }, [symbol, assetClass, timeframe, reloadTick, tzMode]);
+
+  // Seconds on the time axis and the crosshair only where a bar is shorter than a minute. The RSI and
+  // MACD panes are separate charts, so they are set too (and again when one is switched on).
+  useEffect(() => {
+    const opts = { timeScale: { secondsVisible: isSecondsTf(timeframe) } };
+    chartRef.current?.applyOptions(opts);
+    rsiChartRef.current?.applyOptions(opts);
+    macdChartRef.current?.applyOptions(opts);
+  }, [timeframe, showRsi, showMacd]);
 
   useEffect(() => {
     // ovl.vwap is a dependency too: applyEmas draws the VWAP line, so without it the toggle would
@@ -1910,7 +1924,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const loadContext = async () => {
     setCtxBusy(true);
     try {
-      const next = await api.context(symbol, assetClass, timeframe);
+      const next = await api.context(symbol, assetClass, aTf);
       setCtx(next);
       setCtxAt(new Date());
       // If the levels are on the chart, re-plot them from the FRESH read. Leaving the old ones up
@@ -1945,14 +1959,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     if (ctxOpenRef.current) void loadCtxRef.current();
     if (scenOpenRef.current) void loadScenRef.current();
-  }, [symbol, timeframe, assetClass]);
+  }, [symbol, aTf, assetClass]);
 
   // `force` is only ever true from the ↻ button. Opening the panel and switching timeframes reuse
   // the server's cached reads, so moving 1h → 15m → 1h → 4h costs nothing.
   const loadScenarios = async (force = false) => {
     setScenBusy(true);
     try {
-      setScen(await api.scenarios(symbol, assetClass, timeframe, force));
+      setScen(await api.scenarios(symbol, assetClass, aTf, force));
     } catch {
       setScen(null);
     } finally {
@@ -1967,9 +1981,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // the LAST bar. So once an hour rolled over, the 1h candle just kept growing forever and the new
   // one never appeared until a manual refresh — the chart silently stopped being a chart.
   useEffect(() => {
-    if (!liveQuote || !seriesRef.current || !lastBarRef.current) return;
+    // A seconds chart's bars come from the ticks (the next effect), not from this quote.
+    if (!liveQuote || !seriesRef.current || !lastBarRef.current || isSecondsTf(timeframe)) return;
     const bar = lastBarRef.current;
-    const barSec = (TF_MINUTES[timeframe] ?? 0) * 60;
+    const barSec = TF_SECONDS[timeframe] ?? 0;
     const nowDisp = utcToDisp(Date.now() / 1000);
     const nextStart = (bar.time as number) + barSec;
 
@@ -2001,6 +2016,47 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     lastBarRef.current = updated;
     seriesRef.current.update(updated);
   }, [liveQuote, timeframe]);
+
+  // Seconds charts follow the ticks. The quote above comes every 2 seconds and is the mid price,
+  // while the bars are built from the bid: drawn into a 5-second candle it would miss most highs and
+  // lows and jump by half the spread. So the newest bars are re-read from the broker every second,
+  // and a bar that opens re-pulls the whole series, so the indicators take in the one that closed.
+  useEffect(() => {
+    if (!isSecondsTf(timeframe)) return;
+    const key = `${symbol}|${timeframe}`;
+    let dead = false;
+    let busy = false;
+    const id = window.setInterval(() => {
+      if (busy || candlesKeyRef.current !== key || !lastBarRef.current) return;
+      busy = true;
+      api
+        .ohlcv(symbol, assetClass, timeframe, 3)
+        .then((s) => {
+          const series = seriesRef.current;
+          if (dead || !series || candlesKeyRef.current !== key) return;
+          let opened = false;
+          for (const c of s.candles) {
+            const last = lastBarRef.current;
+            const t = toTime(c);
+            // The chart can only rewrite its newest bar; an older one is already final on it.
+            if (!last || t < (last.time as number)) continue;
+            if (t > (last.time as number)) opened = true;
+            const bar: CandlestickData = { time: t, open: c.open, high: c.high, low: c.low, close: c.close };
+            series.update(bar);
+            volumeRef.current?.update({
+              time: t, value: c.volume,
+              color: c.close >= c.open ? "rgba(38,166,154,0.4)" : "rgba(239,83,80,0.4)",
+            });
+            lastBarRef.current = bar;
+          }
+          if (opened) setReloadTick((v) => v + 1);
+        })
+        .catch(() => { /* one missed second; the next read catches up */ })
+        .finally(() => { busy = false; });
+    }, 1000);
+    return () => { dead = true; window.clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, assetClass, timeframe]);
 
   // Proposal entry/stop/target overlay lines (dashed). Suppressed once an actual position
   // exists for this symbol — the solid position lines are then the source of truth (avoids
@@ -2179,7 +2235,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       return;
     }
     const n = times.length;
-    const barSec = (TF_MINUTES[timeframe] ?? 0) * 60 || Math.max(1, times[n - 1] - times[n - 2]);
+    const barSec = TF_SECONDS[timeframe] || Math.max(1, times[n - 1] - times[n - 2]);
     // The candle the trade was opened INSIDE (same rule as the ENTRY marker), as a bar index. Before
     // the loaded history → -1 (the box clamps to the left edge); after the last loaded bar (opened in
     // the bar that is still forming) → counted forward in whole bars.
@@ -2339,7 +2395,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     const t = window.setTimeout(() => { void loadCtxRef.current(); }, 400);
     return () => window.clearTimeout(t);
-  }, [symbol, assetClass, timeframe]);
+  }, [symbol, assetClass, aTf]);
 
   // Today's economic calendar for this instrument. Refreshed every 10 minutes: the events don't
   // change, but the countdown to them does, and "CPI in 6 minutes" is a different fact from
@@ -2369,11 +2425,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   // Order blocks: fetched only while the overlay is on, and re-fetched per symbol AND timeframe —
   // a block belongs to the timeframe it formed on, so the 1h zones are simply wrong on the 5m chart.
+  // A seconds chart shows the 1m blocks, and says so: blocks in 5-second bars would be noise.
   useEffect(() => {
     if (!ovl.ob) { setObs([]); setObStatus(null); return; }
     let dead = false;
     setObStatus({ kind: "loading", text: "Order blocks…" });
-    api.orderBlocks(symbol, assetClass, timeframe)
+    api.orderBlocks(symbol, assetClass, aTf)
       .then((r) => {
         if (dead) return;
         const list = r.blocks ?? [];
@@ -2382,8 +2439,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         setObStatus({
           kind: "ok",
           text: list.length
-            ? `Order blocks: ${list.length} (${dem} demand · ${list.length - dem} supply)`
-            : `Order blocks: none on this ${timeframe} chart`,
+            ? `Order blocks${aTf !== timeframe ? ` (${aTf})` : ""}: ${list.length} (${dem} demand · ${list.length - dem} supply)`
+            : `Order blocks: none on the ${aTf} chart`,
         });
       })
       .catch((e: unknown) => {
@@ -2400,7 +2457,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         });
       });
     return () => { dead = true; };
-  }, [symbol, assetClass, timeframe, ovl.ob]);
+  }, [symbol, assetClass, aTf, timeframe, ovl.ob]);
 
   // Hand them to the primitive. Cleared when the overlay is off so switching it back on cannot
   // flash the previous pair's zones over this one's candles.
@@ -2464,37 +2521,39 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // break — wait for the close"; without knowing whether that close is 40 seconds or 40 minutes
   // away, the advice can't be acted on.
   useEffect(() => {
-    const mins = TF_MINUTES[timeframe];
-    if (!mins) { setBarLeft(null); return; }
+    const len = TF_SECONDS[timeframe];
+    if (!len) { setBarLeft(null); return; }
     const tick = () => {
       const times = barTimesRef.current;
       if (!times.length) { setBarLeft(null); return; }
       // barTimesRef holds DISPLAY time, so compare it against a display-time "now".
       const nowDisp = utcToDisp(Date.now() / 1000);
-      const left = Math.round(times[times.length - 1] + mins * 60 - nowDisp);
+      const left = Math.round(times[times.length - 1] + len - nowDisp);
       if (left <= 0) {
         // The bar's time is up. Pull the new one even if no tick has arrived — on a quiet pair the
         // quote handler above may not fire for minutes, and the chart would sit on a stale candle.
         //
         // Back off hard once the bar is several periods overdue: that isn't a slow broker, it's a
         // closed session or a weekend, and there is no new candle coming to poll for.
+        //
+        // Not on a seconds chart: it reads its ticks every second and re-pulls when a bar opens.
         const overdue = -left;
-        const retryMs = overdue > 3 * mins * 60 ? 60_000 : ROLL_RETRY_MS;
-        if (Date.now() - rollRef.current > retryMs) {
+        const retryMs = overdue > 3 * len ? 60_000 : ROLL_RETRY_MS;
+        if (!isSecondsTf(timeframe) && Date.now() - rollRef.current > retryMs) {
           rollRef.current = Date.now();
           setReloadTick((v) => v + 1);
         }
         setBarLeft(null);
         return;
       }
-      if (left > mins * 60) { setBarLeft(null); return; }               // stale feed / clock skew
+      if (left > len) { setBarLeft(null); return; }               // stale feed / clock skew
       const h = Math.floor(left / 3600);
       const m = Math.floor((left % 3600) / 60);
       const s = left % 60;
       setBarLeft({
         text: h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : m > 0 ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`,
         left,
-        frac: left / (mins * 60),
+        frac: left / len,
       });
     };
     tick();
@@ -2585,7 +2644,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     //
     // Skipped on the daily chart and above, where every candle IS a day and a line between each
     // pair would just be noise.
-    if (ovl.days && (TF_MINUTES[timeframe] ?? 0) > 0 && (TF_MINUTES[timeframe] ?? 0) < 1440) {
+    if (ovl.days && (TF_SECONDS[timeframe] ?? 0) > 0 && (TF_SECONDS[timeframe] ?? 0) < 86_400) {
       const times = barTimesRef.current;
       g.font = "10px system-ui, -apple-system, sans-serif";
 
@@ -3130,7 +3189,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       api
         .manualPreview({
           symbol, asset_class: assetClass, direction: tradeDraft.dir,
-          stop_loss: tradeDraft.stop, timeframe, risk_pct: tradeRisk,
+          stop_loss: tradeDraft.stop, timeframe: aTf, risk_pct: tradeRisk,
         })
         .then((p) => { if (!dead) setTradePrev(p); })
         .catch((e) => { if (!dead) setTradeErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, "") : String(e)); });
@@ -3141,7 +3200,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // a stale lot count, not just a stale number on screen.
     const id = window.setInterval(pull, 2000);
     return () => { dead = true; window.clearInterval(id); };
-  }, [tradeDraft, symbol, assetClass, timeframe, tradeRisk]);
+  }, [tradeDraft, symbol, assetClass, aTf, tradeRisk]);
 
   // Checklist data for an open ticket: the Monitor's 1H/4H/1D read for this pair, trades today and
   // the current run of losses. Fetched once per ticket - these change slowly.
@@ -3213,7 +3272,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     try {
       await api.manualTrade({
         symbol, asset_class: assetClass, direction: tradeDraft.dir,
-        stop_loss: tradeDraft.stop, timeframe, execute: true,
+        stop_loss: tradeDraft.stop, timeframe: aTf, execute: true,
         risk_pct: tradeRisk, note: tradeNote.trim() || null, tags: tradeTags,
       });
       setTradeDraft(null);
@@ -3234,7 +3293,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     setArmErr(null);
     try {
       await api.quickArm({
-        symbol, asset_class: assetClass, timeframe, direction, trigger_price: armDraft.price,
+        symbol, asset_class: assetClass, timeframe: aTf, direction, trigger_price: armDraft.price,
       });
       setArmDraft(null);
       onArmed?.();          // pull the armed list so the trigger/SL/TP lines appear straight away

@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import { displaySymbol, fmtPrice } from "../format";
-import type { MonitorBias, MonitorNote, MonitorResponse, MonitorRow, MonitorTf } from "../types";
+import { displaySymbol, fmtPrice, fmtUsd } from "../format";
+import type {
+  HybridVerdict, MonitorBias, MonitorHybrid, MonitorNote, MonitorResponse, MonitorRow, MonitorTf, PositionView,
+} from "../types";
+import { at, span } from "./MarketHoursChip";
 
 interface Props {
   /** The pair on the chart right now - its row is highlighted. */
   currentSymbol: string;
   /** Chart a pair; `timeframe` is set when a specific timeframe cell was clicked. */
   onSelect: (p: { symbol: string; asset_class: string; timeframe?: string }) => void;
+  /** The live book: a pair you hold is marked, with each timeframe judged against your side. */
+  positions?: PositionView[] | null;
 }
 
 // Columns shown. The 15M is entry timing only: the bias, the filters and the sort are still read from
@@ -20,11 +25,21 @@ const DI_MARGIN = 5;
 // minute between polls loses nothing while the drawer is open (it stops polling when closed).
 const POLL_MS = 60_000;
 
-type Filter = "all" | "aligned" | "pullback" | "zone" | "stretched";
+type Filter = "all" | "mine" | "setups" | "aligned" | "pullback" | "zone" | "stretched";
 type Sort = "clarity" | "strength" | "alpha" | "move";
+
+// A closed market normally went quiet hours ago; a symbol with no bar for longer than this has stopped
+// trading on the account (IN50m's newest bar is from June 2023). Longer than any weekend + holiday.
+const STALE_MS = 4 * 24 * 3600_000;
+
+/** Hybrid outcomes that are a trade idea (taken, under the bar, blocked, or waiting for a break). */
+const isSetup = (v: HybridVerdict | null | undefined) =>
+  !!v && (v.outcome === "candidate" || v.outcome === "below_bar" || v.outcome === "risk_veto" || v.outcome === "arm");
 
 const FILTERS: { id: Filter; label: string; hint: string }[] = [
   { id: "all", label: "All", hint: "Every watched pair" },
+  { id: "mine", label: "Mine", hint: "Pairs you have a position open on" },
+  { id: "setups", label: "Hybrid setups", hint: "Pairs where the Hybrid's last scan found a trade, or a level to wait for" },
   { id: "aligned", label: "Aligned", hint: "1H, 4H and 1D all point the same way" },
   { id: "pullback", label: "Dips & bounces", hint: "4H and 1D agree, the 1H is moving against them" },
   { id: "zone", label: "At a zone", hint: "Price is inside, or within 0.5 ATR of, a demand/supply zone" },
@@ -96,7 +111,7 @@ function ago(iso: string | undefined, now: number): string {
  * disagrees with the analysis panel, and a zone here is a zone on the chart's order-block overlay.
  * It is a read-out: nothing on this screen opens, sizes or blocks a trade.
  */
-export function MarketMonitor({ currentSymbol, onSelect }: Props) {
+export function MarketMonitor({ currentSymbol, onSelect, positions }: Props) {
   const [data, setData] = useState<MonitorResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -132,10 +147,24 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
     };
   }, [load]);
 
+  // Your open positions by symbol (a scale-in can mean two on one pair).
+  const posBySym = useMemo(() => {
+    const m = new Map<string, PositionView[]>();
+    for (const p of positions ?? []) {
+      const k = p.symbol.toUpperCase();
+      m.set(k, [...(m.get(k) ?? []), p]);
+    }
+    return m;
+  }, [positions]);
+
   const rows = useMemo(() => {
     const all = data?.rows ?? [];
     const kept = all.filter((r) => {
       switch (filter) {
+        case "mine":
+          return posBySym.has(r.symbol.toUpperCase());
+        case "setups":
+          return isSetup(r.hybrid);
         case "aligned":
           return r.bias === "aligned_up" || r.bias === "aligned_down";
         case "pullback":
@@ -166,18 +195,20 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
           avgAdx(b) - avgAdx(a),
       );
     return by;
-  }, [data, filter, sort]);
+  }, [data, filter, sort, posBySym]);
 
   const counts = useMemo(() => {
     const all = data?.rows ?? [];
     return {
       all: all.length,
+      mine: all.filter((r) => posBySym.has(r.symbol.toUpperCase())).length,
+      setups: all.filter((r) => isSetup(r.hybrid)).length,
       aligned: all.filter((r) => r.bias.startsWith("aligned")).length,
       pullback: all.filter((r) => r.bias.startsWith("pullback")).length,
       zone: all.filter((r) => BIAS_TFS.some((tf) => nearZone(r.tfs[tf]))).length,
       stretched: all.filter((r) => stretched(r.tfs["1h"]) || stretched(r.tfs["4h"])).length,
     } as Record<Filter, number>;
-  }, [data]);
+  }, [data, posBySym]);
 
   return (
     <div className="space-y-3">
@@ -228,6 +259,8 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
           </button>
         </div>
       </div>
+
+      {data?.hybrid && <HybridSummary h={data.hybrid} now={now} />}
 
       {legend && <Legend />}
 
@@ -284,6 +317,9 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
                 r={r}
                 active={r.symbol.toUpperCase() === currentSymbol.toUpperCase()}
                 onSelect={onSelect}
+                positions={posBySym.get(r.symbol.toUpperCase()) ?? []}
+                hybrid={data?.hybrid ?? null}
+                now={now}
               />
             ))}
           </table>
@@ -298,12 +334,21 @@ export function MarketMonitor({ currentSymbol, onSelect }: Props) {
   );
 }
 
-function Row({ r, active, onSelect }: { r: MonitorRow; active: boolean; onSelect: Props["onSelect"] }) {
+function Row({
+  r, active, onSelect, positions, hybrid, now,
+}: {
+  r: MonitorRow;
+  active: boolean;
+  onSelect: Props["onSelect"];
+  /** Your open positions on this pair. */
+  positions: PositionView[];
+  hybrid: MonitorHybrid | null;
+  now: number;
+}) {
   const b = BIAS[r.bias];
   const chg = r.change_pct;
   // `false` only: null means "unknown" (e.g. no broker serves this pair) and must not read as closed.
   const closed = r.market_open === false;
-  const crypto = r.asset_class === "crypto";
   const noData = TFS.every((tf) => !r.tfs[tf]);
   return (
     <tbody
@@ -329,16 +374,7 @@ function Row({ r, active, onSelect }: { r: MonitorRow; active: boolean; onSelect
           </button>
           <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-neutral-500">
             <span>{r.asset_class}</span>
-            {closed && (
-              <span
-                className="rounded bg-neutral-800 px-1 text-neutral-400"
-                title={crypto
-                  ? "No new prices for 10+ minutes - crypto trades 24/7, so the feed is quiet rather than closed"
-                  : "No fresh prices - the session is closed"}
-              >
-                {crypto ? "⏸ no ticks" : "⏸ closed"}
-              </span>
-            )}
+            <HoursTag r={r} now={now} />
             {r.events_soon && (
               <span className="rounded bg-warn/15 px-1 font-medium text-warn" title={r.events_soon}>
                 ⚑ news
@@ -350,6 +386,9 @@ function Row({ r, active, onSelect }: { r: MonitorRow; active: boolean; onSelect
               </span>
             )}
           </div>
+          {positions.map((p) => (
+            <PositionTag key={p.id ?? `${p.symbol}-${p.direction}-${p.entry_price}`} p={p} r={r} />
+          ))}
           {/* Narrow windows: the bias rides under the pair name - as the last column it was the first
               thing cut off, and it is the one-glance summary of the row. */}
           <span
@@ -403,21 +442,218 @@ function Row({ r, active, onSelect }: { r: MonitorRow; active: boolean; onSelect
 
         {/* What to watch - its own column on wide screens */}
         <td className="hidden px-3 py-2.5 2xl:table-cell">
-          <Notes notes={r.notes} />
+          <Watch r={r} hybrid={hybrid} now={now} />
         </td>
       </tr>
       {/* ...and its own line under the readings on narrower ones. Pinned left like the pair name, so
           scrolling the table sideways does not carry the notes out of view. */}
-      {r.notes.length > 0 && (
+      {(r.notes.length > 0 || hasHybridLine(r, hybrid)) && (
         <tr className="2xl:hidden">
           <td colSpan={6} className="px-3 pb-2.5 pt-0">
             <div className="sticky left-3 max-w-[40rem] border-l-2 border-neutral-800 pl-2.5">
-              <Notes notes={r.notes} />
+              <Watch r={r} hybrid={hybrid} now={now} />
             </div>
           </td>
         </tr>
       )}
     </tbody>
+  );
+}
+
+const CLOSURE_WORD: Record<string, string> = {
+  daily_break: "daily break", overnight: "night", weekend: "weekend", unscheduled: "break",
+};
+
+/**
+ * Market hours for the row: closed pairs say when they reopen, open ones warn when a close is near
+ * (2 hours ahead, 24 before the weekend - amber, red inside 15 minutes), and a symbol with no prices
+ * for days says so outright instead of passing for "closed". Hours learned from the broker's own
+ * prices (backend data/market_hours.py); nothing is shown while a close is far off.
+ */
+function HoursTag({ r, now }: { r: MonitorRow; now: number }) {
+  const h = r.hours;
+  const crypto = r.asset_class === "crypto";
+  const lastAt = r.last_bar_at ? Date.parse(r.last_bar_at) : null;
+  if (r.market_open === false) {
+    if (lastAt != null && now - lastAt > STALE_MS) {
+      const since = new Date(lastAt).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+      return (
+        <span
+          className="rounded bg-bear/15 px-1 font-medium text-bear"
+          title={`No prices since ${since}: this symbol has stopped trading on your account (or was renamed), so every reading in this row is that old. Check it in MT5, or remove it from the watchlist.`}
+        >
+          ⚠ no prices since {since}
+        </span>
+      );
+    }
+    const opens = !crypto ? h?.opens_at : null;
+    return (
+      <span
+        className="rounded bg-neutral-800 px-1 text-neutral-400"
+        title={crypto
+          ? "No new prices for 10+ minutes - crypto trades 24/7, so the feed is quiet rather than closed"
+          : `No fresh prices - the session is closed.${opens ? ` Reopens ${at(opens, now)}${h?.closure && h.closure !== "unscheduled" ? ` after its ${CLOSURE_WORD[h.closure]}` : ""}.` : ""}${h?.off_schedule ? " It normally trades at this hour - a holiday or a broker pause." : ""}`}
+      >
+        {crypto ? "⏸ no ticks" : "⏸ closed"}
+        {opens && ` · opens ${at(opens, now)} (${span(Date.parse(opens) - now)})`}
+      </span>
+    );
+  }
+  if (r.market_open && h?.closes_at) {
+    const left = Date.parse(h.closes_at) - now;
+    const weekend = h.closure === "weekend";
+    if (left > 0 && left <= (weekend ? 24 : 2) * 3600_000) {
+      return (
+        <span
+          className={`rounded px-1 font-medium ${left <= 15 * 60_000 ? "bg-bear/20 text-bear" : "bg-warn/15 text-warn"}`}
+          title={`Closes ${at(h.closes_at, now)}${h.closure ? ` for the ${CLOSURE_WORD[h.closure]}` : ""}${h.opens_at ? `, reopens ${at(h.opens_at, now)}` : ""} - a trade opened now is carried through it.`}
+        >
+          {weekend ? "weekend close" : "closes"} {at(h.closes_at, now)} · {span(left)}
+        </span>
+      );
+    }
+  }
+  return null;
+}
+
+/** Your position on this pair, and each timeframe's arrow judged against YOUR side: ✓ with you, ✗
+ *  against. Red when most of 1H / 4H / 1D point the other way - the bigger picture has turned. */
+function PositionTag({ p, r }: { p: PositionView; r: MonitorRow }) {
+  const side = p.direction === "long" ? "up" : "down";
+  const marks = TFS.map((tf) => {
+    const t = r.tfs[tf]?.trend;
+    return { tf, m: t === side ? "with" : t === "up" || t === "down" ? "against" : "flat" };
+  });
+  const big = marks.filter((x) => x.tf !== "15m");
+  const against = big.filter((x) => x.m === "against").length;
+  const withYou = big.filter((x) => x.m === "with").length;
+  const turned = against > withYou;
+  return (
+    <div
+      className={`mt-1.5 w-fit rounded px-1.5 py-1 text-[11px] ${
+        turned ? "bg-bear/10 ring-1 ring-inset ring-bear/40" : "bg-neutral-800/80"
+      }`}
+      title={`Your ${p.direction.toUpperCase()} ${p.qty} lots: each timeframe's direction against it (✓ with you, ✗ against).${
+        turned ? " Most of 1H / 4H / 1D now point the other way." : ""
+      }`}
+    >
+      <div className="flex items-center gap-1.5 font-semibold tabular-nums">
+        <span className={p.direction === "long" ? "text-bull" : "text-bear"}>
+          {p.direction === "long" ? "▲ LONG" : "▼ SHORT"}
+        </span>
+        <span className="font-normal text-neutral-400">{p.qty}</span>
+        <span className={p.unrealized_pnl >= 0 ? "text-bull" : "text-bear"}>{fmtUsd(p.unrealized_pnl, { sign: true })}</span>
+      </div>
+      <div className="mt-0.5 flex gap-1.5 whitespace-nowrap">
+        {marks.map(({ tf, m }) => (
+          <span key={tf} className={m === "with" ? "text-bull" : m === "against" ? "text-bear" : "text-neutral-500"}>
+            {tf.toUpperCase()} {m === "with" ? "✓" : m === "against" ? "✗" : "–"}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const hasHybridLine = (r: MonitorRow, h: MonitorHybrid | null) => !!h?.enabled && !!r.hybrid;
+
+function Watch({ r, hybrid, now }: { r: MonitorRow; hybrid: MonitorHybrid | null; now: number }) {
+  return (
+    <>
+      {hybrid && r.hybrid && hasHybridLine(r, hybrid) && <HybridLine v={r.hybrid} meta={hybrid} now={now} />}
+      <Notes notes={r.notes} />
+    </>
+  );
+}
+
+/** The engine's rationale cut to its first sentence, without the mode prefix; the tooltip has it whole. */
+function gist(reason: string | undefined, max = 110): string {
+  let s = (reason ?? "").replace(/^Trend-only mode:\s*standing aside\s*[—-]\s*/i, "");
+  const end = s.search(/\.\s/);
+  if (end > 0) s = s.slice(0, end);
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+const pct = (x: number | undefined) => (x == null ? "" : `${Math.round(x * 100)}%`);
+const sideWord = (d: string | undefined) => (d === "long" ? "▲ long" : d === "short" ? "▼ short" : "");
+
+/** What the Hybrid's last scan made of this pair - the answer to "why didn't it trade this?". */
+function HybridLine({ v, meta, now }: { v: HybridVerdict; meta: MonitorHybrid; now: number }) {
+  let text: string;
+  let cls = "text-violet-300";
+  switch (v.outcome) {
+    case "candidate":
+      text = `${sideWord(v.direction)} setup ${pct(v.confidence)} - clears the ${pct(v.bar)} bar`;
+      cls = "text-bull";
+      break;
+    case "below_bar":
+      text = `${sideWord(v.direction)} setup ${pct(v.confidence)} - under the ${pct(v.bar)} bar`;
+      break;
+    case "risk_veto":
+      text = `${sideWord(v.direction)} setup ${pct(v.confidence)} - blocked by risk: ${v.risk ?? ""}`;
+      cls = "text-warn";
+      break;
+    case "arm":
+      text =
+        `waits for a break - ${v.arm_side === "long" ? "buy" : "sell"} at ${fmtLevel(v.trigger ?? null)} ` +
+        `(${pct(v.arm_confidence)})${meta.arming ? "" : " · arming is off, so it isn't placed"}`;
+      break;
+    case "aside":
+      text = `no trade - ${gist(v.reason)}`;
+      cls = "text-neutral-400";
+      break;
+    case "holding":
+      text = "skipped - you have a position open";
+      cls = "text-neutral-500";
+      break;
+    case "pending":
+      text = "skipped - a proposal is waiting for your approval";
+      cls = "text-neutral-500";
+      break;
+    case "armed":
+      text = "skipped - a setup is already armed here";
+      cls = "text-neutral-500";
+      break;
+    case "closed":
+      text = "skipped - market closed";
+      cls = "text-neutral-500";
+      break;
+    default:
+      text = `couldn't analyse - ${gist(v.reason)}`;
+      cls = "text-bear";
+  }
+  return (
+    <div className={`mb-1 flex gap-1.5 text-xs leading-snug ${cls}`} title={v.reason || undefined}>
+      <span className="shrink-0" aria-hidden="true">🤖</span>
+      <span>
+        <span className="font-semibold">Hybrid</span>
+        {meta.scan_at && <span className="text-neutral-500"> ({ago(meta.scan_at, now)})</span>}: {text}
+      </span>
+    </div>
+  );
+}
+
+/** One line over the table: is the Hybrid on, what did its last check conclude, is arming off. */
+function HybridSummary({ h, now }: { h: MonitorHybrid; now: number }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-violet-800/40 bg-violet-950/20 px-3 py-1.5 text-xs text-neutral-400">
+      <span className="font-semibold text-violet-300">🤖 Hybrid {h.enabled ? "on" : "off"}</span>
+      {h.enabled && h.last_at && (
+        <span>
+          · last check {ago(h.last_at, now)}
+          {h.last_reason ? `: ${h.last_reason}` : ""}
+        </span>
+      )}
+      {h.enabled && !h.arming && (
+        <span
+          className="text-warn"
+          title="The engine finds wait-for-the-break setups but the Hybrid doesn't place them. Turn arming on in the Hybrid settings (Scanner) to let it."
+        >
+          · arming is off
+        </span>
+      )}
+      {h.enabled && !h.scan_at && <span className="text-neutral-500">· its read of each pair shows after its next scan</span>}
+    </div>
   );
 }
 
@@ -700,6 +936,9 @@ function Legend() {
       {item("Bias", "How the three timeframes line up (1H, 4H, 1D - the 15M is not part of it). Dip in uptrend = 4H and 1D up, 1H down. Up vs the 1D = 1H and 4H up against the daily.")}
       {item("15M", "Entry timing: the same reading on 15-minute bars. It never changes the bias or the filters; it shows whether the short-term move is with the bigger picture right now.")}
       {item("% of day", "Today's range so far against a normal day's (daily ATR). Past 100% the day's move is already extended.")}
+      {item("Your position", "A pair you hold shows your side, size and floating P&L, and each timeframe's arrow judged against you: ✓ with you, ✗ against. Red when most of 1H / 4H / 1D point the other way. “Mine” filters to them.")}
+      {item("🤖 Hybrid", "What the Hybrid's last scan made of the pair, in the engine's words: a setup (and whether it clears your confidence bar), a level it waits for price to break, or why there is no trade. “Hybrid setups” filters to the pairs with an idea.")}
+      {item("Hours", "Learned from the broker's own prices: amber when a pair closes within 2 hours (24 before the weekend), red inside 15 minutes; a closed pair says when it reopens. “No prices since …” = the symbol has stopped trading on your account.")}
       {item("Click", "A pair name opens it on the chart; a 15M / 1H / 4H / 1D cell opens that timeframe.")}
     </dl>
   );

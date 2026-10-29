@@ -37,9 +37,9 @@ from app.models.schemas import OHLCVSeries
 log = get_logger("agents.market_monitor")
 
 MONITOR_TFS = ("15m", "1h", "4h", "1d")
-# The chart's own per-pair panel adds the 1m: one pair is cheap enough to read live, and it is the
-# timeframe a trade is actually managed on. The bias is still 1h / 4h / 1d only.
-PAIR_TFS = ("1m", "15m", "1h", "4h", "1d")
+# The chart's own per-pair panel adds the 1m and 5m: one pair is cheap enough to read live, and they
+# are the timeframes a trade is actually timed and managed on. The bias is still 1h / 4h / 1d only.
+PAIR_TFS = ("1m", "5m", "15m", "1h", "4h", "1d")
 BIAS_TFS = ("1h", "4h", "1d")        # the timeframes the bias label is read from
 _FETCH_BARS = 500        # what the chart's order-block overlay reads - same zones as the chart
 # The 15m volume baseline compares a bar with the SAME 15-minute slot in ~20 earlier sessions, which
@@ -49,7 +49,7 @@ _ENGINE_BARS = 200       # what the pipeline feeds the engine - same indicator v
 _MIN_BARS = 60
 # A bar on the slow timeframes barely moves in a minute; refetching them that often only loads the
 # shared MT5 connection. The 1h carries the live price, so it stays fresh.
-_TTL = {"1m": 10.0, "15m": 30.0, "1h": 45.0, "4h": 120.0, "1d": 300.0}
+_TTL = {"1m": 10.0, "5m": 20.0, "15m": 30.0, "1h": 45.0, "4h": 120.0, "1d": 300.0}
 # Price this close to a zone edge (in ATRs of that timeframe) counts as "at" the zone.
 NEAR_ZONE_ATR = 0.5
 RSI_HIGH, RSI_LOW = 70.0, 30.0
@@ -113,7 +113,7 @@ VOL_SPIKE = 2.0
 VOL_SIDE_LO, VOL_SIDE_HI = 0.40, 0.60  # share of recent volume on up-close bars
 
 
-_TF_SECONDS = {"1m": 60, "15m": 900, "1h": 3600, "4h": 4 * 3600, "1d": 86400}
+_TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 4 * 3600, "1d": 86400}
 _SAME_HOUR_MIN = 8          # same-hour samples needed before an intraday ratio means anything
 
 
@@ -144,9 +144,9 @@ def _volume_read(candles, timeframe: str = "1h", now: datetime | None = None) ->
     before them. Against a trailing window the reading mostly reported the clock: replayed over 14
     months of Exness 1H bars, the 14:00 UTC bar (US cash open) read as a 2x "spike" on 96% of days for
     US500/USTEC and the 21-23 UTC bars read "low" on 89-100% of days; per-hour baselines bring the spike
-    rate down to 1-15% in every hour. Daily bars use the previous 20 sessions. The 1m uses the previous
-    20 bars: a same-minute baseline would need 20 days of 1m history, and over 20 minutes the session
-    clock barely moves.
+    rate down to 1-15% in every hour. Daily bars use the previous 20 sessions. The 1m and 5m use the
+    previous 20 bars: a same-slot baseline would need 20 days of their history (28,800 bars on the
+    1m), and over 20 bars - 20 minutes to 1h40 - the session clock moves far less than across a day.
 
       ratio      the last completed bar's volume / its baseline
       level      high (>= 1.5x) | normal | low (<= 0.7x)
@@ -525,6 +525,11 @@ def read_pair(broker, symbol: str, asset_class: str, tfs: tuple[str, ...] = MONI
     d1 = series.get("1d")
     px = h1.candles[-1].close if h1 and h1.candles else (d1.candles[-1].close if d1 and d1.candles else None)
     row["price"] = px
+    # When the newest bar printed. A closed market is normally hours old; IN50m's newest bar on this
+    # account is from June 2023 - "closed" alone hid that its readings are years stale.
+    last_ts = h1.candles[-1].ts if h1 and h1.candles else (d1.candles[-1].ts if d1 and d1.candles else None)
+    row["last_bar_at"] = ((last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=timezone.utc)).isoformat()
+                          if last_ts else None)
     row["change_pct"] = row["range_used"] = None
     raw_days = list(d1.candles) if d1 else []
     days = session_days(raw_days)               # weekend stubs folded into Monday (see session_days)

@@ -74,6 +74,28 @@ def _effective_min_conf(strategy: str | None, threshold: float) -> float:
     return threshold
 
 
+def _verdict(symbol: str, prop, dec, bar: float) -> dict:
+    """What the scan made of one pair, kept with the tick so the Monitor can say why the Hybrid did
+    or did not act on it - in the engine's own words. Recording only: nothing reads it to decide."""
+    v = {"symbol": symbol, "direction": prop.direction.value, "confidence": round(prop.confidence, 2),
+         "bar": round(bar, 2), "strategy": prop.strategy, "reason": (prop.rationale or "")[:220]}
+    if prop.direction.value in ("long", "short"):
+        if dec.approved and prop.confidence > bar:
+            v["outcome"] = "candidate"
+        elif prop.confidence <= bar:
+            v["outcome"] = "below_bar"
+        else:
+            v["outcome"] = "risk_veto"
+            v["risk"] = (getattr(dec, "reason", "") or "")[:160]
+    elif prop.conditional is not None:
+        c = prop.conditional
+        v.update(outcome="arm", arm_side="long" if c.order_type.startswith("buy") else "short",
+                 trigger=c.trigger_price, arm_confidence=round(c.confidence, 2))
+    else:
+        v["outcome"] = "aside"
+    return v
+
+
 def get_or_create_hybrid_config(session: Session) -> HybridConfig:
     cfg = session.get(HybridConfig, 1)
     if cfg is None:
@@ -144,6 +166,8 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     # aside tally what the AI decider chose across the scanned pairs (when the AI is the decider).
     stats: dict = {"reached_scan": False, "scanned": 0, "candidates": 0, "skipped_low_conf": 0,
                    "armable": 0, "armed": 0, "ai_opens": 0, "ai_arms": 0, "ai_aside": 0}
+    # Per pair, what this tick made of it (see _verdict) - shown in the Monitor.
+    pairs: list[dict] = []
 
     def done(reason: str, opened: dict | None = None) -> dict:
         if cfg.conditional_enabled and armable:
@@ -152,7 +176,7 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
         cfg.last_result = reason
         session.add(cfg)
         session.add(AgentRun(agent="hybrid", event="tick",
-                             detail={"opened": opened, "reason": reason, "stats": stats}))
+                             detail={"opened": opened, "reason": reason, "stats": stats, "pairs": pairs}))
         session.commit()
         return {"ran": True, "opened": opened, "reason": reason}
 
@@ -205,13 +229,16 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
     stats["reached_scan"] = True
     candidates: list[tuple[bool, float, WatchItem]] = []
     for it in items:
-        if (_norm_symbol(it.symbol) in open_syms or _norm_symbol(it.symbol) in pending_syms
-                or _norm_symbol(it.symbol) in armed_syms):
+        sym = _norm_symbol(it.symbol)
+        if sym in open_syms or sym in pending_syms or sym in armed_syms:
+            pairs.append({"symbol": it.symbol, "outcome": "holding" if sym in open_syms
+                          else "pending" if sym in pending_syms else "armed"})
             continue
         # Skip a CLOSED market (weekend / holiday / out-of-hours) — no point analysing stale prices or
         # arming a setup that can't fill. Crypto keeps ticking so it stays open.
         try:
             if not get_broker_for(AssetClass(it.asset_class), settings.broker_map).market_open(it.symbol):
+                pairs.append({"symbol": it.symbol, "outcome": "closed"})
                 continue
         except Exception:  # noqa: BLE001 - a status lookup failure shouldn't stop the scan
             pass
@@ -226,10 +253,12 @@ def run_hybrid(session: Session, tf_override: str | None = None) -> dict:
                                        read_llm=False if ai_active else None, cache=cache)
         except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't stop the loop
             log.warning("hybrid preview failed", extra={"symbol": it.symbol, "error": str(exc)})
+            pairs.append({"symbol": it.symbol, "outcome": "error", "reason": str(exc)[:160]})
             continue
         stats["scanned"] += 1
         is_directional = prop.direction.value in ("long", "short")
         eff_min = _effective_min_conf(prop.strategy, threshold)
+        pairs.append(_verdict(it.symbol, prop, dec, eff_min))
         if is_directional:
             stats["ai_opens"] += 1
             if dec.approved and prop.confidence > eff_min:

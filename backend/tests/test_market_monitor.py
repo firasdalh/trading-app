@@ -161,6 +161,12 @@ def test_table_is_built_once_within_its_ttl(db_session, monkeypatch):
     monitor(refresh=False, session=db_session)
     monitor(refresh=False, session=db_session)
     assert calls == ["EURUSD"]
+    # Refresh = "a table finished after I clicked". On Windows, Python 3.12's wall clock ticks every
+    # ~15.6 ms, so a click within the same tick as the build reads as simultaneous and is (rightly)
+    # served that table. A real click comes later than that - step past one tick, as it would.
+    import time as _t
+
+    _t.sleep(0.02)
     monitor(refresh=True, session=db_session)         # Refresh rebuilds
     assert calls == ["EURUSD", "EURUSD"]
 

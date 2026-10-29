@@ -29,6 +29,9 @@ MetaTrader5>=5.0; sys_platform == "win32"   # Exness / MT5 brokers (Windows only
 # ---- HTTP ----
 httpx>=0.27
 
+# ---- Time zones ----
+tzdata>=2024.1           # zoneinfo's database on Windows (market hours are read in New York time)
+
 # ---- Dev / test ----
 pytest>=8.0
 pytest-asyncio>=0.23
