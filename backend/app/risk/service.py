@@ -600,12 +600,55 @@ def _risk_per_lot(broker, symbol: str, entry: float | None, stop: float | None) 
     return abs(entry - stop) * contract
 
 
+# Scalp mode: the chart's scalp ticket places hand-made orders tagged "scalp". Those skip the 30-min
+# per-pair cooldown, and the 180-min loss cooldown is a 5-min pause for them (RISK.md override
+# 2026-11-01, at the user's explicit request). The same goes for the orders of the user's own custom
+# strategies (source "strategy:<id>", the Strategies board - also at their explicit request, the
+# same day). Every other gate still applies to both.
+SCALP_PAIR_COOLDOWN_MINUTES = 0
+SCALP_LOSS_COOLDOWN_MINUTES = 5
+
+
+def scalp_cooldowns(source: str | None, tags: list[str] | None) -> dict[str, int]:
+    """The cooldown overrides ``assess`` takes for a scalp-mode order - a hand-placed trade
+    (source "manual") tagged "scalp" - or a custom strategy's order (source "strategy:<id>").
+    Empty for anything else (the Hybrid, the auto-traders, armed setups, approvals, ordinary manual
+    tickets), so the RISK.md defaults apply to them."""
+    if (source == "manual" and "scalp" in (tags or [])) or (source or "").startswith("strategy:"):
+        return {"override_cooldown_minutes": SCALP_PAIR_COOLDOWN_MINUTES,
+                "override_loss_cooldown_minutes": SCALP_LOSS_COOLDOWN_MINUTES}
+    return {}
+
+
+def strategy_cooldowns(pair_minutes: int | None, loss_minutes: int | None) -> dict[str, int]:
+    """A custom strategy's own cooldowns, as set on the Strategies board - never under scalp mode's
+    (no per-pair floor, at least SCALP_LOSS_COOLDOWN_MINUTES after a loss): a value under them would
+    loosen RISK.md past what the user confirmed."""
+    pair = SCALP_PAIR_COOLDOWN_MINUTES if pair_minutes is None else int(pair_minutes)
+    loss = SCALP_LOSS_COOLDOWN_MINUTES if loss_minutes is None else int(loss_minutes)
+    return {"override_cooldown_minutes": max(SCALP_PAIR_COOLDOWN_MINUTES, pair),
+            "override_loss_cooldown_minutes": max(SCALP_LOSS_COOLDOWN_MINUTES, loss)}
+
+
+def record_cooldowns(record) -> dict[str, int]:
+    """The cooldown overrides for a stored proposal: a strategy's own (kept in its reasoning when the
+    order was made), else ``scalp_cooldowns`` from its source and tags."""
+    reasoning = getattr(record, "reasoning", None)
+    reasoning = reasoning if isinstance(reasoning, dict) else {}
+    source = getattr(record, "source", None)
+    own = reasoning.get("cooldowns")
+    if (source or "").startswith("strategy:") and isinstance(own, dict):
+        return strategy_cooldowns(own.get("pair"), own.get("loss"))
+    return scalp_cooldowns(source, reasoning.get("tags"))
+
+
 def assess(
     session: Session,
     proposal: TradeProposal,
     override_risk_fraction: float | None = None,
     cache: ScanCache | None = None,
     override_cooldown_minutes: int | None = None,
+    override_loss_cooldown_minutes: int | None = None,
 ) -> RiskDecision:
     """Run a proposal through the deterministic Risk Manager against live state.
 
@@ -615,6 +658,7 @@ def assess(
     single-symbol assessments and the real open path so they always read fresh broker truth.
     ``override_cooldown_minutes`` lets the per-pair AI auto-trader use its own (shorter) re-entry
     cooldown for both the per-pair AND loss cooldown, without changing the global RISK.md defaults.
+    ``override_loss_cooldown_minutes`` then sets the loss cooldown on its own (scalp mode, above).
     """
     from app.risk.correlation import correlated_concentration
 
@@ -624,6 +668,8 @@ def assess(
     if override_cooldown_minutes is not None:
         limits = limits.model_copy(update={"per_pair_cooldown_minutes": override_cooldown_minutes,
                                            "loss_cooldown_minutes": override_cooldown_minutes})
+    if override_loss_cooldown_minutes is not None:
+        limits = limits.model_copy(update={"loss_cooldown_minutes": override_loss_cooldown_minutes})
     account = build_account_state(session, broker, cache=cache)
     # Open book from broker truth (so manual/terminal trades count too). Used for BOTH the
     # anti-stacking and correlated-concentration checks, which keeps the preview consistent with
@@ -727,7 +773,7 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
     if desired_lots is not None:
         override_rf = _risk_fraction_for_lots(lots=desired_lots, risk_per_lot=rpl, equity=equity)
 
-    decision = assess(session, proposal, override_risk_fraction=override_rf)
+    decision = assess(session, proposal, override_risk_fraction=override_rf, **record_cooldowns(record))
 
     qty_step, min_lot = _lot_specs(broker, proposal.asset_class, record.symbol)
     ceiling = limits.risk_per_trade_ceiling

@@ -195,14 +195,20 @@ def _build_manual_proposal(req: "ManualTradeRequest", session: Session):
     )
 
 
+def _clean_tags(tags: list[str]) -> list[str]:
+    """A ticket's tags as stored with the trade: trimmed, lower-case, at most 20 characters."""
+    return [t.strip().lower()[:20] for t in tags if t and t.strip()]
+
+
 @router.post("/manual/preview", response_model=ManualPreviewResponse)
 def manual_trade_preview(req: ManualTradeRequest, session: Session = Depends(get_session)) -> ManualPreviewResponse:
     """Risk-size a manual ticket WITHOUT placing it — returns the max lots at the 3% cap + the $ risk,
     so the ticket can suggest 'max N lots'. Non-persisting, no execution."""
-    from app.risk.service import assess
+    from app.risk.service import assess, scalp_cooldowns
 
     proposal = _build_manual_proposal(req, session)
-    decision = assess(session, proposal, override_risk_fraction=req.risk_pct)
+    decision = assess(session, proposal, override_risk_fraction=req.risk_pct,
+                      **scalp_cooldowns("manual", _clean_tags(req.tags)))
 
     spread = None
     try:
@@ -228,15 +234,18 @@ def manual_trade(req: ManualTradeRequest, session: Session = Depends(get_session
     """Manual QUICK trade — the user places a trade directly, but it ALWAYS runs through the
     deterministic Risk Manager (sizing + 3% cap, exposure, correlation, per-pair cooldown, daily-loss
     breaker, anti-stacking) and the execution gates (kill-switch, live-confirmation). Nothing here
-    bypasses risk. ``execute=True`` opens it now if approved; ``execute=False`` queues it for approval."""
+    bypasses risk, except that scalp mode's orders (tagged "scalp") skip the per-pair cooldown and
+    get a 5-min loss cooldown (RISK.md override 2026-11-01; see ``scalp_cooldowns``).
+    ``execute=True`` opens it now if approved; ``execute=False`` queues it for approval."""
     from app.execution.executor import ExecutionBlocked, execute_proposal
-    from app.risk.service import assess, size_preview
+    from app.risk.service import assess, scalp_cooldowns, size_preview
 
     proposal = _build_manual_proposal(req, session)   # validates direction/side + defaults entry to market
     d = proposal.direction
-    decision = assess(session, proposal, override_risk_fraction=req.risk_pct)   # sizes + gates
+    tags = _clean_tags(req.tags)
+    decision = assess(session, proposal, override_risk_fraction=req.risk_pct,
+                      **scalp_cooldowns("manual", tags))   # sizes + gates
 
-    tags = [t.strip().lower()[:20] for t in req.tags if t and t.strip()]
     record = TradeProposalRecord(
         symbol=req.symbol, asset_class=req.asset_class.value, timeframe="manual", direction=d.value,
         entry=proposal.entry, stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,

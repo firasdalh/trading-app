@@ -118,6 +118,10 @@ _SQLITE_ADDED_COLUMNS = {
         ("break_level", "FLOAT"),
         ("break_confirmed_at", "DATETIME"),
     ],
+    "strategies": [
+        ("cooldown_minutes", "INTEGER DEFAULT 0"),
+        ("loss_cooldown_minutes", "INTEGER DEFAULT 5"),
+    ],
     "rsi_over_config": [
         ("macd", "BOOLEAN DEFAULT 0"),
         ("rsi_div", "BOOLEAN DEFAULT 0"),

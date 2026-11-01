@@ -168,6 +168,22 @@ class BrokerAdapter(ABC):
         """
         return None
 
+    def order_flow(self, symbol: str, timeframe: str = "1m", bars: int = 400) -> dict | None:
+        """Buy vs sell ticks per bar, for the chart's order-flow pane.
+
+        Default None = this broker has no tick history to read (the pane then says so). MT5
+        overrides this; see ``Mt5BrokerAdapter.order_flow`` for the fields.
+        """
+        return None
+
+    def scalp_spec(self, symbol: str) -> dict | None:
+        """Live lot economics + the account's leverage and free margin, for the scalp ticket.
+
+        Default None = the broker can't report them (the ticket then says so and places nothing).
+        MT5 overrides this; see ``Mt5BrokerAdapter.scalp_spec`` for the fields.
+        """
+        return None
+
     def contract_size(self, symbol: str) -> float:
         """Units of the underlying per 1.0 LOT, for P&L (price_diff × lots × contract).
 

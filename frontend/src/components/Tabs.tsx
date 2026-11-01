@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type NavIcon = "desk" | "monitor" | "scanner" | "risk" | "journal" | "backtest";
+export type NavIcon = "desk" | "monitor" | "scanner" | "strategy" | "risk" | "journal" | "backtest";
 
 export interface NavItem {
   id: string;
@@ -100,6 +100,15 @@ function Icon({ name }: { name: NavIcon }) {
         <circle cx="11" cy="11" r="6.5" />
         <path d="M20.5 20.5 16 16" />
         <path d="M8 12.5l2-2.5 2 1.5 2.5-3" />
+      </>
+    ),
+    // Three sliders - rules you set.
+    strategy: (
+      <>
+        <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1" />
+        <circle cx="15" cy="6" r="2" />
+        <circle cx="9" cy="12" r="2" />
+        <circle cx="17" cy="18" r="2" />
       </>
     ),
     risk: <path d="M12 3l7 3v5.5c0 4.5-3 7.8-7 9.5-4-1.7-7-5-7-9.5V6l7-3z" />,

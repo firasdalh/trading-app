@@ -360,11 +360,9 @@ def regression_channel(candles: list[Candle], lookback: int = 60, k: float = 2.0
             "lower": round(lower, 6), "std": round(std, 6), "pos": round(pos, 3), "r2": round(r2, 3)}
 
 
-def pivot_levels(candles: list[Candle], ref: float, w: int = 3, per_side: int = 3,
-                 gap_frac: float = 0.002) -> list[dict]:
-    """Nearest swing-pivot support/resistance to ``ref``. A pivot high tops the ``w`` bars each side
-    (mirror for a low); keeps the ``per_side`` closest above (resistance) / below (support), spaced at
-    least ``gap_frac`` apart. Shared by the chart levels endpoint and the market-context read."""
+def pivot_prices(candles: list[Candle], w: int = 3) -> tuple[list[float], list[float]]:
+    """The swing-pivot highs and lows ``pivot_levels`` draws its lines from: a high that tops the ``w``
+    bars each side, a low under the ``w`` bars each side."""
     n = len(candles)
     highs = [candles[i].high for i in range(w, n - w)
              if all(candles[i - k].high <= candles[i].high and candles[i + k].high <= candles[i].high
@@ -372,6 +370,15 @@ def pivot_levels(candles: list[Candle], ref: float, w: int = 3, per_side: int = 
     lows = [candles[i].low for i in range(w, n - w)
             if all(candles[i - k].low >= candles[i].low and candles[i + k].low >= candles[i].low
                    for k in range(1, w + 1))]
+    return highs, lows
+
+
+def pivot_levels(candles: list[Candle], ref: float, w: int = 3, per_side: int = 3,
+                 gap_frac: float = 0.002) -> list[dict]:
+    """Nearest swing-pivot support/resistance to ``ref``. A pivot high tops the ``w`` bars each side
+    (mirror for a low); keeps the ``per_side`` closest above (resistance) / below (support), spaced at
+    least ``gap_frac`` apart. Shared by the chart levels endpoint and the market-context read."""
+    highs, lows = pivot_prices(candles, w)
     gap = gap_frac * ref
 
     def pick(vals, above: bool) -> list[float]:

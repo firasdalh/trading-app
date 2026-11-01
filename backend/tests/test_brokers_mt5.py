@@ -151,6 +151,69 @@ def test_seconds_ohlcv_is_empty_when_the_terminal_returns_no_ticks():
     assert _adapter(TickFakeMt5(None)).get_ohlcv("EURUSD", "30s", limit=400).candles == []
 
 
+def test_ten_minute_ohlcv_reads_the_terminals_m10_bars():
+    class M10FakeMt5(FakeMt5):
+        TIMEFRAME_M10 = 10
+
+        def __init__(self):
+            super().__init__()
+            self.tfs = []
+
+        def copy_rates_from_pos(self, sym, tf, start, count):
+            self.tfs.append(tf)
+            return super().copy_rates_from_pos(sym, tf, start, count)
+
+    fake = M10FakeMt5()
+    s = _adapter(fake).get_ohlcv("EURUSD", "10m", limit=5)
+    assert s.timeframe == "10m" and len(s.candles) == 5
+    assert fake.tfs == [M10FakeMt5.TIMEFRAME_M10]
+
+
+class SpecFakeMt5(FakeMt5):
+    """EURUSD on a 1:2000 USD account: 100,000 per lot, margin = notional / leverage."""
+
+    def __init__(self, bid=1.1000, ask=1.1002):
+        super().__init__()
+        self._bid, self._ask = bid, ask
+
+    def symbol_info(self, sym):
+        base = super().symbol_info(sym)
+        if base is None:
+            return None
+        return SimpleNamespace(**vars(base), point=0.00001, digits=5, trade_stops_level=10, bid=0.0, ask=0.0)
+
+    def symbol_info_tick(self, sym):
+        return SimpleNamespace(bid=self._bid, ask=self._ask, time=1_700_000_000)
+
+    def order_calc_profit(self, order_type, sym, volume, price_open, price_close):
+        return (price_close - price_open) * 100000.0 * volume
+
+    def order_calc_margin(self, order_type, sym, volume, price):
+        return price * 100000.0 * volume / 2000
+
+    def account_info(self):
+        return SimpleNamespace(equity=1000.0, balance=990.0, margin_free=950.0, margin_level=2000.0,
+                               leverage=2000, currency="USD", trade_mode=0, login=123, server="Exness-Demo")
+
+
+def test_scalp_spec_reports_lot_economics_and_the_account_leverage():
+    spec = _adapter(SpecFakeMt5()).scalp_spec("EUR/USD")
+    assert spec["symbol"] == "EURUSD"
+    assert (spec["bid"], spec["ask"]) == (1.1000, 1.1002)
+    assert spec["spread"] == pytest.approx(0.0002)
+    assert spec["value_per_unit"] == pytest.approx(100000.0)      # $ per 1.0 move on one lot
+    assert spec["margin_per_lot"] == pytest.approx(1.1002 * 100000 / 2000)
+    assert spec["stops_level"] == pytest.approx(10 * 0.00001)
+    assert (spec["lot_step"], spec["lot_min"], spec["lot_max"]) == (0.01, 0.01, 100.0)
+    assert spec["account_leverage"] == 2000
+    assert (spec["equity"], spec["margin_free"], spec["currency"]) == (1000.0, 950.0, "USD")
+
+
+def test_scalp_spec_is_none_without_a_two_sided_quote():
+    assert _adapter(SpecFakeMt5(bid=0.0, ask=0.0)).scalp_spec("EURUSD") is None
+    assert _adapter(SpecFakeMt5(bid=1.1002, ask=1.1000)).scalp_spec("EURUSD") is None   # crossed book
+
+
 def test_column_reads_a_numpy_record_array_and_a_list_of_dicts():
     np = pytest.importorskip("numpy")
     rows = np.array([(1, 1.5), (2, 1.6)], dtype=[("time", "i8"), ("bid", "f8")])

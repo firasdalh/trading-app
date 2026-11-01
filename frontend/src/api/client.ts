@@ -112,6 +112,17 @@ export const api = {
 
   account: (assetClass: AssetClass) =>
     request<AccountState>(`/api/broker/account?asset_class=${assetClass}`),
+  // Live bid/ask, lot value and margin, and the account's leverage + free margin, for the scalp
+  // ticket (read-only - it places nothing).
+  scalpSpec: (symbol: string, assetClass: AssetClass) =>
+    request<import("../types").ScalpSpec>(
+      `/api/market/scalp-spec?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}`,
+    ),
+  // Buy vs sell ticks per candle for the chart's order-flow pane (read-only; an estimate from the ticks).
+  orderFlow: (symbol: string, assetClass: AssetClass, timeframe: string, bars = 400) =>
+    request<import("../types").OrderFlow>(
+      `/api/market/order-flow?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}&timeframe=${timeframe}&bars=${bars}`,
+    ),
   // App-opened positions (used internally for exposure).
   positions: () => request<PositionView[]>("/api/positions"),
   // The broker's real open positions (includes trades opened directly in MT5/Exness).
@@ -485,6 +496,24 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   autoTradeRun: () => request<{ ran: boolean; opened: number; results: unknown[] }>("/api/auto-trade/run", { method: "POST" }),
+
+  // Custom strategies (the Strategies board). Saved stopped; paper-only; every order through the
+  // Risk Manager. `checkStrategy` reads a draft's rules on a pair now and never trades.
+  strategyCatalog: () => request<import("../types").StrategyCatalog>("/api/strategies/catalog"),
+  strategies: () => request<import("../types").StrategyView[]>("/api/strategies"),
+  createStrategy: (d: import("../types").StrategyDraft) =>
+    request<import("../types").StrategyView>("/api/strategies", { method: "POST", body: JSON.stringify(d) }),
+  updateStrategy: (id: number, d: import("../types").StrategyDraft) =>
+    request<import("../types").StrategyView>(`/api/strategies/${id}`, { method: "PUT", body: JSON.stringify(d) }),
+  deleteStrategy: (id: number) => request<{ deleted: number }>(`/api/strategies/${id}`, { method: "DELETE" }),
+  runStrategy: (id: number, on: boolean) =>
+    request<import("../types").StrategyView>(`/api/strategies/${id}/run`, { method: "POST", body: JSON.stringify({ on }) }),
+  checkStrategy: (config: import("../types").StrategyDraft, symbol: string, assetClass: AssetClass) =>
+    request<import("../types").StrategyCheck>("/api/strategies/check", {
+      method: "POST",
+      body: JSON.stringify({ config, symbol, asset_class: assetClass }),
+    }),
+  strategyActivity: (id: number) => request<import("../types").StrategyActivity[]>(`/api/strategies/${id}/activity`),
 
   // RSI-Over strategy: sweep all available pairs on `timeframe` for the first RSI-extreme reversal
   // (EMA10-confirmed when `confirm`) and stage it (Mode A queues it). "" timeframe -> default 1h.

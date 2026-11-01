@@ -57,6 +57,9 @@ export interface TradeZone {
   // "#1", "#2"… when several trades are open on this pair: prefixed to every label of the zone, so a
   // TP or SL tag that had to move to stay readable still says which trade it belongs to.
   tag?: string;
+  // A plan's own entry tag (a staged scalp order names its side, size and leverage) instead of
+  // "PLAN LONG".
+  title?: string;
 }
 
 export interface ZoneSources {
@@ -346,7 +349,7 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
 
         // Entry tag, centred on the entry line: what the trade is and how it is doing right now.
         const parts: string[] = [];
-        if (plan) parts.push(`${sign > 0 ? "▲" : "▼"} PLAN ${z.direction.toUpperCase()}`);
+        if (plan) parts.push(z.title ?? `${sign > 0 ? "▲" : "▼"} PLAN ${z.direction.toUpperCase()}`);
         else {
           parts.push(`${sign > 0 ? "▲" : "▼"} ${z.direction.toUpperCase()}${z.qty != null ? ` ${z.qty}` : ""}`);
           if (z.pnl != null) parts.push(usd(z.pnl));

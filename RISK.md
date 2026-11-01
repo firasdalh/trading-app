@@ -107,6 +107,30 @@ The sum of all open trades' risk cannot exceed this.
 ### `per_pair_cooldown` (default: 30 min after a closed trade on that pair)
 Prevents immediately re-entering the same pair after a stop-out.
 - Why: re-entries right after a loss are usually emotional, not analytical.
+- **Scalp-mode override (2026-11-01, at the user's explicit request):** hand-placed orders from the
+  chart's scalp ticket (source `manual`, tagged `scalp`) skip this cooldown entirely (0 min), so a
+  scalper can re-enter a pair right after closing it. Every other order — the Hybrid, the auto-traders,
+  armed setups, approvals, ordinary manual tickets — keeps the 30 min. Nothing else is waived for
+  scalps: per-trade risk and its ceiling, exposure, max positions, no-stacking, correlation, the spread
+  gate, the daily-loss pause (when its breaker is on), the kill-switch and the live confirmation all
+  still apply. (`scalp_cooldowns` in `app/risk/service.py`.) The scalp ticket's own daily stop (2 / 4 / 6%
+  by preset) locks its buttons until 00:00 UTC, but it is enforced in the browser only — turn the
+  `daily_loss_breaker_enabled` switch back on for a backend-enforced daily limit.
+  **Adjustable and switchable (2026-11-01, at the user's explicit request):** next to the ticket's Day meter
+  the user can change each preset's daily-stop % (0.5-30% of the day's starting equity; defaults stay
+  2 / 4 / 6%) and switch the daily stop OFF (default ON). With it off the meter still shows the day's loss,
+  but nothing stops manual scalping on a bad day. It counts the whole account's realized P&L for the day,
+  the user's strategies included. (`dailyStop` in `frontend/src/scalp.ts`, `scalp.dailyStopOn` /
+  `scalp.dailyStopPct` in the browser.)
+- **Custom-strategy override (2026-11-01, at the user's explicit request):** orders from the user's own
+  strategies on the Strategies board (source `strategy:<id>`) get the same 0-min per-pair cooldown as
+  scalp orders. The strategies are paper/demo-only, capped at their own max trades a day, and every
+  other gate above still applies. (`scalp_cooldowns` in `app/risk/service.py`.)
+  **Per strategy (2026-11-01, at the user's request):** each strategy sets its own cooldowns on the
+  board - re-entry after any close 0-240 min, same-direction wait after a loss 5-360 min - with the
+  confirmed values as the FLOORS: never under 0 / 5 min, enforced in the API and again in
+  `strategy_cooldowns` (`app/risk/service.py`). Raising them is always allowed; going under them is a
+  change to this file.
 
 ### `loss_cooldown` (default: 180 min after a STOP-OUT, same pair + same direction)
 A longer cooldown that triggers only after a LOSS: once the most recent closed trade on a
@@ -115,6 +139,13 @@ opposite direction is NOT blocked (a failed/reclaimed break often reverses); a l
 - Why: re-entering a just-failed setup is how one stop becomes three (XAGGBPm re-shorted a failed
   break of 47 three times in a session). The 30-min per-pair cooldown is too short to catch
   re-entries that are hours apart.
+- **Scalp-mode override (2026-11-01, at the user's explicit request):** for scalp-tagged manual orders
+  this is a **5-min** pause instead of 180 min — after a losing scalp, the same pair in the same
+  direction waits 5 minutes; the other direction and other pairs are open at once. A deliberately
+  short anti-tilt pause, kept rather than removed (the 30-min per-pair cooldown above is removed for
+  scalps). Custom-strategy orders (source `strategy:<id>`) get the same 5-min pause since
+  2026-11-01, at the user's explicit request: it is what stops a strategy whose rules still hold
+  after a stop-out from re-entering on the very next 5s candle. All other orders keep the 180 min.
 
 ### `execution_mode` (default: A — Propose & Approve)
 A = AI proposes, you approve. B = auto-execute paper only. C = auto-execute live.

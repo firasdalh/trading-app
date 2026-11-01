@@ -10,6 +10,7 @@ import { JournalView } from "./components/JournalView";
 import { RiskDashboard } from "./components/RiskDashboard";
 import { ScorecardPanel } from "./components/ScorecardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { StrategyBoard } from "./components/StrategyBoard";
 import { TargetCelebration, useTargetHits } from "./components/TargetCelebration";
 import type { NavItem } from "./components/Tabs";
 import { useLocalStorage } from "./hooks/useLocalStorage";
@@ -51,7 +52,7 @@ export default function App() {
   // Monitor, Scanner and Advisor are rendered BY the desk, so they can only be open while the desk is the
   // view (e.g. a ?drawer=scanner link opened while the app was last left on Journal).
   useEffect(() => {
-    if (drawer && drawer !== "risk" && view !== "desk") setStored("desk");
+    if (drawer && drawer !== "risk" && drawer !== "strategy" && view !== "desk") setStored("desk");
   }, [drawer, view, setStored]);
 
   const { data: settings, error } = usePolling(() => api.settings(), 5000, [bump]);
@@ -86,8 +87,8 @@ export default function App() {
   // auto-watch, the per-pair auto-trader, the advisor's auto-execute and armed setups were each
   // buried in their own panel (full review 2026-10-20).
   const { data: automation } = usePolling(async () => {
-    const [rsi, auto, adv, arms] = await Promise.allSettled([
-      api.rsiOverConfig(), api.autoTrade(), api.advisorState(), api.conditionals(),
+    const [rsi, auto, adv, arms, strats] = await Promise.allSettled([
+      api.rsiOverConfig(), api.autoTrade(), api.advisorState(), api.conditionals(), api.strategies(),
     ]);
     const on: string[] = [];
     if (rsi.status === "fulfilled" && rsi.value.enabled) {
@@ -100,6 +101,10 @@ export default function App() {
     if (arms.status === "fulfilled") {
       const n = arms.value.filter((c) => c.status === "armed").length;
       if (n) on.push(`${n} armed`);
+    }
+    if (strats.status === "fulfilled") {
+      const n = strats.value.filter((s) => s.enabled).length;
+      if (n) on.push(`Strategy ×${n}`);
     }
     return on;
   }, 30000, [bump]);
@@ -124,13 +129,13 @@ export default function App() {
     setStored(v);
   };
   // Drawers toggle. Scanner and Advisor belong to the desk (they retune its chart), so opening one
-  // from Journal/Backtest brings you back to the desk underneath it. Risk opens over any view.
+  // from Journal/Backtest brings you back to the desk underneath it. Risk and Strategies open over any view.
   const toggleDrawer = (d: DrawerId) => {
     if (drawer === d) {
       setDrawer(null);
       return;
     }
-    if (d !== "risk" && view !== "desk") setStored("desk");
+    if (d !== "risk" && d !== "strategy" && view !== "desk") setStored("desk");
     setDrawer(d);
   };
   const closeDrawer = useCallback(() => setDrawer(null), []);
@@ -167,6 +172,16 @@ export default function App() {
       hint:
         (hybrid?.enabled ? "Hybrid auto-pilot is ON. " : "") +
         "Hybrid auto-pilot, opportunities, RSI extremes and the per-pair auto-trader (opens over the desk)",
+    },
+    {
+      id: "strategy",
+      label: "Strategies",
+      icon: "strategy",
+      kind: "drawer",
+      active: drawer === "strategy",
+      onClick: () => toggleDrawer("strategy"),
+      live: (automation ?? []).some((a) => a.startsWith("Strategy")),
+      hint: "Build your own BUY / SELL / CLOSE rules from indicators on any timeframes, and let them trade (paper / demo only)",
     },
     {
       id: "risk",
@@ -274,6 +289,17 @@ export default function App() {
         <RiskDashboard risk={risk} account={account} settings={settings} onChanged={refresh} />
         <ScorecardPanel />
         <EntryFiltersPanel />
+      </Drawer>
+
+      {/* Strategies run on the backend whether this is open or not; the board is where they are built. */}
+      <Drawer
+        open={drawer === "strategy"}
+        title="Strategies"
+        subtitle="Your own rules: when to buy, when to sell, when to close - from indicators on any timeframes. Runs on a demo / paper account, through the Risk Manager."
+        onClose={closeDrawer}
+        widthClass="max-w-[84rem]"
+      >
+        <StrategyBoard assetClass={assetClass} />
       </Drawer>
 
       {/* One at a time: two targets hit together celebrate back to back. */}

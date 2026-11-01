@@ -770,6 +770,44 @@ export interface AccountState {
   trading_paused: boolean;
 }
 
+// The scalp ticket's live read of one symbol and the account (GET /api/market/scalp-spec). Money is in
+// the account currency; MT5 converts a JPY pair or an HKD index.
+export interface ScalpSpec {
+  symbol: string;
+  bid: number;
+  ask: number;
+  spread: number;
+  digits: number;
+  point: number;
+  lot_step: number;
+  lot_min: number;
+  lot_max: number | null;
+  value_per_unit: number | null;   // P&L of a 1.0 price move on one lot ($100,000 EURUSD, $100 gold)
+  margin_per_lot: number | null;
+  stops_level: number;             // how close to price the broker accepts a stop, in price units
+  account_leverage: number | null; // set in the Exness Personal Area; MT5 can read it, not change it
+  equity: number | null;
+  balance: number | null;
+  margin_free: number | null;
+  margin_level: number | null;
+  currency: string | null;
+}
+
+// GET /api/market/order-flow: buy vs sell ticks per candle, ESTIMATED from the quote ticks by the tick
+// rule (a tick that lifted the bid counts as buying, one that dropped it as selling) - the broker
+// reports no traded volume and no buyer or seller. A bar is [start (UTC seconds), buy ticks, sell
+// ticks, flat ticks, how far the buy ticks moved price, how far the sell ticks did].
+export type OrderFlowBar = [number, number, number, number, number, number];
+export interface OrderFlow {
+  symbol: string;
+  timeframe: string;
+  seconds: number;
+  digits: number;
+  covered_from: number | null;   // the first bar with flow; older candles have none
+  truncated: boolean;            // true when that is later than the chart's first candle (a day of ticks at most)
+  bars: OrderFlowBar[];
+}
+
 // A pair near an RSI extreme (from an RSI-Over sweep) — clickable to open on the chart.
 export interface RsiOverCandidate {
   symbol: string;
@@ -1084,4 +1122,99 @@ export interface MonitorPairResponse {
   generated_at: string;
   timeframes: string[];
   row: MonitorRow;
+}
+
+// --- Custom strategies (the Strategies board; backend app/agents/strategy.py) ---
+// A rule set is a list of GROUPS: a group holds when ALL its conditions do, the rule set fires when
+// ANY group does.
+export interface StrategyCondition {
+  type: string;
+  tf: string;
+  params: Record<string, number>;
+}
+export type StrategyGroups = StrategyCondition[][];
+export interface StrategyParamSpec {
+  key: string;
+  label: string;
+  default: number;
+  min: number;
+  max: number;
+  step: number;
+  kind: "num" | "bool";
+}
+export interface StrategyConditionSpec {
+  type: string;
+  group: string;
+  use: "entry" | "exit" | "both";
+  long: string;    // how it reads in the BUY rules; {key} marks a parameter
+  short: string;   // ... in the SELL rules
+  exit: string;    // ... in the CLOSE rules, against the trade
+  tip: string;
+  suggested: boolean;
+  params: StrategyParamSpec[];
+  tfs?: string[] | null;         // the timeframes it can read (null = any)
+  default_tf?: string | null;    // the one a new row starts on
+}
+export interface StrategyCatalog {
+  timeframes: string[];
+  conditions: StrategyConditionSpec[];
+  max_groups: number;
+  max_conditions: number;
+}
+export interface StrategyDraft {
+  name: string;
+  pairs: { symbol: string; asset_class: AssetClass }[];
+  timeframe: string;
+  sides: "long" | "short" | "both";
+  entry_long: StrategyGroups;
+  entry_short: StrategyGroups;
+  mirror_short: boolean;
+  exit_rules: StrategyGroups;
+  risk_pct: number;
+  stop_atr: number;
+  target_r: number | null;
+  max_trades_day: number;
+  manage_manual: boolean;
+  // Its cooldowns in minutes: after any close on the pair, and in the same direction after a loss.
+  // Never under 0 / 5 (what the user confirmed for scalp-style trading; RISK.md's are 30 / 180).
+  cooldown_minutes: number;
+  loss_cooldown_minutes: number;
+}
+export interface StrategyView extends StrategyDraft {
+  id: number;
+  enabled: boolean;
+  state: Record<string, { note?: string; at?: string; acted_bar?: string }> | null;
+  last_run_at: string | null;
+  last_result: string | null;
+  open_trades: number;
+  trades_today: number;
+}
+export interface StrategyCheckCondition {
+  type: string;
+  tf: string;
+  ok: boolean | null;   // null: could not read (no candles yet, no trade) - never counts as holding
+  detail: string;
+  label: string;
+}
+export interface StrategyCheckSet {
+  ok: boolean;
+  group?: number;
+  groups: { ok: boolean; conditions: StrategyCheckCondition[] }[];
+}
+export interface StrategyCheck {
+  symbol: string;
+  paper: boolean;
+  market_open: boolean | null;
+  bars: Record<string, number>;
+  long: StrategyCheckSet | null;
+  short: StrategyCheckSet | null;
+  exit_long: StrategyCheckSet;
+  exit_short: StrategyCheckSet;
+}
+export interface StrategyActivity {
+  id: number;
+  at: string | null;
+  symbol: string | null;
+  event: string;
+  detail: Record<string, unknown> | null;
 }

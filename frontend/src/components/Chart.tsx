@@ -20,11 +20,14 @@ import { api } from "../api/client";
 import { ScenarioCard } from "./ScenarioCard";
 import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
 import { OrderBlockPrimitive, type ObZone } from "./orderBlockZones";
+import { EmaRibbonPrimitive } from "./emaRibbon";
+import { OrderFlowPane } from "./OrderFlowPane";
 import { PICK_EVENT, addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
 import { fmtPrice, fmtUsd } from "../format";
 import { TF_SECONDS, analysisTimeframe, isSecondsTf } from "../timeframes";
 import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
+import type { PreOrderView, ScalpHud } from "../scalp";
 
 // Persist a small chart UI toggle across refreshes AND pair changes (localStorage-backed useState).
 function usePersisted<T>(key: string, initial: T, merge = false) {
@@ -248,6 +251,16 @@ function useDrawings(symbol: string) {
   const key = drawKey(symbol);
   const [items, setItems] = useState<Drawing[]>(() => readDrawings(key));
   useEffect(() => setItems(readDrawings(key)), [key]);
+  // Another tab charting this pair (a chart window on another timeframe) changed them. Take its list:
+  // a line drawn on the 1h appears on the 5s at once, and this tab's next save builds on it instead
+  // of writing its older copy over it.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === key) setItems(readDrawings(key));
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [key]);
   const save = useCallback(
     (next: (prev: Drawing[]) => Drawing[]) => {
       setItems((prev) => {
@@ -311,6 +324,12 @@ interface Props {
   scenLevels?: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null;
   // Full screen (owned by the Dashboard so the position strip is included).
   isFullscreen?: boolean;
+  // The strategies widget (StrategyWidget). Full screen hides the desk's sidebar, so there it opens as
+  // a floating panel from the toolbar.
+  strategies?: React.ReactNode;
+  // Fill the parent (a flex column) the way full screen does, without being full screen - a chart
+  // window is the chart and nothing else.
+  fill?: boolean;
   onToggleFullscreen?: () => void;
   scenLevelsShown?: boolean;
   onToggleScenLevels?: (levels: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null) => void;
@@ -321,11 +340,23 @@ interface Props {
   // Live indicator read for the charted symbol's open position, lifted so the position strip above
   // the chart can show it. Computed here because this is where the candles already live.
   onPulse?: (p: Pulse | null) => void;
+  // Scalp mode: its own indicator layout (fast RSI and MACD, Bollinger bands, VWAP and the day's
+  // levels on, busy-bar volume), remembered apart from the normal one; and the live bid/ask drawn as
+  // lines, since a buy fills at the ask and the candles are the bid.
+  scalp?: boolean;
+  bidAsk?: { bid: number; ask: number } | null;
+  // A staged scalp order (ScalpTicket): drawn as a plan box with draggable stop and target lines, a
+  // drop reported back here; and the banner saying what Enter / Space will do.
+  preOrder?: PreOrderView | null;
+  onPreOrderDrag?: (kind: "sl" | "tp", price: number) => void;
+  hud?: ScalpHud | null;
 }
 
+// EMA 10 and 20 differ in brightness as well as hue (near-white over magenta), so their crossing
+// reads at a glance even with VWAP, the bands and EMA 50 around them.
 const EMA_CONFIG = [
-  { period: 10, color: "#22d3ee" },   // the RSI-Over confirmation line
-  { period: 20, color: "#e879f9" },
+  { period: 10, color: "#f1f5f9" },   // the RSI-Over confirmation line
+  { period: 20, color: "#ec4899" },
   { period: 50, color: "#f59e0b" },
   { period: 100, color: "#eab308" },
   { period: 200, color: "#2962ff" },
@@ -338,7 +369,7 @@ interface Legend {
   close: number;
 }
 
-function ema(values: number[], period: number): (number | undefined)[] {
+export function ema(values: number[], period: number): (number | undefined)[] {
   const k = 2 / (period + 1);
   const out: (number | undefined)[] = [];
   let prev = 0;
@@ -356,7 +387,7 @@ function ema(values: number[], period: number): (number | undefined)[] {
 }
 
 // Wilder's RSI, aligned to closes (null during warmup).
-function rsiCalc(closes: number[], period = 14): (number | null)[] {
+export function rsiCalc(closes: number[], period = 14): (number | null)[] {
   const res: (number | null)[] = new Array(closes.length).fill(null);
   if (closes.length < period + 1) return res;
   let gains = 0;
@@ -381,7 +412,7 @@ function rsiCalc(closes: number[], period = 14): (number | null)[] {
 // MACD: macd = EMA(fast) − EMA(slow); signal = EMA(signalP) of macd; hist = macd − signal.
 // Returns full-length arrays aligned to the closes (null during warmup) so the sub-pane lines up
 // bar-for-bar with the main chart. Reuses the SMA-seeded ema() above for both stages.
-function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
+export function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
   const emaFast = ema(closes, fast);
   const emaSlow = ema(closes, slow);
   const macd: (number | null)[] = closes.map((_, i) =>
@@ -409,7 +440,7 @@ function macdCalc(closes: number[], fast = 12, slow = 26, signalP = 9) {
 //
 // CAVEAT: MT5 gives tick_volume (count of price changes), not contracts, so this is tick-weighted.
 // It tracks real VWAP closely when activity and volume move together — usually, not always.
-function vwapCalc(candles: Candle[]): (number | null)[] {
+export function vwapCalc(candles: Candle[]): (number | null)[] {
   const out: (number | null)[] = [];
   let day = "";
   let pv = 0;
@@ -427,9 +458,65 @@ function vwapCalc(candles: Candle[]): (number | null)[] {
   return out;
 }
 
+// The session VWAP with its bands: the volume-weighted standard deviation of the typical price
+// around it, 1 and 2 deviations either side. Price stretched to a 2σ band is far from where the
+// session has done its business; the bands are the scalper's "how far is too far".
+export function vwapBandsCalc(candles: Candle[]): { up1: (number | null)[]; lo1: (number | null)[]; up2: (number | null)[]; lo2: (number | null)[] } {
+  const up1: (number | null)[] = [], lo1: (number | null)[] = [], up2: (number | null)[] = [], lo2: (number | null)[] = [];
+  let day = "";
+  let pv = 0, pv2 = 0, vv = 0, bars = 0;
+  for (const c of candles) {
+    const d = new Date(Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(c.ts) ? c.ts : `${c.ts}Z`));
+    const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+    if (key !== day) { day = key; pv = 0; pv2 = 0; vv = 0; bars = 0; }
+    const typical = (c.high + c.low + c.close) / 3;
+    const w = c.volume > 0 ? c.volume : 1;
+    pv += typical * w;
+    pv2 += typical * typical * w;
+    vv += w;
+    bars += 1;
+    const mid = pv / vv;
+    const sd = Math.sqrt(Math.max(0, pv2 / vv - mid * mid));
+    // A session's first few bars have no spread to measure yet.
+    const ok = bars >= 3 && sd > 0;
+    up1.push(ok ? mid + sd : null);
+    lo1.push(ok ? mid - sd : null);
+    up2.push(ok ? mid + 2 * sd : null);
+    lo2.push(ok ? mid - 2 * sd : null);
+  }
+  return { up1, lo1, up2, lo2 };
+}
+
+// Stochastic %K (k bars, smoothed over `smooth`) and its %D (the average of %K over `d`), one value
+// per candle (null in the warm-up). Where the close sits in the recent high-low range, 0-100.
+export function stochCalc(candles: Candle[], k = 5, smooth = 3, d = 3): { k: (number | null)[]; d: (number | null)[] } {
+  const n = candles.length;
+  const raw: (number | null)[] = new Array(n).fill(null);
+  for (let i = k - 1; i < n; i++) {
+    let hi = -Infinity, lo = Infinity;
+    for (let j = i - k + 1; j <= i; j++) {
+      hi = Math.max(hi, candles[j].high);
+      lo = Math.min(lo, candles[j].low);
+    }
+    raw[i] = hi > lo ? ((candles[i].close - lo) / (hi - lo)) * 100 : 50;
+  }
+  const sma = (a: (number | null)[], p: number) =>
+    a.map((_, i) => {
+      if (i < p - 1) return null;
+      let s = 0;
+      for (let j = i - p + 1; j <= i; j++) {
+        if (a[j] == null) return null;
+        s += a[j] as number;
+      }
+      return s / p;
+    });
+  const kk = sma(raw, smooth);
+  return { k: kk, d: sma(kk, d) };
+}
+
 // Wilder ATR — the unit everything else is measured in, so a stop distance means the same thing on
 // bitcoin as on oil.
-function atrCalc(candles: Candle[], period = 14): number | null {
+export function atrCalc(candles: Candle[], period = 14): number | null {
   if (candles.length < period + 1) return null;
   const tr = (i: number) => {
     const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
@@ -718,6 +805,45 @@ function macdDivergences(candles: Candle[], lookback = 60): { a: number; b: numb
   return latest;
 }
 
+// --- EMA 10 / 20 crosses ------------------------------------------------------------------------
+// A TRUE cross, not every touch: the fast average crosses the slow one on a CLOSED candle, does not
+// cross straight back, and within the next CROSS_CONFIRM closed candles the two separate by at least
+// CROSS_GAP of an ATR with the close on the new side of the slow one. A flat market braids the two
+// lines into a "cross" every few bars; none of those survive this.
+const CROSS_CONFIRM = 3;
+const CROSS_GAP = 0.05;
+const CROSS_MARKS = 30;   // the newest ones; older crosses are history the ribbon already shows
+
+export type EmaCross = { i: number; up: boolean; confirmed: boolean };
+
+export function trueCrosses(closes: number[], fast: (number | undefined)[], slow: (number | undefined)[],
+                            closedN: number, atr: number | null): EmaCross[] {
+  const out: EmaCross[] = [];
+  const gap = (atr ?? 0) * CROSS_GAP;
+  let prev = 0;
+  for (let i = 0; i < closedN; i++) {
+    const f = fast[i], w = slow[i];
+    if (f === undefined || w === undefined) continue;
+    const sign = Math.sign(f - w);
+    if (sign === 0) continue;
+    if (prev !== 0 && sign !== prev) {
+      const up = sign > 0;
+      let confirmed = false, broke = false;
+      for (let k = i + 1; k < Math.min(closedN, i + 1 + CROSS_CONFIRM); k++) {
+        const fk = fast[k], wk = slow[k];
+        if (fk === undefined || wk === undefined) break;
+        if (Math.sign(fk - wk) !== sign) { broke = true; break; }     // crossed straight back: a whipsaw
+        if (Math.abs(fk - wk) >= gap && (up ? closes[k] > wk : closes[k] < wk)) { confirmed = true; break; }
+      }
+      // Still being decided: its confirmation candles have not all closed yet.
+      const pending = !confirmed && !broke && i + CROSS_CONFIRM >= closedN;
+      if (confirmed || pending) out.push({ i, up, confirmed });
+    }
+    prev = sign;
+  }
+  return out;
+}
+
 // --- position pulse ---------------------------------------------------------------------------
 // A live read for a trade you are ALREADY IN, which is a different question from whether to enter.
 // Entry asks "is this a good setup"; holding asks "is it still working, or is it turning on me". So
@@ -957,6 +1083,17 @@ const MAIN_MAX = 900;
 const MAIN_DEFAULT = 600;
 const FIT_GAP = 12;   // the chart card's bottom padding, so the card ends at the window's edge
 
+// The price pane with the RSI drawn INSIDE it (scalp mode's default): candles on top, the volume
+// under them, the oscillators in a 0-100 band at the bottom. Fractions of the pane's height.
+const BAND = {
+  candles: { top: 0.05, bottom: 0.38 },
+  volume: { top: 0.64, bottom: 0.26 },
+  osc: { top: 0.77, bottom: 0.02 },
+};
+const PRICE_MARGINS = { top: 0.08, bottom: 0.16 };   // without the band
+const VOLUME_MARGINS = { top: 0.85, bottom: 0 };
+const OSC_RANGE = () => ({ priceRange: { minValue: 0, maxValue: 100 } });
+
 // The grab-strip that sits on a pane's TOP edge. Pointer capture (not window listeners) keeps the
 // drag alive when the cursor leaves the 8px strip — which it does immediately on any real drag.
 function PaneResizer({ height, onChange, label }: { height: number; onChange: (h: number) => void; label: string }) {
@@ -987,17 +1124,33 @@ function PaneResizer({ height, onChange, label }: { height: number; onChange: (h
   );
 }
 
-export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, isFullscreen, onToggleFullscreen,
-                        scenLevelsShown, onToggleScenLevels, onArmed, onOpened, onPulse }: Props) {
+// Keyed by mode, so switching to scalp remounts with the scalp layout's saved toggles instead of
+// writing one layout's state under the other's keys.
+export function Chart(props: Props) {
+  return <ChartView key={props.scalp ? "scalp" : "std"} {...props} />;
+}
+
+function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, isFullscreen, fill, onToggleFullscreen,
+                     scenLevelsShown, onToggleScenLevels, onArmed, onOpened, onPulse, scalp = false, bidAsk,
+                     preOrder = null, onPreOrderDrag, hud = null, strategies }: Props) {
   // The timeframe the analysis reads and tickets/setups are placed on: this chart's, or 1m when the
   // chart is in seconds (../timeframes.ts).
   const aTf = analysisTimeframe(timeframe);
+  // Scalp mode's toggles live under their own keys; its oscillators are the fast settings.
+  const sk = (k: string) => (scalp ? `scalp.${k}` : k);
+  const RSI_P = scalp ? 7 : 14;
+  const RSI_HI = scalp ? 80 : 70;
+  const RSI_LO = scalp ? 20 : 30;
+  const MACD_P: [number, number, number] = scalp ? [3, 10, 16] : [12, 26, 9];
+  const staged = !!preOrder;
   const containerRef = useRef<HTMLDivElement>(null);
   // Full screen is owned by the Dashboard (the position strip must travel with the chart).
   const isFull = !!isFullscreen;
+  const fills = isFull || !!fill;     // sized by its parent's flexbox, not by the window fit below
   const toggleFullscreen = () => onToggleFullscreen?.();
   const [rsiH, setRsiH] = useState(() => storedPaneH("chart.rsiH"));
   const [macdH, setMacdH] = useState(() => storedPaneH("chart.macdH"));
+  const [flowH, setFlowH] = useState(() => storedPaneH("chart.flowH"));
   const [mainH, setMainH] = useState(MAIN_DEFAULT);
   const mainHRef = useRef(MAIN_DEFAULT);   // read by the fit below without re-rendering to compare
   const rsiContainerRef = useRef<HTMLDivElement>(null);
@@ -1009,12 +1162,16 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const emaHiRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of highs (upper band)
   const emaLoRef = useRef<ISeriesApi<"Line"> | null>(null);  // EMA20 of lows (lower band)
   const vwapRef = useRef<ISeriesApi<"Line"> | null>(null);   // session VWAP
+  const vwapBandRefs = useRef<ISeriesApi<"Line">[]>([]);     // VWAP +1σ / -1σ / +2σ / -2σ
+  const bbRefs = useRef<ISeriesApi<"Line">[]>([]);           // Bollinger upper / basis / lower
+  const quoteLinesRef = useRef<IPriceLine[]>([]);             // scalp mode's live bid / ask
   const chanMidRef = useRef<ISeriesApi<"Line"> | null>(null);   // regression channel mid (trend line)
   const chanUpRef = useRef<ISeriesApi<"Line"> | null>(null);    // upper band (dynamic resistance)
   const chanLoRef = useRef<ISeriesApi<"Line"> | null>(null);    // lower band (dynamic support)
   const srLinesRef = useRef<IPriceLine[]>([]);                  // multi-TF support/resistance lines
   const rsiChartRef = useRef<IChartApi | null>(null);
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const stochRefs = useRef<ISeriesApi<"Line">[]>([]);       // Stochastic %K / %D, in the RSI pane
   const macdContainerRef = useRef<HTMLDivElement>(null);
   const macdChartRef = useRef<IChartApi | null>(null);
   const macdLineRef = useRef<ISeriesApi<"Line"> | null>(null);
@@ -1027,6 +1184,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // Order-block zones (orderBlockZones.ts) — a separate primitive from the SL/TP boxes because they
   // say different things: one is your trade, the other is the market's structure.
   const obRef = useRef<OrderBlockPrimitive | null>(null);
+  const ribbonRef = useRef<EmaRibbonPrimitive | null>(null);   // EMA 10 / 20, green above / red below
+  // The last TRUE cross of EMA 10 over / under EMA 20 (see trueCrosses), for the legend.
+  const [emaCross, setEmaCross] = useState<{ up: boolean; ago: number; pending: boolean } | null>(null);
   const [obs, setObs] = useState<import("../types").OrderBlock[]>([]);
   // What happened to the last order-block fetch, shown as a chip while the overlay is on. The first
   // version swallowed failures: with the backend still running code from before the endpoint existed,
@@ -1050,6 +1210,11 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     validate: (p: number) => boolean;
     why: string;            // shown when a drop is refused, so a rejection is never silent
     commit: (p: number) => void;
+    // The dollars at the level under the pointer, written into the line's title as it moves (a
+    // staged order: sized as the drop would size it). `title` is the line's title to restore when a
+    // drop is refused.
+    hint?: (p: number) => string | null;
+    title?: string;
   };
   const handlesRef = useRef<DragHandle[]>([]);
   const dragRef = useRef<DragHandle | null>(null);
@@ -1058,7 +1223,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const onSetArmedRef = useRef<Props["onSetArmedLevels"]>(onSetArmedLevels);
   onSetSlTpRef.current = onSetSlTp;
   onSetArmedRef.current = onSetArmedLevels;
-  const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null } | null>(null);
+  const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null; extra?: string | null } | null>(null);
   const [dragErr, setDragErr] = useState<string | null>(null);
 
   // Hand drawing: the saved set, the stroke in progress, and the canvas it's painted on.
@@ -1121,25 +1286,43 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const [priceDec, setPriceDec] = useState<number | null>(null);
   const legendRef = useRef<HTMLDivElement>(null);       // day labels keep clear of these two
   const fsBtnRef = useRef<HTMLButtonElement>(null);
+  // Scalp mode starts from a fast-chart layout: EMA 10/20/50, VWAP, Bollinger bands, the day's levels
+  // and the sessions on; the swing tools (SuperTrend, pullbacks, the EMA20 band) off.
   const [showEma, setShowEma] = usePersisted<Record<number, boolean>>(
-    "chart.showEma", { 10: true, 20: true, 50: true, 100: false, 200: true }, true);
-  const [showRsi, setShowRsi] = usePersisted("chart.showRsi", true);
-  const [showMacd, setShowMacd] = usePersisted("chart.showMacd", true);
-  const [showSt, setShowSt] = usePersisted("chart.showSt", true);
-  const [showPb, setShowPb] = usePersisted("chart.showPb", true);
-  const [showBand, setShowBand] = usePersisted("chart.showBand", true);
-  const [showStructure, setShowStructure] = usePersisted("chart.showStructure", false);
-  const [showChannel, setShowChannel] = usePersisted("chart.showChannel", false);
+    sk("chart.showEma"), scalp ? { 10: true, 20: true, 50: true, 100: false, 200: false } : { 10: true, 20: true, 50: true, 100: false, 200: true }, true);
+  const [showRsi, setShowRsi] = usePersisted(sk("chart.showRsi"), true);
+  // The fast Stochastic shares the RSI pane (both read 0-100 against the same 80 / 20 lines).
+  const [showStoch, setShowStoch] = usePersisted(sk("chart.showStoch"), scalp);
+  // Scalp mode draws the RSI in a band inside the price chart rather than a pane of its own: one time
+  // axis and no gap between them, so the height goes to the candles.
+  const [rsiIn, setRsiIn] = usePersisted(sk("chart.rsiIn"), scalp);
+  const rsiPane = showRsi && !rsiIn;
+  const rsiBand = showRsi && rsiIn;
+  // Where the band is on screen (pane pixels): its top edge, its 80 / 50 / 20 lines, the RSI now, and
+  // the price axis beside it - which keeps printing prices down there, so the band covers it with
+  // its own 0-100 scale.
+  type BandGeo = { top: number; lines: [number, number][]; now: { y: number; v: number } | null; axisW: number; axisH: number };
+  const [band, setBand] = useState<BandGeo | null>(null);
+  const [showMacd, setShowMacd] = usePersisted(sk("chart.showMacd"), true);
+  // Buyers vs sellers from the ticks, in a pane right under the price chart (OrderFlowPane.tsx).
+  const [showFlow, setShowFlow] = usePersisted(sk("chart.showFlow"), true);
+  const [showSt, setShowSt] = usePersisted(sk("chart.showSt"), !scalp);
+  const [showPb, setShowPb] = usePersisted(sk("chart.showPb"), !scalp);
+  const [showBand, setShowBand] = usePersisted(sk("chart.showBand"), !scalp);
+  const [showStructure, setShowStructure] = usePersisted(sk("chart.showStructure"), false);
+  const [showChannel, setShowChannel] = usePersisted(sk("chart.showChannel"), false);
   const [showSR, setShowSR] = usePersisted<Record<string, boolean>>(
-    "chart.srByTf", { "1h": false, "4h": false, "1d": false });
+    sk("chart.srByTf"), { "1h": false, "4h": false, "1d": false });
   // --- extra overlays, all off by default so nobody's chart changes without asking ---
   const [ovl, setOvl] = usePersisted<Record<string, boolean>>(
-    "chart.overlays",
+    sk("chart.overlays"),
     // `days` defaults ON — knowing where one day ends and the next begins is orientation, not
     // analysis, and without it a 1h chart is an undifferentiated run of candles.
     // `zones` (the SL/TP boxes) defaults ON for the same reason: "where is my stop, where is my
     // target, and where is price between them" is the first thing you look at on a live trade.
-    { pd: false, pw: false, open: false, sessions: false, vwap: false, rr: false, div: false, choch: false, ob: false, days: true, zones: true },
+    scalp
+      ? { pd: true, pw: false, open: true, sessions: true, vwap: true, vwapb: true, pivots: false, bb: true, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true }
+      : { pd: false, pw: false, open: false, sessions: false, vwap: false, vwapb: false, pivots: false, bb: false, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true },
     true,
   );
   // Which toolbar menu is open (only one at a time — two dropdowns overlapping is worse than
@@ -1173,6 +1356,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   const scenDrag = useDragPanel("chart.scenPos", rootRef);
   const armDrag = useDragPanel("chart.armPos", rootRef);
   const tradeDrag = useDragPanel("chart.tradePos", rootRef);
+  // The strategies pop-up (full screen only): whether it is open is remembered, like where it sits.
+  const stratDrag = useDragPanel("chart.stratPos", rootRef);
+  const [stratOpen, setStratOpen] = usePersisted("chart.stratOpen", false);
   // The price map's S/R ladder, plotted on request. Held as its OWN copy rather than read from
   // `ctx`, so closing the map panel to actually look at the chart doesn't wipe the levels you just
   // asked it to draw — which is the whole reason you drew them.
@@ -1211,7 +1397,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       // Tighter top/bottom padding so the candles fill the pane vertically (less dead space).
       // minimumWidth pins the price-axis width so the RSI pane below lines up bar-for-bar.
       rightPriceScale: {
-        borderColor: "#404040", scaleMargins: { top: 0.08, bottom: 0.16 }, minimumWidth: 72,
+        borderColor: "#404040", scaleMargins: PRICE_MARGINS, minimumWidth: 72,
       },
       crosshair: { mode: 1 },
     });
@@ -1224,7 +1410,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       priceFormat: { type: "volume" }, priceScaleId: "vol",
       lastValueVisible: false, priceLineVisible: false,  // keep the right axis clean
     });
-    volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+    volume.priceScale().applyOptions({ scaleMargins: VOLUME_MARGINS });
 
     // The SL/TP boxes read the drag handles' lines directly, so a box follows its line while you
     // drag it — and stays with the dropped price until the broker's new level comes back on the poll,
@@ -1250,6 +1436,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     const obPrim = new OrderBlockPrimitive();
     series.attachPrimitive(obPrim);
     obRef.current = obPrim;
+
+    const ribbon = new EmaRibbonPrimitive();
+    series.attachPrimitive(ribbon);
+    ribbonRef.current = ribbon;
 
     chartRef.current = chart;
     seriesRef.current = series;
@@ -1277,6 +1467,20 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
       title: "VWAP",
     });
+    // Its bands, fainter than the line: ±1σ dotted, ±2σ (the stretched zone) solid.
+    vwapBandRefs.current = [LineStyle.Dotted, LineStyle.Dotted, LineStyle.Solid, LineStyle.Solid].map((lineStyle, i) =>
+      chart.addLineSeries({
+        color: i < 2 ? "rgba(251,191,36,0.35)" : "rgba(251,191,36,0.5)", lineWidth: 1, lineStyle,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+      }),
+    );
+    // Bollinger (20, 2): the bands solid, the basis dotted - an envelope, not a trend line.
+    bbRefs.current = [LineStyle.Solid, LineStyle.Dotted, LineStyle.Solid].map((lineStyle) =>
+      chart.addLineSeries({
+        color: "rgba(129,140,248,0.75)", lineWidth: 1, lineStyle, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false,
+      }),
+    );
     emaLoRef.current = chart.addLineSeries({
       color: "#f97316", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
       lastValueVisible: false, crosshairMarkerVisible: false,
@@ -1306,6 +1510,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
     return () => {
       series.detachPrimitive(zones);
+      series.detachPrimitive(ribbon);
+      ribbonRef.current = null;
       zonesRef.current = null;
       obRef.current = null;
       chart.remove();
@@ -1316,6 +1522,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       stRef.current = null;
       emaHiRef.current = null;
       emaLoRef.current = null;
+      bbRefs.current = [];
+      vwapBandRefs.current = [];
+      quoteLinesRef.current = [];
     };
   }, []);
 
@@ -1327,7 +1536,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // fits). It converges in one pass: the pane's own height never moves its top or what is below it.
   // Full screen sizes by flexbox instead and skips this.
   useLayoutEffect(() => {
-    if (isFull) return;
+    if (fills) return;
     const fit = () => {
       const pane = containerRef.current;
       const root = rootRef.current;
@@ -1351,7 +1560,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       ro.disconnect();
       window.removeEventListener("resize", fit);
     };
-  }, [isFull]);
+  }, [fills]);
 
   // Remember the pane heights. Both sub-charts are autoSize, so resizing the wrapper is all it
   // takes — no manual chart.resize() call, and no re-create on drag.
@@ -1359,14 +1568,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     try {
       localStorage.setItem("chart.rsiH", String(rsiH));
       localStorage.setItem("chart.macdH", String(macdH));
+      localStorage.setItem("chart.flowH", String(flowH));
     } catch {
       /* private mode / quota — the heights just won't survive a reload */
     }
-  }, [rsiH, macdH]);
+  }, [rsiH, macdH, flowH]);
 
   // Create/destroy the RSI sub-pane chart when toggled; sync its time axis to the main chart.
   useEffect(() => {
-    if (!showRsi || !rsiContainerRef.current) return;
+    if (!rsiPane || !rsiContainerRef.current) return;
     const rsiChart = createChart(rsiContainerRef.current, {
       autoSize: true,
       // The TradingView attribution stays on the main chart (that satisfies the licence's link
@@ -1378,9 +1588,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       rightPriceScale: { borderColor: "#404040", minimumWidth: 72 },
       crosshair: { mode: 1 },
     });
+    // The Stochastic under the RSI line, so the RSI stays the one you read first.
+    stochRefs.current = [
+      rsiChart.addLineSeries({ color: "rgba(34,211,238,0.85)", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }),
+      rsiChart.addLineSeries({ color: "rgba(251,146,60,0.85)", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }),
+    ];
     const line = rsiChart.addLineSeries({ color: "#c084fc", lineWidth: 2, priceLineVisible: false });
-    line.createPriceLine({ price: 70, color: "#ef5350", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "70" });
-    line.createPriceLine({ price: 30, color: "#26a69a", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "30" });
+    line.createPriceLine({ price: RSI_HI, color: "#ef5350", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: String(RSI_HI) });
+    line.createPriceLine({ price: RSI_LO, color: "#26a69a", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: String(RSI_LO) });
     rsiChartRef.current = rsiChart;
     rsiSeriesRef.current = line;
     applyRsi();
@@ -1410,9 +1625,81 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       rsiChart.remove();
       rsiChartRef.current = null;
       rsiSeriesRef.current = null;
+      stochRefs.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showRsi]);
+  }, [rsiPane]);
+
+  // The RSI as a band INSIDE the price chart (see BAND): the same series, on an overlay 0-100 scale
+  // of the main chart, with the candles and the volume moved up to make room. Same refs as the pane,
+  // so applyRsi fills whichever one is showing.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candles = seriesRef.current;
+    if (!rsiBand || !chart || !candles) return;
+    const osc = { priceScaleId: "osc", priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: OSC_RANGE };
+    const added = [
+      chart.addLineSeries({ ...osc, color: "rgba(34,211,238,0.85)", lineWidth: 1 }),
+      chart.addLineSeries({ ...osc, color: "rgba(251,146,60,0.85)", lineWidth: 1, lineStyle: LineStyle.Dashed }),
+      chart.addLineSeries({ ...osc, color: "#c084fc", lineWidth: 2 }),
+    ];
+    const line = added[2];
+    line.createPriceLine({ price: RSI_HI, color: "rgba(239,83,80,0.7)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" });
+    line.createPriceLine({ price: RSI_LO, color: "rgba(38,166,154,0.7)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" });
+    chart.priceScale("osc").applyOptions({ scaleMargins: BAND.osc });
+    candles.priceScale().applyOptions({ scaleMargins: BAND.candles });
+    volumeRef.current?.priceScale().applyOptions({ scaleMargins: BAND.volume });
+    stochRefs.current = added.slice(0, 2);
+    rsiSeriesRef.current = line;
+    applyRsi();
+    return () => {
+      stochRefs.current = [];
+      rsiSeriesRef.current = null;
+      if (chartRef.current !== chart) return;   // the whole chart is already gone
+      added.forEach((s) => chart.removeSeries(s));
+      candles.priceScale().applyOptions({ scaleMargins: PRICE_MARGINS });
+      volumeRef.current?.priceScale().applyOptions({ scaleMargins: VOLUME_MARGINS });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rsiBand]);
+
+  // The band's geometry (BandGeo), re-measured when the candles reload and as the pane resizes.
+  useEffect(() => {
+    if (!rsiBand) {
+      setBand(null);
+      return;
+    }
+    let raf = 0;
+    const measure = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const s = rsiSeriesRef.current;
+        const chart = chartRef.current;
+        const top = s?.priceToCoordinate(100);
+        if (!s || !chart || top == null) {
+          setBand(null);
+          return;
+        }
+        const at = (v: number) => s.priceToCoordinate(v) ?? top;
+        const vals = rsiCalc(candlesRef.current.map((c) => c.close), RSI_P);
+        const v = vals[vals.length - 1];
+        setBand({
+          top: Math.round(top),
+          lines: [RSI_HI, 50, RSI_LO].map((x) => [x, Math.round(at(x))]),
+          now: v != null ? { y: Math.round(at(v)), v } : null,
+          axisW: chart.priceScale("right").width(),
+          axisH: chart.timeScale().height(),
+        });
+      });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (containerRef.current) ro.observe(containerRef.current);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [rsiBand, dataV, showMacd, showFlow]);
 
   // Create/destroy the MACD sub-pane (histogram + macd/signal lines) when toggled; sync its time
   // axis to the main chart the same way the RSI pane does.
@@ -1492,12 +1779,12 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         });
         setPriceDec(dec);
         volumeRef.current.setData(
-          series.candles.map((c): HistogramData => ({
-            time: toTime(c), value: c.volume,
-            color: c.close >= c.open ? "rgba(38,166,154,0.4)" : "rgba(239,83,80,0.4)",
+          series.candles.map((c, i): HistogramData => ({
+            time: toTime(c), value: c.volume, color: volColor(c, series.candles, i),
           })),
         );
         applyEmas(series.candles);
+        applyBollinger(series.candles);
         applyRsi();
         applyMacd();
         applySuperTrend(series.candles);
@@ -1540,6 +1827,10 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         seriesRef.current.setMarkers([]);
         volumeRef.current.setData([]);
         for (const { period } of EMA_CONFIG) emaRefs.current[period]?.setData([]);
+        for (const s of bbRefs.current) s.setData([]);
+        for (const s of vwapBandRefs.current) s.setData([]);
+        for (const s of stochRefs.current) s.setData([]);
+        ribbonRef.current?.setPoints([]);
         stRef.current?.setData([]);
         emaHiRef.current?.setData([]);
         emaLoRef.current?.setData([]);
@@ -1561,25 +1852,57 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   }, [symbol, assetClass, timeframe, reloadTick, tzMode]);
 
   // Seconds on the time axis and the crosshair only where a bar is shorter than a minute. The RSI and
-  // MACD panes are separate charts, so they are set too (and again when one is switched on).
+  // MACD panes are separate charts, so they are set too (and again when one is switched on); the
+  // order-flow pane takes the same two settings as props.
+  // Scalp mode keeps ONE time axis, under the bottom pane: an axis above another pane repeats it and
+  // costs a row of chart.
   useEffect(() => {
-    const opts = { timeScale: { secondsVisible: isSecondsTf(timeframe) } };
-    chartRef.current?.applyOptions(opts);
-    rsiChartRef.current?.applyOptions(opts);
-    macdChartRef.current?.applyOptions(opts);
-  }, [timeframe, showRsi, showMacd]);
+    const secondsVisible = isSecondsTf(timeframe);
+    chartRef.current?.applyOptions({ timeScale: { secondsVisible, visible: !(scalp && (showFlow || showMacd || rsiPane)) } });
+    rsiChartRef.current?.applyOptions({ timeScale: { secondsVisible, visible: !(scalp && showMacd) } });
+    macdChartRef.current?.applyOptions({ timeScale: { secondsVisible } });
+  }, [timeframe, showRsi, showMacd, showFlow, rsiPane, scalp]);
 
   useEffect(() => {
     // ovl.vwap is a dependency too: applyEmas draws the VWAP line, so without it the toggle would
     // do nothing until the next candle reload.
     applyEmas(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showEma, ovl.vwap]);
+  }, [showEma, ovl.vwap, ovl.vwapb, ovl.emaRibbon]);
+
+  useEffect(() => {
+    applyRsi();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showStoch]);
+
+  useEffect(() => {
+    applyBollinger(candlesRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ovl.bb]);
 
   useEffect(() => {
     applySuperTrend(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSt]);
+
+  // Scalp mode draws the live bid and ask: a buy fills at the ask, a sell at the bid, and the candles
+  // (the bid on MT5) never show the side a buy pays. Moved in place every poll rather than re-created.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    const want = scalp && bidAsk ? [
+      { price: bidAsk.ask, color: "rgba(38,166,154,0.85)", title: "Ask" },
+      { price: bidAsk.bid, color: "rgba(239,83,80,0.85)", title: "Bid" },
+    ] : [];
+    if (quoteLinesRef.current.length !== want.length) {
+      quoteLinesRef.current.forEach((l) => series.removePriceLine(l));
+      quoteLinesRef.current = want.map((w) =>
+        series.createPriceLine({ ...w, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true }),
+      );
+    } else {
+      quoteLinesRef.current.forEach((l, i) => l.applyOptions({ price: want[i].price }));
+    }
+  }, [scalp, bidAsk?.bid, bidAsk?.ask]);
 
   // `positions` is in here so the entry marker follows the trade: it appears the moment a position
   // opens, its P&L text tracks the poll, and it disappears on close. `ovl.zones` decides whether
@@ -1587,7 +1910,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   useEffect(() => {
     applyMarkers(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showPb, showStructure, positions, symbol, ovl.zones]);
+  }, [showPb, showStructure, positions, symbol, ovl.zones, ovl.choch, ovl.div, ovl.emaCross, showEma]);
 
   useEffect(() => {
     applyBand(candlesRef.current);
@@ -1609,6 +1932,14 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         vw.flatMap((v, i) => (v == null ? [] : [{ time: times[i], value: v } as LineData])),
       );
     }
+    if (vwapBandRefs.current.length === 4) {
+      const b = ovl.vwapb ? vwapBandsCalc(candles) : null;
+      [b?.up1, b?.lo1, b?.up2, b?.lo2].forEach((vals, k) =>
+        vwapBandRefs.current[k].setData(
+          (vals ?? []).flatMap((v, i) => (v == null ? [] : [{ time: times[i], value: v } as LineData])),
+        ),
+      );
+    }
     for (const { period } of EMA_CONFIG) {
       const lineSeries = emaRefs.current[period];
       if (!lineSeries) continue;
@@ -1623,6 +1954,55 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       }
       lineSeries.setData(data);
     }
+    // The 10 / 20 ribbon: green while EMA 10 is above EMA 20, red while it is below.
+    const ribbon = ribbonRef.current;
+    if (ribbon) {
+      if (ovl.emaRibbon && showEma[10] && showEma[20]) {
+        const f = ema(closes, 10), w = ema(closes, 20);
+        const pts = [];
+        for (let i = 0; i < closes.length; i++) {
+          if (f[i] !== undefined && w[i] !== undefined) pts.push({ time: times[i], fast: f[i] as number, slow: w[i] as number });
+        }
+        ribbon.setPoints(pts);
+      } else {
+        ribbon.setPoints([]);
+      }
+    }
+  }
+
+  // Bollinger bands (20, 2σ, population deviation as in most platforms).
+  function applyBollinger(candles: Candle[]) {
+    const [up, mid, lo] = bbRefs.current;
+    if (!up || !mid || !lo) return;
+    if (!ovl.bb || candles.length < 20) {
+      for (const s of bbRefs.current) s.setData([]);
+      return;
+    }
+    const times = candles.map(toTime);
+    const u: LineData[] = [], m: LineData[] = [], l: LineData[] = [];
+    for (let i = 19; i < candles.length; i++) {
+      const win = candles.slice(i - 19, i + 1).map((c) => c.close);
+      const mean = win.reduce((a, b) => a + b, 0) / 20;
+      const sd = Math.sqrt(win.reduce((a, b) => a + (b - mean) ** 2, 0) / 20);
+      u.push({ time: times[i], value: mean + 2 * sd });
+      m.push({ time: times[i], value: mean });
+      l.push({ time: times[i], value: mean - 2 * sd });
+    }
+    up.setData(u);
+    mid.setData(m);
+    lo.setData(l);
+  }
+
+  // Volume bars in the candle's colour. In scalp mode a bar with twice the 20-bar average is drawn
+  // solid: the busy bars are the ones that move price, and they should stand out from the rest.
+  function volColor(c: Candle, candles: Candle[], i: number): string {
+    const up = c.close >= c.open;
+    if (scalp && i >= 20) {
+      let sum = 0;
+      for (let j = i - 20; j < i; j++) sum += candles[j].volume;
+      if (c.volume >= 2 * (sum / 20)) return up ? "rgba(38,166,154,0.95)" : "rgba(239,83,80,0.95)";
+    }
+    return up ? "rgba(38,166,154,0.4)" : "rgba(239,83,80,0.4)";
   }
 
   function applyRsi() {
@@ -1631,7 +2011,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     if (!line || !candles.length) return;
     const closes = candles.map((c) => c.close);
     const times = candles.map(toTime);
-    const vals = rsiCalc(closes, 14);
+    const vals = rsiCalc(closes, RSI_P);
     // Emit a point for EVERY candle (whitespace during the 14-bar warmup) so the RSI series has
     // the SAME length/logical indices as the candles — otherwise the logical-range sync between
     // the two charts is offset by the warmup and the panes don't line up.
@@ -1640,6 +2020,15 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       data.push(vals[i] !== null ? { time: times[i], value: vals[i] as number } : { time: times[i] });
     }
     line.setData(data);
+    // %K and %D, whitespace-padded the same way so the pane's bars stay aligned.
+    if (stochRefs.current.length === 2) {
+      const st = showStoch ? stochCalc(candles, 5, 3, 3) : null;
+      [st?.k, st?.d].forEach((arr, k) =>
+        stochRefs.current[k].setData(
+          arr ? arr.map((v, i): LineData | WhitespaceData => (v != null ? { time: times[i], value: v } : { time: times[i] })) : [],
+        ),
+      );
+    }
   }
 
   function applyMacd() {
@@ -1649,7 +2038,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     const candles = candlesRef.current;
     if (!macdLine || !signalLine || !histSeries || !candles.length) return;
     const times = candles.map(toTime);
-    const { macd, signal, hist } = macdCalc(candles.map((c) => c.close));
+    const { macd, signal, hist } = macdCalc(candles.map((c) => c.close), ...MACD_P);
     // A point for EVERY candle (whitespace during warmup) so logical indices match the main pane.
     const macdData: (LineData | WhitespaceData)[] = [];
     const signalData: (LineData | WhitespaceData)[] = [];
@@ -1755,6 +2144,29 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
           });
         }
       }
+    }
+    // EMA 10 x 20: TRUE crosses only (trueCrosses), each marked on the candle it happened on. The
+    // forming candle is left out - it can cross and uncross before it closes.
+    if (ovl.emaCross && showEma[10] && showEma[20] && candles.length > 25) {
+      const closes = candles.map((c) => c.close);
+      const lastTs = candles[candles.length - 1].ts;
+      const lastAt = Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(lastTs) ? lastTs : `${lastTs}Z`);
+      const forming = lastAt + (TF_SECONDS[timeframe] ?? 60) * 1000 > Date.now();
+      const closedN = forming ? candles.length - 1 : candles.length;
+      const xs = trueCrosses(closes, ema(closes, 10), ema(closes, 20), closedN, atrCalc(candles));
+      for (const x of xs.filter((c) => c.confirmed).slice(-CROSS_MARKS)) {
+        markers.push({
+          time: toTime(candles[x.i]),
+          position: x.up ? "belowBar" : "aboveBar",
+          color: x.up ? "#22c55e" : "#f43f5e",
+          shape: x.up ? "arrowUp" : "arrowDown",
+          text: "10×20",
+        });
+      }
+      const last = xs[xs.length - 1];
+      setEmaCross(last ? { up: last.up, ago: closedN - 1 - last.i, pending: !last.confirmed } : null);
+    } else {
+      setEmaCross(null);
     }
     // ENTRY marker — pins the open position to the CANDLE it was opened on.
     //
@@ -2027,7 +2439,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     let dead = false;
     let busy = false;
     const id = window.setInterval(() => {
-      if (busy || candlesKeyRef.current !== key || !lastBarRef.current) return;
+      // A hidden tab (a chart window behind another) reads nothing; the first read once it is shown
+      // finds newer bars and re-pulls the series.
+      if (busy || document.visibilityState === "hidden" || candlesKeyRef.current !== key || !lastBarRef.current) return;
       busy = true;
       api
         .ohlcv(symbol, assetClass, timeframe, 3)
@@ -2044,8 +2458,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             const bar: CandlestickData = { time: t, open: c.open, high: c.high, low: c.low, close: c.close };
             series.update(bar);
             volumeRef.current?.update({
-              time: t, value: c.volume,
-              color: c.close >= c.open ? "rgba(38,166,154,0.4)" : "rgba(239,83,80,0.4)",
+              time: t, value: c.volume, color: volColor(c, candlesRef.current, candlesRef.current.length),
             });
             lastBarRef.current = bar;
           }
@@ -2069,7 +2482,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     const hasPosition = (positions ?? []).some(
       (p) => p.symbol.toUpperCase() === symbol.toUpperCase(),
     );
-    if (!proposal || proposal.direction === "no_trade" || hasPosition) return;
+    // A staged scalp order is the plan on screen; the engine's would only be a second set of lines.
+    if (!proposal || proposal.direction === "no_trade" || hasPosition || staged) return;
     const add = (price: number | null, color: string, title: string) => {
       if (price == null) return;
       priceLinesRef.current.push(
@@ -2079,7 +2493,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     add(proposal.entry, "#3b82f6", "Entry");
     add(proposal.stop_loss, "#ef5350", "Stop");
     add(proposal.take_profit, "#26a69a", "Target");
-  }, [proposal, positions, symbol]);
+  }, [proposal, positions, symbol, staged]);
 
   // AI-scenario S/R overlay — the exact levels the AI cites, plotted as BOLD labelled lines on request
   // (the "Show these levels" button in the scenario card), so the zones in the AI's text are obvious
@@ -2223,6 +2637,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   // TradingView-style SL/TP boxes. One per open position on this symbol (from the candle it was
   // opened on), else one for the proposed trade (from the last bar). Rebuilt on every positions poll
   // and candle load; between those, the primitive reads live drag prices and the live close itself.
+  // A staged scalp order always gets its box: seeing it is what staging is for.
   useEffect(() => {
     const prim = zonesRef.current;
     if (!prim) return;
@@ -2230,8 +2645,19 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // Only once the loaded candles are THIS chart's. On a pair/timeframe switch the old series is
     // still on screen until the new one lands, and the new pair's levels would be drawn against the
     // old pair's price scale — a box in the wrong place is worse than no box for a moment.
-    if (!ovl.zones || candlesKeyRef.current !== `${symbol}|${timeframe}` || times.length < 2) {
+    if (candlesKeyRef.current !== `${symbol}|${timeframe}` || times.length < 2) {
       prim.setZones([]);
+      return;
+    }
+    const preZone: TradeZone[] = preOrder ? [{
+      key: "pre", kind: "plan", direction: preOrder.dir,
+      entry: preOrder.entry, stop: preOrder.sl, target: preOrder.tp,
+      stopKey: "pre-sl", targetKey: "pre-tp",      // the drag handles registered with the lines
+      startIndex: null, usdPerPrice: null, pnl: null, qty: preOrder.lots,
+      title: `${preOrder.dir === "long" ? "▲ PRE-ORDER BUY" : "▼ PRE-ORDER SELL"} ${preOrder.lots} lot · ${preOrder.leverage.toFixed(1)}x`,
+    }] : [];
+    if (!ovl.zones) {
+      prim.setZones(preZone);
       return;
     }
     const n = times.length;
@@ -2279,7 +2705,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     // The plan only when nothing is open here — same rule as the dashed proposal lines, so a box
     // never appears without its lines. The symbol check also stops the PREVIOUS pair's proposal
     // (still in hand until the new pair's one loads) from being drawn on this pair's scale.
-    if (!list.length && proposal && proposal.entry != null
+    if (!list.length && !preOrder && proposal && proposal.entry != null
         && (proposal.direction === "long" || proposal.direction === "short")
         && (!proposal.symbol || proposal.symbol.toUpperCase() === sym)) {
       list.push({
@@ -2288,9 +2714,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
         startIndex: null, usdPerPrice: null, pnl: null, qty: null,
       });
     }
-    prim.setZones(list);
+    prim.setZones([...list, ...preZone]);
     // tzMode re-derives every bar time (via a candle reload, which bumps dataV).
-  }, [positions, proposal, symbol, timeframe, dataV, ovl.zones]);
+  }, [positions, proposal, symbol, timeframe, dataV, ovl.zones, preOrder]);
 
   // Armed conditional ('wait for the break') overlay — large-dashed amber lines for THIS symbol's
   // armed setups, so the pending trigger/SL/TP are visible on the chart distinct from proposal
@@ -2389,6 +2815,62 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
     }
   }, [priceAlerts, symbol]);
 
+  // A staged scalp order: its stop and target as draggable lines (the fill side is the Ask or Bid
+  // line already on the chart, and the plan box's own entry edge). The same two lines for as long as
+  // it is staged, moved in place: it re-prices every 1.5 s, and a line re-created under the pointer
+  // would drop the drag. The dollars go in the line titles (the plan box only names the trade and
+  // its R:R), so the one number on screen follows the drag.
+  const preLinesRef = useRef<{ sl: IPriceLine; tp: IPriceLine } | null>(null);
+  const preRef = useRef<PreOrderView | null>(preOrder);
+  preRef.current = preOrder;
+  const onPreDragRef = useRef(onPreOrderDrag);
+  onPreDragRef.current = onPreOrderDrag;
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    handlesRef.current = handlesRef.current.filter((h) => !h.key.startsWith("pre-"));
+    const p = preOrder;
+    if (!p) {
+      if (preLinesRef.current) Object.values(preLinesRef.current).forEach((l) => series.removePriceLine(l));
+      preLinesRef.current = null;
+      return;
+    }
+    const long = p.dir === "long";
+    const word = long ? "BUY" : "SELL";
+    const slTitle = `SL ${fmtUsd(p.slUsd, { sign: true })}`;
+    const tpTitle = `TP ${fmtUsd(p.tpUsd, { sign: true })}`;
+    if (!preLinesRef.current) {
+      preLinesRef.current = {
+        sl: series.createPriceLine({ price: p.sl, color: "#ef5350", title: slTitle, lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: true }),
+        tp: series.createPriceLine({ price: p.tp, color: "#26a69a", title: tpTitle, lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: true }),
+      };
+    } else {
+      // The line in the hand stays where the pointer has it; only the other one moves.
+      const held = dragRef.current?.key;
+      if (held !== "pre-sl") preLinesRef.current.sl.applyOptions({ price: p.sl, title: slTitle });
+      if (held !== "pre-tp") preLinesRef.current.tp.applyOptions({ price: p.tp, title: tpTitle });
+    }
+    const L = preLinesRef.current;
+    // Judged against the live book at the drop: a stop on the wrong side of it would trigger the
+    // moment the order fills, a target there would fill at once.
+    handlesRef.current.push(
+      {
+        key: "pre-sl", label: "SL", refPos: null, line: L.sl, price: p.sl, title: slTitle,
+        validate: (x) => { const q = preRef.current; return !!q && (long ? x < q.bid : x > q.ask); },
+        why: `a ${word} stop must sit ${long ? "below the bid" : "above the ask"} — it would trigger at once`,
+        commit: (x) => onPreDragRef.current?.("sl", x),
+        hint: (x) => preRef.current?.hint("sl", x) ?? null,
+      },
+      {
+        key: "pre-tp", label: "TP", refPos: null, line: L.tp, price: p.tp, title: tpTitle,
+        validate: (x) => { const q = preRef.current; return !!q && (long ? x > q.ask : x < q.bid); },
+        why: `a ${word} target must sit ${long ? "above the ask" : "below the bid"} — it would fill at once`,
+        commit: (x) => onPreDragRef.current?.("tp", x),
+        hint: (x) => preRef.current?.hint("tp", x) ?? null,
+      },
+    );
+  }, [preOrder]);
+
   // Load the map in the background on every pair/timeframe change. It is fully deterministic —
   // no LLM, no tokens — and the server caches the candles it needs for 12s, so this costs a couple
   // of local MT5 reads and makes the rejection chip present without being asked for.
@@ -2413,7 +2895,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
   // Daily reference levels. Fetched only when a toggle that needs them is on, so a trader who
   // never turns them on never pays for the extra daily fetch.
-  const needKeyLv = ovl.pd || ovl.pw || ovl.open;
+  const needKeyLv = ovl.pd || ovl.pw || ovl.open || ovl.pivots;
   useEffect(() => {
     if (!needKeyLv) return;
     let dead = false;
@@ -2515,7 +2997,17 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       add(keyLv.today_open, "#fbbf24", "Open");
       add(keyLv.prior_close, "#a3a3a3", "Prev close");
     }
-  }, [keyLv, ovl.pd, ovl.pw, ovl.open, symbol, timeframe]);
+    // Classic floor pivots from yesterday's high, low and close.
+    const { prior_day_high: h, prior_day_low: l, prior_close: c } = keyLv;
+    if (ovl.pivots && h != null && l != null && c != null) {
+      const p = (h + l + c) / 3;
+      add(p, "#e5e5e5", "P");
+      add(2 * p - l, "#f87171", "R1");
+      add(p + (h - l), "#f87171", "R2");
+      add(2 * p - h, "#4ade80", "S1");
+      add(p - (h - l), "#4ade80", "S2");
+    }
+  }, [keyLv, ovl.pd, ovl.pw, ovl.open, ovl.pivots, symbol, timeframe]);
 
   // Time left on the current candle. The playbook keeps saying "a wick through a level is not a
   // break — wait for the close"; without knowing whether that close is 40 seconds or 40 minutes
@@ -3025,8 +3517,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       const price = yToPrice(e);
       if (price == null) return;
       dragPriceRef.current = price;
-      drag.line.applyOptions({ price });
-      setDragHint({ label: drag.label, price, pos: drag.refPos });
+      const extra = drag.hint?.(price) ?? null;
+      drag.line.applyOptions(extra ? { price, title: `${drag.label} ${extra}` } : { price });
+      setDragHint({ label: drag.label, price, pos: drag.refPos, extra });
     };
 
     const onDown = (e: MouseEvent) => {
@@ -3053,7 +3546,7 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
       // exactly like an accepted one, and you would walk away believing a stop or target had moved
       // when the broker still had the old one. Snap it back at once and explain why.
       if (!drag.validate(price)) {
-        drag.line.applyOptions({ price: drag.price });
+        drag.line.applyOptions(drag.title != null ? { price: drag.price, title: drag.title } : { price: drag.price });
         setDragErr(`${drag.label} not moved — ${drag.why}.`);
         return;
       }
@@ -3324,25 +3817,48 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
   };
 
   return (
-    <div ref={rootRef} className={`relative${isFull ? " flex min-h-0 flex-1 flex-col" : ""}`}>
-      <div ref={toolbarRef} className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-1.5">
+    <div ref={rootRef} className={`relative${fills ? " flex min-h-0 flex-1 flex-col" : ""}`}>
+      <div ref={toolbarRef} className={`${scalp ? "mb-1 p-1" : "mb-2 p-1.5"} flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40`}>
         {/* Three menus instead of fifteen chips. The counts keep "what is on" visible without
             every option being permanently on screen. */}
         <ToolMenu label="📈 EMA" count={EMA_CONFIG.filter(({ period }) => showEma[period]).length}
-                  open={menu === "ema"} onToggle={() => setMenu((m) => (m === "ema" ? null : "ema"))} width="w-40">
+                  open={menu === "ema"} onToggle={() => setMenu((m) => (m === "ema" ? null : "ema"))} width="w-60">
           {EMA_CONFIG.map(({ period, color }) => (
             <MenuItem key={period} on={!!showEma[period]} dot={color}
                       onClick={() => setShowEma((x) => ({ ...x, [period]: !x[period] }))}>
               EMA {period}
             </MenuItem>
           ))}
+          <div className="mt-1 border-t border-neutral-800 px-1.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            EMA 10 × 20
+          </div>
+          <MenuItem on={!!ovl.emaRibbon} dot="#22c55e" onClick={() => setOvl((x) => ({ ...x, emaRibbon: !x.emaRibbon }))}
+                    tip="Tints the space between EMA 10 and EMA 20: green while 10 is above 20, red while it is below. The colour flips exactly where they cross. Needs both EMAs on.">
+            Ribbon: green above, red below
+          </MenuItem>
+          <MenuItem on={!!ovl.emaCross} dot="#f43f5e" onClick={() => setOvl((x) => ({ ...x, emaCross: !x.emaCross }))}
+                    tip="Marks each TRUE cross with an arrow on the candle it happened on: crossed on a closed candle, did not cross straight back, and within 3 closed candles the lines separated and the close confirmed the new side. A cross that whips back is not marked. Needs both EMAs on.">
+            Mark true crosses
+          </MenuItem>
         </ToolMenu>
 
         <ToolMenu label="📊 Indicators"
-                  count={[showRsi, showMacd, showSt, showPb, showStructure, showChannel].filter(Boolean).length}
+                  count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel].filter(Boolean).length}
                   open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))}>
-          <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI pane</MenuItem>
+          <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI {RSI_P}</MenuItem>
+          <MenuItem on={rsiIn} onClick={() => setRsiIn((v) => !v)} dot="#a78bfa"
+                    tip="Draw the RSI (and the Stochastic) in a band at the bottom of the price chart, under the volume, instead of in a pane of its own: one time axis, no gap, and the height goes to the candles. Off: the RSI gets its own resizable pane.">
+            … inside the price chart
+          </MenuItem>
+          <MenuItem on={showStoch} onClick={() => setShowStoch((v) => !v)} dot="#22d3ee"
+                    tip="Stochastic 5,3,3 with the RSI: %K (cyan) and its average %D (orange, dashed). Where the close sits in the last 5 bars' range - over 80 it closes near the highs, under 20 near the lows. It turns before the RSI does, so it is the quicker of the two and the noisier.">
+            Stochastic 5,3,3{!showRsi && " (needs the RSI)"}
+          </MenuItem>
           <MenuItem on={showMacd} onClick={() => setShowMacd((v) => !v)} dot="#3b82f6">MACD pane</MenuItem>
+          <MenuItem on={showFlow} onClick={() => setShowFlow((v) => !v)} dot="#38bdf8"
+                    tip="Who pushed the price, buyers or sellers: each tick that lifted the price counts as buying, each that dropped it as selling. Exness sends no real volume, so this is an estimate from the ticks. Bars for each candle, buyers' share over the last N candles, and a quick check of whether a strong share was followed by price going the same way.">
+            Order flow pane (buyers vs sellers)
+          </MenuItem>
           <MenuItem on={showSt} onClick={() => setShowSt((v) => !v)} dot="#26a69a"
                     tip="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red = downtrend (resistance)">
             SuperTrend
@@ -3363,7 +3879,8 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
 
         <ToolMenu label="📍 Levels"
                   count={(["1h", "4h", "1d"] as const).filter((tf) => showSR[tf]).length
-                         + (showBand ? 1 : 0) + Object.values(ovl).filter(Boolean).length}
+                         + (showBand ? 1 : 0)
+                         + Object.entries(ovl).filter(([k, v]) => v && k !== "emaRibbon" && k !== "emaCross").length}
                   open={menu === "lv"} onToggle={() => setMenu((m) => (m === "lv" ? null : "lv"))} width="w-72">
           <div className="px-1.5 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
             Support / resistance
@@ -3388,6 +3905,9 @@ export function Chart({ symbol, assetClass, timeframe, proposal, liveQuote, posi
             ["pw", "Prior week high / low", "PWH & PWL — last completed week's range."],
             ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
             ["vwap", "Session VWAP", "Volume-weighted average price, reset each trading day — the level institutions execute against, and the same one the rejection score uses for its location points."],
+            ["vwapb", "VWAP bands (±1σ, ±2σ)", "One and two volume-weighted standard deviations either side of the session VWAP. Inside ±1σ is where the session trades most; out at ±2σ price is stretched, and a scalp entered there chases the move."],
+            ["pivots", "Daily pivots (P, R1-R2, S1-S2)", "Floor pivots from yesterday's high, low and close: P = (H + L + C) / 3, R1 = 2P - L, S1 = 2P - H, R2 / S2 = P ± (H - L). Levels many intraday traders watch, so price often pauses at them."],
+            ["bb", "Bollinger bands (20, 2)", "A 20-bar average with bands two standard deviations either side. Narrow bands = a quiet market coiling; price riding a band = a strong push; a close back inside after a band poke = the push fading."],
             ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
             ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
             ["rr", "Risk / reward bands", "Full-width bands entry→stop (red) and entry→target (green). With Trade zones on, only armed setups get these; otherwise positions and proposals too."],
@@ -3612,6 +4132,16 @@ Click for the full breakdown. Info only — it gates nothing.`}
         >
           {scenBusy ? "…" : "🤖 Scenarios"}
         </button>
+        {isFull && strategies && (
+          <button
+            onClick={() => setStratOpen((v) => !v)}
+            aria-pressed={stratOpen}
+            className={`rounded px-2 py-0.5 text-xs ${stratOpen ? "bg-amber-500/25 text-amber-200" : "bg-neutral-800/50 text-amber-300 hover:bg-neutral-700 hover:text-white"}`}
+            title="Your strategies, live: what each pair's rules read now, the trades they hold, today's result - in a panel you can move and resize"
+          >
+            ♟ Strategies
+          </button>
+        )}
         <button
           onClick={recenter}
           className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700 hover:text-white"
@@ -4012,6 +4542,36 @@ Click for the full breakdown. Info only — it gates nothing.`}
         </div>
       )}
 
+      {isFull && strategies && stratOpen && (
+        <div
+          data-panel
+          style={stratDrag.style}
+          className="absolute right-[86px] top-10 z-30 flex max-h-[70%] w-[25rem] flex-col overflow-y-auto rounded-lg border border-amber-700/50 bg-neutral-900/95 p-3 shadow-xl"
+        >
+          <div
+            {...stratDrag.handle}
+            className="sticky -top-3 z-10 -mx-3 -mt-3 mb-1 flex shrink-0 cursor-move touch-none select-none items-center justify-between border-b border-amber-900/40 bg-neutral-900/95 px-3 py-2 text-xs"
+            title="Drag to move this panel · double-click to snap it back"
+          >
+            <span className="font-semibold text-amber-200"><span className="mr-1 text-neutral-600">⠿</span>♟ Strategies</span>
+            <span className="flex items-center gap-2">
+              {stratDrag.moved && (
+                <button
+                  onClick={stratDrag.reset}
+                  className="rounded px-1 text-neutral-600 hover:bg-neutral-800 hover:text-neutral-200"
+                  title="Snap back to its default place and size"
+                >
+                  ⇱
+                </button>
+              )}
+              <button onClick={() => setStratOpen(false)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
+            </span>
+          </div>
+          <div className="-mx-2">{strategies}</div>
+          <PanelGrip resize={stratDrag.resize} />
+        </div>
+      )}
+
       {/* Review + delete. Every drawing is listed with what it is and where, so you can remove one
           precisely — a chart you can only clear wholesale is one you stop annotating. */}
       {drawList && drawings.length > 0 && (
@@ -4069,7 +4629,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
           to the component. Anchoring them to the component meant guessing the toolbar's height —
           and the moment the toolbar wrapped to a second row, that row landed on top of the OHLC
           numbers. A wrapping toolbar now just pushes the chart (and everything on it) down. */}
-      <div className={`relative${isFull ? " min-h-0 flex-1" : ""}`}>
+      <div className={`relative${fills ? " min-h-0 flex-1" : ""}`}>
         {legend && (
           <div ref={legendRef} className="pointer-events-none absolute left-2 top-2 z-10 flex gap-2 text-xs tabular-nums">
             <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.open, priceDec)}</span></span>
@@ -4079,7 +4639,58 @@ Click for the full breakdown. Info only — it gates nothing.`}
             <span className={change >= 0 ? "text-bull" : "text-bear"}>
               {change >= 0 ? "+" : ""}{fmtPrice(change, priceDec)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
             </span>
+            {/* The last TRUE EMA 10 x 20 cross - pulsing while it is fresh. */}
+            {emaCross && (
+              <span
+                className={`rounded px-1 font-semibold ${
+                  emaCross.pending
+                    ? "bg-amber-500/15 text-amber-300"
+                    : emaCross.up ? "bg-emerald-500/15 text-emerald-300" : "bg-rose-500/15 text-rose-300"
+                } ${!emaCross.pending && emaCross.ago <= 2 ? "animate-pulse" : ""}`}
+              >
+                EMA 10 {emaCross.up ? "▲ crossed above" : "▼ crossed below"} 20
+                {emaCross.pending
+                  ? " · confirming on the next closes"
+                  : emaCross.ago === 0 ? " · on the last candle" : ` · ${emaCross.ago} candle${emaCross.ago === 1 ? "" : "s"} ago`}
+              </span>
+            )}
           </div>
+        )}
+
+        {/* The RSI band: a divider across the pane with the band's name, and over the price axis
+            beside it (still printing prices down there) the band's own 0-100 scale. */}
+        {rsiBand && band && (
+          <>
+            <div className="pointer-events-none absolute left-0 z-[2] border-t border-neutral-700/70" style={{ top: band.top - 4, right: band.axisW }}>
+              <span className="ml-2 mt-0.5 inline-flex gap-2 rounded bg-neutral-950/70 px-1 text-[11px]">
+                <span className="text-purple-300">RSI {RSI_P}{scalp && " · fast"}</span>
+                {showStoch && <span className="text-cyan-300">Stoch 5,3,3 <span className="text-orange-300">%D</span></span>}
+              </span>
+            </div>
+            <div
+              className="pointer-events-none absolute right-0 z-[3] border-l border-t border-neutral-700/70 bg-neutral-900"
+              style={{ top: band.top - 4, bottom: band.axisH, width: band.axisW }}
+            >
+              {band.lines.map(([v, y]) => (
+                <span
+                  key={v}
+                  className={`absolute left-1.5 -translate-y-1/2 text-[11px] tabular-nums ${v === RSI_HI ? "text-bear/90" : v === RSI_LO ? "text-bull/90" : "text-neutral-500"}`}
+                  style={{ top: y - band.top + 4 }}
+                >
+                  {v}
+                </span>
+              ))}
+              {band.now && (
+                <span
+                  className="absolute left-0.5 -translate-y-1/2 rounded bg-purple-500 px-1 text-[11px] font-semibold tabular-nums text-white"
+                  style={{ top: band.now.y - band.top + 4 }}
+                  title={`RSI ${RSI_P} at the last close`}
+                >
+                  {band.now.v.toFixed(1)}
+                </span>
+              )}
+            </div>
+          </>
         )}
 
         {dragHint && (
@@ -4088,8 +4699,10 @@ Click for the full breakdown. Info only — it gates nothing.`}
               dragHint.label === "SL" ? "bg-bear/90" : dragHint.label === "TP" ? "bg-bull/90" : "bg-amber-500/90"
             }`}
           >
-            {dragHint.label} → {fmtPrice(dragHint.price)}{" "}
-            {dragHint.pos && usdAtLevel(dragHint.pos, dragHint.price) && (
+            {dragHint.label} → {fmtPrice(dragHint.price, priceDec)}{" "}
+            {dragHint.extra ? (
+              <span>({dragHint.extra})</span>
+            ) : dragHint.pos && usdAtLevel(dragHint.pos, dragHint.price) && (
               <span>({usdAtLevel(dragHint.pos, dragHint.price)})</span>
             )}
           </div>
@@ -4098,6 +4711,30 @@ Click for the full breakdown. Info only — it gates nothing.`}
         {dragErr && (
           <div className="pointer-events-none absolute left-1/2 top-9 z-30 max-w-[26rem] -translate-x-1/2 rounded bg-bear/90 px-2.5 py-1.5 text-xs font-medium text-white shadow-lg">
             ⚠ {dragErr}
+          </div>
+        )}
+
+        {/* Scalp mode: what the next key does. On the left, under the price legend: the right is where
+            the newest candles and the staged order's own tags are. Out of the way while a line is
+            being dragged or a drop was refused (those readouts need the attention then). */}
+        {scalp && hud && !dragHint && !dragErr && (
+          <div
+            className={`pointer-events-none absolute left-2 top-7 z-20 flex max-w-[34rem] items-center gap-3 rounded-lg border bg-neutral-950/85 px-3 py-1 shadow-lg backdrop-blur-sm ${
+              hud.tone === "long" || hud.tone === "win"
+                ? "border-bull/70 text-bull shadow-[0_0_22px_-6px_rgba(38,166,154,0.8)]"
+                : hud.tone === "short" || hud.tone === "loss"
+                  ? "border-bear/70 text-bear shadow-[0_0_22px_-6px_rgba(239,83,80,0.8)]"
+                  : hud.tone === "close"
+                    ? "border-sky-500/70 text-sky-300"
+                    : "border-neutral-700 text-neutral-400"
+            }`}
+          >
+            {/* In a trade: the money, big enough to read from the corner of an eye. */}
+            {hud.big && <div className="text-2xl font-black tabular-nums leading-none">{hud.big}</div>}
+            <div className="min-w-0">
+              <div className="text-sm font-black italic tracking-wide tabular-nums">{hud.title}</div>
+              {hud.detail && <div className="text-[11px] tabular-nums text-neutral-300">{hud.detail}</div>}
+            </div>
           </div>
         )}
 
@@ -4374,8 +5011,8 @@ Click for the full breakdown. Info only — it gates nothing.`}
         <canvas ref={bgCanvasRef} className="pointer-events-none absolute inset-0 z-0" />
         <div
           ref={containerRef}
-          className={`relative z-[1] w-full ${isFull ? "h-full" : ""}`}
-          style={isFull ? undefined : { height: mainH }}
+          className={`relative z-[1] w-full ${fills ? "h-full" : ""}`}
+          style={fills ? undefined : { height: mainH }}
         />
 
         {/* Key for the session bands. One small legend rather than a name written inside every
@@ -4409,7 +5046,9 @@ Click for the full breakdown. Info only — it gates nothing.`}
           className={`absolute inset-0 z-10 ${drawMode === "off" ? "pointer-events-none" : "cursor-crosshair touch-none"}`}
         />
       </div>
-      {(() => {
+      {/* The line-style key. Scalp mode leaves it out: the chart's height matters more there, and every
+          line it explains is labelled on the price axis. */}
+      {!scalp && (() => {
         const hasPos = !!myPos;
         const hasProp = !!proposal && proposal.direction !== "no_trade" && !hasPos;
         const hasArmed = (armed ?? []).some((a) => a.symbol.toUpperCase() === symbol.toUpperCase());
@@ -4445,11 +5084,29 @@ Click for the full breakdown. Info only — it gates nothing.`}
       })()}
       {/* Each pane keeps its dragged height in full screen too, so the price chart (flex-1) simply
           absorbs whatever height the indicators don't claim. */}
-      {showRsi && (
+      {showFlow && (
+        <>
+          <PaneResizer height={flowH} onChange={setFlowH} label="order flow" />
+          <div className="relative shrink-0" style={{ height: flowH }}>
+            <OrderFlowPane
+              symbol={symbol} assetClass={assetClass} timeframe={timeframe}
+              mainChart={chartRef} candles={candlesRef}
+              lastBarTime={() => (lastBarRef.current ? (lastBarRef.current.time as number) : null)}
+              dataV={dataV} reloadTick={reloadTick} toTime={toTime} toDisp={utcToDisp}
+              timeAxis={!(scalp && (rsiPane || showMacd))} secondsVisible={isSecondsTf(timeframe)}
+              storeKey={sk}
+            />
+          </div>
+        </>
+      )}
+      {rsiPane && (
         <>
           <PaneResizer height={rsiH} onChange={setRsiH} label="RSI" />
           <div className="relative shrink-0" style={{ height: rsiH }}>
-            <span className="pointer-events-none absolute left-2 top-1 z-10 text-xs text-purple-300">RSI 14</span>
+            <span className="pointer-events-none absolute left-2 top-1 z-10 flex gap-2 text-xs">
+              <span className="text-purple-300">RSI {RSI_P}{scalp && " · fast"}</span>
+              {showStoch && <span className="text-cyan-300">Stoch 5,3,3 <span className="text-orange-300">%D</span></span>}
+            </span>
             <div ref={rsiContainerRef} className="h-full w-full" />
           </div>
         </>
@@ -4459,7 +5116,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
           <PaneResizer height={macdH} onChange={setMacdH} label="MACD" />
           <div className="relative shrink-0" style={{ height: macdH }}>
             <span className="pointer-events-none absolute left-2 top-1 z-10 flex gap-2 text-xs">
-              <span className="text-neutral-400">MACD 12 26 9</span>
+              <span className="text-neutral-400">MACD {MACD_P.join(" ")}{scalp && " · fast"}</span>
               <span className="text-blue-300">MACD</span>
               <span className="text-amber-400">signal</span>
             </span>

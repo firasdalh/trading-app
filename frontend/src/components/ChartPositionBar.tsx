@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import { fmtPrice, fmtUsd } from "../format";
 import type { Pulse } from "./Chart";
 import { OverCapChip, overCapRisk, positionR, stopWidening, WidenedChip } from "./LiveBook";
@@ -15,8 +15,8 @@ function usdAtLevel(pos: PositionView, level: number | null | undefined): number
 }
 
 // Resume of the open position for the charted symbol, sitting on top of the chart: direction/entry,
-// current P&L (and in R), risk ($ to SL) and reward ($ to TP) in dollars, R:R, and a quick
-// (confirmed) Close.
+// current P&L (and in R), risk ($ to SL) and reward ($ to TP) in dollars, R:R, and a one-click
+// Quick close (no confirm step - asked for, so a fast exit isn't two clicks).
 export function ChartPositionBar({
   pos,
   pulse,
@@ -35,15 +35,8 @@ export function ChartPositionBar({
   onClose: (p: PositionView) => Promise<void> | void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-
-  // Auto-cancel the confirm if it isn't acted on quickly, so a stray click can't sit armed and get
-  // confirmed by accident later (this closes a real position).
-  useEffect(() => {
-    if (!confirming) return;
-    const t = setTimeout(() => setConfirming(false), 5000);
-    return () => clearTimeout(t);
-  }, [confirming]);
+  // Set synchronously on the first click, so a double-click sends one close, not two.
+  const inFlight = useRef(false);
 
   if (!pos) return null;
 
@@ -61,11 +54,13 @@ export function ChartPositionBar({
     Math.abs(pos.stop_loss - pos.entry_price) <= Math.abs(pos.entry_price) * 1e-4;
 
   const close = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     try {
       await onClose(pos);
-      setConfirming(false);
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
@@ -138,33 +133,14 @@ export function ChartPositionBar({
       )}
 
       <span className="ml-auto">
-        {confirming ? (
-          <span className="flex items-center gap-2">
-            <button
-              disabled={busy}
-              onClick={close}
-              className="btn bg-bear text-white hover:bg-red-700"
-              title={`Confirm closing ${pos.symbol} ${pos.direction.toUpperCase()}`}
-            >
-              {busy ? "Closing…" : "Confirm close"}
-            </button>
-            <button
-              disabled={busy}
-              onClick={() => setConfirming(false)}
-              className="btn bg-neutral-700 text-neutral-200 hover:bg-neutral-600"
-            >
-              Cancel
-            </button>
-          </span>
-        ) : (
-          <button
-            onClick={() => setConfirming(true)}
-            className="btn border border-bear/50 bg-bear/10 text-bear hover:bg-bear/20"
-            title={`Close ${pos.symbol} ${pos.direction.toUpperCase()} — asks to confirm`}
-          >
-            Quick close
-          </button>
-        )}
+        <button
+          disabled={busy}
+          onClick={close}
+          className="btn border border-bear/50 bg-bear/10 text-bear hover:bg-bear/20"
+          title={`Close ${pos.symbol} ${pos.direction.toUpperCase()} at market now — one click, no confirm`}
+        >
+          {busy ? "Closing…" : "Quick close"}
+        </button>
       </span>
 
       {/* Live read for the trade you're IN. Each chip is judged against YOUR side, so green always

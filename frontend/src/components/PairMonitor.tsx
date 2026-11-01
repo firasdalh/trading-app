@@ -167,7 +167,7 @@ const ROWS: RowDef[] = [
   },
   {
     key: "act", label: "Activity", counted: false, core: true,
-    hint: "How busy the last completed bar was vs normal for that time (same hour on 1H/4H, same slot on 15M, last 20 bars on 1M/5M, last 20 sessions on 1D). Bold = 1.5x+, dim = 0.7x or less. ↑ building / ↓ fading.",
+    hint: "How busy the last completed bar was vs normal for that time (same hour on 1H/4H, same slot on 15M, last 20 bars on 30S/1M/5M, last 20 sessions on 1D). Bold = 1.5x+, dim = 0.7x or less. ↑ building / ↓ fading.",
     read: (t) => {
       const v = t.volume;
       if (!v) return { side: 0, body: "—", tip: "Not enough completed bars" };
@@ -312,7 +312,7 @@ export function PairMonitor({
   // The poll keeps the previous pair's answer until the new one lands - never show it under this name.
   const fresh = data && data.row.symbol.toUpperCase() === symbol.toUpperCase() ? data : null;
   const row = fresh?.row ?? null;
-  const tfs = fresh?.timeframes ?? ["1m", "5m", "15m", "1h", "4h", "1d"];
+  const tfs = fresh?.timeframes ?? ["30s", "1m", "5m", "15m", "1h", "4h", "1d"];
   const scores = tfs.map((tf) => score(row?.tfs[tf]));
   const posSide: Side = position ? (position.direction === "long" ? 1 : -1) : 0;
   const read = scores.filter((s): s is Score => s != null);
@@ -329,7 +329,7 @@ export function PairMonitor({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title="Every indicator on 1M to 1D for this pair - click for the full read"
+        title="Every indicator on 30S to 1D for this pair - click for the full read"
         className={`flex w-full flex-wrap items-center gap-x-1.5 gap-y-1 rounded-md border px-2 py-1 text-left text-xs transition ${
           open ? "border-brand-500/60 bg-neutral-900" : "border-neutral-800 bg-neutral-900/60 hover:border-neutral-600"
         }`}

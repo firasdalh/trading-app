@@ -4,7 +4,11 @@ import { assetLabel, displaySymbol, fmtPrice, fmtUsd } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { useQuoteSocket } from "../hooks/useQuoteSocket";
-import { TF_SECONDS, analysisTimeframe, isSecondsTf } from "../timeframes";
+import { useScalpSpec, type PreOrder, type PreOrderView, type ScalpHud } from "../scalp";
+import { SCALP_FAST, SCALP_TFS, TF_SECONDS, TIMEFRAMES, analysisTimeframe } from "../timeframes";
+import { ChartWindowMenu, ScalpToggle } from "./ChartWindow";
+import { ScalpTicket } from "./ScalpTicket";
+import { TimeframeBadge, TimeframeSwitch } from "./TimeframeSwitch";
 import type {
   AccountState,
   AnalyzeResponse,
@@ -70,6 +74,7 @@ import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
 import { SymbolPicker } from "./SymbolPicker";
 import { WatchlistPanel } from "./WatchlistPanel";
+import { StrategyWidget } from "./StrategyWidget";
 import { MarketMonitor } from "./MarketMonitor";
 import { PriceAlerts } from "./PriceAlerts";
 
@@ -98,15 +103,6 @@ interface Props {
   onCloseDrawer: () => void;
 }
 
-// This selector drives BOTH the chart and the analysis/trade the engine produces. 1m, 5m and 15m
-// are included so you can drop down to time an entry, but they are marked: measured over 959
-// signals, 15m lost -0.159R per trade in BOTH halves of the data (the clearest negative result on
-// this book) because the win rate falls AND the fixed spread eats roughly twice as much of a
-// smaller stop. 5m and 1m are faster still. 1h is the tested baseline. 5s/10s/30s are chart-only:
-// the analysis and trading behind them run on 1m (../timeframes.ts).
-const TIMEFRAMES = ["5s", "10s", "30s", "1m", "5m", "15m", "1h", "4h", "1d"];
-const FAST_TF = new Set(["1m", "5m", "15m"]);
-
 // A plan is drawn on the chart (dashed lines + PLAN zone) only while it is still current: once 3+ bars
 // of its timeframe have closed since the analysis — the panel's own "stale, re-run it" rule — its levels
 // may no longer be true, and a 2,000-hour-old PLAN box looked exactly like a live idea.
@@ -122,8 +118,8 @@ const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energ
  * THE DESK — a trading-terminal layout, using the full window width.
  *
  *   ┌──────────────────────────────────────┬───────────────────┐
- *   │ toolbar: pair · class · TF · modes   │ OPEN POSITIONS    │
- *   │ chart (+ the open trade's strip)     │ WAITING FOR YOU   │
+ *   │ toolbar: pair · class · modes        │ OPEN POSITIONS    │
+ *   │ chart: header + TF, the trade, chart │ WAITING FOR YOU   │
  *   │ ANALYSIS of the charted pair         │ WATCHLIST         │
  *   └──────────────────────────────────────┴───────────────────┘
  *
@@ -156,6 +152,27 @@ export function Dashboard({
   const [timeframe, setTimeframe] = useLocalStorage("ta.timeframe", "1h");
   // What the engine analyses and trades on: the chart's timeframe, or 1m under a seconds chart.
   const aTf = analysisTimeframe(timeframe);
+  // Scalp mode (../scalp.ts). Entering it moves the chart to the last fast timeframe you scalped on;
+  // leaving it returns to the one you were on.
+  const [scalp, setScalp] = useLocalStorage("ta.scalp", false);
+  const [scalpTf, setScalpTf] = useLocalStorage("ta.scalp.tf", "1m");
+  const [preScalpTf, setPreScalpTf] = useLocalStorage("ta.scalp.prevTf", "1h");
+  const toggleScalp = () => {
+    if (scalp) {
+      setScalpTf(timeframe);
+      setTimeframe(preScalpTf);
+    } else {
+      setPreScalpTf(timeframe);
+      if (!SCALP_FAST.includes(timeframe)) setTimeframe(SCALP_FAST.includes(scalpTf) ? scalpTf : "1m");
+    }
+    setScalp(!scalp);
+  };
+  const { spec: scalpSpec, error: scalpSpecErr } = useScalpSpec(symbol, assetClass, scalp);
+  // The staged scalp order (its levels, placed on the chart) and what the ticket says the chart
+  // should draw for it. Another pair, or leaving scalp mode, drops it.
+  const [preOrder, setPreOrder] = useState<PreOrder | null>(null);
+  const [scalpView, setScalpView] = useState<{ preOrder: PreOrderView | null; hud: ScalpHud | null }>({ preOrder: null, hud: null });
+  useEffect(() => setPreOrder(null), [symbol, assetClass, scalp]);
   const [favorites, setFavorites] = useLocalStorage<Favorite[]>("ta.favorites", []);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [scenario, setScenario] = useState<import("../types").AiScenarioRead | null>(null);
@@ -526,6 +543,19 @@ export function Dashboard({
     if (el.getBoundingClientRect().top < hdr) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
+  // The strategies widget (scalp mode's sidebar, the full-screen chart's pop-up): a pair picked there
+  // is charted on the timeframe already showing. The board is a drawer, which full screen would hide,
+  // so opening it leaves full screen first.
+  const pickStrategyPair = (sym: string, ac: AssetClass) => {
+    if (ac !== assetClass) setAssetClass(ac);
+    setSymbol(sym);
+    revealChart();
+  };
+  const openStrategyBoard = () => {
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    onOpenDrawer("strategy");
+  };
+
   const openFavorite = (f: Favorite) => {
     if (f.assetClass !== assetClass) setAssetClass(f.assetClass);
     setSymbol(f.symbol);
@@ -570,39 +600,9 @@ export function Dashboard({
     </>
   );
 
-  // Segmented timeframe switch: one click instead of a dropdown, used in the toolbar and in full
-  // screen (where the toolbar is off-screen). Switching timeframe is the most common thing you do
-  // while reading a chart.
+  // In the chart's own header (it travels into full screen with it): the timeframe is the chart's.
   const timeframeSwitch = (
-    <span
-      className="inline-flex shrink-0 items-center rounded-md border border-neutral-700 bg-neutral-800/60 p-0.5"
-      role="group"
-      aria-label="Timeframe"
-    >
-      {TIMEFRAMES.map((t) => (
-        <button
-          key={t}
-          onClick={() => setTimeframe(t)}
-          aria-pressed={t === timeframe}
-          title={
-            isSecondsTf(t)
-              ? `${t} candles, built from the broker's ticks. Chart only: analysis, tickets and setups from it run on 1m`
-              : FAST_TF.has(t)
-                ? `${t} — backtested as loss-making for entries; fine for timing`
-                : `Switch the chart and the analysis to ${t}`
-          }
-          className={`rounded px-2 py-0.5 text-xs font-medium tabular-nums transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 ${
-            t === timeframe
-              ? "bg-brand-600 text-white"
-              : FAST_TF.has(t) || isSecondsTf(t)
-                ? "text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
-                : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
-          }`}
-        >
-          {t}
-        </button>
-      ))}
-    </span>
+    <TimeframeSwitch value={timeframe} onChange={setTimeframe} options={scalp ? SCALP_TFS : TIMEFRAMES} scalp={scalp} />
   );
 
   return (
@@ -646,25 +646,6 @@ export function Dashboard({
                 </option>
               ))}
             </select>
-            {timeframeSwitch}
-            {/* Named at the point of use, not buried in a doc: the cost of a fast timeframe is
-                invisible on the chart but decisive in the results. */}
-            {FAST_TF.has(timeframe) && (
-              <span
-                className="shrink-0 rounded bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn"
-                title="Backtested over 959 signals: 15m lost -0.159R per trade in both halves of the data — the win rate drops and the fixed spread eats about twice as much of a smaller stop. Fine for reading price; poor for trading."
-              >
-                ⚠ {timeframe}: timing only, tested loss-making
-              </span>
-            )}
-            {isSecondsTf(timeframe) && (
-              <span
-                className="shrink-0 rounded bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn"
-                title="MT5 has no candle under 1 minute, so these are built from the broker's ticks (the bid, as on every MT5 chart). Run analysis, the price map, AI scenarios, order blocks, chart tickets, armed setups and auto-trade all work on 1m from here."
-              >
-                ⚠ {timeframe}: chart only, analysis on 1m
-              </span>
-            )}
 
             <span className="hidden h-6 w-px bg-neutral-800 2xl:block" aria-hidden="true" />
 
@@ -732,8 +713,8 @@ export function Dashboard({
             </div>
           </div>
 
-          {/* Chart card */}
-          <div className="card p-3">
+          {/* Chart card - lit amber in scalp mode, so the mode is never in doubt at a glance. */}
+          <div className={`card p-3${scalp ? " ring-1 ring-amber-500/50 shadow-[0_0_36px_-10px_rgba(245,158,11,0.45)]" : ""}`}>
             {/* Header + position strip + chart all travel together into full screen — see
                 chartWrapRef above. */}
             <div
@@ -749,13 +730,15 @@ export function Dashboard({
                     <span className="hidden truncate text-xs text-neutral-500 md:inline">{descriptions[symbol]}</span>
                   )}
                 </span>
+                {/* This pair alone in its own tab, on any timeframe - several timeframes at once, or
+                    one on another screen. */}
+                <ScalpToggle on={scalp} onToggle={toggleScalp} />
+                <ChartWindowMenu symbol={symbol} assetClass={assetClass} timeframe={timeframe} scalp={scalp} />
                 {/* Open or closed, and when it next closes / reopens - before a trade, not after. */}
                 <MarketHoursChip symbol={symbol} assetClass={assetClass} />
                 {result?.proposal?.regime && (
                   <RegimeBadge regime={result.proposal.regime} strategy={result.proposal.strategy} />
                 )}
-                {/* Full screen only: the toolbar with the real timeframe switch is off-screen. */}
-                {chartFull && timeframeSwitch}
                 {/* Favourites — how you move between the pairs you actually watch. In full screen
                     they are compact with no × : removing a favourite is housekeeping, not something
                     you do mid-read, and every extra × is a mis-click that silently drops a pair. */}
@@ -819,6 +802,11 @@ export function Dashboard({
                     })}
                   </span>
                 )}
+                {/* The timeframe, at the chart's top right - where a chart keeps it. */}
+                <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
+                  <TimeframeBadge tf={timeframe} compact={scalp} />
+                  {timeframeSwitch}
+                </span>
               </div>
               {/* The charted pair's indicators across 1M-1D: one line here, the full read as a popover
                   over the chart. In full screen too - the timeframes you are not looking at matter
@@ -827,23 +815,40 @@ export function Dashboard({
                 symbol={symbol}
                 assetClass={assetClass}
                 timeframe={timeframe}
-                selectable={TIMEFRAMES}
+                selectable={scalp ? SCALP_TFS : TIMEFRAMES}
                 onTimeframe={setTimeframe}
                 position={chartedPosition}
               />
+              {scalp && (
+                <ScalpTicket
+                  symbol={symbol}
+                  assetClass={assetClass}
+                  timeframe={timeframe}
+                  spec={scalpSpec}
+                  specError={scalpSpecErr}
+                  positions={positions}
+                  pre={preOrder}
+                  setPre={setPreOrder}
+                  onView={setScalpView}
+                  onOpened={onPositionsChanged}
+                />
+              )}
               {/* Open-position resume for the charted symbol: P&L, risk/reward $, R:R + quick close.
                   Only where the sidebar is NOT beside the chart: full screen (hidden) and narrow
-                  windows (stacked below) - there this strip is the only view of the trade. */}
-              <div className={chartFull ? "shrink-0" : "lg:hidden"}>
-                <ChartPositionBar
-                  pos={chartedPosition}
-                  pulse={pulse}
-                  adviceR={chartedAdvice?.r_multiple ?? null}
-                  equity={equity}
-                  riskCap={riskCap}
-                  onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class, direction: p.direction })}
-                />
-              </div>
+                  windows (stacked below) - there this strip is the only view of the trade. In scalp
+                  mode the ticket's own trade panel shows the trade, live, beside the way in. */}
+              {!scalp && (
+                <div className={chartFull ? "shrink-0" : "lg:hidden"}>
+                  <ChartPositionBar
+                    pos={chartedPosition}
+                    pulse={pulse}
+                    adviceR={chartedAdvice?.r_multiple ?? null}
+                    equity={equity}
+                    riskCap={riskCap}
+                    onClose={(p) => closePosition({ symbol: p.symbol, asset_class: p.asset_class, direction: p.direction })}
+                  />
+                </div>
+              )}
               <Chart
                 symbol={symbol}
                 assetClass={assetClass}
@@ -868,6 +873,14 @@ export function Dashboard({
                 onArmed={() => setCondKey((v) => v + 1)}
                 onOpened={onPositionsChanged}
                 onPulse={setPulse}
+                scalp={scalp}
+                bidAsk={scalpSpec ? { bid: scalpSpec.bid, ask: scalpSpec.ask } : null}
+                preOrder={scalp ? scalpView.preOrder : null}
+                onPreOrderDrag={(kind, price) => setPreOrder((p) => (p ? { ...p, [kind]: { price } } : p))}
+                hud={scalp ? scalpView.hud : null}
+                strategies={
+                  <StrategyWidget positions={positions} chartSymbol={symbol} onPick={pickStrategyPair} onOpenBoard={openStrategyBoard} />
+                }
               />
             </div>
             <p className="mt-2 text-[11px] text-neutral-600">
@@ -964,10 +977,33 @@ export function Dashboard({
             )}
           </SideSection>
 
-          {/* The re-housed WatchlistPanel opens with its own bold "Watchlist" title, which would sit
+          {/* Scalp mode puts the strategies here instead of the watchlist: what each running one reads
+              on its pairs, live, beside the chart. Not mounted in full screen, where the chart's own
+              pop-up shows it, so the two don't both poll. */}
+          {scalp ? (
+            <SideSection
+              title="Strategies"
+              hint="Your strategies, live: what each pair's rules read now, the trades they hold, today's result"
+              body="bare"
+              actions={
+                <button
+                  onClick={openStrategyBoard}
+                  className="btn btn-ghost px-1.5 py-0.5 text-xs"
+                  title="The Strategies board: build, change, start and stop them"
+                >
+                  Board ›
+                </button>
+              }
+            >
+              {!chartFull && (
+                <StrategyWidget positions={positions} chartSymbol={symbol} onPick={pickStrategyPair} onOpenBoard={openStrategyBoard} />
+              )}
+            </SideSection>
+          ) : (
+          /* The re-housed WatchlistPanel opens with its own bold "Watchlist" title, which would sit
               right under this section's WATCHLIST header. The selector hides only a
               `text-sm font-semibold` title div in that exact spot, so if the panel's markup ever
-              changes the worst case is the duplicate title coming back — nothing else can vanish. */}
+              changes the worst case is the duplicate title coming back — nothing else can vanish. */
           <SideSection
             title="Watchlist"
             hint="Pairs the Hybrid auto-pilot scans — click one to chart it"
@@ -995,6 +1031,7 @@ export function Dashboard({
               }}
             />
           </SideSection>
+          )}
 
           <SideSection title="Price alerts" hint="Be told when price reaches a level - never places an order" body="flush">
             <PriceAlerts symbol={symbol} assetClass={assetClass} />

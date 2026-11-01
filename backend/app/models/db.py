@@ -515,6 +515,45 @@ class AutoTradeConfig(Base):
     )
 
 
+class StrategyConfig(Base):
+    """A strategy the user builds on the Strategies board (app/agents/strategy.py): indicator rules on
+    any timeframes that OPEN a trade and CLOSE it again, checked every few seconds on closed bars.
+
+    Rules are lists of GROUPS of conditions ``[[{"type", "tf", "params"}, ...], ...]``: a group holds
+    when ALL its conditions do, a rule set fires when ANY group does. ``exit_rules`` are written
+    against the trade and apply to both sides. Off until the user runs it, and PAPER-ONLY - every
+    order still carries a broker-side stop and goes through the Risk Manager and the executor."""
+
+    __tablename__ = "strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), default="My strategy")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    pairs: Mapped[list] = mapped_column(JSON, default=list)          # [{"symbol", "asset_class"}]
+    timeframe: Mapped[str] = mapped_column(String(8), default="1m")   # base: the stop's ATR, the bar clock
+    sides: Mapped[str] = mapped_column(String(8), default="both")    # long | short | both
+    entry_long: Mapped[list] = mapped_column(JSON, default=list)
+    entry_short: Mapped[list] = mapped_column(JSON, default=list)
+    mirror_short: Mapped[bool] = mapped_column(Boolean, default=True)  # SELL = the BUY rules mirrored
+    exit_rules: Mapped[list] = mapped_column(JSON, default=list)
+    risk_pct: Mapped[float] = mapped_column(Float, default=0.005)    # of equity, re-clamped to the ceiling
+    stop_atr: Mapped[float] = mapped_column(Float, default=1.5)      # stop = this x ATR(14) of the base TF
+    target_r: Mapped[float | None] = mapped_column(Float, default=2.0)  # None = no target, the rules exit
+    max_trades_day: Mapped[int] = mapped_column(Integer, default=10)
+    manage_manual: Mapped[bool] = mapped_column(Boolean, default=False)  # also exit the user's own trades
+    # Its own cooldowns (risk.service.strategy_cooldowns): the wait after any close on the pair, and the
+    # wait in the same direction after a losing trade. Never under scalp mode's 0 / 5 min.
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    loss_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    state: Mapped[dict | None] = mapped_column(JSON)                 # per pair: last note, last bar acted on
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_result: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class RsiOverConfig(Base):
     """Singleton (id=1) for the RSI-Over auto-watch. When enabled, a scheduled tick every
     ``interval_seconds`` re-runs the RSI-Over sweep on ``timeframe`` (EMA10 ``confirm`` on by default)

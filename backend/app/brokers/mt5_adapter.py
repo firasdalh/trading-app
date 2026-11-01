@@ -39,7 +39,7 @@ log = get_logger("broker.mt5")
 
 # Our timeframe string -> MT5 TIMEFRAME_* attribute name.
 _TF_ATTR = {
-    "1m": "TIMEFRAME_M1", "5m": "TIMEFRAME_M5", "15m": "TIMEFRAME_M15",
+    "1m": "TIMEFRAME_M1", "5m": "TIMEFRAME_M5", "10m": "TIMEFRAME_M10", "15m": "TIMEFRAME_M15",
     "30m": "TIMEFRAME_M30", "1h": "TIMEFRAME_H1", "4h": "TIMEFRAME_H4", "1d": "TIMEFRAME_D1",
 }
 
@@ -86,6 +86,58 @@ def _bars_from_ticks(times: list, prices: list, seconds: int) -> list[list]:
             cur[4] = p
             cur[5] += 1
     return bars
+
+
+# Bar lengths of the terminal's own timeframes, for the order-flow bars (built from ticks).
+_TF_SECONDS = {"1m": 60, "5m": 300, "10m": 600, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
+def _flow_from_ticks(times: list, bids: list, seconds: int, prev: float | None = None,
+                     final_before: int | None = None) -> tuple[dict[int, list], float | None]:
+    """Buy vs sell pressure per bar of ``seconds``, from time-ordered ticks, by the TICK RULE.
+
+    A CFD quote feed (Exness) has no traded volume and no buyer/seller flag: only a bid and an ask,
+    and they move together. So each tick is judged by how it moved the bid: up is a BUY tick (buyers
+    lifted the price), down a SELL tick, unchanged a FLAT one. A bar is ``[buy, sell, flat, up,
+    down]``: the tick count on each side, then how far the buy ticks and the sell ticks moved the
+    price. ``prev`` is the bid before the first tick; without one the first tick counts flat. Bars
+    start on whole multiples of ``seconds`` and skip bid-less ticks, as in ``_bars_from_ticks``, so
+    they are the chart's candles. Also returns the last bid before ``final_before`` (of all the ticks
+    when None): the ``prev`` of a later call that starts there.
+    """
+    out: dict[int, list] = {}
+    keep = prev
+    for t, p in zip(times, bids):
+        if not p or p <= 0:
+            continue
+        start = int(t) - int(t) % seconds
+        row = out.get(start)
+        if row is None:
+            row = out[start] = [0, 0, 0, 0.0, 0.0]
+        if prev is None or p == prev:
+            row[2] += 1
+        elif p > prev:
+            row[0] += 1
+            row[3] += p - prev
+        else:
+            row[1] += 1
+            row[4] += prev - p
+        prev = p
+        if final_before is None or start < final_before:
+            keep = p
+    return out, keep
+
+
+# The order-flow pane reads at most a day of ticks before the newest bar (a day of gold is ~350k
+# ticks, of US500 more); older bars of a long timeframe come back without flow. Ticks are counted
+# into buckets - a seconds chart's own bars, minutes for every chart of a minute or more - and the
+# closed buckets are kept per (symbol, bucket), so a refresh reads only the ticks of the forming
+# bucket, even when the forming bar is a whole day. A few symbols' worth; the least recently used
+# goes first.
+_FLOW_SPAN_S = 24 * 3600
+_FLOW_CACHE: dict[tuple[str, int], dict] = {}
+_FLOW_CACHE_MAX = 12
+_FLOW_LOCK = threading.Lock()
 
 
 # The MetaTrader5 package talks to the terminal over a SINGLE connection that is NOT safe for
@@ -443,6 +495,75 @@ class Mt5BrokerAdapter(BrokerAdapter):
             for t, o, h, lo, c, n in bars
         ]
 
+    def order_flow(self, symbol: str, timeframe: str = "1m", bars: int = 400) -> dict:
+        """Buy vs sell ticks per bar (``_flow_from_ticks``) for the chart's order-flow pane. Read-only.
+
+        The bars are the chart's: the last ``bars`` that exist, found through the M1 bars on a
+        seconds chart as in ``_second_bars``. Flow starts at most ``_FLOW_SPAN_S`` before the newest
+        bar (``covered_from``; ``truncated`` when that leaves bars out). The ticks are counted per
+        bucket (the bar itself under a minute, else a minute) and each bar is the sum of its buckets.
+        Closed buckets are cached, so a refresh reads only the ticks from the last closed bucket on,
+        starting from the bid it closed at.
+        """
+        name = self._resolve_symbol(symbol)
+        mt5 = self._mt5
+        if timeframe in _SECOND_TFS:
+            sec = _SECOND_TFS[timeframe]
+            rates = mt5.copy_rates_from_pos(name, mt5.TIMEFRAME_M1, 0, -(-bars * sec // 60) + 1)
+        else:
+            tf = self._tf(timeframe)
+            sec = _TF_SECONDS[timeframe]
+            rates = mt5.copy_rates_from_pos(name, tf, 0, bars)
+        step = min(sec, 60)                 # the bucket
+        info = mt5.symbol_info(name)
+        digits = int(getattr(info, "digits", 8)) if info is not None else 8
+        out = {"symbol": name, "timeframe": timeframe, "seconds": sec, "digits": digits,
+               "covered_from": None, "truncated": False, "bars": []}
+        if rates is None or len(rates) == 0:
+            return out
+        first, newest = int(rates[0]["time"]), int(rates[-1]["time"])
+        start = max(first, newest - _FLOW_SPAN_S)
+        start += -start % sec               # the first WHOLE bar: a cut one would undercount
+        end = newest + max(sec, 60) + 120   # past the forming bar on purpose: MT5 stops at the newest tick
+        key = (name, step)
+        with _FLOW_LOCK:
+            c = _FLOW_CACHE.pop(key, None)
+            if c is None or start < c["from"] or c["final"] < start:
+                c = {"from": start, "final": start, "prev": None, "rows": {}}
+            ticks = mt5.copy_ticks_range(name, c["final"], end, mt5.COPY_TICKS_ALL)
+            times = _column(ticks, "time") if ticks is not None and len(ticks) else []
+            bids = _column(ticks, "bid") if times else []
+            # A bucket is final once a tick a second past its end is in: the terminal hands ticks
+            # over in time order, so no more can come for it.
+            final = c["final"]
+            if times:
+                edge = int(times[-1]) - 1
+                final = max(final, edge - edge % step)
+            fresh, prev = _flow_from_ticks(times, bids, step, c["prev"], final)
+            c["rows"].update((s, row) for s, row in fresh.items() if s < final)
+            c["final"], c["prev"] = final, prev
+            # Keep what the longest chart on these buckets can ask for: a day of flow before its
+            # newest bar, which on a daily chart opened up to a day ago.
+            floor = final - _FLOW_SPAN_S - (86400 if step == 60 else step)
+            if floor > c["from"]:
+                c["rows"] = {s: row for s, row in c["rows"].items() if s >= floor}
+                c["from"] = floor
+            _FLOW_CACHE[key] = c
+            while len(_FLOW_CACHE) > _FLOW_CACHE_MAX:
+                _FLOW_CACHE.pop(next(iter(_FLOW_CACHE)))
+            summed: dict[int, list] = {}
+            for rows in (c["rows"], {s: row for s, row in fresh.items() if s >= final}):
+                for s, row in rows.items():
+                    if s >= start:
+                        acc = summed.setdefault(s - s % sec, [0, 0, 0, 0.0, 0.0])
+                        for i in range(5):
+                            acc[i] += row[i]
+        keep = sorted(summed)[-bars:]
+        out["bars"] = [[b, *summed[b][:3], round(summed[b][3], digits), round(summed[b][4], digits)] for b in keep]
+        out["covered_from"] = keep[0] if keep else None
+        out["truncated"] = first < start
+        return out
+
     # ---- account ----
 
     def _last_error(self):
@@ -764,6 +885,62 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 "leverage": round(leverage, 1) if leverage else None,
             }
         except Exception:  # noqa: BLE001 - economics are best-effort; never break the flow
+            return None
+
+    def scalp_spec(self, symbol: str) -> dict | None:
+        """What the scalp ticket needs to turn a leverage into lots, read live: bid/ask, the symbol's
+        lot rules and stop distance limit, the account-currency value of a 1.0 price move on one lot,
+        the margin one lot holds, and the account's own leverage and free margin.
+
+        Read-only. MT5 does the currency conversion (``order_calc_profit``/``order_calc_margin``),
+        so a JPY pair or an HKD index comes back in the USD account. The account leverage is the one
+        set in the Exness Personal Area - MT5 reports it but cannot change it. None when the terminal
+        can't price the symbol (no quote, closed book, read failure).
+        """
+        mt5 = self._mt5
+        try:
+            sym = self._resolve_symbol(symbol)
+            info = self._symbol_info(sym)
+            tick = mt5.symbol_info_tick(sym)
+            bid = float(getattr(tick, "bid", 0) or 0) if tick is not None else 0.0
+            ask = float(getattr(tick, "ask", 0) or 0) if tick is not None else 0.0
+            if not (bid and ask):
+                bid = float(getattr(info, "bid", 0) or 0)
+                ask = float(getattr(info, "ask", 0) or 0)
+            if not (bid and ask) or ask < bid:
+                return None
+            mid = (bid + ask) / 2
+            buy = getattr(mt5, "ORDER_TYPE_BUY", 0)
+            # The profit of a 1% move, scaled back to a 1.0 move (as in quote_economics): the value of
+            # one price unit on one lot - $100,000 on EURUSD, $100 on gold, $1 on bitcoin.
+            move = mid * 0.01
+            profit = mt5.order_calc_profit(buy, sym, 1.0, mid, mid + move)
+            value_per_unit = abs(float(profit)) / move if profit else None
+            margin = mt5.order_calc_margin(buy, sym, 1.0, ask)
+            acct = mt5.account_info()
+            point = float(getattr(info, "point", 0) or 0)
+            return {
+                "symbol": sym,
+                "bid": bid,
+                "ask": ask,
+                "spread": ask - bid,
+                "digits": int(getattr(info, "digits", 0) or 0),
+                "point": point,
+                "lot_step": float(getattr(info, "volume_step", 0) or 0) or 0.01,
+                "lot_min": float(getattr(info, "volume_min", 0) or 0) or 0.01,
+                "lot_max": float(getattr(info, "volume_max", 0) or 0) or None,
+                "value_per_unit": value_per_unit,
+                "margin_per_lot": float(margin) if margin else None,
+                # How close to price MT5 accepts a stop/target (SYMBOL_TRADE_STOPS_LEVEL, in points).
+                "stops_level": int(getattr(info, "trade_stops_level", 0) or 0) * point,
+                "account_leverage": int(getattr(acct, "leverage", 0) or 0) or None if acct else None,
+                "equity": float(getattr(acct, "equity", 0) or 0) if acct else None,
+                "balance": float(getattr(acct, "balance", 0) or 0) if acct else None,
+                "margin_free": float(getattr(acct, "margin_free", 0) or 0) if acct else None,
+                "margin_level": float(getattr(acct, "margin_level", 0) or 0) or None if acct else None,
+                "currency": getattr(acct, "currency", None) if acct else None,
+            }
+        except Exception:  # noqa: BLE001 - read-only and best-effort; the ticket shows "no data"
             return None
 
     def get_closed_trades(self, since) -> list[PositionView] | None:

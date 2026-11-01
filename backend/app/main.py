@@ -29,6 +29,7 @@ from app.api.proposal_routes import router as proposal_router
 from app.api.routes import router
 from app.api.settings_routes import router as settings_router
 from app.api.shadow_routes import router as shadow_router
+from app.api.strategy_routes import router as strategy_router
 from app.api.watchlist_routes import router as watchlist_router
 from app.api.ws import router as ws_router
 from app.core.config import get_settings
@@ -142,6 +143,18 @@ def _auto_trade_tick() -> None:
         log.warning("auto-trade tick failed", extra={"error": str(exc)})
 
 
+def _strategy_tick() -> None:
+    """Run the user's custom strategies (app/agents/strategy.py). Only running ones do any work."""
+    from app.agents.strategy import strategy_tick
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            strategy_tick(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("strategy tick failed", extra={"error": str(exc)})
+
+
 def _conditional_tick() -> None:
     """Watch armed conditional setups: expire stale ones, and on a confirmed trigger re-check +
     open. Its own job/session so a firing setup (which runs the full analysis) never delays the
@@ -194,12 +207,17 @@ def _register_monitor_job() -> None:
     # Polls every 60s; the per-pair AI auto-trader enforces its own interval (default 15 min).
     sched.add_job(_auto_trade_tick, "interval", seconds=60, id="auto_trade",
                   replace_existing=True, max_instances=1)
+    # Every 1s: custom strategies act a second after a bar closes on any timeframe they read (a 5s
+    # bar closes every 5 s); the engine itself decides which pairs are due. A tick with none running,
+    # or nothing just closed, is one query.
+    sched.add_job(_strategy_tick, "interval", seconds=1, id="strategy_engine",
+                  replace_existing=True, max_instances=1)
     # Every 10 min: grade shadow decisions whose horizon elapsed (keeps the AI-vs-deterministic
     # scorecard + the AI's self-learning brief current without needing the panel open).
     sched.add_job(_shadow_eval_tick, "interval", seconds=600, id="shadow_eval",
                   replace_existing=True, max_instances=1)
     log.info("position monitor (10s) + scanner (20s) + advisor (30s) + hybrid (60s) + "
-             "conditional watch (15s) + rsi-over watch (60s) + shadow-eval (600s) scheduled")
+             "conditional watch (15s) + rsi-over watch (60s) + strategies (1s) + shadow-eval (600s) scheduled")
 
 
 @asynccontextmanager
@@ -333,6 +351,7 @@ app.include_router(watchlist_router)
 app.include_router(shadow_router)
 app.include_router(rsi_over_router)
 app.include_router(auto_trade_router)
+app.include_router(strategy_router)
 app.include_router(macro_router)
 app.include_router(ws_router)
 

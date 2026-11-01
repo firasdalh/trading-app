@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.brokers.base import BrokerError
 from app.brokers.registry import get_broker_for
 from app.core.database import get_session
 from app.core.logging import get_logger
@@ -54,6 +55,46 @@ def ohlcv(
 ) -> OHLCVSeries:
     broker = _broker_for(asset_class, session)
     return broker.get_ohlcv(symbol, timeframe, limit)
+
+
+@router.get("/market/scalp-spec")
+def scalp_spec(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.FOREX),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Live bid/ask, lot economics and the account's leverage + free margin for the scalp ticket.
+    Read-only: it sizes nothing and places nothing (orders still go through /api/proposals/manual)."""
+    broker = _broker_for(asset_class, session)
+    spec = broker.scalp_spec(symbol)
+    if spec is None:
+        raise HTTPException(status_code=503,
+                            detail=f"{broker.name} can't price {symbol} right now (no quote or contract data)")
+    return spec
+
+
+@router.get("/market/order-flow")
+def order_flow(
+    symbol: str = Query(...),
+    asset_class: AssetClass = Query(AssetClass.FOREX),
+    timeframe: str = Query("1m"),
+    bars: int = Query(400, ge=1, le=1000),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Buy vs sell ticks per candle, for the chart's order-flow pane. An ESTIMATE from the quote
+    ticks (``_flow_from_ticks`` in the MT5 adapter): the broker reports no traded volume and no
+    buyer or seller. Read-only: it reads ticks and places nothing."""
+    broker = _broker_for(asset_class, session)
+    try:
+        flow = broker.order_flow(symbol, timeframe, bars)
+    except ValueError as e:              # a timeframe the terminal has no bars for
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except BrokerError as e:             # unknown symbol, terminal unreachable
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    if flow is None:
+        raise HTTPException(status_code=503,
+                            detail=f"{broker.name} has no tick history, and the order-flow pane is built from ticks")
+    return flow
 
 
 @router.get("/market/hours")
