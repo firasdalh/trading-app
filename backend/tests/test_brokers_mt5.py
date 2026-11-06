@@ -485,3 +485,80 @@ def test_new_account_with_nothing_open_rebases_the_daily_baseline(db_session):
     assert get_or_create_settings(db_session).mt5_account_login == 123
     assert get_or_create_daily_state(db_session).starting_equity == 500.0
     assert a.account_block() is None
+
+
+class _HistoryMt5(FakeMt5):
+    """Deal history with the fields the chart's trade history reads (MT5's real constant values)."""
+    DEAL_ENTRY_IN = 0; DEAL_ENTRY_OUT = 1; DEAL_ENTRY_OUT_BY = 3
+    DEAL_TYPE_BUY = 0; DEAL_TYPE_SELL = 1
+    DEAL_REASON_CLIENT = 0; DEAL_REASON_EXPERT = 3; DEAL_REASON_SL = 4; DEAL_REASON_TP = 5
+    T = 1_762_000_000
+
+    def history_deals_get(self, frm, to):
+        T = self.T
+
+        def d(pid, sym, entry, kind, vol, price, at, **kw):
+            return SimpleNamespace(position_id=pid, symbol=sym, entry=entry, type=kind, volume=vol, price=price,
+                                   time=T + at, **{"profit": 0.0, "swap": 0.0, "commission": 0.0, "reason": 0,
+                                                   "comment": "", **kw})
+        return [
+            # A strategy's buy, closed in two steps: half by the app, the rest at its target.
+            d(1, "EURUSD", 0, 0, 0.10, 1.1000, 0, comment="ai-trading-app:strategy:1", commission=-0.5),
+            d(1, "EURUSD", 1, 1, 0.05, 1.1010, 60, profit=5.0, reason=3),
+            d(1, "EURUSD", 1, 1, 0.05, 1.1030, 300, profit=15.0, reason=5),
+            # A sell typed in the terminal, stopped out.
+            d(2, "EURUSD", 0, 1, 0.20, 1.1050, 400),
+            d(2, "EURUSD", 1, 0, 0.20, 1.1060, 500, profit=-20.0, reason=4),
+            # Half closed, half still open.
+            d(5, "EURUSD", 0, 0, 0.10, 1.1020, 550, comment="ai-trading-app:manual"),
+            d(5, "EURUSD", 1, 1, 0.05, 1.1025, 580, profit=2.5, reason=3),
+            # No exit yet; another pair; a balance operation with no position.
+            d(3, "EURUSD", 0, 0, 0.10, 1.1040, 600),
+            d(4, "GBPUSD", 0, 0, 0.10, 1.3000, 0),
+            d(4, "GBPUSD", 1, 1, 0.10, 1.3010, 60, profit=10.0),
+            d(0, "", 0, 2, 0.0, 0.0, 0, profit=100.0),
+        ]
+
+
+def test_trade_history_has_each_entry_and_every_exit_with_why():
+    rows = _adapter(_HistoryMt5()).get_trade_history("EURUSD", datetime(2025, 1, 1, tzinfo=timezone.utc))
+    assert [r["id"] for r in rows] == [1, 2, 5]          # oldest first; no exit yet / another pair: left out
+    buy, sell, half = rows
+    at = lambda s: datetime.fromtimestamp(_HistoryMt5.T + s, tz=timezone.utc).isoformat()  # noqa: E731
+    assert (buy["direction"], buy["volume"], buy["entry_price"], buy["opened_at"]) == ("long", 0.1, 1.1, at(0))
+    assert [(x["price"], x["at"], x["volume"], x["pnl"], x["by"]) for x in buy["exits"]] == [
+        (1.101, at(60), 0.05, 5.0, "app"), (1.103, at(300), 0.05, 15.0, "target")]
+    assert buy["pnl"] == 19.5 and buy["source"] == "strategy:1" and buy["open"] is False   # the entry's commission
+    assert (sell["direction"], sell["source"], sell["pnl"]) == ("short", "manual", -20.0)
+    assert [(x["price"], x["by"]) for x in sell["exits"]] == [(1.106, "stop")]
+    assert half["open"] is True and half["volume"] == 0.1 and [x["volume"] for x in half["exits"]] == [0.05]
+
+
+def test_trade_history_is_none_when_the_terminal_cannot_answer():
+    class Down(_HistoryMt5):
+        def history_deals_get(self, frm, to):
+            raise RuntimeError("IPC timeout")
+    assert _adapter(Down()).get_trade_history("EURUSD", datetime(2025, 1, 1, tzinfo=timezone.utc)) is None
+
+
+def test_three_minute_ohlcv_reads_the_terminals_m3_bars():
+    """3m (asked for 2026-11-05) is the terminal's own M3 bar, read like the 1m and the 5m - not built from
+    ticks - and order flow knows its bar length."""
+    from app.brokers import mt5_adapter
+
+    class M3FakeMt5(FakeMt5):
+        TIMEFRAME_M3 = 3
+
+        def __init__(self):
+            super().__init__()
+            self.tfs = []
+
+        def copy_rates_from_pos(self, sym, tf, start, count):
+            self.tfs.append(tf)
+            return super().copy_rates_from_pos(sym, tf, start, count)
+
+    fake = M3FakeMt5()
+    s = _adapter(fake).get_ohlcv("EURUSD", "3m", limit=5)
+    assert s.timeframe == "3m" and len(s.candles) == 5
+    assert fake.tfs == [M3FakeMt5.TIMEFRAME_M3]
+    assert mt5_adapter._TF_SECONDS["3m"] == 180

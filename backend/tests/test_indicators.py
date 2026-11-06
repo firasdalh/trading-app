@@ -4,7 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.agents.indicators import (
-    adx, atr, bollinger, ema, macd, market_structure, regression_channel, supertrend, volume_ratio,
+    adx, adx_series, atr, atr_series, bollinger, ema, macd, market_structure, regression_channel, supertrend,
+    volume_ratio,
 )
 from app.agents.orchestrator import _deterministic_decision, _regime, _session_quality
 from app.models.enums import AssetClass, Direction, TradingBias
@@ -62,6 +63,23 @@ def test_adx_strong_in_trend_weak_in_range():
     flat = adx(_flat())
     assert up is not None and up["adx"] > 25 and up["plus_di"] > up["minus_di"]
     assert flat is not None and flat["adx"] < 20
+
+
+def test_adx_is_the_last_point_of_its_lines():
+    c = _ramp()
+    s = adx_series(c)
+    assert adx(c) == {"adx": round(s["adx"][-1], 2), "plus_di": round(s["plus_di"][-1], 2),
+                      "minus_di": round(s["minus_di"][-1], 2), "adx_prev": round(s["adx"][-2], 2)}
+    assert len(s["plus_di"]) - len(s["adx"]) == 13                    # period - 1: smoothed once more
+    assert adx_series(c[:28]) is None                                 # under 2 x 14 + 1 candles
+
+
+def test_atr_series_is_the_atr_at_every_bar():
+    c = _ramp()
+    s = atr_series(c, 14)
+    assert len(s) == len(c) and s[:14] == [None] * 14 and s[14] is not None
+    assert round(s[-1], 6) == atr(c, 14) and round(s[-2], 6) == atr(c[:-1], 14)
+    assert atr_series(c[:14], 14) == [None] * 14                      # under period + 1 candles
 
 
 def test_macd_sign_follows_direction():

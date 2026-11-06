@@ -4,7 +4,7 @@ import { api } from "./api/client";
 import { Header } from "./components/Header";
 import { Dashboard } from "./components/Dashboard";
 import { BacktestView } from "./components/BacktestView";
-import { DRAWER_IDS, Drawer, type DrawerId } from "./components/Drawer";
+import { DESK_CHANNEL, DRAWER_IDS, Drawer, type DrawerId } from "./components/Drawer";
 import { EntryFiltersPanel } from "./components/EntryFiltersPanel";
 import { JournalView } from "./components/JournalView";
 import { RiskDashboard } from "./components/RiskDashboard";
@@ -139,6 +139,19 @@ export default function App() {
     setDrawer(d);
   };
   const closeDrawer = useCallback(() => setDrawer(null), []);
+  // A chart window - on another screen, say - asks for a drawer (its Strategies widget's "Open the
+  // board"): open it here and answer, so the window knows a desk heard it.
+  useEffect(() => {
+    if (typeof BroadcastChannel === "undefined") return;
+    const ch = new BroadcastChannel(DESK_CHANNEL);
+    ch.onmessage = (e: MessageEvent<{ type?: string; drawer?: DrawerId }>) => {
+      const d = e.data?.drawer;
+      if (e.data?.type !== "open-drawer" || !d || !DRAWER_IDS.includes(d)) return;
+      setDrawer(d);
+      ch.postMessage({ type: "opened" });
+    };
+    return () => ch.close();
+  }, []);
 
   const paused = !!(account?.trading_paused || risk?.trading_paused);
   const nav: NavItem[] = [

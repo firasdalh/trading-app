@@ -68,7 +68,11 @@ export interface ScalpPlan {
   blocked: string | null; // why BUY / SELL are off
 }
 
-export function planScalp({ spec, atr, stopAtr, targetR, level, leverage, spreadGate, stopDist: userStop, targetDist }: {
+// The most a scalp may risk, per trade: the Risk Manager's scalp-mode ceiling (RISK.md override 2026-11-02,
+// SCALP_RISK_CEILING in app/risk/service.py). Each preset's own risk is adjustable up to it.
+export const SCALP_MAX_RISK = 0.06;
+
+export function planScalp({ spec, atr, stopAtr, targetR, level, leverage, spreadGate, stopDist: userStop, targetDist, risk }: {
   spec: ScalpSpec;
   atr: number | null;
   stopAtr: number;
@@ -80,8 +84,10 @@ export function planScalp({ spec, atr, stopAtr, targetR, level, leverage, spread
   // multiple and the target that many R.
   stopDist?: number | null;
   targetDist?: number | null;
+  risk?: number | null;        // this preset's risk as set on the ticket (fraction); null = the preset's own
 }): ScalpPlan {
   const preset = SCALP_PRESETS[level];
+  const riskFrac = Math.min(SCALP_MAX_RISK, risk ?? preset.risk);
   const equity = spec.equity ?? 0;
   const mid = (spec.bid + spec.ask) / 2;
   const vpu = spec.value_per_unit ?? 0;
@@ -104,7 +110,7 @@ export function planScalp({ spec, atr, stopAtr, targetR, level, leverage, spread
   const tight = own && stopDist < floor;
 
   // Risk = leverage x stop distance / price, so at this stop the preset's risk caps the leverage.
-  const levRisk = (preset.risk * mid) / stopDist;
+  const levRisk = (riskFrac * mid) / stopDist;
   const levMargin = spec.margin_per_lot && spec.margin_free != null
     ? ((MARGIN_USE * spec.margin_free) / spec.margin_per_lot) * perLot / equity
     : Infinity;
@@ -121,7 +127,7 @@ export function planScalp({ spec, atr, stopAtr, targetR, level, leverage, spread
     if (minLev <= maxLeverage + 1e-9) lots = spec.lot_min;
     else if (minLev > levMargin) blocked = `Not enough free margin for the smallest lot (${spec.lot_min}).`;
     else if (minLev > preset.maxLev) blocked = `The smallest lot (${spec.lot_min}) is ${minLev.toFixed(1)}x your equity - over ${preset.label}'s ${preset.maxLev}x.`;
-    else blocked = `The smallest lot (${spec.lot_min}) loses ${((minLev * stopDist) / mid * 100).toFixed(1)}% at this stop - over ${preset.label}'s ${preset.risk * 100}%. A higher preset or a tighter stop fits it.`;
+    else blocked = `The smallest lot (${spec.lot_min}) loses ${((minLev * stopDist) / mid * 100).toFixed(1)}% at this stop - over ${preset.label}'s ${+(riskFrac * 100).toFixed(2)}%. A higher risk or a tighter stop fits it.`;
   }
   const notional = lots * perLot;
   const riskUsd = lots * vpu * stopDist;
@@ -208,7 +214,7 @@ const signed = (x: number, dp = 1) => `${x >= 0 ? "+" : ""}${x.toFixed(dp)}`;
 // Readings of the stop timeframe's candles. Each is a fact about price, not a call: none of them was
 // tested as an entry signal on this book, and the momentum / regime / price-action reads that were
 // tested failed (analysis/ai_reads). Colour says which side the reading leans to, nothing more.
-export function scalpReadings(candles: Candle[], spread: number | null, tf: string): { atr: number | null; items: ScalpReading[] } {
+export function scalpReadings(candles: Candle[], spread: number | null, tf: string, rsiPeriod = 7): { atr: number | null; items: ScalpReading[] } {
   const n = candles.length;
   const atr = atrCalc(candles, 14);
   if (n < 30 || !atr) return { atr, items: [] };
@@ -235,12 +241,12 @@ export function scalpReadings(candles: Candle[], spread: number | null, tf: stri
     });
   }
 
-  const r = rsiCalc(closes, 7)[n - 1];
+  const r = rsiCalc(closes, rsiPeriod)[n - 1];
   if (r != null) {
     items.push({
-      label: "RSI 7", value: `${r.toFixed(0)}${r >= 80 ? " hot" : r <= 20 ? " cold" : ""}`,
+      label: `RSI ${rsiPeriod}`, value: `${r.toFixed(0)}${r >= 80 ? " hot" : r <= 20 ? " cold" : ""}`,
       tone: r >= 80 || r <= 20 ? "warn" : r > 55 ? "bull" : r < 45 ? "bear" : "flat",
-      tip: `Fast RSI on ${tf}. Over 80 or under 20 the move is stretched - a late entry there buys the top or sells the bottom of a burst.`,
+      tip: `RSI ${rsiPeriod} on ${tf} (the chart's period). Over 80 or under 20 the move is stretched - a late entry there buys the top or sells the bottom of a burst.`,
       meter: { lo: 0, hi: 100, v: r, marks: [20, 80] },
     });
   }
@@ -370,7 +376,7 @@ export function fmtDur(secs: number | null): string {
 
 export const fmtR = (r: number) => `${r >= 0 ? "+" : ""}${r.toFixed(2)}R`;
 
-export function tradeWatch({ pos, spec, candles, atr, tf, seen, now = Date.now() }: {
+export function tradeWatch({ pos, spec, candles, atr, tf, seen, now = Date.now(), rsiPeriod = 7 }: {
   pos: PositionView;
   spec: ScalpSpec | null;
   candles: Candle[] | null;           // the ticket's bars (the stop timeframe's)
@@ -378,6 +384,7 @@ export function tradeWatch({ pos, spec, candles, atr, tf, seen, now = Date.now()
   tf: string;
   seen?: { peak: number; trough: number };   // the best / worst P&L already seen by this tab
   now?: number;
+  rsiPeriod?: number;                 // the scalp chart's RSI period
 }): TradeWatch {
   const long = pos.direction === "long";
   const sign = long ? 1 : -1;
@@ -466,13 +473,13 @@ export function tradeWatch({ pos, spec, candles, atr, tf, seen, now = Date.now()
       });
     }
 
-    const rs = rsiCalc(closes, 7);
+    const rs = rsiCalc(closes, rsiPeriod);
     const rv = rs[n - 1], rp = rs[n - 2];
     if (rv != null) {
       const yours = long ? rv : 100 - rv;   // the RSI read from your side: high = going your way
       const toward = rp != null && mine(rv - rp) > 0;
       cues.push({
-        key: "rsi", label: "RSI 7",
+        key: "rsi", label: `RSI ${rsiPeriod}`,
         value: `${rv.toFixed(0)}${yours >= 80 ? " stretched" : yours <= 20 ? " against" : toward ? " ↑" : " ↓"}`,
         tone: yours >= 80 || yours <= 20 ? "warn" : toward ? "ok" : "flat",
         tip: yours >= 80

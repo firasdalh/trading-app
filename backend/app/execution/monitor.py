@@ -27,9 +27,13 @@ log = get_logger("execution.monitor")
 # A position must be missing from the broker's book on successful reads for this long before we
 # call it closed. Right after the PC wakes from sleep the terminal can report an EMPTY (not failed)
 # book for a few seconds; one such read used to mark every open trade CLOSED (19 phantom closes,
-# up to 103 h, the exposure cap silently bypassed). A real broker-side close is reconciled 60 s late.
+# up to 103 h, the exposure cap silently bypassed). A broker-side close that the broker's own deal
+# history already shows is not waited for (``_closed_in_history``): an empty read can't fake a closing deal.
 _RECONCILE_CONFIRM = timedelta(seconds=60)
 _MISSING_SINCE: dict[int, datetime] = {}   # position id -> first successful read that lacked it
+# A trade in the deal history is the row's own when it is on the same symbol and side and was entered
+# this close to the row's open (the app stamps its row a second or so after the fill).
+_SAME_ENTRY = timedelta(seconds=60)
 
 
 def _exit_reason(direction: str, price: float, stop: float | None, target: float | None) -> str | None:
@@ -89,8 +93,15 @@ def _close_position(session: Session, pos: Position, broker, exit_price: float, 
                              detail={"reason": reason, "error": result.error}))
         return False
     fill = result.avg_fill_price or exit_price
-    realized = _pnl(broker, pos, fill)  # broker-truth (currency-correct) when available
+    # broker-truth (currency-correct) P&L when available
+    _book_close(session, pos, fill, _pnl(broker, pos, fill), reason, result.status.value)
+    return True
 
+
+def _book_close(session: Session, pos: Position, fill: float, realized: float, reason: str,
+                broker_status: str) -> None:
+    """Book ``pos`` CLOSED at ``fill`` for ``realized``: the row, the day's realized P&L (and its
+    daily-loss auto-pause) and the log."""
     pos.status = PositionStatus.CLOSED.value
     pos.closed_at = datetime.now(timezone.utc)
     pos.last_price = fill
@@ -111,11 +122,10 @@ def _close_position(session: Session, pos: Position, broker, exit_price: float, 
     session.add_all([pos, daily, AgentRun(
         agent="monitor", symbol=pos.symbol, event="position_closed",
         detail={"reason": reason, "exit": fill, "realized_pnl": realized,
-                "broker_status": result.status.value},
+                "broker_status": broker_status},
     )])
     log.info("position closed", extra={"symbol": pos.symbol, "reason": reason,
                                        "exit": fill, "realized_pnl": realized})
-    return True
 
 
 def close_one(session: Session, position_id: int) -> dict:
@@ -155,11 +165,14 @@ def _reconcile_closed_at_broker(session: Session, settings, open_positions: list
     closed just because the broker was unreachable.)
 
     Confirmed absence only: a position is closed once it has been missing from SUCCESSFUL reads for
-    ``_RECONCILE_CONFIRM`` (60 s); one empty read (a terminal waking from sleep) never closes it.
+    ``_RECONCILE_CONFIRM`` (60 s); one empty read (a terminal waking from sleep) never closes it. Or
+    at once, when the broker's deal history shows it closed (``_closed_in_history``).
 
     Does NOT book realized P&L into the daily state: realized P&L and the journal already come from
     the broker's own deal history (broker truth), so re-booking here would double-count. This only
-    removes the phantom from the OPEN set.
+    removes the phantom from the OPEN set. The one exception is the broker's own STOP, shown in its
+    deal history: that close is booked the way the stop backstop in ``monitor_positions`` books it.
+    The backstop usually reached such a close first, up to a minute late.
     """
     from app.risk.service import _norm_symbol
 
@@ -169,9 +182,10 @@ def _reconcile_closed_at_broker(session: Session, settings, open_positions: list
         _MISSING_SINCE.pop(stale, None)
 
     bm = settings.broker_map or {}
-    broker_books: dict[str, tuple[bool, set[tuple[str, str]]]] = {}  # broker name -> (fetch_ok, keys)
+    # broker name -> (fetch_ok, keys, the broker)
+    broker_books: dict[str, tuple[bool, set[tuple[str, str]], object]] = {}
 
-    def book_for(asset_class: str) -> tuple[bool, set[tuple[str, str]]]:
+    def book_for(asset_class: str) -> tuple[bool, set[tuple[str, str]], object]:
         name = bm.get(asset_class, "sim")
         if name not in broker_books:
             # Everything here is wrapped: a bad asset_class string (legacy/migrated row) or a
@@ -182,42 +196,82 @@ def _reconcile_closed_at_broker(session: Session, settings, open_positions: list
                 # Only a durable-account broker (MT5/Exness) is authoritative for "still open". The
                 # sim broker forgets positions on restart, so its empty book must never close DB rows.
                 if not getattr(broker, "reconciles_positions", False):
-                    broker_books[name] = (False, set())
+                    broker_books[name] = (False, set(), None)
                 else:
                     positions = broker.get_open_positions()
-                    broker_books[name] = (True, {(_norm_symbol(p.symbol), p.direction) for p in positions})
+                    broker_books[name] = (True, {(_norm_symbol(p.symbol), p.direction) for p in positions},
+                                          broker)
             except Exception as exc:  # noqa: BLE001 - bad asset_class / unbuildable / unreachable => skip
                 log.warning("reconcile: broker open-book unavailable",
                             extra={"broker": name, "asset_class": asset_class, "error": str(exc)})
-                broker_books[name] = (False, set())
+                broker_books[name] = (False, set(), None)
         return broker_books[name]
 
     reconciled = 0
     for pos in open_positions:
-        ok, keys = book_for(pos.asset_class)
+        ok, keys, broker = book_for(pos.asset_class)
         if not ok:
             continue
         if (_norm_symbol(pos.symbol), pos.direction) in keys:
             _MISSING_SINCE.pop(pos.id, None)     # seen again -> any earlier empty read was transient
             continue
         first_missing = _MISSING_SINCE.setdefault(pos.id, now)
-        if now - first_missing < _RECONCILE_CONFIRM:
+        closed = _closed_in_history(broker, pos)
+        if closed is None and now - first_missing < _RECONCILE_CONFIRM:
             if first_missing == now:
                 log.info("position missing from the broker book — confirming before closing",
                          extra={"symbol": pos.symbol, "direction": pos.direction, "id": pos.id})
             continue
         _MISSING_SINCE.pop(pos.id, None)
+        last = closed["exits"][-1] if closed else None
+        if last and last.get("by") == "stop":
+            # The broker's own stop, booked as the stop backstop below books one - but at the broker's
+            # price and P&L. Only the closing deal's P&L: an earlier partial close was booked when it ran.
+            price = float(last.get("price") or pos.last_price or pos.entry_price)
+            pnl = last.get("pnl")
+            _book_close(session, pos, price, float(pnl) if pnl is not None else _pnl(broker, pos, price),
+                        "stop", "closed at broker")
+            reconciled += 1
+            continue
         pos.status = PositionStatus.CLOSED.value
         pos.closed_at = datetime.now(timezone.utc)
         session.add(pos)
         session.add(AgentRun(
             agent="monitor", symbol=pos.symbol, event="position_reconciled",
-            detail={"reason": "closed at broker (reconciled)", "direction": pos.direction},
+            detail={"reason": "closed at broker (deal history)" if closed else "closed at broker (reconciled)",
+                    "direction": pos.direction},
         ))
         log.warning("position reconciled (closed at broker)",
                     extra={"symbol": pos.symbol, "direction": pos.direction, "id": pos.id})
         reconciled += 1
     return reconciled
+
+
+def _closed_in_history(broker, pos: Position) -> dict | None:
+    """The broker's own record of ``pos`` CLOSED, or None: a trade in its deal history on the same
+    symbol and side, entered within ``_SAME_ENTRY`` of the row, with nothing left open. That is
+    positive proof, unlike a book that lacks it, so the close is booked on this pass, not a minute
+    later. The wait had a stop-out the broker had taken show as OPEN, P&L ticking, for up to a minute.
+    Meanwhile the chart already drew its exit arrow (from this same deal history), so it read as a
+    second trade opened on the pair as the first one closed (USOILm, 2026-11-03)."""
+    opened = _aware(pos.opened_at)
+    history = getattr(broker, "get_trade_history", None)
+    if opened is None or history is None:
+        return None
+    try:
+        trades = history(pos.symbol, opened - _SAME_ENTRY) or []
+    except Exception:  # noqa: BLE001 - an unreadable history proves nothing: the confirming wait applies
+        return None
+    for t in trades:
+        if t.get("open") or t.get("direction") != pos.direction or not t.get("exits"):
+            continue
+        try:
+            entered = _aware(datetime.fromisoformat(t["opened_at"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs(entered - opened) <= _SAME_ENTRY:
+            return t
+    return None
 
 
 def _aware(dt):

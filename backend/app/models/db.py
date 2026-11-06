@@ -545,6 +545,21 @@ class StrategyConfig(Base):
     # wait in the same direction after a losing trade. Never under scalp mode's 0 / 5 min.
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=0)
     loss_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    # When it may OPEN a trade: {"start": "09:00", "end": "12:00", "tz": "Asia/Dubai"} on the user's clock,
+    # past midnight when end is earlier than start. None = around the clock. Its close rules run at any hour.
+    hours: Mapped[dict | None] = mapped_column(JSON)
+    # Where its stop goes: None = stop_atr x ATR. {"mode": "supertrend", "tf", "period", "mult", "buffer"} = on
+    # that timeframe's SuperTrend line, buffer x ATR beyond it, then following the line - only toward the trade.
+    stop: Mapped[dict | None] = mapped_column(JSON)
+    # In $: once the trades it closed today (UTC) have made this much, it opens nothing more until the next
+    # day. None = no target. Its close rules, stops and targets still run on the trades it holds.
+    daily_target: Mapped[float | None] = mapped_column(Float)
+    # The groups switched off on the board, by place: {"entry_long": [1], "entry_short": [], "exit_rules": [3]}.
+    # They are read like the others, but never open or close a trade. None = all on.
+    off_groups: Mapped[dict | None] = mapped_column(JSON)
+    # Trades a REAL account too (RISK.md, 2026-11-04, at the user's explicit request). Off = demo only. Real-money
+    # orders still need the typed live confirmation, re-typed after every restart (the executor's gate).
+    live: Mapped[bool] = mapped_column(Boolean, default=False)
     state: Mapped[dict | None] = mapped_column(JSON)                 # per pair: last note, last bar acted on
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)

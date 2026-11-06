@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { assetLabel, displaySymbol, fmtPrice } from "../format";
 import type { AssetClass, BacktestResult } from "../types";
 import { EquityChart } from "./EquityChart";
+import { NumberBox } from "./NumberBox";
 
 const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
@@ -75,10 +76,10 @@ export function BacktestView() {
           </select>
         </Field>
         <Field label="Bars">
-          <input name="bt-bars" type="number" value={bars} min={50} max={2000} onChange={(e) => setBars(Number(e.target.value))} className="w-24 rounded bg-neutral-800 px-2 py-1.5" />
+          <NumberBox name="bt-bars" value={bars} min={50} max={2000} step={1} onChange={setBars} className="w-24 rounded bg-neutral-800 px-2 py-1.5" />
         </Field>
         <Field label="Starting equity">
-          <input name="bt-equity" type="number" value={equity} min={1} onChange={(e) => setEquity(Number(e.target.value))} className="w-32 rounded bg-neutral-800 px-2 py-1.5" />
+          <NumberBox name="bt-equity" value={equity} min={1} max={1e9} step={1} onChange={setEquity} className="w-32 rounded bg-neutral-800 px-2 py-1.5" />
         </Field>
         <button onClick={run} disabled={busy} className="btn btn-primary">
           {busy ? "Running…" : "Run backtest"}

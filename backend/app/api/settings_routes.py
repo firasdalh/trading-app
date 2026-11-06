@@ -193,7 +193,7 @@ def set_broker_map(req: BrokerMapRequest, session: Session = Depends(get_session
 
 
 _DAILY_LOSS_CEILING = 0.10    # RISK.md: max_daily_loss override 2026-06-04
-_EXPOSURE_CEILING = 0.09      # RISK.md: max_total_exposure override 2026-06-05
+_EXPOSURE_CEILING = 0.15      # RISK.md: max_total_exposure override 2026-11-02 (9% since 2026-06-05)
 
 
 @router.post("/settings/risk", response_model=SettingsResponse)
@@ -711,12 +711,19 @@ def live_positions(session: Session = Depends(get_session)) -> list[PositionView
 
     # WHO opened it, from the app's open row on the same symbol + side. Missing before, so an app
     # trade looked exactly like one placed in the terminal. None (shown as "Terminal") = no app row.
+    # The same row says which per-trade ceiling it was placed under (a scalp or strategy trade's 6%),
+    # so the over-the-cap chip measures it against that, not the configured 3%.
     try:
+        from app.risk.service import position_risk_ceiling
+
         open_rows = session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
         src = {(_norm_symbol(r.symbol), r.direction): r.source for r in open_rows if r.source}
+        cap = {(_norm_symbol(r.symbol), r.direction): position_risk_ceiling(r) for r in open_rows}
         for p in out:
+            key = (_norm_symbol(p.symbol), p.direction)
             if getattr(p, "source", None) is None:
-                p.source = src.get((_norm_symbol(p.symbol), p.direction))
+                p.source = src.get(key)
+            p.risk_ceiling = cap.get(key)
     except Exception as exc:  # noqa: BLE001
         log.warning("source lookup failed", extra={"error": str(exc)})
 
@@ -1062,7 +1069,7 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
     (stop, target and risk), so the exposure budget for new trades sees the real risk."""
     from app.brokers.registry import get_broker_for
     from app.models.db import AgentRun
-    from app.risk.service import _norm_symbol
+    from app.risk.service import _norm_symbol, position_risk_ceiling
 
     settings = get_or_create_settings(session)
     broker = get_broker_for(req.asset_class, settings.broker_map)
@@ -1082,6 +1089,9 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
             f"the open {req.symbol} position is {direction}, not {req.direction} - refresh and try again"))
     long_ = direction == "long"
     price = held[0].last_price
+    # The app's own rows for this trade: mirrored below, and they say which ceiling it was placed under.
+    rows = [r for r in session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
+            if _norm_symbol(r.symbol) == norm and r.direction == direction]
 
     risk_before = risk_after = warning = None
     if req.stop_loss is not None:
@@ -1098,10 +1108,16 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
                 equity = broker.get_account().equity
             except Exception:  # noqa: BLE001 - the warning is informational; never block the move on it
                 equity = None
-            limit_frac = get_or_create_risk_config(session).risk_per_trade
+            # A scalp-mode or strategy trade is measured against the 6% it may risk (RISK.md override
+            # 2026-11-02), not the configured per-trade risk: a 5% scalp stop is inside its limit.
+            # Only when every app row of the trade is one - a terminal trade has none.
+            scalp_cap = {position_risk_ceiling(r) for r in rows}
+            scalp = len(scalp_cap) == 1 and None not in scalp_cap
+            limit_frac = scalp_cap.pop() if scalp else get_or_create_risk_config(session).risk_per_trade
             if equity and risk_after > equity * limit_frac:
+                what = "scalp mode's" if scalp else "your"
                 warning = (f"This stop risks ${risk_after:.2f} ({risk_after / equity:.1%} of equity) — above "
-                           f"your {limit_frac:.1%} per-trade risk (${equity * limit_frac:.2f}).")
+                           f"{what} {limit_frac:.1%} per-trade risk (${equity * limit_frac:.2f}).")
     if req.take_profit and price and ((long_ and req.take_profit <= price) or (not long_ and req.take_profit >= price)):
         raise HTTPException(status_code=400, detail=(
             f"a {direction} target must be {'above' if long_ else 'below'} the current price ({price})"))
@@ -1111,8 +1127,6 @@ def set_position_sl_tp(req: SlTpRequest, session: Session = Depends(get_session)
         raise HTTPException(status_code=409, detail=result.error or "could not set SL/TP")
 
     # Mirror onto our own rows so the monitor, the exposure budget and the journal see the real stop.
-    rows = [r for r in session.scalars(select(Position).where(Position.status == PositionStatus.OPEN.value)).all()
-            if _norm_symbol(r.symbol) == norm and r.direction == direction]
     for r in rows:
         if req.stop_loss is not None and req.stop_loss > 0:
             r.stop_loss = req.stop_loss

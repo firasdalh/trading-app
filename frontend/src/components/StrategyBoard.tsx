@@ -4,26 +4,35 @@ import { assetLabel, displaySymbol, fmtUsd } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import { TF_SECONDS } from "../timeframes";
+import { NumberBox } from "./NumberBox";
+import { ActivityFeed } from "./StrategyActivityFeed";
 import type {
   AssetClass,
   StrategyActivity,
   StrategyCatalog,
+  StrategyCheck,
   StrategyCheckCondition,
   StrategyCheckSet,
   StrategyCondition,
   StrategyConditionSpec,
   StrategyDraft,
   StrategyGroups,
+  StrategyHours,
+  StrategyHoursNow,
+  StrategyLean,
+  StrategyOffGroups,
+  StrategyStop,
   StrategyView,
 } from "../types";
 
 // The condition picker's names (the catalog carries the sentences; these are the menu entries).
 const NAMES: Record<string, string> = {
   ema_cross: "EMA cross", ema_above: "EMA above / below", price_ema: "Closes vs an EMA", trend: "Trend (EMA 20 / 50)",
-  supertrend: "SuperTrend", adx: "ADX trend strength", rsi_rising: "RSI rising / falling", rsi_level: "RSI level",
-  macd: "MACD histogram", stoch_cross: "Stochastic cross", vwap: "VWAP side", volume: "Volume spike",
-  bb_break: "Bollinger breakout", candles: "Candle colour", sr_room: "Room to S/R (1h / 4h / 1d)",
-  zone_room: "Room to supply / demand", spread: "Spread filter", session: "Session filter",
+  tf_align: "Timeframes agree (the strip above the chart)", supertrend: "SuperTrend", adx: "ADX trend strength", rsi_rising: "RSI rising / falling", rsi_level: "RSI level",
+  macd: "MACD histogram", stoch_cross: "Stochastic cross (turning out of a zone)",
+  stoch_room: "Stochastic with room (our way, not overbought / oversold)", vwap: "VWAP side", volume: "Volume spike",
+  bb_break: "Bollinger breakout", candles: "Candle colour", clean_candle: "Candle with us (no doji / star / hammer)", structure: "Structure (HH / HL)", sr_room: "Room to S/R (1h / 4h / 1d)",
+  zone_room: "Room to supply / demand", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter",
   rsi_extreme: "Take profit: RSI stretched", profit_r: "Take profit: at +R", time_stop: "Time stop",
 };
 
@@ -71,7 +80,19 @@ function template(symbol: string, assetClass: AssetClass): StrategyDraft {
     manage_manual: false,
     cooldown_minutes: 0,
     loss_cooldown_minutes: 5,
+    hours: null,
+    stop: null,
+    daily_target: null,
+    off_groups: offGroupsOf(null),
+    live: false,
   };
+}
+
+// Every rule set's switched-off groups, present and in order as the backend returns them, so an untouched draft
+// compares equal to its saved copy.
+function offGroupsOf(o: Partial<StrategyOffGroups> | null | undefined): StrategyOffGroups {
+  const inOrder = (xs: number[] | undefined) => [...new Set(xs ?? [])].sort((a, b) => a - b);
+  return { entry_long: inOrder(o?.entry_long), entry_short: inOrder(o?.entry_short), exit_rules: inOrder(o?.exit_rules) };
 }
 
 export function draftOf(s: StrategyView): StrategyDraft {
@@ -80,7 +101,244 @@ export function draftOf(s: StrategyView): StrategyDraft {
     entry_short: s.entry_short, mirror_short: s.mirror_short, exit_rules: s.exit_rules, risk_pct: s.risk_pct,
     stop_atr: s.stop_atr, target_r: s.target_r, max_trades_day: s.max_trades_day, manage_manual: s.manage_manual,
     cooldown_minutes: s.cooldown_minutes ?? 0, loss_cooldown_minutes: s.loss_cooldown_minutes ?? 5,
+    hours: s.hours ?? null, stop: s.stop ?? null, daily_target: s.daily_target ?? null,
+    off_groups: offGroupsOf(s.off_groups),
+    live: s.live ?? false,
   };
+}
+
+// Trading hours are set on the browser's clock: "9 to 12" is 9 to 12 where the user sits.
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+export function zoneLabel(tz: string | null): string {
+  const z = tz || BROWSER_TZ;
+  let off = "";
+  try {
+    off = new Intl.DateTimeFormat("en-US", { timeZone: z, timeZoneName: "shortOffset" })
+      .formatToParts(new Date()).find((p) => p.type === "timeZoneName")?.value ?? "";
+  } catch {
+    /* a zone this browser doesn't know: its name alone */
+  }
+  return `${z === BROWSER_TZ ? "your clock" : z}${off ? `, ${off}` : ""}`;
+}
+
+// A pair waiting out the strategy's cooldown after the last close there (StrategyView.cooldown_until):
+// until when, on this clock, and the minutes left - null once it is free to open again.
+export function pairWait(s: StrategyView | null | undefined, symbol: string, now = Date.now()): { until: string; mins: number } | null {
+  const iso = s?.cooldown_until?.[symbol];
+  const end = iso ? Date.parse(iso) : NaN;
+  if (!(end > now)) return null;
+  return {
+    until: new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }),
+    mins: Math.ceil((end - now) / 60_000),
+  };
+}
+
+const hm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+
+// The next 00:00 UTC, on this clock: when a strategy's day - its daily cap, its daily target - starts again.
+function utcDayEnd(now = Date.now()): string {
+  const d = new Date(now);
+  return hm(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1));
+}
+
+// A strategy that reached its daily target today (StrategyView.target_hit) opens nothing until the next
+// UTC day: when it got there and when it trades again, on this clock.
+export function targetDone(s: StrategyView | null | undefined, now = Date.now()): { at: string; resumes: string } | null {
+  if (!s?.target_hit) return null;
+  return { at: hm(Date.parse(s.target_hit.at)), resumes: utcDayEnd(now) };
+}
+
+const minsOf = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+
+function span(mins: number): string {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h ? (m ? `${h} h ${m} min` : `${h} h`) : `${m} min`;
+}
+
+// When it may OPEN a trade: all day, or from one time up to another (past midnight when the end comes
+// first). `now` is the backend's read of the draft's hours (the live check), on the strategy's clock.
+function HoursRow({ value, onChange, now }: {
+  value: StrategyHours | null;
+  onChange: (h: StrategyHours | null) => void;
+  now: StrategyHoursNow | null | undefined;
+}) {
+  const len = value ? (minsOf(value.end) - minsOf(value.start) + 1440) % 1440 : 0;
+  const pastMidnight = !!value && minsOf(value.end) > 0 && minsOf(value.end) < minsOf(value.start);
+  // The start and the end can't be the same time (the backend refuses that window: "all day" is the
+  // button for it), so a time equal to the other end isn't taken.
+  const time = (key: "start" | "end") => value && (
+    <input
+      type="time"
+      value={value[key]}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (v && v !== value[key === "start" ? "end" : "start"]) onChange({ ...value, [key]: v });
+      }}
+      className="rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 tabular-nums text-amber-200"
+      aria-label={key === "start" ? "Trading hours from" : "Trading hours until"}
+      title="The start and the end can't be the same time - for every hour, pick 'all day'"
+    />
+  );
+  const tab = (on: boolean) => `rounded px-2 py-0.5 ${on ? "bg-neutral-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`;
+  return (
+    <span
+      className="flex basis-full flex-wrap items-center gap-1.5 text-xs text-neutral-400"
+      title="When it may OPEN a trade. Outside these hours it opens nothing; a trade it holds keeps its close rules, stop and target at any hour."
+    >
+      Trading hours
+      <span className="inline-flex rounded-md border border-neutral-700 bg-neutral-800/60 p-0.5" role="group" aria-label="Trading hours">
+        <button onClick={() => onChange(null)} className={tab(!value)}>all day</button>
+        <button onClick={() => !value && onChange({ start: "09:00", end: "12:00", tz: BROWSER_TZ })} className={tab(!!value)}>only from</button>
+      </span>
+      {value && (
+        <>
+          {time("start")} to {time("end")}
+          <span className="text-neutral-500">
+            {zoneLabel(value.tz)} · {span(len)} a day{pastMidnight ? ", past midnight" : ""}
+          </span>
+          {now && (
+            <span className={`rounded px-1.5 py-0.5 font-semibold ${now.open ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-300"}`}>
+              {now.open
+                ? `on now - until ${now.end} (${span(Math.ceil(now.next_s / 60))} left)`
+                : `off now - starts at ${now.start} (in ${span(Math.ceil(now.next_s / 60))})`}
+            </span>
+          )}
+        </>
+      )}
+    </span>
+  );
+}
+
+const ST_STOP: StrategyStop = { mode: "supertrend", tf: "1m", period: 10, mult: 2.7, buffer: 0.5 };
+const px = (v: number) => String(Number(v.toPrecision(6)));
+
+// Where its stop goes: stop_atr x ATR of the base bars, or on a SuperTrend line it then follows (asked for
+// 2026-11-03) - `buffer` x ATR beyond the line, room for a false break, and only ever toward the trade.
+// `now`: where a buy's and a sell's stop would sit now (the live check).
+function StopRow({ draft, set, tfs, now }: {
+  draft: StrategyDraft;
+  set: (patch: Partial<StrategyDraft>) => void;
+  tfs: string[];
+  now: StrategyCheck["stop"];
+}) {
+  const st = draft.stop;
+  const tab = (on: boolean) => `rounded px-2 py-0.5 ${on ? "bg-neutral-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`;
+  const box = "rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 text-center tabular-nums text-amber-200";
+  const num = (key: "period" | "mult" | "buffer", min: number, max: number, step: number, label: string) => st && (
+    <NumberBox value={st[key]} min={min} max={max} step={step} label={label} title={label}
+               onChange={(v) => set({ stop: { ...st, [key]: v } })} className={`w-14 ${box}`} />
+  );
+  const at = (side: "long" | "short", who: string) => {
+    const w = now?.[side];
+    return w ? `${who} at ${px(w.level)}` : `${who}: the line is against it`;
+  };
+  return (
+    <span
+      className="flex basis-full flex-wrap items-center gap-1.5 text-xs text-neutral-400"
+      title="The broker-side stop every order carries. On a SuperTrend line it starts on the line, the buffer beyond it, then follows the line at each close of that timeframe - only ever toward the trade, never back. The time a false break gets is your SuperTrend close rule's confirming candles."
+    >
+      Stop
+      <span className="inline-flex rounded-md border border-neutral-700 bg-neutral-800/60 p-0.5" role="group" aria-label="Stop">
+        <button onClick={() => set({ stop: null })} className={tab(!st)}>× ATR</button>
+        <button onClick={() => !st && set({ stop: ST_STOP })} className={tab(!!st)}>SuperTrend line</button>
+      </span>
+      {!st ? (
+        <>
+          <NumberBox value={draft.stop_atr} min={0.3} max={10} step={0.1} label="Stop, in ATR"
+                     onChange={(v) => set({ stop_atr: v })} className={`w-16 ${box}`} />
+          × ATR of the {draft.timeframe} bars, pushed further out when the spread gate needs it
+        </>
+      ) : (
+        <>
+          on the
+          <select value={st.tf} onChange={(e) => set({ stop: { ...st, tf: e.target.value } })} aria-label="Stop timeframe"
+                  className="rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 tabular-nums text-amber-200">
+            {tfs.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          SuperTrend ({num("period", 3, 50, 1, "SuperTrend ATR period")}, {num("mult", 0.5, 10, 0.1, "SuperTrend multiplier")}),
+          {num("buffer", 0, 5, 0.1, "Room beyond the line for a false break, in ATR of that timeframe")} × ATR beyond the line
+          <span className="text-neutral-500">· then follows it, only toward the trade</span>
+          {now && (
+            <span className="rounded bg-neutral-800 px-1.5 py-0.5 tabular-nums text-neutral-300">
+              now: {at("long", "a buy's")} · {at("short", "a sell's")}
+            </span>
+          )}
+        </>
+      )}
+    </span>
+  );
+}
+
+// Its daily target (asked for 2026-11-03: "if today we made $300, we stop trading for today"): once the
+// trades it closed today have made this much it opens nothing more until the next UTC day. The chip reads
+// the SAVED copy's day, so an unsaved edit doesn't look as if it had already taken effect.
+function TargetRow({ value, onChange, saved }: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  saved: StrategyView | null;
+}) {
+  const done = targetDone(saved);
+  return (
+    <span
+      className="flex flex-wrap items-center gap-1.5 text-xs text-neutral-400"
+      title="Counts the trades THIS strategy closed today (UTC, like its daily cap) - stops and targets included, your own trades not. Once reached it stays reached for the day, even if a trade still open then closes at a loss. The trades it holds keep their close rules, stop and target."
+    >
+      {value != null ? (
+        <>
+          Daily target +$
+          <NumberBox
+            value={value}
+            min={1}
+            max={1000000}
+            step={50}
+            onChange={onChange}
+            label="Daily target, in $"
+            className="w-20 rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 text-center tabular-nums text-amber-200"
+          />
+          then no new trades that day
+        </>
+      ) : <span>Daily target: none - it trades all day</span>}
+      <label className="flex items-center gap-1 text-neutral-500">
+        <input type="checkbox" checked={value == null} onChange={(e) => onChange(e.target.checked ? null : 300)} className="accent-amber-500" />
+        no daily target
+      </label>
+      {saved?.daily_target != null && (
+        <span className={`rounded px-1.5 py-0.5 font-semibold tabular-nums ${done ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-300"}`}>
+          {done
+            ? `🎯 reached at ${done.at} - no new trades until ${done.resumes}`
+            : `today ${fmtUsd(saved.pnl_today ?? 0, { sign: true })} of +${fmtUsd(saved.daily_target)}`}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// Whether it trades a REAL account too (RISK.md 2026-11-04) - off, it trades a demo only. On a real account a new
+// order also needs LIVE trading confirmed, typed again after every restart (the executor's gate).
+function LiveRow({ on, onChange, real }: { on: boolean; onChange: (on: boolean) => void; real: boolean }) {
+  const tab = (v: boolean) => `rounded px-2 py-0.5 ${
+    on === v ? (v ? "bg-bear/30 font-semibold text-bear" : "bg-neutral-600 text-white") : "text-neutral-400 hover:text-neutral-200"
+  }`;
+  return (
+    <span
+      className="flex basis-full flex-wrap items-center gap-1.5 text-xs text-neutral-400"
+      title="Off: it trades a demo account only. On: it trades a real account the same way - real money, no approval per order."
+    >
+      Live account
+      <span className="inline-flex rounded-md border border-neutral-700 bg-neutral-800/60 p-0.5" role="group" aria-label="Live account">
+        <button type="button" onClick={() => onChange(false)} aria-pressed={!on} className={tab(false)}>demo only</button>
+        <button type="button" onClick={() => onChange(true)} aria-pressed={on} className={tab(true)}>trades it too</button>
+      </span>
+      {on && (
+        <span className="text-[11px] text-bear">
+          real money, no approval per order{real ? " - the broker is a real account now" : ""}. New trades need LIVE trading
+          confirmed (typed, again after every restart).
+        </span>
+      )}
+    </span>
+  );
 }
 
 function Wait({ label, value, options, onChange, title }: {
@@ -105,17 +363,27 @@ function Wait({ label, value, options, onChange, title }: {
 function sentence(spec: StrategyConditionSpec | undefined, where: Where, params: Record<string, number>): string {
   if (!spec) return "?";
   const text = spec[where] || spec.long;
-  return text.replace(/\{(~?)(\w+)\}/g, (_m, flip: string, k: string) => {
-    const p = spec.params.find((x) => x.key === k);
-    const v = params[k] ?? p?.default ?? 0;
-    return p?.kind === "bool" ? (v ? "on" : "off") : String(flip ? 100 - v : v);
-  });
+  return text
+    .replace(/\{(~?)(\w+)\}/g, (_m, flip: string, k: string) => {
+      const p = spec.params.find((x) => x.key === k);
+      const v = params[k] ?? p?.default ?? 0;
+      if (p?.kind === "tf") return v ? ` ${p.label} ` : "";
+      return p?.kind === "bool" ? (v ? "on" : "off") : String(flip ? 100 - v : v);
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// The timeframes a condition reads: its own, or the ones a rule over several (Timeframes agree) ticks.
+function readsOf(c: StrategyCondition, catalog?: StrategyCatalog): string[] {
+  const spec = catalog?.conditions.find((s) => s.type === c.type);
+  return spec?.multi_tf ? spec.params.filter((p) => p.kind === "tf" && c.params[p.key]).map((p) => p.key) : [c.tf];
 }
 
 // The engine reads a running strategy about a second after each candle closes on the fastest
 // timeframe its rules use (app/agents/strategy.py, GRACE): when that is next, and on which timeframe.
-function nextLook(d: StrategyDraft): { tf: string; secs: number } {
-  const tfs = new Set([d.timeframe, ...[d.entry_long, d.entry_short, d.exit_rules].flat(2).map((c) => c.tf)]);
+function nextLook(d: StrategyDraft, catalog?: StrategyCatalog): { tf: string; secs: number } {
+  const tfs = new Set([d.timeframe, ...[d.entry_long, d.entry_short, d.exit_rules].flat(2).flatMap((c) => readsOf(c, catalog))]);
   const tf = [...tfs].sort((a, b) => (TF_SECONDS[a] ?? 60) - (TF_SECONDS[b] ?? 60))[0] ?? d.timeframe;
   const len = TF_SECONDS[tf] ?? 60;
   const now = Date.now() / 1000;
@@ -128,12 +396,45 @@ function ago(iso: string | null | undefined): string {
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : `${Math.floor(s / 3600)}h ago`;
 }
 
+// A "Timeframes agree" rule's live read, drawn the way the strip above the chart draws it: each ticked
+// timeframe green ▲ up, red ▼ down, grey ≈ neither, … not read yet. `compact` drops the counts.
+export function LeanStrip({ leans, compact }: { leans: StrategyLean[]; compact?: boolean }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-0.5">
+      {leans.map((l) => (
+        <span
+          key={l.tf}
+          title={l.side == null
+            ? `${l.tf}: no candles read yet`
+            : `${l.tf}: ${l.up} of its ${l.of} readings point up, ${l.down} down (closed candles)`}
+          className={`rounded px-1 font-semibold tabular-nums ${
+            l.side == null ? "bg-neutral-800 text-neutral-600"
+              : l.side > 0 ? "bg-bull/25 text-bull"
+                : l.side < 0 ? "bg-bear/25 text-bear"
+                  : "bg-neutral-800 text-neutral-400"
+          }`}
+        >
+          {l.tf.toUpperCase()}
+          {compact ? "" : " "}
+          {l.side == null ? "…" : l.side > 0 ? `▲${compact ? "" : l.up}` : l.side < 0 ? `▼${compact ? "" : l.down}` : "≈"}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function State({ c, prefix }: { c?: StrategyCheckCondition; prefix?: string }) {
   if (!c) return null;
   const tone = c.ok === true ? "bg-bull/20 text-bull" : c.ok === false ? "bg-bear/15 text-bear" : "bg-neutral-800 text-neutral-500";
+  // A Timeframes rule draws its timeframes; its words keep only the verdict after them ("2 of 7 lean up, needs all").
+  const cut = c.detail.lastIndexOf(" - ");
   return (
-    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${tone}`} title={`${c.label}\nnow: ${c.detail}`}>
-      {prefix}{c.ok === true ? "✓" : c.ok === false ? "✗" : "…"} {c.detail}
+    <span
+      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${c.leans ? "inline-flex flex-wrap items-center gap-1" : ""} ${tone}`}
+      title={`${c.label}\nnow: ${c.detail}`}
+    >
+      {prefix}{c.ok === true ? "✓" : c.ok === false ? "✗" : "…"}
+      {c.leans ? <><LeanStrip leans={c.leans} /> {cut >= 0 ? c.detail.slice(cut + 3) : c.detail}</> : ` ${c.detail}`}
     </span>
   );
 }
@@ -184,32 +485,53 @@ function ConditionRow({ cond, where, catalog, tfs, onChange, onRemove, states }:
           const raw = cond.params[p.key] ?? p.default;
           const v = flip ? 100 - raw : raw;
           const set = (x: number) => onChange({ ...cond, params: { ...cond.params, [p.key]: flip ? 100 - x : x } });
+          if (p.kind === "tf") {
+            const on = v >= 1;
+            return (
+              <button
+                key={i}
+                type="button"
+                aria-pressed={on}
+                onClick={() => set(on ? 0 : 1)}
+                title={on ? `${p.label} is read - click to leave it out` : `Click to read ${p.label} too`}
+                className={`mx-px rounded border px-1 text-[10px] font-semibold ${
+                  on ? "border-sky-500/60 bg-sky-500/20 text-sky-200" : "border-neutral-700 text-neutral-500 hover:text-neutral-300"
+                }`}
+              >
+                {p.label}
+              </button>
+            );
+          }
           return p.kind === "bool" ? (
             <input key={i} type="checkbox" checked={v >= 1} onChange={(e) => set(e.target.checked ? 1 : 0)} className="mx-0.5 align-middle accent-amber-500" title={p.label} />
           ) : (
-            <input
+            <NumberBox
               key={i}
-              type="number"
               value={v}
               min={flip ? 100 - p.max : p.min}
               max={flip ? 100 - p.min : p.max}
               step={p.step}
-              onChange={(e) => set(Number(e.target.value))}
+              onChange={set}
+              label={p.label}
               className="mx-0.5 w-14 rounded border border-neutral-700 bg-neutral-900 px-1 text-center tabular-nums text-amber-200"
               title={`${p.label}: ${flip ? 100 - p.max : p.min} to ${flip ? 100 - p.min : p.max}`}
             />
           );
         })}
       </span>
-      <span className="text-neutral-500">on</span>
-      <select
-        value={cond.tf}
-        onChange={(e) => onChange({ ...cond, tf: e.target.value })}
-        className="rounded border border-neutral-700 bg-neutral-900 px-1 py-0.5 font-semibold text-sky-300"
-        title="The timeframe this condition reads (closed bars only)"
-      >
-        {(spec?.tfs ?? tfs).map((t) => <option key={t} value={t}>{t}</option>)}
-      </select>
+      {!spec?.multi_tf && (
+        <>
+          <span className="text-neutral-500">on</span>
+          <select
+            value={cond.tf}
+            onChange={(e) => onChange({ ...cond, tf: e.target.value })}
+            className="rounded border border-neutral-700 bg-neutral-900 px-1 py-0.5 font-semibold text-sky-300"
+            title="The timeframe this condition reads (closed bars only)"
+          >
+            {(spec?.tfs ?? tfs).map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </>
+      )}
       <span className="ml-auto flex flex-wrap items-center gap-1">
         {states.map((s, i) => <State key={i} {...s} />)}
         <button onClick={onRemove} className="rounded px-1 text-neutral-500 hover:bg-bear/20 hover:text-bear" title="Remove this condition">×</button>
@@ -219,11 +541,13 @@ function ConditionRow({ cond, where, catalog, tfs, onChange, onRemove, states }:
 }
 
 // One rule set: groups of conditions. A group holds when ALL its conditions do; the set fires when
-// ANY group does. `check` is the live read for the BUY / SELL set; `checks` for the CLOSE set (one per side).
-function RuleSet({ where, groups, onChange, catalog, tfs, baseTf, check, checks }: {
+// ANY group switched on does. One switched off (`off`, by place) is read like the others but never opens or
+// closes a trade. `check` is the live read for the BUY / SELL set; `checks` for the CLOSE set (one per side).
+function RuleSet({ where, groups, off, onChange, catalog, tfs, baseTf, check, checks }: {
   where: Where;
   groups: StrategyGroups;
-  onChange: (g: StrategyGroups) => void;
+  off: number[];
+  onChange: (groups: StrategyGroups, off: number[]) => void;
   catalog: StrategyCatalog;
   tfs: string[];
   baseTf: string;
@@ -232,31 +556,55 @@ function RuleSet({ where, groups, onChange, catalog, tfs, baseTf, check, checks 
 }) {
   const first = catalog.conditions.find((s) => usable(s, where) && (where === "exit" ? s.type === "supertrend" : s.type === "ema_cross"))
     ?? catalog.conditions.find((s) => usable(s, where))!;
-  const setGroup = (gi: number, g: StrategyCondition[]) => onChange(groups.map((x, i) => (i === gi ? g : x)));
+  const setGroup = (gi: number, g: StrategyCondition[]) => onChange(groups.map((x, i) => (i === gi ? g : x)), off);
+  // Removing a group moves the ones after it up a place, and their switches with them.
+  const removeGroup = (gi: number) =>
+    onChange(groups.filter((_, i) => i !== gi), off.filter((i) => i !== gi).map((i) => (i > gi ? i - 1 : i)));
+  const flip = (gi: number) => onChange(groups, off.includes(gi) ? off.filter((i) => i !== gi) : [...off, gi].sort((a, b) => a - b));
+  const verb = where === "exit" ? "closes" : "opens";
   return (
     <div className="space-y-2">
       {groups.map((g, gi) => {
+        const isOff = off.includes(gi);
         const held = check?.groups[gi]?.ok || (checks ?? []).some((c) => c.set?.groups[gi]?.ok);
         const closes = (checks ?? []).filter((c) => c.set?.groups[gi]?.ok).map((c) => c.prefix.replace("if ", "").trim());
         return (
-          <div key={gi} className={`rounded-lg border p-2 ${held ? "border-bull/60 bg-bull/[0.05]" : "border-neutral-800 bg-neutral-900/40"}`}>
+          <div
+            key={gi}
+            className={`rounded-lg border p-2 ${
+              isOff ? "border-dashed border-neutral-700 bg-neutral-900/20" : held ? "border-bull/60 bg-bull/[0.05]" : "border-neutral-800 bg-neutral-900/40"
+            }`}
+          >
             <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
               {gi > 0 && <span className="rounded bg-amber-500/20 px-1.5 text-amber-300">or</span>}
               {where === "exit" ? `Close rule ${gi + 1}` : `Group ${gi + 1}`} - all of these
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!isOff}
+                onClick={() => flip(gi)}
+                title={isOff
+                  ? `Off: still read here, but it ${verb} nothing. Click to switch it on.`
+                  : `On. Click to switch it off without deleting it: it stays here and is still read, but ${verb} nothing.`}
+                className={`rounded-full px-2 normal-case ${isOff ? "bg-neutral-800 text-neutral-400 hover:text-neutral-200" : "bg-bull/20 text-bull hover:bg-bull/30"}`}
+              >
+                {isOff ? "○ off" : "● on"}
+              </button>
               {held && (
-                <span className="rounded bg-bull/20 px-1.5 text-bull">
-                  {closes.length ? `would close a ${closes.join(" or a ")} now` : "holds now"}
+                <span className={`rounded px-1.5 ${isOff ? "bg-neutral-800 text-neutral-400" : "bg-bull/20 text-bull"}`}>
+                  {closes.length ? `would close a ${closes.join(" or a ")} now` : isOff ? "would hold now" : "holds now"}
+                  {isOff && " · off"}
                 </span>
               )}
               <button
-                onClick={() => onChange(groups.filter((_, i) => i !== gi))}
+                onClick={() => removeGroup(gi)}
                 className="ml-auto rounded px-1.5 normal-case text-neutral-500 hover:bg-bear/20 hover:text-bear"
                 title="Remove this whole group"
               >
                 remove
               </button>
             </div>
-            <div className="space-y-1">
+            <div className={`space-y-1 ${isOff ? "opacity-60" : ""}`}>
               {g.map((c, ci) => (
                 <ConditionRow
                   key={ci}
@@ -283,7 +631,7 @@ function RuleSet({ where, groups, onChange, catalog, tfs, baseTf, check, checks 
       })}
       {groups.length < catalog.max_groups && (
         <button
-          onClick={() => onChange([...groups, [newCondition(first, baseTf)]])}
+          onClick={() => onChange([...groups, [newCondition(first, baseTf)]], off)}
           className="rounded border border-dashed border-neutral-700 px-2 py-1 text-xs text-neutral-400 hover:border-amber-500/60 hover:text-amber-200"
         >
           {groups.length ? (where === "exit" ? "+ or another close rule" : "+ or another group") : where === "exit" ? "+ add a close rule" : "+ add a group"}
@@ -299,43 +647,16 @@ function Num({ label, value, onChange, min, max, step, suffix, title }: {
   return (
     <label className="flex items-center gap-1.5 text-xs text-neutral-400" title={title}>
       {label}
-      <input
-        type="number"
+      <NumberBox
         value={value}
+        onChange={onChange}
         min={min}
         max={max}
         step={step}
-        onChange={(e) => onChange(Number(e.target.value))}
         className="w-16 rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 text-center tabular-nums text-amber-200"
       />
       {suffix}
     </label>
-  );
-}
-
-const EVENT_TONE: Record<string, string> = {
-  opened: "text-bull", closed: "text-sky-300", refused: "text-amber-300", blocked: "text-amber-300",
-  not_filled: "text-amber-300", close_failed: "text-bear", started: "text-amber-200", stopped: "text-neutral-400",
-  edited: "text-neutral-500",
-};
-
-function ActivityRow({ a }: { a: StrategyActivity }) {
-  const d = (a.detail ?? {}) as Record<string, unknown>;
-  const side = d.side === "long" ? "▲ BUY" : d.side === "short" ? "▼ SELL" : "";
-  const rules = Array.isArray(d.rules) ? (d.rules as string[]).join(" · ") : "";
-  const pnl = typeof d.pnl === "number" ? fmtUsd(d.pnl, { sign: true }) : null;
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-2 border-b border-neutral-800/60 py-1 text-xs">
-      <span className="w-16 shrink-0 tabular-nums text-neutral-500">{a.at ? new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""}</span>
-      <span className={`font-semibold ${EVENT_TONE[a.event] ?? "text-neutral-300"}`}>{a.event.replace("_", " ")}</span>
-      {side && <span className={d.side === "long" ? "text-bull" : "text-bear"}>{side}</span>}
-      {a.symbol && <span className="text-neutral-300">{displaySymbol(a.symbol)}</span>}
-      {typeof d.lots === "number" && <span className="tabular-nums text-neutral-400">{d.lots} lot</span>}
-      {pnl && <b className={(d.pnl as number) >= 0 ? "text-bull" : "text-bear"}>{pnl}</b>}
-      {d.manual === true && <span className="text-amber-300">(your trade)</span>}
-      {typeof d.reason === "string" && <span className="text-amber-300/90">{d.reason}</span>}
-      {rules && <span className="min-w-0 basis-full truncate pl-[4.5rem] text-neutral-500" title={rules}>{rules}</span>}
-    </div>
   );
 }
 
@@ -481,7 +802,9 @@ function PairPicker({ added, defaultClass, chartSymbol, onAdd }: {
  */
 export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
   const [chartSymbol] = useLocalStorage("ta.symbol", "");
-  const { data: catalog } = usePolling(() => api.strategyCatalog(), 600_000);
+  // Every 30 s, not 10 min: an open board kept the old 12-condition limit (no "+ and…") and missed new
+  // conditions for up to 10 minutes after a backend update (2026-11-03). The catalog is one small read.
+  const { data: catalog } = usePolling(() => api.strategyCatalog(), 30_000);
   const { data: list, error: listErr } = usePolling(() => api.strategies(), 5000);
   const [sel, setSel] = useState<number | "new" | null>(null);
   const [draft, setDraft] = useState<StrategyDraft | null>(null);
@@ -507,6 +830,15 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
       setDraft(template(chartSymbol, assetClass));
     }
   }, [list, sel, chartSymbol, assetClass]);
+  // A draft with no edits of its own follows the saved copy, so a change made elsewhere (another tab, the
+  // API) shows here rather than reading as unsaved edits that the next Save would undo.
+  const synced = useRef<string | null>(null);
+  useEffect(() => {
+    if (!saved) return;
+    const now = JSON.stringify(draftOf(saved));
+    if (synced.current !== null && synced.current !== now && JSON.stringify(draft) === synced.current) setDraft(draftOf(saved));
+    synced.current = now;
+  }, [saved, draft]);
 
   const dirty = !!draft && (sel === "new" || (!!saved && JSON.stringify(draftOf(saved)) !== JSON.stringify(draft)));
   const pair = draft?.pairs[Math.min(checkPair, Math.max(0, (draft?.pairs.length ?? 1) - 1))];
@@ -596,13 +928,24 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
 
   const note = pair && saved?.state?.[pair.symbol]?.note;
   const sell = draft.mirror_short ? draft.entry_long : draft.entry_short;
+  // Outside its trading hours a rule that holds opens nothing: say so rather than "fires now". Nor while
+  // the pair waits out its cooldown after the last close there, nor once its daily target is reached.
+  const offHours = !!draft.hours && check?.hours?.open === false;
+  const wait = pair ? pairWait(saved, pair.symbol) : null;
+  const done = targetDone(saved);
   const summary = (c: StrategyCheckSet | null | undefined) => {
     if (!c) return "—";
     if (!c.groups.length) return "no rule";
-    const best = Math.max(...c.groups.map((g) => g.conditions.filter((x) => x.ok === true).length));
-    const of = c.groups.length === 1 ? `/${c.groups[0].conditions.length}` : "";
-    return c.ok ? "fires now" : `${best}${of} hold`;
+    const on = c.groups.filter((g) => !g.off);           // a group switched off never fires
+    if (!on.length) return "every group off";
+    const best = Math.max(...on.map((g) => g.conditions.filter((x) => x.ok === true).length));
+    const of = on.length === 1 ? `/${on[0].conditions.length}` : "";
+    return c.ok
+      ? (done ? "holds - daily target reached" : offHours ? "holds - outside its hours"
+        : wait ? `holds - waits until ${wait.until}` : "fires now")
+      : `${best}${of} hold`;
   };
+  const fires = (c: StrategyCheckSet | null | undefined) => !!c?.ok && !offHours && !wait && !done;
 
   return (
     <div className="space-y-3 text-sm">
@@ -675,6 +1018,8 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
           )}
           <PairPicker added={draft.pairs} defaultClass={assetClass} chartSymbol={chartSymbol} onAdd={addPair} />
         </span>
+        <HoursRow value={draft.hours} onChange={(h) => set({ hours: h })} now={check?.hours} />
+        <LiveRow on={draft.live} onChange={(v) => set({ live: v })} real={!!check && !check.paper} />
       </div>
 
       {/* BUY */}
@@ -682,11 +1027,11 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
         <div className="mb-1.5 flex flex-wrap items-baseline gap-2">
           <h3 className="font-black tracking-wide text-bull">▲ BUY</h3>
           <span className="text-xs text-neutral-500">opens a long when every condition of a group holds (any one group is enough)</span>
-          {draft.sides !== "short" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${check?.long?.ok ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`}>now: {summary(check?.long)}</span>}
+          {draft.sides !== "short" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${fires(check?.long) ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`}>now: {summary(check?.long)}</span>}
         </div>
         {draft.sides === "short"
           ? <p className="text-xs text-neutral-500">Off - this strategy only sells.{draft.mirror_short && " (Its SELL rules are these, mirrored - edit them here with “Buy & sell”.)"}</p>
-          : <RuleSet where="long" groups={draft.entry_long} onChange={(g) => set({ entry_long: g })} catalog={catalog} tfs={tfs} baseTf={draft.timeframe} check={check?.long} />}
+          : <RuleSet where="long" groups={draft.entry_long} off={draft.off_groups.entry_long} onChange={(g, off) => set({ entry_long: g, off_groups: { ...draft.off_groups, entry_long: off } })} catalog={catalog} tfs={tfs} baseTf={draft.timeframe} check={check?.long} />}
       </section>
 
       {/* SELL */}
@@ -702,7 +1047,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
               my own SELL rules
             </button>
           </span>
-          {draft.sides !== "long" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${check?.short?.ok ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`}>now: {summary(check?.short)}</span>}
+          {draft.sides !== "long" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${fires(check?.short) ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`}>now: {summary(check?.short)}</span>}
         </div>
         {draft.sides === "long" ? (
           <p className="text-xs text-neutral-500">Off - this strategy only buys.</p>
@@ -710,14 +1055,20 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
           <div className="space-y-1 rounded-lg border border-neutral-800 bg-neutral-900/30 p-2">
             {sell.length === 0 && <p className="text-xs text-neutral-500">Add BUY rules - the SELL ones are their mirror image.</p>}
             {sell.map((g, gi) => (
-              <div key={gi} className="flex flex-wrap items-start gap-1.5 text-xs">
-                <span className="mt-0.5 shrink-0 rounded bg-neutral-800 px-1.5 text-[10px] font-semibold uppercase text-neutral-500">{gi > 0 ? "or " : ""}group {gi + 1}</span>
+              <div key={gi} className={`flex flex-wrap items-start gap-1.5 text-xs ${draft.off_groups.entry_long.includes(gi) ? "opacity-50" : ""}`}>
+                <span
+                  className="mt-0.5 shrink-0 rounded bg-neutral-800 px-1.5 text-[10px] font-semibold uppercase text-neutral-500"
+                  title={draft.off_groups.entry_long.includes(gi) ? "Off with its BUY group: read, but it opens nothing" : undefined}
+                >
+                  {gi > 0 ? "or " : ""}group {gi + 1}{draft.off_groups.entry_long.includes(gi) && " · off"}
+                </span>
                 <span className="flex flex-1 flex-wrap gap-1">
                   {g.map((c, ci) => {
                     const st = check?.short?.groups[gi]?.conditions[ci];
+                    const spec = catalog.conditions.find((x) => x.type === c.type);
                     return (
                       <span key={ci} className="flex items-center gap-1 rounded border border-neutral-800 bg-neutral-950/60 px-1.5 py-0.5 text-neutral-300">
-                        {sentence(catalog.conditions.find((x) => x.type === c.type), "short", c.params)} <b className="text-sky-300">{c.tf}</b>
+                        {sentence(spec, "short", c.params)} {!spec?.multi_tf && <b className="text-sky-300">{c.tf}</b>}
                         <State c={st} />
                       </span>
                     );
@@ -727,7 +1078,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
             ))}
           </div>
         ) : (
-          <RuleSet where="short" groups={draft.entry_short} onChange={(g) => set({ entry_short: g })} catalog={catalog} tfs={tfs} baseTf={draft.timeframe} check={check?.short} />
+          <RuleSet where="short" groups={draft.entry_short} off={draft.off_groups.entry_short} onChange={(g, off) => set({ entry_short: g, off_groups: { ...draft.off_groups, entry_short: off } })} catalog={catalog} tfs={tfs} baseTf={draft.timeframe} check={check?.short} />
         )}
       </section>
 
@@ -740,7 +1091,8 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
         <RuleSet
           where="exit"
           groups={draft.exit_rules}
-          onChange={(g) => set({ exit_rules: g })}
+          off={draft.off_groups.exit_rules}
+          onChange={(g, off) => set({ exit_rules: g, off_groups: { ...draft.off_groups, exit_rules: off } })}
           catalog={catalog}
           tfs={tfs}
           baseTf={draft.timeframe}
@@ -750,10 +1102,9 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
 
       {/* Money */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-neutral-800 bg-neutral-900/40 p-2.5">
-        <Num label="Risk per trade" value={+(draft.risk_pct * 100).toFixed(2)} onChange={(v) => set({ risk_pct: v / 100 })} min={0.1} max={3} step={0.1} suffix="% of equity"
+        <Num label="Risk per trade" value={+(draft.risk_pct * 100).toFixed(2)} onChange={(v) => set({ risk_pct: v / 100 })} min={0.1} max={6} step={0.1} suffix="% of equity"
              title="What a stopped-out trade loses. The Risk Manager re-clamps it to the per-trade ceiling (RISK.md) whatever you type." />
-        <Num label="Stop" value={draft.stop_atr} onChange={(v) => set({ stop_atr: v })} min={0.3} max={10} step={0.1} suffix={`× ATR of the ${draft.timeframe} bars`}
-             title="The broker-side stop every order carries, pushed further out when the spread gate needs it" />
+        <StopRow draft={draft} set={set} tfs={tfs} now={check?.stop} />
         <span className="flex items-center gap-2">
           {draft.target_r != null ? (
             <Num label="Target" value={draft.target_r} onChange={(v) => set({ target_r: v })} min={0.3} max={20} step={0.1} suffix="R" title="The broker-side target, in multiples of the stop distance" />
@@ -763,7 +1114,8 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
             no target
           </label>
         </span>
-        <Num label="At most" value={draft.max_trades_day} onChange={(v) => set({ max_trades_day: Math.round(v) })} min={1} max={200} step={1} suffix="trades a day" />
+        <Num label="At most" value={draft.max_trades_day} onChange={(v) => set({ max_trades_day: v })} min={1} max={200} step={1} suffix="trades a day" />
+        <TargetRow value={draft.daily_target} onChange={(v) => set({ daily_target: v })} saved={saved ?? null} />
         <Wait
           label="After a trade closes, re-enter the pair after"
           value={draft.cooldown_minutes}
@@ -778,9 +1130,12 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
           onChange={(v) => set({ loss_cooldown_minutes: v })}
           title="After a stopped-out trade, the same direction waits this long (the other direction doesn't). RISK.md's default is 180 min; it can't go under 5 here - that is the floor you confirmed, and it stops a rule that still holds after a stop-out from re-entering on the very next candle."
         />
-        <label className="flex items-center gap-1.5 text-xs text-neutral-300" title="Off: the strategy only closes the trades it opened. On: its CLOSE rules also close YOUR trades on these pairs (the scalp ticket's, the chart's).">
+        <label
+          className="flex items-center gap-1.5 text-xs text-neutral-300"
+          title={`Off: the strategy only manages the trades it opened. On: its CLOSE rules also close YOUR trades on these pairs (the scalp ticket's, the chart's)${draft.stop ? `, and its SuperTrend stop trails them too - only ever toward the trade, never wider, the target kept` : ""}.`}
+        >
           <input type="checkbox" checked={draft.manage_manual} onChange={(e) => set({ manage_manual: e.target.checked })} className="accent-amber-500" />
-          its CLOSE rules also close my own trades on these pairs
+          its CLOSE rules{draft.stop ? " and SuperTrend stop" : ""} also manage my own trades on these pairs
         </label>
       </div>
 
@@ -805,14 +1160,21 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
             <span className={saved.enabled ? "font-semibold text-bull" : ""}>{saved.enabled ? "● running" : "○ stopped"}</span>
             {saved.enabled && <span>checked {ago(saved.last_run_at)}</span>}
             {saved.enabled && (() => {
-              const n = nextLook(draftOf(saved));
+              const n = nextLook(draftOf(saved), catalog);
               return (
                 <span className="tabular-nums text-sky-300" title="A running strategy is read about a second after each candle closes on any timeframe its rules use, and at least every 15 seconds for its +R and time exits.">
                   next look: the {n.tf} close, in {n.secs}s
                 </span>
               );
             })()}
-            <span>{saved.open_trades} open · {saved.trades_today} today</span>
+            <span>
+              {saved.open_trades} open · {saved.trades_today} today
+              {saved.pnl_today != null && (
+                <b className={`ml-1 tabular-nums ${saved.pnl_today >= 0 ? "text-bull" : "text-bear"}`} title="What the trades it closed today (UTC) made">
+                  {fmtUsd(saved.pnl_today, { sign: true })}
+                </b>
+              )}
+            </span>
             {note && <span className="text-neutral-300">{displaySymbol(pair!.symbol)}: {note}</span>}
           </span>
         )}
@@ -821,7 +1183,9 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
       {checkErr && <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">Live read unavailable: {checkErr}</div>}
       {check && !check.paper && (
         <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">
-          This broker is a REAL account right now: a running strategy will not trade it (paper / demo only).
+          {draft.live
+            ? "This broker is a REAL account right now, and this strategy trades it: real money, no approval per order."
+            : "This broker is a REAL account right now: this strategy trades a demo only (Live account: demo only)."}
         </div>
       )}
 
@@ -829,7 +1193,19 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
         How it trades: the backend reads a running strategy about a second after each candle closes on any timeframe its
         rules use - every 5 s with a 5s rule, every minute if they are all 1m - and at least every 15 s for its +R and time
         exits. It reads CLOSED bars only (the forming bar repaints),
-        opens at most once per {draft.timeframe} bar, and closes on a bar that closed after the entry. Only on a demo / paper account.
+        opens at most once per {draft.timeframe} bar, and closes on a bar that closed after the entry. {draft.live
+          ? "On a demo, and on a real account too - there only while LIVE trading is confirmed."
+          : "Only on a demo / paper account."}
+        {draft.hours && ` It opens trades only from ${draft.hours.start} to ${draft.hours.end} (${zoneLabel(draft.hours.tz)}); outside those
+        hours it opens nothing, but still runs its close rules on the trades it holds, and their stop and target stay at the broker.`}
+        {draft.stop && ` Its stop starts on the ${draft.stop.tf} SuperTrend (${draft.stop.period}, ${draft.stop.mult}) line,
+        ${draft.stop.buffer} × ATR beyond it, then follows the line at each ${draft.stop.tf} close - only ever toward the trade.
+        A break of the line is confirmed by your SuperTrend close rule's candles; the stop is the backstop. Your own trades keep
+        the stops you set.`}
+        {draft.daily_target != null && ` Once the trades it closed today have made +${fmtUsd(draft.daily_target)} it opens
+        nothing more until 00:00 UTC (${utcDayEnd()} on your clock),
+        even if a trade still open then closes at a loss; the trades it holds keep their close rules, stop and target. Your own
+        trades don't count toward it.`}
         Every order carries a broker-side stop (and the target), and goes through the Risk Manager like any other: the per-trade
         ceiling, exposure, max open positions, one trade per side per pair, correlation, the spread gate. Its cooldowns are
         its own (set above): after a trade closes on a pair it re-enters {draft.cooldown_minutes ? `after ${draft.cooldown_minutes} min` : "with no wait"},
@@ -842,11 +1218,9 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
       {typeof sel === "number" && (
         <section>
           <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">Activity</h3>
-          {(activity ?? []).length === 0 ? (
-            <p className="text-xs text-neutral-600">Nothing yet. Opens, closes and refusals appear here.</p>
-          ) : (
-            <div className="max-h-64 overflow-y-auto">{(activity ?? []).map((a) => <ActivityRow key={a.id} a={a} />)}</div>
-          )}
+          <div className="max-h-64 overflow-y-auto">
+            <ActivityFeed items={activity} empty="Nothing yet. Opens, closes and refusals appear here." />
+          </div>
         </section>
       )}
     </div>

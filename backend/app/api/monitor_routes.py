@@ -154,8 +154,8 @@ def monitor_pair(
     asset_class: str = Query(...),
     session: Session = Depends(get_session),
 ) -> dict:
-    """``{generated_at, timeframes, row}`` - ONE pair on 1m / 5m / 15m / 1h / 4h / 1d, for the panel
-    above the chart. The same row shape as the table (read_pair + notes_for), with the 1m and 5m added. Not
+    """``{generated_at, timeframes, row}`` - ONE pair on 5s / 10s / 30s / 1m / 3m / 5m / 15m / 1h / 4h / 1d, for
+    the panel above the chart. The same row shape as the table (read_pair + notes_for), with the 5s to 5m added. Not
     table-cached: candles come from the short-lived OHLCV cache, so polling it costs one pair's reads."""
     from app.api.watchlist_routes import _events_soon
 

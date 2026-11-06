@@ -198,6 +198,60 @@ def test_sltp_within_the_limit_has_no_warning(db_session, monkeypatch):
     assert res["warning"] is None
 
 
+# A scalp-mode or strategy trade may risk up to 6% (RISK.md override 2026-11-02): a stop moved on it is
+# measured against that, not the configured 3% (the user's report 2026-11-03: a 5.1% scalp stop warned).
+def _row(db_session, *, source="manual", tags=None):
+    row = Position(symbol="XAUUSDm", asset_class="metal", direction="long", qty=1.0, entry_price=100.0,
+                   stop_loss=95.0, take_profit=110.0, status=PositionStatus.OPEN.value, risk_amount=50.0,
+                   source=source, review={"note": None, "tags": tags or []})
+    db_session.add(row)
+    db_session.commit()
+    return row
+
+
+def test_a_scalp_stop_under_the_scalp_ceiling_has_no_warning(db_session, monkeypatch):
+    _row(db_session, tags=["scalp", "high"])
+    res = _sltp(db_session, monkeypatch, _SlBroker(), sl=49.0)       # $510 = 5.1%: over 3%, under 6%
+    assert res["warning"] is None
+
+
+def test_a_scalp_stop_past_the_scalp_ceiling_still_warns(db_session, monkeypatch):
+    _row(db_session, tags=["scalp", "high"])
+    broker = _SlBroker()
+    res = _sltp(db_session, monkeypatch, broker, sl=35.0)            # $650 = 6.5% > 6%
+    assert broker.calls == [(35.0, None)]                            # still allowed - the user's call
+    assert "6.5%" in res["warning"] and "scalp mode's 6.0% per-trade risk ($600.00)" in res["warning"]
+
+
+def test_a_strategy_trade_gets_the_scalp_ceiling_too(db_session, monkeypatch):
+    _row(db_session, source="strategy:1")
+    assert _sltp(db_session, monkeypatch, _SlBroker(), sl=49.0)["warning"] is None
+
+
+def test_an_ordinary_manual_trade_keeps_the_configured_limit(db_session, monkeypatch):
+    _row(db_session, tags=["breakout"])                              # manual, not a scalp
+    res = _sltp(db_session, monkeypatch, _SlBroker(), sl=49.0)
+    assert "5.1%" in res["warning"] and "your 3.0% per-trade risk ($300.00)" in res["warning"]
+
+
+def test_the_live_positions_say_which_ceiling_each_trade_is_under(db_session, monkeypatch):
+    from app.api.settings_routes import live_positions
+    from app.risk import service
+    _row(db_session, tags=["scalp"])
+    db_session.add(Position(symbol="EURUSDm", asset_class="forex", direction="short", qty=0.1, entry_price=1.1,
+                            stop_loss=1.11, status=PositionStatus.OPEN.value, source="hybrid"))
+    db_session.commit()
+    live = [PositionView(id=1, symbol="XAUUSDm", asset_class="metal", direction="long", qty=1.0, entry_price=100.0,
+                         stop_loss=49.0, status="open"),
+            PositionView(id=2, symbol="EURUSDm", asset_class="forex", direction="short", qty=0.1, entry_price=1.1,
+                         stop_loss=1.11, status="open"),
+            PositionView(id=3, symbol="GBPUSDm", asset_class="forex", direction="long", qty=0.1, entry_price=1.3,
+                         stop_loss=1.29, status="open")]                 # opened in the terminal: no app row
+    monkeypatch.setattr(service, "live_broker_positions", lambda session: live)
+    out = {p.symbol: p.risk_ceiling for p in live_positions(db_session)}
+    assert out == {"XAUUSDm": 0.06, "EURUSDm": None, "GBPUSDm": None}
+
+
 def test_sltp_removing_a_stop_is_refused(db_session, monkeypatch):
     broker = _SlBroker()
     code, detail = _status(lambda: _sltp(db_session, monkeypatch, broker, sl=0.0))

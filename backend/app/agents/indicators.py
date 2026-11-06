@@ -417,6 +417,18 @@ def atr(candles: list[Candle], period: int = 14) -> float | None:
     return round(rma[-1], 6) if rma else None
 
 
+def atr_series(candles: list[Candle], period: int = 14) -> list[float | None]:
+    """The ATR at every bar, aligned to ``candles`` (None until ``period`` true ranges are in). Same
+    Wilder smoothing as ``atr``: its last point is ``atr`` unrounded."""
+    out: list[float | None] = [None] * len(candles)
+    if len(candles) < period + 1:
+        return out
+    trs = [max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close)) for p, c in zip(candles, candles[1:])]
+    for i, v in enumerate(_rma(trs, period)):
+        out[period + i] = v
+    return out
+
+
 ST_PERIOD = 10     # SuperTrend ATR period
 ST_FACTOR = 2.7    # SuperTrend ATR multiplier (matches the chart overlay)
 
@@ -476,6 +488,20 @@ def supertrend(candles: list[Candle], period: int = ST_PERIOD, mult: float = ST_
 
 def adx(candles: list[Candle], period: int = 14) -> dict | None:
     """Wilder's ADX with +DI/-DI. ADX < ~20 => weak/no trend (chop)."""
+    s = adx_series(candles, period)
+    if not s:
+        return None
+    adx_s = s["adx"]
+    return {"adx": round(adx_s[-1], 2), "plus_di": round(s["plus_di"][-1], 2), "minus_di": round(s["minus_di"][-1], 2),
+            # Previous bar's ADX -> "is trend strength BUILDING or FADING?". ADX 30 and falling is a
+            # trend running out of steam; ADX 24 and rising is often one starting. The level alone
+            # can't tell them apart.
+            "adx_prev": round(adx_s[-2], 2) if len(adx_s) >= 2 else None}
+
+
+def adx_series(candles: list[Candle], period: int = 14) -> dict | None:
+    """The ADX, +DI and -DI lines, oldest first and unrounded, each ending on the last candle. The ADX
+    line is ``period - 1`` points shorter than the DI lines: it smooths them once more."""
     if len(candles) < 2 * period + 1:
         return None
     plus_dm: list[float] = []
@@ -505,11 +531,7 @@ def adx(candles: list[Candle], period: int = 14) -> dict | None:
     adx_s = _rma(dx, period)
     if not adx_s:
         return None
-    return {"adx": round(adx_s[-1], 2), "plus_di": round(pdi[-1], 2), "minus_di": round(mdi[-1], 2),
-            # Previous bar's ADX -> "is trend strength BUILDING or FADING?". ADX 30 and falling is a
-            # trend running out of steam; ADX 24 and rising is often one starting. The level alone
-            # can't tell them apart.
-            "adx_prev": round(adx_s[-2], 2) if len(adx_s) >= 2 else None}
+    return {"adx": adx_s, "plus_di": pdi, "minus_di": mdi}
 
 
 def ema_slope(closes: list[float], period: int, lookback: int = 20,

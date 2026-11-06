@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api/client";
+import { playCelebration } from "../celebrate";
 import { displaySymbol, fmtUsd } from "../format";
 import { play, type Note } from "../hooks/useApprovalChime";
 import type { PositionView } from "../types";
@@ -126,7 +127,8 @@ export function useTargetHits(positions: PositionView[] | null | undefined): [Ta
 export function TargetCelebration({ hit, onDone }: { hit: TargetHit | null; onDone: (key: string) => void }) {
   useEffect(() => {
     if (!hit) return;
-    play(FANFARE, 0.16);
+    // One of the ElevenLabs celebration clips for this amount; the synthesized fanfare without them.
+    void playCelebration(hit.pnl, { target: true }).then((ok) => { if (!ok) play(FANFARE, 0.16); });
     const t = setTimeout(() => onDone(hit.key), SHOW_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps

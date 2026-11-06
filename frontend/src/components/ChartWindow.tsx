@@ -8,18 +8,21 @@ import { SCALP_FAST, SCALP_TFS, TIMEFRAMES } from "../timeframes";
 import type { AssetClass, PositionView } from "../types";
 import { Chart, type Pulse } from "./Chart";
 import { ChartPositionBar } from "./ChartPositionBar";
+import { DESK_CHANNEL } from "./Drawer";
 import { MarketHoursChip } from "./MarketHoursChip";
 import { PairMonitor } from "./PairMonitor";
 import { ScalpTicket } from "./ScalpTicket";
+import { StrategyWidget } from "./StrategyWidget";
 import { TimeframeBadge, TimeframeSwitch } from "./TimeframeSwitch";
 
 /**
  * A CHART WINDOW: one pair's chart alone in its own browser tab, at /?chart=XAUUSDm&ac=metal&tf=1h.
  *
  * Opened from the desk's "⧉ New tab", so a pair can be watched on several timeframes at once (the 1h,
- * the 15m and the 5s side by side) and a tab dragged onto another screen. It is the chart and what
- * belongs on it - the pair's timeframe strip, the open trade's strip, its lines, tickets and drawings -
- * and nothing else: no header, no book, no analysis.
+ * the 15m and the 5s side by side) - and with a second screen connected it opens there, as a window
+ * filling it. It is what the desk's full-screen chart is - the pair's timeframe strip, the open trade's
+ * strip, its lines, tickets and drawings, the strategies pop-up - and nothing else: no header, no book,
+ * no analysis. Picking a pair in the strategies pop-up switches this window to it.
  *
  * Two things it deliberately does NOT do:
  * - Touch the desk's saved pair and timeframe (ta.symbol / ta.timeframe). The pair and timeframe live
@@ -45,9 +48,28 @@ function readParams() {
   };
 }
 
+// The Strategies board is a drawer of the desk: ask the desk tab (on the other screen, say) to open it,
+// and open the desk with it when no desk tab answers.
+function openDeskBoard() {
+  const desk = `${window.location.pathname}?drawer=strategy`;
+  if (typeof BroadcastChannel === "undefined") {
+    window.open(desk, "_blank");
+    return;
+  }
+  const ch = new BroadcastChannel(DESK_CHANNEL);
+  let heard = false;
+  ch.onmessage = (e: MessageEvent<{ type?: string }>) => { if (e.data?.type === "opened") heard = true; };
+  ch.postMessage({ type: "open-drawer", drawer: "strategy" });
+  window.setTimeout(() => {
+    ch.close();
+    if (!heard) window.open(desk, "_blank");
+  }, 600);
+}
+
 export function ChartWindow() {
-  // The pair is fixed for the window's life; the timeframe and scalp mode are this window's own.
-  const [{ symbol, assetClass }] = useState(readParams);
+  // The pair comes from the link (or the strategies pop-up); the timeframe and scalp mode are this
+  // window's own.
+  const [{ symbol, assetClass }, setPair] = useState(readParams);
   const [timeframe, setTimeframe] = useState(() => readParams().timeframe);
   const [scalp, setScalp] = useState(() => readParams().scalp);
   const [notice, setNotice] = useState<string | null>(null);
@@ -72,7 +94,7 @@ export function ChartWindow() {
   // The staged scalp order and what the ticket says the chart should draw for it (see the desk).
   const [preOrder, setPreOrder] = useState<PreOrder | null>(null);
   const [scalpView, setScalpView] = useState<{ preOrder: PreOrderView | null; hud: ScalpHud | null }>({ preOrder: null, hud: null });
-  useEffect(() => setPreOrder(null), [scalp]);
+  useEffect(() => setPreOrder(null), [scalp, symbol]);
   const { data: positions } = usePolling(() => api.livePositions(), 4000, [posBump]);
   const { data: conditionals } = usePolling(() => api.conditionals(), 10000, [condKey]);
   const { data: account } = usePolling(() => api.account(assetClass), 10000, [assetClass]);
@@ -209,6 +231,14 @@ export function ChartWindow() {
         preOrder={scalp ? scalpView.preOrder : null}
         onPreOrderDrag={(kind, price) => setPreOrder((p) => (p ? { ...p, [kind]: { price } } : p))}
         hud={scalp ? scalpView.hud : null}
+        strategies={
+          <StrategyWidget
+            positions={positions}
+            chartSymbol={symbol}
+            onPick={(sym, ac) => setPair((p) => ({ ...p, symbol: sym, assetClass: ac }))}
+            onOpenBoard={openDeskBoard}
+          />
+        }
       />
     </div>
   );
@@ -236,9 +266,33 @@ export function ScalpToggle({ on, onToggle }: { on: boolean; onToggle: () => voi
   );
 }
 
+// The browser's multi-screen window placement (Chrome): which screens there are, and where.
+type ScreenArea = { left: number; top: number; availLeft: number; availTop: number; availWidth: number; availHeight: number };
+type ScreenDetails = { screens: ScreenArea[]; currentScreen: ScreenArea };
+const screenDetails = () => (window as Window & { getScreenDetails?: () => Promise<ScreenDetails> }).getScreenDetails;
+const twoScreens = () => (window.screen as Screen & { isExtended?: boolean }).isExtended === true;
+
+// A chart window filling ANOTHER screen. Chrome asks once to let the desk "manage windows on all your
+// displays"; false when it can't (one screen, refused, another browser) - the caller opens a tab.
+async function openOnOtherScreen(url: string): Promise<boolean> {
+  const get = screenDetails();
+  if (!twoScreens() || !get) return false;
+  try {
+    const { screens, currentScreen } = await get.call(window);
+    const other = screens.find((x) => x.left !== currentScreen.left || x.top !== currentScreen.top);
+    if (!other) return false;
+    const opened = window.open(url, "_blank",
+      `popup,left=${other.availLeft},top=${other.availTop},width=${other.availWidth},height=${other.availHeight}`);
+    return !!opened;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The desk's "⧉ New tab": opens the charted pair alone in a chart window, on any timeframe. Real
- * links, so a middle-click or Shift+click (a new browser window) works as on any link.
+ * The desk's "⧉ New tab": opens the charted pair alone in a chart window, on any timeframe - on the
+ * other screen, filling it, when one is connected. Real links, so a middle-click, Ctrl+click or
+ * Shift+click does what it does on any link.
  */
 export function ChartWindowMenu({ symbol, assetClass, timeframe, scalp = false }: {
   symbol: string;
@@ -248,8 +302,12 @@ export function ChartWindowMenu({ symbol, assetClass, timeframe, scalp = false }
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  const other = twoScreens() && !!screenDetails();
   useEffect(() => {
     if (!open) return;
+    // Ask for the screens as the menu opens (a click), so Chrome's one-time "manage windows" question
+    // comes now and not in the middle of opening the window.
+    if (other) void screenDetails()?.call(window).catch(() => {});
     const away = (e: PointerEvent) => {
       if (!ref.current?.contains(e.target as Node)) setOpen(false);
     };
@@ -262,14 +320,14 @@ export function ChartWindowMenu({ symbol, assetClass, timeframe, scalp = false }
       document.removeEventListener("pointerdown", away);
       document.removeEventListener("keydown", esc);
     };
-  }, [open]);
+  }, [open, other]);
 
   return (
     <span ref={ref} className="relative shrink-0">
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        title="Open this pair's chart alone in a new browser tab, on any timeframe: watch several timeframes at once, or move one to another screen"
+        title="Open this pair's chart alone - on your other screen when one is connected - on any timeframe, with the strategies pop-up: watch several timeframes at once, or keep the desk on one screen and the chart on the other"
         className="rounded border border-neutral-700 px-2 py-0.5 text-xs text-neutral-300 transition hover:border-sky-600 hover:text-white"
       >
         ⧉ New tab
@@ -286,7 +344,14 @@ export function ChartWindowMenu({ symbol, assetClass, timeframe, scalp = false }
                 href={chartWindowUrl(symbol, assetClass, t, scalp)}
                 target="_blank"
                 rel="noopener"
-                onClick={() => setOpen(false)}
+                onClick={(e) => {
+                  setOpen(false);
+                  // A modified click keeps the browser's own link behaviour (a tab, a window).
+                  if (!other || e.button !== 0 || e.ctrlKey || e.shiftKey || e.metaKey || e.altKey) return;
+                  e.preventDefault();
+                  const url = chartWindowUrl(symbol, assetClass, t, scalp);
+                  void openOnOtherScreen(url).then((ok) => { if (!ok) window.open(url, "_blank"); });
+                }}
                 className={`rounded px-2 py-0.5 text-xs font-medium tabular-nums ${
                   t === timeframe ? "bg-neutral-700 text-white" : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
                 }`}
@@ -296,8 +361,10 @@ export function ChartWindowMenu({ symbol, assetClass, timeframe, scalp = false }
             ))}
           </div>
           <div className="mt-1.5 max-w-[22rem] text-[11px] leading-snug text-neutral-500">
-            Drag the tab out of the browser to put it on another screen (Shift+click opens a new window). Each
-            tab keeps its own timeframe; the desk keeps yours.
+            {other
+              ? "Opens on your other screen, filling it (the first time, Chrome asks to manage windows on all your displays - allow it). Ctrl+click for a tab here instead. "
+              : "Drag the tab out of the browser to put it on another screen (Shift+click opens a new window). "}
+            Each window keeps its own timeframe; the desk keeps yours.
           </div>
         </div>
       )}

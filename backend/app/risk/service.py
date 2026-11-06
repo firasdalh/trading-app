@@ -607,6 +607,16 @@ def _risk_per_lot(broker, symbol: str, entry: float | None, stop: float | None) 
 # same day). Every other gate still applies to both.
 SCALP_PAIR_COOLDOWN_MINUTES = 0
 SCALP_LOSS_COOLDOWN_MINUTES = 5
+# The same orders may risk up to 6% of equity, where every other order stops at the configured 3%
+# ceiling (RISK.md override 2026-11-02, at the user's explicit request). The exposure cap, the min-lot
+# bound (2x the trade's own risk) and every other gate are unchanged.
+SCALP_RISK_CEILING = 0.06
+
+
+def is_scalp_order(source: str | None, tags: list[str] | None) -> bool:
+    """A scalp-mode order: hand-placed (source "manual") and tagged "scalp", or a custom strategy's
+    (source "strategy:<id>")."""
+    return (source == "manual" and "scalp" in (tags or [])) or (source or "").startswith("strategy:")
 
 
 def scalp_cooldowns(source: str | None, tags: list[str] | None) -> dict[str, int]:
@@ -614,7 +624,7 @@ def scalp_cooldowns(source: str | None, tags: list[str] | None) -> dict[str, int
     (source "manual") tagged "scalp" - or a custom strategy's order (source "strategy:<id>").
     Empty for anything else (the Hybrid, the auto-traders, armed setups, approvals, ordinary manual
     tickets), so the RISK.md defaults apply to them."""
-    if (source == "manual" and "scalp" in (tags or [])) or (source or "").startswith("strategy:"):
+    if is_scalp_order(source, tags):
         return {"override_cooldown_minutes": SCALP_PAIR_COOLDOWN_MINUTES,
                 "override_loss_cooldown_minutes": SCALP_LOSS_COOLDOWN_MINUTES}
     return {}
@@ -628,6 +638,28 @@ def strategy_cooldowns(pair_minutes: int | None, loss_minutes: int | None) -> di
     loss = SCALP_LOSS_COOLDOWN_MINUTES if loss_minutes is None else int(loss_minutes)
     return {"override_cooldown_minutes": max(SCALP_PAIR_COOLDOWN_MINUTES, pair),
             "override_loss_cooldown_minutes": max(SCALP_LOSS_COOLDOWN_MINUTES, loss)}
+
+
+def scalp_risk_ceiling(source: str | None, tags: list[str] | None) -> dict[str, float]:
+    """The per-trade ceiling ``assess`` takes for a scalp-mode order (SCALP_RISK_CEILING). Empty for
+    any other order, which keeps the configured ceiling."""
+    return {"override_risk_ceiling": SCALP_RISK_CEILING} if is_scalp_order(source, tags) else {}
+
+
+def position_risk_ceiling(row) -> float | None:
+    """The per-trade ceiling an app-opened trade was placed under, when it is not the configured one:
+    SCALP_RISK_CEILING for a scalp-mode or strategy trade (its source, and the tags kept in its entry
+    review), else None. What a stop moved on it is measured against."""
+    review = getattr(row, "review", None)
+    tags = review.get("tags") if isinstance(review, dict) else None
+    return SCALP_RISK_CEILING if is_scalp_order(getattr(row, "source", None), tags) else None
+
+
+def record_risk_ceiling(record) -> dict[str, float]:
+    """``scalp_risk_ceiling`` for a stored proposal, from its source and the tags in its reasoning."""
+    reasoning = getattr(record, "reasoning", None)
+    reasoning = reasoning if isinstance(reasoning, dict) else {}
+    return scalp_risk_ceiling(getattr(record, "source", None), reasoning.get("tags"))
 
 
 def record_cooldowns(record) -> dict[str, int]:
@@ -649,6 +681,7 @@ def assess(
     cache: ScanCache | None = None,
     override_cooldown_minutes: int | None = None,
     override_loss_cooldown_minutes: int | None = None,
+    override_risk_ceiling: float | None = None,
 ) -> RiskDecision:
     """Run a proposal through the deterministic Risk Manager against live state.
 
@@ -659,6 +692,8 @@ def assess(
     ``override_cooldown_minutes`` lets the per-pair AI auto-trader use its own (shorter) re-entry
     cooldown for both the per-pair AND loss cooldown, without changing the global RISK.md defaults.
     ``override_loss_cooldown_minutes`` then sets the loss cooldown on its own (scalp mode, above).
+    ``override_risk_ceiling`` raises the per-trade ceiling for a scalp-mode order (``scalp_risk_ceiling``):
+    never past SCALP_RISK_CEILING, never under the configured ceiling.
     """
     from app.risk.correlation import correlated_concentration
 
@@ -670,6 +705,9 @@ def assess(
                                            "loss_cooldown_minutes": override_cooldown_minutes})
     if override_loss_cooldown_minutes is not None:
         limits = limits.model_copy(update={"loss_cooldown_minutes": override_loss_cooldown_minutes})
+    if override_risk_ceiling is not None:
+        ceiling = max(limits.risk_per_trade_ceiling, min(override_risk_ceiling, SCALP_RISK_CEILING))
+        limits = limits.model_copy(update={"risk_per_trade_ceiling": ceiling})
     account = build_account_state(session, broker, cache=cache)
     # Open book from broker truth (so manual/terminal trades count too). Used for BOTH the
     # anti-stacking and correlated-concentration checks, which keeps the preview consistent with
@@ -773,10 +811,12 @@ def size_preview(session: Session, record, desired_lots: float | None = None) ->
     if desired_lots is not None:
         override_rf = _risk_fraction_for_lots(lots=desired_lots, risk_per_lot=rpl, equity=equity)
 
-    decision = assess(session, proposal, override_risk_fraction=override_rf, **record_cooldowns(record))
+    decision = assess(session, proposal, override_risk_fraction=override_rf, **record_cooldowns(record),
+                      **record_risk_ceiling(record))
 
     qty_step, min_lot = _lot_specs(broker, proposal.asset_class, record.symbol)
-    ceiling = limits.risk_per_trade_ceiling
+    # A scalp-mode order's own ceiling (record_risk_ceiling), as assess applied it.
+    ceiling = max(limits.risk_per_trade_ceiling, record_risk_ceiling(record).get("override_risk_ceiling", 0.0))
 
     # Size used for the economics: the approved LOTS when allowed; otherwise the would-be sized lots
     # (so the cost still shows even when a gate would block it). Both honour the clamped risk

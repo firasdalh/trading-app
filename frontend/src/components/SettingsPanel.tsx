@@ -11,6 +11,8 @@ const LLM_DEFAULT_MODEL: Record<string, string> = {
 
 const ASSET_CLASSES: AssetClass[] = ["stock", "crypto", "forex", "metal", "energy", "index"];
 const BROKERS = ["sim", "alpaca", "ccxt", "oanda", "mt5"];
+// RISK.md's ceiling for Max exposure (override 2026-11-02, 9% before); the server rejects anything above it.
+const MAX_EXPOSURE_PCT = 15;
 
 interface Props {
   settings: SettingsResponse | null;
@@ -92,7 +94,12 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
   };
   const saveExposure = () => {
     const pct = Number(exposurePct);
-    if (!Number.isFinite(pct) || pct <= 0 || pct > 100) return;
+    if (!Number.isFinite(pct) || pct <= 0) return;
+    if (pct > MAX_EXPOSURE_PCT) {
+      setError(`Max exposure goes up to ${MAX_EXPOSURE_PCT}% (RISK.md).`);
+      if (settings) setExposurePct((settings.risk.max_total_exposure * 100).toFixed(0));
+      return;
+    }
     if (settings && Math.abs(pct / 100 - settings.risk.max_total_exposure) < 1e-9) return;
     run(() => api.updateRisk({ max_total_exposure: pct / 100 }), `Max exposure set to ${pct}%.`);
   };
@@ -335,10 +342,10 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
                   />
                 </label>
                 <div>Max daily loss: {(settings.risk.max_daily_loss * 100).toFixed(1)}%</div>
-                <label className="flex items-center gap-1.5" title="Total risk-at-entry budget across all open trades. Must be big enough to fit the trade count.">
+                <label className="flex items-center gap-1.5" title={`What all open trades together can lose if every stop is hit, as a % of equity - up to ${MAX_EXPOSURE_PCT}% (RISK.md). Must be big enough to fit the trade count.`}>
                   <span>Max exposure:</span>
                   <input
-                    type="number" min={1} max={100} value={exposurePct} disabled={busy}
+                    type="number" min={1} max={MAX_EXPOSURE_PCT} value={exposurePct} disabled={busy}
                     onChange={(e) => setExposurePct(e.target.value)} onBlur={saveExposure}
                     onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                     className="field w-14 px-1.5 py-0.5 text-right tabular-nums"

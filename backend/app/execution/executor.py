@@ -259,7 +259,7 @@ def _final_risk_gate(session: Session, broker, record: TradeProposalRecord) -> N
     The fraction of equity the trade was approved at is preserved; the lots are re-derived from the
     actual fill-to-stop distance and capped at the approved lots.
     """
-    from app.risk.service import assess, current_equity, proposal_from_record, record_cooldowns
+    from app.risk.service import assess, current_equity, proposal_from_record, record_cooldowns, record_risk_ceiling
 
     equity = current_equity(session)
     if not equity or equity <= 0:
@@ -269,9 +269,10 @@ def _final_risk_gate(session: Session, broker, record: TradeProposalRecord) -> N
     if fill is not None:
         fresh = fresh.model_copy(update={"entry": fill})
     fraction = (record.risk_amount or 0.0) / equity if record.risk_amount else None
-    # A scalp-mode order keeps its cooldown waiver here too, or it would pass the ticket and bounce
-    # at the fill.
-    decision = assess(session, fresh, override_risk_fraction=fraction, **record_cooldowns(record))
+    # A scalp-mode order keeps its cooldown waiver and its 6% ceiling here too, or it would pass the
+    # ticket and then bounce, or shrink to 3%, at the fill.
+    decision = assess(session, fresh, override_risk_fraction=fraction, **record_cooldowns(record),
+                      **record_risk_ceiling(record))
     if not decision.approved or not decision.approved_qty or decision.approved_qty <= 0:
         raise ExecutionBlocked(f"risk check at execution: {decision.reason}")
     if decision.approved_qty < (record.approved_qty or 0.0) - 1e-9:

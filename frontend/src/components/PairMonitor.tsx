@@ -6,9 +6,11 @@ import { usePolling } from "../hooks/usePolling";
 import type { MonitorNote, MonitorRow, MonitorTf, PositionView } from "../types";
 import { BIAS } from "./MarketMonitor";
 
-// The server caches the 1m for 10s and the slow timeframes for minutes, so 15s keeps the 1m live
-// without re-reading anything the cache would not have refreshed anyway.
-const POLL_MS = 15_000;
+// The server caches the 5s for 2s, the 10s for 4s, the 30s and 1m for 10s and the slow timeframes for
+// minutes. 5s keeps the 10s column within a bar of the chart (at 15s it ran one or two of its bars behind)
+// and the 5s column within one or two of its bars, without re-reading anything the cache would not have
+// refreshed anyway.
+const POLL_MS = 5_000;
 // +DI and -DI must differ by at least this much, at ADX 20+, before either side "owns" the strength
 // (the same rule as the Monitor).
 const DI_MARGIN = 5;
@@ -167,7 +169,7 @@ const ROWS: RowDef[] = [
   },
   {
     key: "act", label: "Activity", counted: false, core: true,
-    hint: "How busy the last completed bar was vs normal for that time (same hour on 1H/4H, same slot on 15M, last 20 bars on 30S/1M/5M, last 20 sessions on 1D). Bold = 1.5x+, dim = 0.7x or less. ↑ building / ↓ fading.",
+    hint: "How busy the last completed bar was vs normal for that time (same hour on 1H/4H, same slot on 15M, last 20 bars on 5S/10S/30S/1M/3M/5M, last 20 sessions on 1D). Bold = 1.5x+, dim = 0.7x or less. ↑ building / ↓ fading.",
     read: (t) => {
       const v = t.volume;
       if (!v) return { side: 0, body: "—", tip: "Not enough completed bars" };
@@ -210,6 +212,8 @@ const ROWS: RowDef[] = [
   },
 ];
 
+// The strip's verdict. The backend counts the same readings with the same thresholds (market_monitor.lean_of),
+// and the strategy rule "Timeframes agree" trades on that: change one, change the other.
 type Score = { bull: number; bear: number; n: number; lean: Side };
 
 function score(t: MonitorTf | null | undefined): Score | null {
@@ -257,8 +261,8 @@ function ago(iso: string | undefined, now: number): string {
 }
 
 /**
- * The Monitor, for the charted pair only, live: every indicator the engine reads on 1M / 5M / 15M /
- * 1H / 4H / 1D. Above the chart it is ONE line - each timeframe's verdict (green leans up, red down) and,
+ * The Monitor, for the charted pair only, live: every indicator the engine reads on 5S / 10S / 30S / 1M /
+ * 3M / 5M / 15M / 1H / 4H / 1D. Above the chart it is ONE line - each timeframe's verdict (green leans up, red down) and,
  * with a position open, whether each one is with you (✓) or against you (✗). Clicking it opens the
  * full read as a popover OVER the chart, so the chart never moves and the read is gone the moment you
  * go back to the candles.
@@ -312,7 +316,7 @@ export function PairMonitor({
   // The poll keeps the previous pair's answer until the new one lands - never show it under this name.
   const fresh = data && data.row.symbol.toUpperCase() === symbol.toUpperCase() ? data : null;
   const row = fresh?.row ?? null;
-  const tfs = fresh?.timeframes ?? ["30s", "1m", "5m", "15m", "1h", "4h", "1d"];
+  const tfs = fresh?.timeframes ?? ["5s", "10s", "30s", "1m", "3m", "5m", "15m", "1h", "4h", "1d"];
   const scores = tfs.map((tf) => score(row?.tfs[tf]));
   const posSide: Side = position ? (position.direction === "long" ? 1 : -1) : 0;
   const read = scores.filter((s): s is Score => s != null);
@@ -329,7 +333,7 @@ export function PairMonitor({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title="Every indicator on 30S to 1D for this pair - click for the full read"
+        title="Every indicator on 5S to 1D for this pair - click for the full read"
         className={`flex w-full flex-wrap items-center gap-x-1.5 gap-y-1 rounded-md border px-2 py-1 text-left text-xs transition ${
           open ? "border-brand-500/60 bg-neutral-900" : "border-neutral-800 bg-neutral-900/60 hover:border-neutral-600"
         }`}
@@ -373,7 +377,7 @@ export function PairMonitor({
         <div
           role="dialog"
           aria-label={`${displaySymbol(symbol)} across timeframes`}
-          className="absolute left-0 top-full z-50 mt-1 max-h-[70vh] w-[calc(100vw-2rem)] max-w-[60rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 shadow-xl backdrop-blur-sm"
+          className="absolute left-0 top-full z-50 mt-1 max-h-[70vh] w-[calc(100vw-2rem)] max-w-[68rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 shadow-xl backdrop-blur-sm"
         >
           <FullRead
             symbol={symbol}

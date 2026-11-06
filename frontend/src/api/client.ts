@@ -20,6 +20,20 @@ import type {
   SettingsResponse,
 } from "../types";
 
+// FastAPI explains a refused request body (422) as a list of {loc, msg}: say it as "field: why", not
+// "[object Object]".
+function detailText(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return JSON.stringify(detail);
+  return detail
+    .map((d: { loc?: (string | number)[]; msg?: string }) => {
+      const where = (d.loc ?? []).filter((p) => p !== "body").join(".");
+      const why = (d.msg ?? "invalid").replace(/^Value error, /, "");
+      return where ? `${where}: ${why}` : why;
+    })
+    .join("; ");
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -33,7 +47,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail ?? JSON.stringify(body);
+      detail = body.detail != null ? detailText(body.detail) : JSON.stringify(body);
     } catch {
       /* ignore */
     }
@@ -418,6 +432,10 @@ export const api = {
     }),
 
   journalTrades: (limit = 100) => request<PositionView[]>(`/api/journal/trades?limit=${limit}`),
+  // One pair's past trades - where each opened and every exit - for the chart's MT5-style history.
+  chartTrades: (symbol: string, assetClass: AssetClass, days: number) =>
+    request<import("../types").ChartTrade[]>(
+      `/api/journal/chart-trades?symbol=${encodeURIComponent(symbol)}&asset_class=${assetClass}&days=${days}`),
   resetJournal: () =>
     request<{ journal_reset_at: string | null }>("/api/journal/reset", { method: "POST" }),
   restoreJournal: () =>
@@ -514,6 +532,9 @@ export const api = {
       body: JSON.stringify({ config, symbol, asset_class: assetClass }),
     }),
   strategyActivity: (id: number) => request<import("../types").StrategyActivity[]>(`/api/strategies/${id}/activity`),
+  // Every strategy's, newest first (the desk's feed).
+  strategyActivityAll: (limit = 40) =>
+    request<import("../types").StrategyActivity[]>(`/api/strategies/activity?limit=${limit}`),
 
   // RSI-Over strategy: sweep all available pairs on `timeframe` for the first RSI-extreme reversal
   // (EMA10-confirmed when `confirm`) and stage it (Mode A queues it). "" timeframe -> default 1h.

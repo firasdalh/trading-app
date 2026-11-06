@@ -121,6 +121,11 @@ _SQLITE_ADDED_COLUMNS = {
     "strategies": [
         ("cooldown_minutes", "INTEGER DEFAULT 0"),
         ("loss_cooldown_minutes", "INTEGER DEFAULT 5"),
+        ("hours", "JSON"),
+        ("stop", "JSON"),
+        ("daily_target", "FLOAT"),
+        ("off_groups", "JSON"),
+        ("live", "BOOLEAN DEFAULT 0"),
     ],
     "rsi_over_config": [
         ("macd", "BOOLEAN DEFAULT 0"),

@@ -104,7 +104,7 @@ export function ChartPositionBar({
             {fmtUsd(riskUsd, { sign: true })}
           </span>
         )}
-        {over && riskCap != null && <span className="ml-1.5"><OverCapChip over={over} cap={riskCap} compact /></span>}
+        {over && <span className="ml-1.5"><OverCapChip over={over} cap={over.cap} compact /></span>}
         {widened != null && widened > 1.05 && <span className="ml-1.5"><WidenedChip k={widened} /></span>}
       </span>
 

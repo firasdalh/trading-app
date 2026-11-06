@@ -21,11 +21,13 @@ import { ScenarioCard } from "./ScenarioCard";
 import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
 import { OrderBlockPrimitive, type ObZone } from "./orderBlockZones";
 import { EmaRibbonPrimitive } from "./emaRibbon";
+import { TradeHistoryPrimitive, type HistTrade } from "./tradeHistory";
+import { RSI_PERIOD_EVENT } from "../rsiPeriod";
 import { OrderFlowPane } from "./OrderFlowPane";
 import { PICK_EVENT, addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
 import { fmtPrice, fmtUsd } from "../format";
 import { TF_SECONDS, analysisTimeframe, isSecondsTf } from "../timeframes";
-import type { AiScenarioRead, AssetClass, BreakPlan, Candle, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
+import type { AiScenarioRead, AssetClass, BreakPlan, Candle, ChartTrade, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
 import type { LiveQuote } from "../hooks/useQuoteSocket";
 import type { PreOrderView, ScalpHud } from "../scalp";
 
@@ -95,6 +97,35 @@ function tzLabel(mode: "local" | "utc"): string {
   } catch {
     return "your local time";
   }
+}
+
+// --- Past trades (MT5-style history, tradeHistory.ts) ---------------------------------------------
+const HIST_POLL_MS = 15_000;
+// Why a trade closed, from MT5's deal reason. "app" is anything the app sent - a strategy's close rule,
+// the close button, Space, the advisor: MT5 records them all the same way.
+const HIST_BY: Record<string, string> = {
+  stop: "stop hit", target: "target hit", stop_out: "stop-out (margin)", app: "closed from the app",
+  terminal: "closed in MT5", phone: "closed on the phone", web: "closed on MT5 web", other: "closed",
+};
+
+// A deal's time on the axis's own clock (local or UTC), with the date when it isn't today.
+function dealTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`);
+  const tz: Intl.DateTimeFormatOptions = TZ_MODE === "utc" ? { timeZone: "UTC" } : {};
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, ...tz });
+  const day = (x: Date) => x.toLocaleDateString([], { day: "numeric", month: "short", ...tz });
+  return day(d) === day(new Date()) ? time : `${day(d)} ${time}`;
+}
+
+function heldFor(from: string | null, to: string | null): string | null {
+  if (!from || !to) return null;
+  const s = Math.max(0, Math.round((Date.parse(to) - Date.parse(from)) / 1000));
+  if (!Number.isFinite(s)) return null;
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}h ${String(Math.floor(s / 60) % 60).padStart(2, "0")}m`;
+  return `${Math.floor(s / 86_400)}d ${Math.floor(s / 3600) % 24}h`;
 }
 
 // Drag a floating panel around by its header. The position is remembered: a panel you have to
@@ -324,8 +355,8 @@ interface Props {
   scenLevels?: { support: number | null; resistance: number | null; target: number | null; invalidation: number | null } | null;
   // Full screen (owned by the Dashboard so the position strip is included).
   isFullscreen?: boolean;
-  // The strategies widget (StrategyWidget). Full screen hides the desk's sidebar, so there it opens as
-  // a floating panel from the toolbar.
+  // The strategies widget (StrategyWidget). Full screen hides the desk's sidebar and a chart window has
+  // none, so there it opens as a floating panel from the toolbar.
   strategies?: React.ReactNode;
   // Fill the parent (a flex column) the way full screen does, without being full screen - a chart
   // window is the chart and nothing else.
@@ -1138,7 +1169,10 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const aTf = analysisTimeframe(timeframe);
   // Scalp mode's toggles live under their own keys; its oscillators are the fast settings.
   const sk = (k: string) => (scalp ? `scalp.${k}` : k);
-  const RSI_P = scalp ? 7 : 14;
+  // The RSI period: 7 (fast) in scalp mode and 14 elsewhere unless picked in the Indicators menu, kept per
+  // mode. The scalp ticket's RSI gauges follow the scalp chart's (they listen for RSI_PERIOD_EVENT).
+  const [rsiPick, setRsiPick] = usePersisted<number>(sk("chart.rsiPeriod"), scalp ? 7 : 14);
+  const RSI_P = Math.min(50, Math.max(2, Math.round(Number(rsiPick) || (scalp ? 7 : 14))));
   const RSI_HI = scalp ? 80 : 70;
   const RSI_LO = scalp ? 20 : 30;
   const MACD_P: [number, number, number] = scalp ? [3, 10, 16] : [12, 26, 9];
@@ -1185,6 +1219,11 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   // say different things: one is your trade, the other is the market's structure.
   const obRef = useRef<OrderBlockPrimitive | null>(null);
   const ribbonRef = useRef<EmaRibbonPrimitive | null>(null);   // EMA 10 / 20, green above / red below
+  // Past trades on the pair, MT5-style (tradeHistory.ts): what is drawn, and the one under the pointer.
+  const histRef = useRef<TradeHistoryPrimitive | null>(null);
+  const [hist, setHist] = useState<{ symbol: string; trades: ChartTrade[] } | null>(null);
+  const [histTip, setHistTip] = useState<{ key: string; x: number; y: number } | null>(null);
+  const [stratNames, setStratNames] = useState<Record<string, string>>({});
   // The last TRUE cross of EMA 10 over / under EMA 20 (see trueCrosses), for the legend.
   const [emaCross, setEmaCross] = useState<{ up: boolean; ago: number; pending: boolean } | null>(null);
   const [obs, setObs] = useState<import("../types").OrderBlock[]>([]);
@@ -1320,9 +1359,10 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     // analysis, and without it a 1h chart is an undifferentiated run of candles.
     // `zones` (the SL/TP boxes) defaults ON for the same reason: "where is my stop, where is my
     // target, and where is price between them" is the first thing you look at on a live trade.
+    // `hist` (past trades, MT5-style) defaults ON: it was asked for to be seen, in both modes.
     scalp
-      ? { pd: true, pw: false, open: true, sessions: true, vwap: true, vwapb: true, pivots: false, bb: true, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true }
-      : { pd: false, pw: false, open: false, sessions: false, vwap: false, vwapb: false, pivots: false, bb: false, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true },
+      ? { pd: true, pw: false, open: true, sessions: true, vwap: true, vwapb: true, pivots: false, bb: true, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true, hist: true }
+      : { pd: false, pw: false, open: false, sessions: false, vwap: false, vwapb: false, pivots: false, bb: false, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true, hist: true },
     true,
   );
   // Which toolbar menu is open (only one at a time — two dropdowns overlapping is worse than
@@ -1441,6 +1481,10 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     series.attachPrimitive(ribbon);
     ribbonRef.current = ribbon;
 
+    const histPrim = new TradeHistoryPrimitive();
+    series.attachPrimitive(histPrim);
+    histRef.current = histPrim;
+
     chartRef.current = chart;
     seriesRef.current = series;
     volumeRef.current = volume;
@@ -1498,6 +1542,15 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       color: "#a78bfa", lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false,
       lastValueVisible: false, crosshairMarkerVisible: false,
     });
+    // The price axis fits the CANDLES, never these overlays (TradingView's "scale price chart only").
+    // A line far from price - the session VWAP's ±2σ band on a 1m chart, an EMA 200 - used to stretch
+    // the axis to reach it and squash the candles into a strip: a 10-pip range on a 50-pip axis, so going
+    // 10s -> 1m needed fixing by hand every time (2026-11-03). Now such a line runs off the edge instead.
+    for (const s of [...Object.values(emaRefs.current), stRef.current, emaHiRef.current, vwapRef.current,
+                     ...vwapBandRefs.current, ...bbRefs.current, emaLoRef.current, chanMidRef.current,
+                     chanUpRef.current, chanLoRef.current]) {
+      s?.applyOptions({ autoscaleInfoProvider: () => null });
+    }
 
     chart.subscribeCrosshairMove((param) => {
       const bar = param.seriesData.get(series) as CandlestickData | undefined;
@@ -1506,11 +1559,17 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         const b = lastBarRef.current;
         setLegend({ open: b.open, high: b.high, low: b.low, close: b.close });
       }
+      // A past trade's arrow under the pointer: drawn stronger, with its details beside it.
+      const hit = param.point ? histPrim.hit(param.point.x, param.point.y) : null;
+      histPrim.setHover(hit?.key ?? null);
+      setHistTip((was) => (!hit ? null : was && was.key === hit.key && was.x === hit.x && was.y === hit.y ? was : hit));
     });
 
     return () => {
       series.detachPrimitive(zones);
       series.detachPrimitive(ribbon);
+      series.detachPrimitive(histPrim);
+      histRef.current = null;
       ribbonRef.current = null;
       zonesRef.current = null;
       obRef.current = null;
@@ -1699,7 +1758,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [rsiBand, dataV, showMacd, showFlow]);
+  }, [rsiBand, dataV, showMacd, showFlow, RSI_P]);
 
   // Create/destroy the MACD sub-pane (histogram + macd/signal lines) when toggled; sync its time
   // axis to the main chart the same way the RSI pane does.
@@ -1762,6 +1821,8 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       .ohlcv(symbol, assetClass, timeframe, 400)
       .then((series) => {
         if (cancelled || !seriesRef.current || !volumeRef.current) return;
+        // What was in view before this load - a switch to another timeframe or pair keeps the zoom.
+        const was = chartRef.current?.timeScale().getVisibleLogicalRange() ?? null;
         candlesRef.current = series.candles;
         candlesKeyRef.current = `${symbol}|${timeframe}`;   // what candlesRef actually holds
         // Drawings map pixels↔time through the bar times, so refresh that lookup with the data.
@@ -1799,14 +1860,21 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         // from under anyone examining older bars.
         const viewKey = `${symbol}|${assetClass}|${timeframe}`;
         if (viewKeyRef.current !== viewKey) {
+          const first = !viewKeyRef.current;
           viewKeyRef.current = viewKey;
-          // Show the most recent ~110 bars (not all 400) so candles are big and the price scale
-          // hugs current price — much less dead space than fitContent(). Pan/zoom still works.
+          // The first chart shows the most recent ~110 bars (not all 400) so candles are big and the
+          // price scale hugs current price — much less dead space than fitContent(). A switch to
+          // another timeframe or pair keeps the zoom you were on: as many bars in view as before, so the
+          // candles stay the size you had them instead of snapping back to 110 (2026-11-03). Pan/zoom
+          // still works.
           const ts = chartRef.current?.timeScale();
           const n = candleData.length;
           if (ts && n) {
             const VISIBLE = 110;
-            ts.setVisibleLogicalRange({ from: Math.max(0, n - VISIBLE), to: n + 6 });
+            const GAP = 6;                     // empty bars right of the newest one
+            const kept = !first && was ? Math.round(was.to - was.from) - GAP : VISIBLE;
+            const show = Math.max(20, Math.min(n, kept));
+            ts.setVisibleLogicalRange({ from: Math.max(0, n - show), to: n + GAP });
           }
           // Re-fit the price (y) axis to the NEW pair. autoScale gets turned OFF the moment the user
           // drags the price axis, and stays off — which otherwise leaves the next pair's candles
@@ -1873,7 +1941,11 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   useEffect(() => {
     applyRsi();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showStoch]);
+  }, [showStoch, RSI_P]);
+
+  useEffect(() => {
+    if (scalp) window.dispatchEvent(new CustomEvent(RSI_PERIOD_EVENT, { detail: RSI_P }));
+  }, [scalp, RSI_P]);
 
   useEffect(() => {
     applyBollinger(candlesRef.current);
@@ -2717,6 +2789,89 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     prim.setZones([...list, ...preZone]);
     // tzMode re-derives every bar time (via a candle reload, which bumps dataV).
   }, [positions, proposal, symbol, timeframe, dataV, ovl.zones, preOrder]);
+
+  // MT5's "show trade history": this pair's past trades (GET /api/journal/chart-trades), as far back
+  // as the loaded bars go. Re-read every HIST_POLL_MS, and at once when a trade on the pair opens or
+  // closes - the one that just closed then gets its arrows without waiting for the poll.
+  // Only once THIS chart's candles are in (a candle load re-renders, via dataV): during a switch the
+  // previous chart's bars - a 1d chart's months, say - would ask for the wrong span.
+  const firstTs = candlesKeyRef.current === `${symbol}|${timeframe}` ? candlesRef.current[0]?.ts ?? null : null;
+  const histDays = firstTs
+    ? Math.min(120, Math.max(1, Math.ceil((Date.now() - Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(firstTs) ? firstTs : `${firstTs}Z`)) / 86_400_000)))
+    : null;
+  const openHere = (positions ?? []).filter((p) => p.symbol.toUpperCase() === symbol.toUpperCase()).map((p) => p.id).join(",");
+  useEffect(() => {
+    if (!ovl.hist) {
+      setHist(null);
+      return;
+    }
+    if (histDays == null) return;
+    let alive = true;
+    const load = () =>
+      api.chartTrades(symbol, assetClass, histDays)
+        .then((trades) => { if (alive) setHist({ symbol, trades }); })
+        .catch(() => { /* keep what is drawn; the next poll tries again */ });
+    load();
+    const id = window.setInterval(load, HIST_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [symbol, assetClass, histDays, ovl.hist, openHere]);
+
+  // The strategies' names, for "opened by" in a trade's details - read once, and again if one is missing.
+  const histStrats = (hist?.trades ?? []).map((t) => t.source).filter((s): s is string => !!s?.startsWith("strategy:"));
+  const missingStrat = histStrats.some((s) => !(s.slice(9) in stratNames));
+  useEffect(() => {
+    if (!missingStrat) return;
+    api.strategies()
+      .then((rows) => setStratNames(Object.fromEntries(rows.map((r) => [String(r.id), r.name]))))
+      .catch(() => { /* "strategy #1" then */ });
+  }, [missingStrat]);
+
+  // The trades placed on the loaded bars: each deal on the candle it happened INSIDE, as a logical
+  // index - the same rule as the entry marker and the SL/TP boxes.
+  useEffect(() => {
+    const prim = histRef.current;
+    if (!prim) return;
+    const times = barTimesRef.current;
+    const n = times.length;
+    if (!ovl.hist || !hist || hist.symbol !== symbol || candlesKeyRef.current !== `${symbol}|${timeframe}` || n < 2) {
+      prim.setTrades([]);
+      return;
+    }
+    const barSec = TF_SECONDS[timeframe] || Math.max(1, times[n - 1] - times[n - 2]);
+    // Before the loaded history a deal is counted back in whole bars: off the left edge, where its
+    // dotted line comes in from.
+    const idx = (iso: string | null): number | null => {
+      if (!iso) return null;
+      const at = utcToDisp(Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`) / 1000);
+      if (!Number.isFinite(at)) return null;
+      if (at < times[0]) return Math.floor((at - times[0]) / barSec);
+      if (at >= times[n - 1]) return n - 1 + Math.floor((at - times[n - 1]) / barSec);
+      let lo = 0;
+      let hi = n - 1;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (times[mid] <= at) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const list: HistTrade[] = [];
+    for (const t of hist.trades) {
+      const entry = idx(t.opened_at);
+      if (entry == null) continue;
+      const exits = t.exits.flatMap((e) => {
+        const i = idx(e.at);
+        return i == null ? [] : [{ index: i, price: e.price, pnl: e.pnl }];
+      });
+      if (exits.length) {
+        list.push({ key: String(t.id), direction: t.direction, entry: { index: entry, price: t.entry_price }, exits, pnl: t.pnl, open: t.open });
+      }
+    }
+    prim.setTrades(list);
+  }, [hist, symbol, timeframe, dataV, ovl.hist]);
 
   // Armed conditional ('wait for the break') overlay — large-dashed amber lines for THIS symbol's
   // armed setups, so the pending trigger/SL/TP are visible on the chart distinct from proposal
@@ -3846,6 +4001,34 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
                   count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel].filter(Boolean).length}
                   open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))}>
           <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI {RSI_P}</MenuItem>
+          <div
+            className="flex items-center gap-1 px-1.5 pb-1 pl-8 text-xs text-neutral-400"
+            title={`The RSI's period: fewer bars reacts sooner and swings more. ${scalp ? "7 is scalp mode's default" : "14 is the classic"}; kept for ${scalp ? "scalp mode" : "the normal chart"}.`}
+          >
+            period
+            <input
+              type="number"
+              min={2}
+              max={50}
+              value={RSI_P}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v) && v >= 2 && v <= 50) setRsiPick(Math.round(v));
+              }}
+              aria-label="RSI period"
+              className="w-12 rounded border border-neutral-700 bg-neutral-900 px-1 text-center tabular-nums text-purple-200"
+            />
+            {[7, 9, 14, 21].map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setRsiPick(p)}
+                className={`rounded px-1.5 ${RSI_P === p ? "bg-purple-500/30 font-semibold text-purple-100" : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"}`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
           <MenuItem on={rsiIn} onClick={() => setRsiIn((v) => !v)} dot="#a78bfa"
                     tip="Draw the RSI (and the Stochastic) in a band at the bottom of the price chart, under the volume, instead of in a pane of its own: one time axis, no gap, and the height goes to the candles. Off: the RSI gets its own resizable pane.">
             … inside the price chart
@@ -3910,6 +4093,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
             ["bb", "Bollinger bands (20, 2)", "A 20-bar average with bands two standard deviations either side. Narrow bands = a quiet market coiling; price riding a band = a strong push; a close back inside after a band poke = the push fading."],
             ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
             ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
+            ["hist", "Trade history (MT5 style)", "Your past trades on this pair, drawn the way MetaTrader does: each deal is an arrow with its tip on the price - a buy blue and pointing up, a sell red and pointing down - so a buy opens on a blue arrow and closes on a red one. A dotted line joins each entry to its exit (blue = a buy, red = a sell), with the result at the exit. Point at an arrow for the details: lots, times, prices, who opened it and why it closed (stop, target, the app, MT5). From the broker's own deal history, every trade on the account - the terminal's and the phone's too."],
             ["rr", "Risk / reward bands", "Full-width bands entry→stop (red) and entry→target (green). With Trade zones on, only armed setups get these; otherwise positions and proposals too."],
             ["ob", "Order blocks", "Supply and demand zones: the candle an impulsive move departed from, where that move also BROKE a swing. Cyan = demand (below price), amber = supply (above). Brighter means stronger; a hollow, dashed box has already been traded into, and the first return to a zone is the clean one. The tag reads side · strength · FVG (an imbalance was left on the way out) · how many times it has been tested."],
             ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
@@ -4132,7 +4316,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
         >
           {scenBusy ? "…" : "🤖 Scenarios"}
         </button>
-        {isFull && strategies && (
+        {fills && strategies && (
           <button
             onClick={() => setStratOpen((v) => !v)}
             aria-pressed={stratOpen}
@@ -4542,7 +4726,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
         </div>
       )}
 
-      {isFull && strategies && stratOpen && (
+      {fills && strategies && stratOpen && (
         <div
           data-panel
           style={stratDrag.style}
@@ -4663,7 +4847,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
           <>
             <div className="pointer-events-none absolute left-0 z-[2] border-t border-neutral-700/70" style={{ top: band.top - 4, right: band.axisW }}>
               <span className="ml-2 mt-0.5 inline-flex gap-2 rounded bg-neutral-950/70 px-1 text-[11px]">
-                <span className="text-purple-300">RSI {RSI_P}{scalp && " · fast"}</span>
+                <span className="text-purple-300">RSI {RSI_P}{RSI_P < 14 && " · fast"}</span>
                 {showStoch && <span className="text-cyan-300">Stoch 5,3,3 <span className="text-orange-300">%D</span></span>}
               </span>
             </div>
@@ -4692,6 +4876,50 @@ Click for the full breakdown. Info only — it gates nothing.`}
             </div>
           </>
         )}
+
+        {/* A past trade's details while the pointer is on one of its arrows (tradeHistory.ts). */}
+        {histTip && ovl.hist && (() => {
+          const t = hist?.symbol === symbol ? hist.trades.find((x) => String(x.id) === histTip.key) : undefined;
+          if (!t) return null;
+          const long = t.direction === "long";
+          const many = t.exits.length > 1;
+          const sid = t.source?.startsWith("strategy:") ? t.source.slice(9) : null;
+          const who = !t.source ? null : t.source === "manual" ? "you" : sid ? `strategy ${stratNames[sid] ?? `#${sid}`}` : t.source;
+          const held = heldFor(t.opened_at, t.exits[t.exits.length - 1]?.at ?? null);
+          const tone = (by: string) => (by === "stop" || by === "stop_out" ? "text-bear" : by === "target" ? "text-bull" : "text-neutral-400");
+          // Beside the arrow, on whichever side has the room.
+          const flipX = histTip.x > (containerRef.current?.clientWidth ?? 0) * 0.6;
+          const flipY = histTip.y > (containerRef.current?.clientHeight ?? 0) * 0.55;
+          return (
+            <div
+              className="pointer-events-none absolute z-30 w-max max-w-[24rem] rounded-md border border-neutral-700 bg-neutral-950/95 px-2.5 py-1.5 text-[11px] leading-snug text-neutral-300 shadow-xl"
+              style={{
+                left: histTip.x + (flipX ? -14 : 14), top: histTip.y + (flipY ? -10 : 10),
+                transform: `translate(${flipX ? "-100%" : "0"}, ${flipY ? "-100%" : "0"})`,
+              }}
+            >
+              <div className="font-semibold text-neutral-100">
+                <span className={long ? "text-sky-400" : "text-rose-400"}>{long ? "▲ BUY" : "▼ SELL"}</span> {t.volume} lot
+                {who && <span className="font-normal text-neutral-400"> · opened by {who}</span>}
+              </div>
+              <div className="tabular-nums">Opened {dealTime(t.opened_at)} at {fmtPrice(t.entry_price, priceDec)}</div>
+              {t.exits.map((e, i) => (
+                <div key={i} className="tabular-nums">
+                  {many ? `Closed ${e.volume} lot` : "Closed"} {dealTime(e.at)} at {fmtPrice(e.price, priceDec)}
+                  {e.by && <span className={tone(e.by)}> · {HIST_BY[e.by] ?? e.by}</span>}
+                  {many && e.pnl != null && <span className={e.pnl >= 0 ? "text-bull" : "text-bear"}> {fmtUsd(e.pnl, { sign: true })}</span>}
+                </div>
+              ))}
+              {t.pnl != null && (
+                <div className="tabular-nums">
+                  {t.open ? "Booked so far (part is still open)" : "Result"}{" "}
+                  <b className={t.pnl >= 0 ? "text-bull" : "text-bear"}>{fmtUsd(t.pnl, { sign: true })}</b>
+                  {held && !t.open && <span className="text-neutral-500"> · held {held}</span>}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {dragHint && (
           <div
@@ -5104,7 +5332,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
           <PaneResizer height={rsiH} onChange={setRsiH} label="RSI" />
           <div className="relative shrink-0" style={{ height: rsiH }}>
             <span className="pointer-events-none absolute left-2 top-1 z-10 flex gap-2 text-xs">
-              <span className="text-purple-300">RSI {RSI_P}{scalp && " · fast"}</span>
+              <span className="text-purple-300">RSI {RSI_P}{RSI_P < 14 && " · fast"}</span>
               {showStoch && <span className="text-cyan-300">Stoch 5,3,3 <span className="text-orange-300">%D</span></span>}
             </span>
             <div ref={rsiContainerRef} className="h-full w-full" />

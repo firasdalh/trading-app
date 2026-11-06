@@ -160,6 +160,12 @@ class BrokerAdapter(ABC):
         """
         return None
 
+    def get_trade_history(self, symbol: str, since) -> list[dict] | None:
+        """One symbol's trades since ``since`` as the chart draws them, MT5-style: where each opened
+        and every exit, from the broker's own deals. Default None = the broker can't report it (the
+        caller then falls back to the app's own closed positions)."""
+        return None
+
     def quote_economics(self, symbol: str, qty_units: float, price: float, is_long: bool) -> dict | None:
         """Cost (margin) and leverage of a hypothetical order, in the account currency.
 

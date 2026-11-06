@@ -25,6 +25,16 @@ The maximum you can lose on a single trade if the stop-loss is hit. Position siz
   1% default; a sustained losing streak now bites much faster. The conservative values (1% default
   / 2% ceiling) are the documented recommendation — consider returning to them once the strategy
   is proven.
+- **Scalp-mode ceiling 6% (2026-11-02, at the user's explicit request, after the current values were
+  restated):** the scalp ticket's orders (manual, tagged `scalp`) and the user's custom strategies' orders
+  (source `strategy:<id>`) may risk up to **6%** of equity per trade. That is 2x the 3% ceiling and 3x the
+  documented 2% cap. Every other order (normal manual tickets, the Hybrid, the auto-traders, armed setups,
+  approvals) keeps the 3% ceiling. The ticket's presets keep their defaults (0.5 / 1 / 2%), each adjustable up
+  to 6%; a strategy's risk per trade on the board goes up to 6%. Unchanged: the 9% total exposure cap (so one
+  6% trade leaves room for only 3% more), the minimum-lot bound (2x the trade's own risk - up to 12% on a
+  min-lot trade at 6%), and every other gate. (`SCALP_RISK_CEILING` / `scalp_risk_ceiling` in
+  `app/risk/service.py`, applied in the ticket's routes, the size preview, the strategy engine and the
+  executor's last check.)
 - **Manual size (added 2026-06-05):** before approving a Mode-A trade you may adjust the lot
   size up or down (Proposal panel shows the spend/margin + leverage live). Any chosen size is
   re-run through the deterministic Risk Manager and **hard-clamped to the 3% ceiling above** —
@@ -103,6 +113,18 @@ The sum of all open trades' risk cannot exceed this.
   request. At 9% the combined risk across open trades can take a larger bite at once; the 6%
   default is the documented recommendation. Per-trade (2% ceiling) and daily-loss caps unchanged.
   Consider returning to 6% once the strategy is proven.
+- **Override (2026-11-02, at the user's explicit request, confirmed after the restatement):** the
+  ceiling is now **15%** (from 9%), and the user's setting was raised to 15%. The user can change it in
+  Settings › Max exposure, anywhere from 1 to 15%; the server rejects anything above 15%
+  (`_EXPOSURE_CEILING` in `app/api/settings_routes.py`).
+  - At 15%, all open trades together can lose 15% of equity if every stop is hit: about $110 on that
+    day's $734.68. At the strategy's 4.5% a trade, that is three trades open at once instead of two.
+  - It covers every order (manual, strategies, the auto-traders) and a live account too.
+  - Unchanged: the per-trade ceilings (3%; 6% for scalp and strategy orders), the 2x min-lot bound and
+    every other gate.
+  - The daily-loss breaker was OFF when this was set, so nothing pauses new trades after a bad run.
+    Turn it back on before trading the live account, and consider returning to 6-9% once the strategy
+    is proven.
 
 ### `per_pair_cooldown` (default: 30 min after a closed trade on that pair)
 Prevents immediately re-entering the same pair after a stop-out.
@@ -124,8 +146,20 @@ Prevents immediately re-entering the same pair after a stop-out.
   `scalp.dailyStopPct` in the browser.)
 - **Custom-strategy override (2026-11-01, at the user's explicit request):** orders from the user's own
   strategies on the Strategies board (source `strategy:<id>`) get the same 0-min per-pair cooldown as
-  scalp orders. The strategies are paper/demo-only, capped at their own max trades a day, and every
-  other gate above still applies. (`scalp_cooldowns` in `app/risk/service.py`.)
+  scalp orders. The strategies are paper/demo-only unless their live switch is on (below), capped at
+  their own max trades a day, and every other gate above still applies. (`scalp_cooldowns` in
+  `app/risk/service.py`.)
+  **Live account (2026-11-04, at the user's explicit request after the restatement):** a strategy may
+  trade a REAL account when its "Trade the live account" switch is on (`StrategyConfig.live`, board:
+  "Live account: trades it too"). It is OFF by default, so a new strategy is demo-only. On a real
+  account it trades exactly as on the demo - the same rules, risk per trade, cooldowns and caps; the
+  user asked for "the same as the demo, exactly". Restated before the yes: strategy 1 risks 5% a trade
+  (~$41 on the real account's $815.64), up to 180 trades a day on 9 pairs, no backtest, the daily-loss
+  breaker off, and no human approval per order - RISK.md's Mode C advice (backtest and a long paper
+  run first) was given and set aside by the user. Still enforced on every real-money order: the typed
+  live confirmation (re-typed after every restart; without it the strategy opens nothing and says so),
+  the kill-switch, the news gate, the 6% strategy ceiling, exposure, max positions and no-stacking.
+  Switched on for strategy 1 the same day, at the user's request.
   **Per strategy (2026-11-01, at the user's request):** each strategy sets its own cooldowns on the
   board - re-entry after any close 0-240 min, same-direction wait after a loss 5-360 min - with the
   confirmed values as the FLOORS: never under 0 / 5 min, enforced in the API and again in

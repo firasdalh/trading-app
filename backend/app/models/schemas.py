@@ -356,6 +356,10 @@ class PositionView(BaseModel):
     unrealized_pnl: float = 0.0
     realized_pnl: float | None = None
     source: str | None = None   # who opened it (ai / rsi_over / armed / hybrid / manual / …)
+    # The per-trade ceiling this trade falls under when it isn't the configured one: 6% for a scalp-mode
+    # or strategy trade (RISK.md override 2026-11-02), filled in by GET /api/positions/live. None = the
+    # configured per-trade risk applies.
+    risk_ceiling: float | None = None
     swap: float = 0.0           # accrued overnight swap (account ccy), NOT in unrealized_pnl
     opened_at: datetime | None = None   # when the position was opened (app-tracked rows)
     # Margin required to hold the position, in the account currency (USD) — the "cost to open".

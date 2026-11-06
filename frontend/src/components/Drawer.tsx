@@ -3,6 +3,9 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 /** The pop-ups that slide over the desk without leaving it. */
 export type DrawerId = "monitor" | "scanner" | "risk" | "advisor" | "strategy";
 export const DRAWER_IDS: DrawerId[] = ["monitor", "scanner", "risk", "advisor", "strategy"];
+// A chart window (another tab or screen) asks the desk to open one of these drawers on this channel:
+// { type: "open-drawer", drawer }. The desk answers { type: "opened" }.
+export const DESK_CHANNEL = "trading-desk";
 
 interface Props {
   open: boolean;

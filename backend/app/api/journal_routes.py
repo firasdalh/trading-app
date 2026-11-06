@@ -1,16 +1,17 @@
 """Journal / reflection routes (Milestone 9).
 
 - GET  /api/journal/trades            -> recent CLOSED positions (the trade log).
+- GET  /api/journal/chart-trades      -> one pair's trades, entry + every exit, for the chart's history.
 - POST /api/journal/reflect           -> run the read-only Reflection agent now.
 - GET  /api/journal/reflection/latest -> the most recent stored reflection (or null).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agents.reflection import latest_reflection, run_reflection
@@ -18,7 +19,7 @@ from app.core.database import get_session
 from app.core.state import get_or_create_risk_config, get_or_create_settings
 from app.models.db import entry_risk
 from app.models.db import Position
-from app.models.enums import PositionStatus
+from app.models.enums import AssetClass, PositionStatus
 from app.models.schemas import PositionView, ReflectionReport, ScorecardView
 
 router = APIRouter(prefix="/api/journal", tags=["journal"])
@@ -126,6 +127,50 @@ def closed_trades(
         select(Position).where(*conds).order_by(Position.closed_at.desc()).limit(limit)
     ).all()
     return [PositionView.model_validate(r) for r in rows]
+
+
+@router.get("/chart-trades")
+def chart_trades(
+    symbol: str = Query(..., min_length=1, max_length=32),
+    asset_class: AssetClass = Query(AssetClass.FOREX),
+    days: int = Query(7, ge=1, le=120),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    """One pair's past trades for the chart's MT5-style history: where each opened and where it closed
+    (every exit - a partial close too - and why), from the broker's own deals. The journal's "start
+    fresh" marker doesn't apply: the chart shows what happened on the pair, as MT5 does. One day more
+    is read than asked, so a trade opened just before the chart's first bar keeps its entry. A broker
+    with no deal history (the simulator) falls back to the app's own closed positions."""
+    from app.brokers.registry import get_broker_for
+
+    since = datetime.now(timezone.utc) - timedelta(days=days + 1)
+    try:
+        broker = get_broker_for(asset_class, get_or_create_settings(session).broker_map or {})
+        rows = broker.get_trade_history(symbol, since)
+    except Exception:  # noqa: BLE001 - no broker right now: the app's own record still draws
+        rows = None
+    if rows is not None:
+        return rows
+
+    def utc(dt: datetime | None) -> datetime | None:
+        return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    out: list[dict] = []
+    for p in session.scalars(
+        select(Position).where(Position.status == PositionStatus.CLOSED.value,
+                               func.upper(Position.symbol) == symbol.upper()).order_by(Position.opened_at)
+    ).all():
+        opened, closed = utc(p.opened_at), utc(p.closed_at)
+        if closed is None or closed < since or p.last_price is None:
+            continue
+        out.append({
+            "id": p.id, "direction": p.direction, "volume": p.qty, "entry_price": p.entry_price,
+            "opened_at": opened.isoformat() if opened else None,
+            "exits": [{"price": p.last_price, "at": closed.isoformat(), "volume": p.qty, "pnl": p.realized_pnl,
+                       "by": None}],
+            "pnl": p.realized_pnl, "open": False, "source": p.source,
+        })
+    return out
 
 
 class JournalStats(BaseModel):

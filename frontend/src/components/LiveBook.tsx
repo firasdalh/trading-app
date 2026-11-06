@@ -190,18 +190,21 @@ export function stopWidening(p: PositionView): number | null {
  * The loss at the CURRENT stop against the per-trade risk cap (RISK.md). Returns the numbers only
  * when it is over the cap — a stop widened by hand can take a trade far past what it was sized
  * for, and nothing else on the card would say so. 5% slack so a trade sized AT the cap is not
- * flagged for a fill a tick worse or a slightly smaller equity since.
+ * flagged for a fill a tick worse or a slightly smaller equity since. A scalp or strategy trade is
+ * measured against its own ceiling (`risk_ceiling`, 6% - RISK.md override 2026-11-02), and `cap` in
+ * the result is the one it was measured against.
  */
 export function overCapRisk(
   p: PositionView,
   equity: number | null | undefined,
-  cap: number | null | undefined,
-): { usd: number; pct: number } | null {
+  configured: number | null | undefined,
+): { usd: number; pct: number; cap: number } | null {
+  const cap = p.risk_ceiling ?? configured;
   if (!equity || equity <= 0 || !cap || cap <= 0) return null;
   const at = usdAtLevel(p, p.stop_loss);
   if (at == null || at >= 0) return null;
   const pct = -at / equity;
-  return pct > cap * 1.05 ? { usd: -at, pct } : null;
+  return pct > cap * 1.05 ? { usd: -at, pct, cap } : null;
 }
 
 /** "×2.2" — how much wider the stop is than at entry. */
@@ -400,7 +403,7 @@ function PositionCard({
           off, so a normal card stays two lines. */}
       {((widened != null && widened > 1.05) || over) && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
-          {over && riskCap != null && <OverCapChip over={over} cap={riskCap} />}
+          {over && <OverCapChip over={over} cap={over.cap} />}
           {widened != null && widened > 1.05 && <WidenedChip k={widened} />}
         </div>
       )}

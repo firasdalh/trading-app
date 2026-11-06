@@ -1,17 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { api } from "../api/client";
+import { playCelebration } from "../celebrate";
+import { useScalpRsiPeriod } from "../rsiPeriod";
 import { fmtPrice, fmtUsd } from "../format";
 import { play } from "../hooks/useApprovalChime";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import {
-  SCALP_PRESETS, STOP_ATR_CHOICES, TARGET_R_CHOICES, dailyStop, fmtDur, fmtR, planScalp, resolvePreOrder, sameSymbol,
+  SCALP_MAX_RISK, SCALP_PRESETS, STOP_ATR_CHOICES, TARGET_R_CHOICES, dailyStop, fmtDur, fmtR, planScalp, resolvePreOrder, sameSymbol,
   scalpReadings, scalpStop, tradeWatch, untilUtcMidnight,
   type CueTone, type PreOrder, type PreOrderView, type ReadTone, type ScalpHud, type ScalpLevel, type ScalpReading,
   type TradeWatch, type VerdictTone,
 } from "../scalp";
 import { analysisTimeframe, isSecondsTf } from "../timeframes";
 import type { AssetClass, PositionView, ScalpSpec } from "../types";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { TugConfetti, TugOfWar, TugParty, winnerOf, type Kind } from "./TugOfWar";
 
 const LEVEL_TONE: Record<ScalpLevel, string> = {
   low: "border-emerald-500 bg-emerald-500/20 text-emerald-300",
@@ -110,6 +114,9 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   // which then follows the stop.
   const [levBy, setLevBy] = useLocalStorage<Partial<Record<ScalpLevel, number>>>("scalp.leverage", {});
   const [sound, setSound] = useLocalStorage("scalp.sound", true);
+  // Each preset's risk per trade, in %, when changed from the preset's own (up to SCALP_MAX_RISK, the
+  // Risk Manager's scalp ceiling - RISK.md override 2026-11-02).
+  const [riskBy, setRiskBy] = useLocalStorage<Partial<Record<ScalpLevel, number>>>("scalp.riskPct", {});
   // The daily stop: on or off, and its % per preset when changed from the preset's own (RISK.md,
   // the user's choice 2026-11-01). Off keeps the meter and never locks.
   const [stopOn, setStopOn] = useLocalStorage("scalp.dailyStopOn", true);
@@ -119,8 +126,13 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   // Folded: one line (state, size, SELL / BUY) and the trade or pre-order under it - the rest of the
   // window goes to the chart.
   const [fold, setFold] = useLocalStorage("scalp.fold", false);
+  // The bull vs bear tug of war on the trade bar, and its ending when the trade closes (TugOfWar.tsx).
+  const [tug, setTug] = useLocalStorage("scalp.tug", true);
   const [busy, setBusy] = useState<"long" | "short" | "close" | null>(null);
-  const [flash, setFlash] = useState<{ dir: "long" | "short" | "close"; text: string; tone?: "win" | "loss" | "target" } | null>(null);
+  const [flash, setFlash] = useState<{
+    dir: "long" | "short" | "close"; text: string; tone?: "win" | "loss" | "target";
+    party?: { win: Kind; kind: "target" | "stop" | "close" };   // a close: who won the tug of war
+  } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const inFlight = useRef(false);
 
@@ -132,14 +144,17 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   const { data: review } = usePolling(() => api.journalReview(), 20000);
 
   const candles = series && series.timeframe === stopTf && sameSymbol(series.symbol, symbol) ? series.candles : null;
+  const rsiP = useScalpRsiPeriod();     // the scalp chart's RSI period, so the gauges read the same RSI
   const { atr, items } = useMemo(
-    () => (candles ? scalpReadings(candles, spec?.spread ?? null, stopTf) : { atr: null, items: [] }),
-    [candles, spec?.spread, stopTf],
+    () => (candles ? scalpReadings(candles, spec?.spread ?? null, stopTf, rsiP) : { atr: null, items: [] }),
+    [candles, spec?.spread, stopTf, rsiP],
   );
   const spreadGate = settings?.risk.spread_gate_enabled ? settings.risk.max_spread_r_fraction : null;
   const preset = SCALP_PRESETS[level];
+  const riskOf = (k: ScalpLevel) => Math.min(SCALP_MAX_RISK, (riskBy[k] ?? SCALP_PRESETS[k].risk * 100) / 100);
+  const riskFrac = riskOf(level);
   const asked = levBy[level] ?? null;
-  const base = { atr, stopAtr, targetR, level, leverage: asked, spreadGate };
+  const base = { atr, stopAtr, targetR, level, leverage: asked, spreadGate, risk: riskFrac };
 
   const live = pre && spec ? resolvePreOrder(spec, pre) : null;
   const plan = spec ? planScalp({ spec, ...base, stopDist: live?.stopDist, targetDist: live?.targetDist }) : null;
@@ -159,7 +174,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   const seenRef = useRef<Seen | null>(null);
   seenRef.current ??= loadSeen();
   const watch: TradeWatch | null = newest
-    ? tradeWatch({ pos: newest, spec, candles, atr, tf: stopTf, seen: seenRef.current[String(newest.id)] })
+    ? tradeWatch({ pos: newest, spec, candles, atr, tf: stopTf, seen: seenRef.current[String(newest.id)], rsiPeriod: rsiP })
     : null;
 
   // Why an order would not go out now. Staging stays possible regardless - seeing the trade and its
@@ -227,7 +242,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   // A trade that leaves the book without this ticket closing it hit its stop or its target (or was
   // closed elsewhere): say which, with the last P&L seen. A failed positions read is not a close,
   // and neither is switching the chart to another pair.
-  const lastTrade = useRef<{ id: string; sym: string; pnl: number; at: number | null } | null>(null);
+  const lastTrade = useRef<{ id: string; sym: string; dir: "long" | "short"; pnl: number; at: number | null } | null>(null);
   const closedHere = useRef<string | null>(null);
   useEffect(() => {
     const last = lastTrade.current;
@@ -239,10 +254,15 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
         dir: "close",
         text: atTarget ? `🎯 TARGET HIT ${usd}` : atStop ? `${last.pnl >= 0 ? "stopped in profit" : "stopped out"} ${usd}` : `closed ${usd} (at the broker or elsewhere)`,
         tone: atTarget ? "target" : last.pnl >= 0 ? "win" : "loss",
+        party: { win: winnerOf(last.dir, last.pnl), kind: atTarget ? "target" : atStop ? "stop" : "close" },
       });
-      if (sound) play(atTarget ? TARGET_NOTES : CLOSE_NOTES, 0.1);
+      // A win gets a celebration clip for its amount; a loss, or no clips, the ticket's own notes.
+      if (sound) {
+        const notes = atTarget ? TARGET_NOTES : CLOSE_NOTES;
+        void playCelebration(last.pnl, { target: atTarget }).then((ok) => { if (!ok) play(notes, 0.1); });
+      }
     }
-    if (newest && watch) lastTrade.current = { id: String(newest.id), sym: symbol, pnl: watch.pnl, at: watch.at };
+    if (newest && watch) lastTrade.current = { id: String(newest.id), sym: symbol, dir: watch.dir, pnl: watch.pnl, at: watch.at };
     else if (positions) lastTrade.current = null;
   });
 
@@ -294,7 +314,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
       const px = (v: number) => Number(v.toFixed(fresh.digits));
       const res = await api.manualTrade({
         symbol, asset_class: assetClass, direction: pre.dir, stop_loss: px(d.sl), take_profit: px(d.tp),
-        lots: p.lots, risk_pct: preset.risk, timeframe: analysisTimeframe(timeframe), execute: true,
+        lots: p.lots, risk_pct: riskFrac, timeframe: analysisTimeframe(timeframe), execute: true,
         tags: ["scalp", level], note: `scalp ${timeframe} ${p.leverage.toFixed(1)}x ${preset.label}`,
       });
       if (res.status !== "executed") throw new Error(`Refused by the Risk Manager: ${res.risk?.reason ?? res.status}`);
@@ -319,8 +339,11 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
     const pnl = watch?.pnl ?? newest.unrealized_pnl;
     try {
       await api.liveClose(newest.symbol, newest.asset_class as AssetClass, newest.direction);
-      setFlash({ dir: "close", text: `closed ≈ ${fmtUsd(pnl, { sign: true })}`, tone: pnl >= 0 ? "win" : "loss" });
-      if (sound) play(CLOSE_NOTES, 0.1);
+      setFlash({
+        dir: "close", text: `closed ≈ ${fmtUsd(pnl, { sign: true })}`, tone: pnl >= 0 ? "win" : "loss",
+        party: { win: winnerOf(newest.direction === "short" ? "short" : "long", pnl), kind: "close" },
+      });
+      if (sound) void playCelebration(pnl).then((ok) => { if (!ok) play(CLOSE_NOTES, 0.1); });
       onOpened();
     } catch (e) {
       closedHere.current = null;
@@ -467,7 +490,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
         : { cls: "bg-neutral-800 text-neutral-400", text: "READY · pick a side" };
 
   return (
-    <div className="mb-1.5 shrink-0 overflow-hidden rounded-lg border border-amber-500/40 bg-gradient-to-br from-amber-500/[0.08] via-neutral-900/80 to-neutral-900/80 text-xs shadow-[0_0_28px_-14px_rgba(245,158,11,0.7)]">
+    <div className="relative mb-1.5 shrink-0 overflow-hidden rounded-lg border border-amber-500/40 bg-gradient-to-br from-amber-500/[0.08] via-neutral-900/80 to-neutral-900/80 text-xs shadow-[0_0_28px_-14px_rgba(245,158,11,0.7)]">
       {/* Line 1: the mode and its state, how big the next order is, and the two sides. */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-2.5 py-1">
         <span className="font-black uppercase italic tracking-wider text-amber-300" title="Scalp mode: manual trading on the fast charts. Every order goes with its stop and target, through the Risk Manager.">
@@ -482,16 +505,36 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
                 key={k}
                 onClick={(e) => { e.currentTarget.blur(); setLevel(k); }}
                 aria-pressed={level === k}
-                title={`${p.label}: a stopped-out trade loses ${p.risk * 100}% of equity${spec?.equity ? ` (${fmtUsd(-(p.risk * spec.equity))})` : ""}, the trade's leverage is capped at ${p.maxLev}x, and sending locks for the day after a ${stopPct[k] ?? p.dailyStop * 100}% loss${stopOn ? "" : " (daily stop OFF)"}.`}
+                title={`${p.label}: a stopped-out trade loses ${+(riskOf(k) * 100).toFixed(2)}% of equity${spec?.equity ? ` (${fmtUsd(-(riskOf(k) * spec.equity))})` : ""}, the trade's leverage is capped at ${p.maxLev}x, and sending locks for the day after a ${stopPct[k] ?? p.dailyStop * 100}% loss${stopOn ? "" : " (daily stop OFF)"}.`}
                 className={`rounded-md border px-1.5 py-0.5 font-semibold transition ${
                   level === k ? LEVEL_TONE[k] : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
                 }`}
               >
-                {p.label} <span className="font-normal opacity-80">{p.risk * 100}%</span>
+                {p.label} <span className="font-normal opacity-80">{+(riskOf(k) * 100).toFixed(2)}%</span>
               </button>
             );
           })}
         </span>
+        <label
+          className="flex items-center gap-1 text-[11px] text-neutral-400"
+          title={`${preset.label}'s risk per trade: what a stopped-out trade loses, as a % of equity${spec?.equity ? ` (${fmtUsd(-(riskFrac * spec.equity))} now)` : ""}. Up to ${SCALP_MAX_RISK * 100}% - scalp mode's ceiling (RISK.md); its default is ${preset.risk * 100}%. Kept per preset.`}
+        >
+          risk
+          <input
+            type="number"
+            min={0.1}
+            max={SCALP_MAX_RISK * 100}
+            step={0.1}
+            value={+(riskFrac * 100).toFixed(2)}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v >= 0.1 && v <= SCALP_MAX_RISK * 100) setRiskBy((m) => ({ ...m, [level]: v }));
+            }}
+            aria-label="Risk per trade percent"
+            className={`w-12 rounded border bg-neutral-900 px-1 text-center tabular-nums ${riskFrac > 0.03 ? "border-amber-500/70 text-amber-200" : "border-neutral-700 text-neutral-200"}`}
+          />
+          %
+        </label>
         <label className="flex min-w-[12rem] flex-1 items-center gap-2" title="Leverage: the trade's size against your equity. The size is capped so a stopped-out trade stays inside the preset, so a wider stop means a smaller size.">
           <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Lev</span>
           <input
@@ -555,6 +598,16 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
             className="text-neutral-500 hover:text-neutral-200"
           >
             {sound ? "🔊" : "🔇"}
+          </button>
+          <button
+            onClick={(e) => { e.currentTarget.blur(); setTug((v) => !v); }}
+            aria-pressed={tug}
+            title={tug
+              ? "Bull vs bear: a tug of war for the price on the trade bar - they tire as it nears their end, and the winner celebrates when the trade closes. Click to switch it off."
+              : "Bull vs bear tug of war on the trade bar is off - click to switch it on"}
+            className={`transition ${tug ? "" : "opacity-40 grayscale hover:opacity-80"}`}
+          >
+            🐂
           </button>
           <button
             onClick={(e) => { e.currentTarget.blur(); setFold((v) => !v); }}
@@ -725,6 +778,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
           more={mine.length - 1}
           keys={keys}
           busy={busy === "close"}
+          tug={tug}
           onClose={() => void closeNewest()}
         />
       )}
@@ -752,21 +806,31 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
           <button onClick={() => setMsg(null)} className="text-bear/80 hover:text-bear" aria-label="Dismiss">×</button>
         </div>
       )}
-      {flash?.dir === "close" && (
-        <div
-          className={`border-t px-2.5 py-1 text-sm font-black tracking-wide ${
-            flash.tone === "target"
-              ? "border-amber-400/50 bg-amber-400/15 text-amber-200"
-              : flash.tone === "win"
-                ? "border-bull/40 bg-bull/10 text-bull"
-                : flash.tone === "loss"
-                  ? "border-bear/40 bg-bear/10 text-bear"
-                  : "border-sky-500/30 bg-sky-500/10 text-sky-300"
-          }`}
-        >
-          ✓ Trade {flash.text}
-        </div>
-      )}
+      {flash?.dir === "close" && (() => {
+        const row = (
+          <div
+            className={`border-t px-2.5 py-1 text-sm font-black tracking-wide ${
+              flash.tone === "target"
+                ? "border-amber-400/50 bg-amber-400/15 text-amber-200"
+                : flash.tone === "win"
+                  ? "border-bull/40 bg-bull/10 text-bull"
+                  : flash.tone === "loss"
+                    ? "border-bear/40 bg-bear/10 text-bear"
+                    : "border-sky-500/30 bg-sky-500/10 text-sky-300"
+            }`}
+          >
+            ✓ Trade {flash.text}
+          </div>
+        );
+        // The bull vs bear ending, or - with it off, another trade still open here, or if it ever breaks -
+        // the plain line.
+        return tug && flash.party && !watch ? (
+          <ErrorBoundary name="trade ending" fallback={row}>
+            <TugParty win={flash.party.win} kind={flash.party.kind} text={flash.text} />
+            {flash.party.kind === "target" && <TugConfetti win={flash.party.win} />}
+          </ErrorBoundary>
+        ) : row;
+      })()}
     </div>
   );
 }
@@ -796,12 +860,13 @@ function Gauge({ it }: { it: ScalpReading }) {
 }
 
 // The trade you are in, in two lines: the money and the stop-to-target track, then hold-or-close.
-function TradePanel({ w, digits, more, keys, busy, onClose }: {
+function TradePanel({ w, digits, more, keys, busy, tug, onClose }: {
   w: TradeWatch;
   digits: number | null;
   more: number;          // other trades open on this pair
   keys: boolean;
   busy: boolean;
+  tug: boolean;          // the bull vs bear tug of war along the bar
   onClose: () => void;
 }) {
   const long = w.dir === "long";
@@ -823,24 +888,38 @@ function TradePanel({ w, digits, more, keys, busy, onClose }: {
         {w.at != null && w.entryAt != null ? (
           // Stop on the left, target on the right, whichever side the trade is: left is always the
           // loss, right the gain. The bright stretch is how far price has gone from the entry.
-          <div className="min-w-[14rem] flex-1" title="Where price sits between your stop (left) and your target (right). White = now, grey line = entry, gold tick = the best so far.">
-            <div className="relative h-4">
-              <div className="absolute inset-x-0 top-1 h-2 overflow-hidden rounded-full bg-neutral-800">
-                <div className="absolute inset-y-0 left-0 bg-bear/35" style={{ width: pct(w.entryAt) }} />
-                <div className="absolute inset-y-0 right-0 bg-bull/25" style={{ left: pct(w.entryAt) }} />
-                <div
-                  className={`absolute inset-y-0 transition-all duration-500 ${w.at >= w.entryAt ? "bg-bull" : "bg-bear"}`}
-                  style={{ left: pct(Math.min(w.at, w.entryAt)), width: `${Math.abs(clamp(w.at) - clamp(w.entryAt)) * 100}%` }}
-                />
-              </div>
-              {w.troughAt != null && <span className="absolute top-0.5 h-3 w-0.5 -translate-x-1/2 bg-neutral-500" style={{ left: pct(w.troughAt) }} />}
-              {w.peakAt != null && <span className="absolute top-0.5 h-3 w-0.5 -translate-x-1/2 bg-amber-300" style={{ left: pct(w.peakAt) }} />}
-              <span className="absolute top-0 h-4 w-0.5 -translate-x-1/2 bg-neutral-300" style={{ left: pct(w.entryAt) }} />
-              <span
-                className="absolute -top-0.5 h-5 w-1.5 -translate-x-1/2 rounded-sm bg-white shadow-[0_0_10px_rgba(255,255,255,0.9)] transition-[left] duration-500"
-                style={{ left: pct(w.at) }}
-              />
-            </div>
+          <div
+            className={`${tug ? "min-w-[22rem]" : "min-w-[14rem]"} flex-1`}
+            title={`Where price sits between your stop (left) and your target (right). White = now, grey line = entry, gold tick = the best so far.${tug ? ` Bull vs bear: your ${long ? "bull" : "bear"} holds the target end; each one tires as price nears its end.` : ""}`}
+          >
+            {(() => {
+              const track = (
+                <div className="relative h-4">
+                  <div className="absolute inset-x-0 top-1 h-2 overflow-hidden rounded-full bg-neutral-800">
+                    <div className="absolute inset-y-0 left-0 bg-bear/35" style={{ width: pct(w.entryAt) }} />
+                    <div className="absolute inset-y-0 right-0 bg-bull/25" style={{ left: pct(w.entryAt) }} />
+                    <div
+                      className={`absolute inset-y-0 transition-all duration-500 ${w.at >= w.entryAt ? "bg-bull" : "bg-bear"}`}
+                      style={{ left: pct(Math.min(w.at, w.entryAt)), width: `${Math.abs(clamp(w.at) - clamp(w.entryAt)) * 100}%` }}
+                    />
+                    {tug && <div className="tug-rope" />}
+                  </div>
+                  {w.troughAt != null && <span className="absolute top-0.5 h-3 w-0.5 -translate-x-1/2 bg-neutral-500" style={{ left: pct(w.troughAt) }} />}
+                  {w.peakAt != null && <span className="absolute top-0.5 h-3 w-0.5 -translate-x-1/2 bg-amber-300" style={{ left: pct(w.peakAt) }} />}
+                  <span className="absolute top-0 h-4 w-0.5 -translate-x-1/2 bg-neutral-300" style={{ left: pct(w.entryAt) }} />
+                  <span
+                    className="absolute -top-0.5 h-5 w-1.5 -translate-x-1/2 rounded-sm bg-white shadow-[0_0_10px_rgba(255,255,255,0.9)] transition-[left] duration-500"
+                    style={{ left: pct(w.at) }}
+                  />
+                </div>
+              );
+              // Dressing only: if the tug of war ever breaks, the plain bar stands in for it.
+              return tug ? (
+                <ErrorBoundary name="tug of war" fallback={track}>
+                  <TugOfWar dir={w.dir} at={w.at} entryAt={w.entryAt}>{track}</TugOfWar>
+                </ErrorBoundary>
+              ) : track;
+            })()}
             <div className="flex items-center justify-between gap-2 text-[10px] leading-tight tabular-nums">
               <span className="text-bear">SL {px(w.sl)} {w.slUsd != null && <b>{fmtUsd(w.slUsd, { sign: true })}</b>}</span>
               <span className="text-neutral-500">

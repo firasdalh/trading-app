@@ -39,7 +39,7 @@ log = get_logger("broker.mt5")
 
 # Our timeframe string -> MT5 TIMEFRAME_* attribute name.
 _TF_ATTR = {
-    "1m": "TIMEFRAME_M1", "5m": "TIMEFRAME_M5", "10m": "TIMEFRAME_M10", "15m": "TIMEFRAME_M15",
+    "1m": "TIMEFRAME_M1", "3m": "TIMEFRAME_M3", "5m": "TIMEFRAME_M5", "10m": "TIMEFRAME_M10", "15m": "TIMEFRAME_M15",
     "30m": "TIMEFRAME_M30", "1h": "TIMEFRAME_H1", "4h": "TIMEFRAME_H4", "1d": "TIMEFRAME_D1",
 }
 
@@ -89,7 +89,7 @@ def _bars_from_ticks(times: list, prices: list, seconds: int) -> list[list]:
 
 
 # Bar lengths of the terminal's own timeframes, for the order-flow bars (built from ticks).
-_TF_SECONDS = {"1m": 60, "5m": 300, "10m": 600, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+_TF_SECONDS = {"1m": 60, "3m": 180, "5m": 300, "10m": 600, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
 def _flow_from_ticks(times: list, bids: list, seconds: int, prev: float | None = None,
@@ -230,6 +230,14 @@ def source_from_comment(comment: str | None) -> str | None:
     if c.startswith(_APP_COMMENT):
         return "app"
     return "manual"
+
+
+# Why an exit deal happened (MT5's DEAL_REASON_*), as the chart's trade history words it. The app's own
+# closes - a strategy's close rule, the close button on the desk, the advisor - all go through the API,
+# which MT5 records as an expert ("app").
+_EXIT_BY = (("DEAL_REASON_SL", 4, "stop"), ("DEAL_REASON_TP", 5, "target"), ("DEAL_REASON_SO", 6, "stop_out"),
+            ("DEAL_REASON_EXPERT", 3, "app"), ("DEAL_REASON_CLIENT", 0, "terminal"),
+            ("DEAL_REASON_MOBILE", 1, "phone"), ("DEAL_REASON_WEB", 2, "web"))
 
 
 class Mt5BrokerAdapter(BrokerAdapter):
@@ -1003,6 +1011,66 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 source=source_from_comment(getattr(first_in, "comment", None)),
             ))
         out.sort(key=lambda v: v.closed_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return out
+
+    def get_trade_history(self, symbol: str, since) -> list[dict] | None:
+        """One symbol's trades as MT5's "show trade history" draws them: each position's entry deal and
+        EVERY exit deal - a partial close (the advisor's scale-out) is an exit of its own - with why it
+        happened. A trade still partly open comes with what has been closed of it so far; one with no
+        exit yet is left out (the chart draws open trades itself), and so is one whose entry is older
+        than ``since``."""
+        mt5 = self._mt5
+        try:
+            sym = self._resolve_symbol(symbol).upper()
+            deals = mt5.history_deals_get(since, datetime.now(timezone.utc))
+        except Exception:  # noqa: BLE001
+            return None
+        if deals is None:
+            return []
+
+        entry_in = getattr(mt5, "DEAL_ENTRY_IN", 0)
+        exits =(getattr(mt5, "DEAL_ENTRY_OUT", 1), getattr(mt5, "DEAL_ENTRY_OUT_BY", 3))
+        deal_buy = getattr(mt5, "DEAL_TYPE_BUY", 0)
+        why = {getattr(mt5, name, code): word for name, code, word in _EXIT_BY}
+
+        groups: dict[int, list] = {}
+        for d in deals:
+            pid = getattr(d, "position_id", 0)
+            if pid and (getattr(d, "symbol", "") or "").upper() == sym:
+                groups.setdefault(pid, []).append(d)
+
+        def at(d) -> str | None:
+            ts = int(getattr(d, "time", 0) or 0)
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
+
+        def money(d) -> float:   # what the deal booked, as the journal counts it
+            return sum(float(getattr(d, k, 0) or 0) for k in ("profit", "swap", "commission"))
+
+        def vol(d) -> float:
+            return float(getattr(d, "volume", 0) or 0)
+
+        out: list[dict] = []
+        for pid, ds in groups.items():
+            ds.sort(key=lambda x: int(getattr(x, "time_msc", 0) or 0) or int(getattr(x, "time", 0) or 0) * 1000)
+            ins = [d for d in ds if getattr(d, "entry", None) == entry_in]
+            outs = [d for d in ds if getattr(d, "entry", None) in exits]
+            if not ins or not outs:
+                continue
+            first = ins[0]
+            out.append({
+                "id": pid,
+                "direction": "long" if getattr(first, "type", 0) == deal_buy else "short",
+                "volume": round(sum(vol(d) for d in ins), 2),
+                "entry_price": float(getattr(first, "price", 0) or 0),
+                "opened_at": at(first),
+                "exits": [{"price": float(getattr(d, "price", 0) or 0), "at": at(d), "volume": round(vol(d), 2),
+                           "pnl": round(money(d), 2), "by": why.get(getattr(d, "reason", None), "other")}
+                          for d in outs],
+                "pnl": round(sum(money(d) for d in ds), 2),
+                "open": sum(vol(d) for d in ins) - sum(vol(d) for d in outs) > 1e-9,
+                "source": source_from_comment(getattr(first, "comment", None)),
+            })
+        out.sort(key=lambda t: t["opened_at"] or "")
         return out
 
     def _side(self, positions, direction: str | None) -> list:

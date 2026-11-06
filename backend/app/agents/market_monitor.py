@@ -37,10 +37,11 @@ from app.models.schemas import OHLCVSeries
 log = get_logger("agents.market_monitor")
 
 MONITOR_TFS = ("15m", "1h", "4h", "1d")
-# The chart's own per-pair panel adds the 30s, 1m and 5m: one pair is cheap enough to read live, and
-# they are the timeframes a trade is actually timed and managed on (the 30s for scalping, built from
-# ticks like the chart's). The bias is still 1h / 4h / 1d only.
-PAIR_TFS = ("30s", "1m", "5m", "15m", "1h", "4h", "1d")
+# The chart's own per-pair panel adds the 5s to the 5m: one pair is cheap enough to read live, and they
+# are the timeframes a trade is actually timed and managed on (the 5s, 10s and 30s for scalping, built
+# from ticks like the chart's; the 10s asked for 2026-11-03; the 3m, MT5's own M3 bar, 2026-11-05; the
+# 5s 2026-11-06). The bias is still 1h / 4h / 1d only.
+PAIR_TFS = ("5s", "10s", "30s", "1m", "3m", "5m", "15m", "1h", "4h", "1d")
 BIAS_TFS = ("1h", "4h", "1d")        # the timeframes the bias label is read from
 _FETCH_BARS = 500        # what the chart's order-block overlay reads - same zones as the chart
 # The 15m volume baseline compares a bar with the SAME 15-minute slot in ~20 earlier sessions, which
@@ -49,8 +50,9 @@ _FETCH_BARS_TF = {"15m": 2000}
 _ENGINE_BARS = 200       # what the pipeline feeds the engine - same indicator values as the engine
 _MIN_BARS = 60
 # A bar on the slow timeframes barely moves in a minute; refetching them that often only loads the
-# shared MT5 connection. The 1h carries the live price, so it stays fresh.
-_TTL = {"30s": 10.0, "1m": 10.0, "5m": 20.0, "15m": 30.0, "1h": 45.0, "4h": 120.0, "1d": 300.0}
+# shared MT5 connection. The 1h carries the live price, so it stays fresh. The 10s lives under one
+# of its bars: 500 of them are ~85 minutes of ticks, a 30-100 ms read. The 5s too: ~42 minutes of ticks.
+_TTL = {"5s": 2.0, "10s": 4.0, "30s": 10.0, "1m": 10.0, "3m": 15.0, "5m": 20.0, "15m": 30.0, "1h": 45.0, "4h": 120.0, "1d": 300.0}
 # Price this close to a zone edge (in ATRs of that timeframe) counts as "at" the zone.
 NEAR_ZONE_ATR = 0.5
 RSI_HIGH, RSI_LOW = 70.0, 30.0
@@ -114,7 +116,7 @@ VOL_SPIKE = 2.0
 VOL_SIDE_LO, VOL_SIDE_HI = 0.40, 0.60  # share of recent volume on up-close bars
 
 
-_TF_SECONDS = {"30s": 30, "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 4 * 3600, "1d": 86400}
+_TF_SECONDS = {"5s": 5, "10s": 10, "30s": 30, "1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600, "4h": 4 * 3600, "1d": 86400}
 _SAME_HOUR_MIN = 8          # same-hour samples needed before an intraday ratio means anything
 
 
@@ -145,7 +147,7 @@ def _volume_read(candles, timeframe: str = "1h", now: datetime | None = None) ->
     before them. Against a trailing window the reading mostly reported the clock: replayed over 14
     months of Exness 1H bars, the 14:00 UTC bar (US cash open) read as a 2x "spike" on 96% of days for
     US500/USTEC and the 21-23 UTC bars read "low" on 89-100% of days; per-hour baselines bring the spike
-    rate down to 1-15% in every hour. Daily bars use the previous 20 sessions. The 1m and 5m use the
+    rate down to 1-15% in every hour. Daily bars use the previous 20 sessions. The 1m, 3m and 5m use the
     previous 20 bars: a same-slot baseline would need 20 days of their history (28,800 bars on the
     1m), and over 20 bars - 20 minutes to 1h40 - the session clock moves far less than across a day.
 
@@ -191,17 +193,21 @@ def _volume_read(candles, timeframe: str = "1h", now: datetime | None = None) ->
         if pm > 0:
             r = rm / pm
             trend = "expanding" if r >= 1.15 else "fading" if r <= 0.85 else "flat"
-    win = done[-20:]
-    upv = sum(float(c.volume or 0.0) for c in win if c.close > c.open)
-    dnv = sum(float(c.volume or 0.0) for c in win if c.close < c.open)
     return {
         "ratio": round(ratio, 2),
         "level": "high" if ratio >= VOL_HIGH else "low" if ratio <= VOL_LOW else "normal",
         "trend": trend,
-        "up_share": round(upv / (upv + dnv), 2) if (upv + dnv) > 0 else None,
+        "up_share": up_share(done[-20:]),
         "baseline": (("same 15-min slot" if timeframe == "15m" else "same hour") if intraday
                      else "20 sessions" if timeframe == "1d" else "20 bars"),
     }
+
+
+def up_share(bars: list) -> float | None:
+    """The share of these bars' volume that traded on UP-close bars, to 2 dp: the buyers / sellers reading."""
+    upv = sum(float(c.volume or 0.0) for c in bars if c.close > c.open)
+    dnv = sum(float(c.volume or 0.0) for c in bars if c.close < c.open)
+    return round(upv / (upv + dnv), 2) if (upv + dnv) > 0 else None
 
 
 _HOLIDAY_STUB = 0.15        # a weekday trading under 15% of a normal session is a holiday stub
@@ -252,6 +258,83 @@ def session_days(daily: list) -> list:
     return out if (fold_weekends or len(out) != len(daily)) else daily
 
 
+def _direction(ind: dict, trend: str) -> dict:
+    """A read's direction fields, from the engine's indicators: what ``lean_of`` counts. ``trend`` is the
+    read's own EMA label, the fallback when the EMAs can't be compared."""
+    st_dir = ind.get("supertrend_dir")
+    structure = {1.0: "up", -1.0: "down"}.get(ind.get("structure"), "range")
+    choch = ind.get("choch") == 1.0
+    return {
+        "trend": _trend_from_indicators(ind, trend),
+        "adx": ind.get("adx"),
+        # ADX measures strength only; +DI vs -DI says which side that strength belongs to.
+        "plus_di": ind.get("plus_di"), "minus_di": ind.get("minus_di"),
+        "supertrend": ("up" if st_dir and st_dir > 0 else "down" if st_dir and st_dir < 0 else None),
+        # The histogram's sign says which side has momentum.
+        "macd_hist": ind.get("macd_hist"),
+        "rsi": ind.get("rsi14"),
+        "structure": structure,
+        "choch": choch,
+        # Which way the change of character broke. It is measured against the SWING structure, which
+        # can disagree with the EMA arrow shown beside it: swing structure "up" plus a close under the
+        # last swing low is a BEARISH break - it confirms a down arrow rather than warning against it.
+        "choch_side": ("down" if structure == "up" else "up") if choch else None,
+    }
+
+
+# --- The strip's verdict ------------------------------------------------------------------------- #
+# The Timeframes strip above the chart (PairMonitor.tsx `score`) counts the same seven readings with the
+# same thresholds, and the strategy rule "Timeframes agree" (strategy._c_tf_align) trades on this one:
+# change one, change the other.
+LEAN_MARGIN = 2            # a timeframe leans one way when that side leads by this many readings
+DI_MARGIN = 5.0            # +DI and -DI this far apart, at ADX 20+, before either side owns the strength
+RSI_UP, RSI_DOWN = 55.0, 45.0
+
+
+def _up_down(v: str | None) -> int:
+    return 1 if v == "up" else -1 if v == "down" else 0
+
+
+def readings(t: dict) -> dict[str, int]:
+    """One timeframe's seven counted readings (a ``read_timeframe`` row): +1 up, -1 down, 0 neither."""
+    h, r, a, pdi, mdi = (t.get(k) for k in ("macd_hist", "rsi", "adx", "plus_di", "minus_di"))
+    share = (t.get("volume") or {}).get("up_share")
+    owned = None not in (a, pdi, mdi) and a >= ADX_WEAK and abs(pdi - mdi) >= DI_MARGIN
+    return {
+        "trend": _up_down(t.get("trend")),
+        "supertrend": _up_down(t.get("supertrend")),
+        "macd": 0 if not h else 1 if h > 0 else -1,
+        "rsi": 0 if r is None else 1 if r >= RSI_UP else -1 if r <= RSI_DOWN else 0,
+        "adx": (1 if pdi > mdi else -1) if owned else 0,
+        # A change of character overrides the swings: it says which way the structure just broke.
+        "structure": _up_down(t.get("choch_side") or t.get("structure")),
+        "flow": 0 if share is None else 1 if share >= VOL_SIDE_HI else -1 if share <= VOL_SIDE_LO else 0,
+    }
+
+
+def lean_of(t: dict | None) -> dict | None:
+    """How a timeframe leans, as the strip prints it: ``{"up", "down", "of", "side"}``. "▲ 5/7" is 5 of the
+    7 readings up and side +1; "≈" is side 0, neither side ahead by LEAN_MARGIN. None = no read."""
+    if not t:
+        return None
+    r = readings(t).values()
+    up, down = sum(v > 0 for v in r), sum(v < 0 for v in r)
+    return {"up": up, "down": down, "of": len(r),
+            "side": 1 if up - down >= LEAN_MARGIN else -1 if down - up >= LEAN_MARGIN else 0}
+
+
+def lean_read(candles: list, timeframe: str) -> dict | None:
+    """``lean_of`` straight from candles, for a reader of its own bars (the strategy rule reads closed ones):
+    the indicators ``read_timeframe`` takes from the last _ENGINE_BARS bars, and the buyers' share of the last
+    20 completed bars - without the zones, the chart state and the volume baseline, which it doesn't count."""
+    if len(candles) < _MIN_BARS:
+        return None
+    tfr = _deterministic_timeframe(OHLCVSeries(symbol="", timeframe=timeframe, candles=candles[-_ENGINE_BARS:]))
+    done = completed(session_days(candles) if timeframe == "1d" else candles, timeframe)
+    flow = {"up_share": up_share(done[-20:])} if len(done) >= 25 else None   # as _volume_read: 25 bars or none
+    return lean_of({**_direction(tfr.indicators, tfr.trend), "volume": flow})
+
+
 def read_timeframe(series: OHLCVSeries) -> dict | None:
     """One timeframe's read-out, or None when there isn't enough history to say anything honest."""
     candles = list(series.candles)
@@ -267,36 +350,24 @@ def read_timeframe(series: OHLCVSeries) -> dict | None:
     stacked = (e20 is not None and e50 is not None and e200 is not None
                and (e20 > e50 > e200 or e20 < e50 < e200))
     strength, adx_dir = _strength(ind.get("adx"), ind.get("adx_prev"))
-    st_dir = ind.get("supertrend_dir")
     cs = read_chart_state(eng)
     div = ("bear" if ind.get("div_bear") else "bull" if ind.get("div_bull")
            else "bear_hidden" if ind.get("div_bear_hidden") else "bull_hidden" if ind.get("div_bull_hidden")
            else None)
     daily = series.timeframe == "1d"
-    structure = {1.0: "up", -1.0: "down"}.get(ind.get("structure"), "range")
-    choch = ind.get("choch") == 1.0
     return {
-        "trend": _trend_from_indicators(ind, tfr.trend),
+        **_direction(ind, tfr.trend),
         "ema_stacked": stacked,
         "ema20": e20, "ema50": e50, "ema200": e200,
         "price_vs_ema200": (None if e200 is None else "above" if px > e200 else "below"),
-        "adx": ind.get("adx"), "strength": strength, "adx_dir": adx_dir,
-        # ADX measures strength only; +DI vs -DI says which side that strength belongs to.
-        "plus_di": ind.get("plus_di"), "minus_di": ind.get("minus_di"),
-        "supertrend": ("up" if st_dir and st_dir > 0 else "down" if st_dir and st_dir < 0 else None),
-        # Histogram and its previous bar: the sign says which side has momentum, the change says
-        # whether it is building or fading. cross: +1 bullish / -1 bearish signal-line cross this bar.
-        "macd_hist": ind.get("macd_hist"), "macd_hist_prev": ind.get("macd_hist_prev"),
+        "strength": strength, "adx_dir": adx_dir,
+        # The histogram's previous bar says whether momentum is building or fading. cross: +1 bullish /
+        # -1 bearish signal-line cross this bar.
+        "macd_hist_prev": ind.get("macd_hist_prev"),
         "macd_cross": ind.get("macd_cross"),
-        "rsi": ind.get("rsi14"), "rsi_prev": ind.get("rsi14_prev"), "rsi_zone": _rsi_zone(ind.get("rsi14")),
-        "structure": structure,
+        "rsi_prev": ind.get("rsi14_prev"), "rsi_zone": _rsi_zone(ind.get("rsi14")),
         # The two swings that define the structure: a close beyond the opposite one breaks it.
         "swing_high": ind.get("swing_high"), "swing_low": ind.get("swing_low"),
-        "choch": choch,
-        # Which way the change of character broke. It is measured against the SWING structure, which
-        # can disagree with the EMA arrow shown beside it: swing structure "up" plus a close under the
-        # last swing low is a BEARISH break - it confirms a down arrow rather than warning against it.
-        "choch_side": ("down" if structure == "up" else "up") if choch else None,
         "divergence": div,
         "state": cs.state, "state_headline": cs.headline,
         # Which way the latest bar's pattern leans (chart_state's own read), so "pullback" is never

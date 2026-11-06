@@ -267,6 +267,33 @@ export interface PositionView {
   // The stop the trade was OPENED with (from the app's own order/proposal records; null for trades
   // opened in the terminal). R is measured against this, so widening a stop can't shrink a loss in R.
   initial_stop_loss?: number | null;
+  // The per-trade ceiling it falls under when not the configured one: 0.06 for a scalp-mode or strategy
+  // trade (RISK.md override 2026-11-02). Absent / null = the configured per-trade risk.
+  risk_ceiling?: number | null;
+}
+
+/** One exit deal of a past trade (a partial close is one of its own). */
+export interface ChartTradeExit {
+  price: number;
+  at: string | null;
+  volume: number;
+  pnl: number | null;
+  // Why it closed, from MT5's deal reason: stop / target / stop_out / app (anything the app sent: a
+  // strategy's close rule, the close button, the advisor) / terminal / phone / web / other. null = unknown.
+  by: string | null;
+}
+
+/** A pair's past trade as the chart's MT5-style history draws it (GET /api/journal/chart-trades). */
+export interface ChartTrade {
+  id: number;
+  direction: "long" | "short";
+  volume: number;
+  entry_price: number;
+  opened_at: string | null;
+  exits: ChartTradeExit[];
+  pnl: number | null;        // net: every exit + swap + commission
+  open: boolean;             // part of it is still open
+  source: string | null;     // who opened it: manual / strategy:<id> / hybrid / …
 }
 
 export interface PositionAdvice {
@@ -1140,7 +1167,7 @@ export interface StrategyParamSpec {
   min: number;
   max: number;
   step: number;
-  kind: "num" | "bool";
+  kind: "num" | "bool" | "tf";   // tf: 1 = this timeframe ticked (key = the timeframe) for a rule over several
 }
 export interface StrategyConditionSpec {
   type: string;
@@ -1154,6 +1181,7 @@ export interface StrategyConditionSpec {
   params: StrategyParamSpec[];
   tfs?: string[] | null;         // the timeframes it can read (null = any)
   default_tf?: string | null;    // the one a new row starts on
+  multi_tf?: boolean;            // reads the timeframes ticked in its params, not one of its own
 }
 export interface StrategyCatalog {
   timeframes: string[];
@@ -1179,10 +1207,59 @@ export interface StrategyDraft {
   // Never under 0 / 5 (what the user confirmed for scalp-style trading; RISK.md's are 30 / 180).
   cooldown_minutes: number;
   loss_cooldown_minutes: number;
+  hours: StrategyHours | null;   // null = it may open a trade at any hour
+  stop: StrategyStop | null;     // null = stop_atr x ATR of the base bars
+  // $: once the trades it closed today (UTC) have made this much it opens nothing more until the next day.
+  daily_target: number | null;
+  // The groups switched off, by place in each rule set: read on the board, but they never open or close a trade.
+  off_groups: StrategyOffGroups;
+  // It trades a REAL account too (RISK.md 2026-11-04); false = demo only. A new real-money order also needs LIVE
+  // trading confirmed - typed, again after every restart.
+  live: boolean;
+}
+export type StrategyOffGroups = Record<"entry_long" | "entry_short" | "exit_rules", number[]>;
+// A stop that follows a SuperTrend line (backend StopIn): it starts on the `tf` SuperTrend (`period`, `mult`),
+// `buffer` x that timeframe's ATR beyond the line - room for a false break - then follows the line at each
+// close of that timeframe, only ever toward the trade.
+export interface StrategyStop {
+  mode: "supertrend";
+  tf: string;
+  period: number;
+  mult: number;
+  buffer: number;
+}
+// Where a buy's or a sell's SuperTrend stop would sit now (the live check); null on the side the line is against.
+export interface StrategyStopNow {
+  level: number;
+  line: number;
+  tf: string;
+}
+// When a strategy may OPEN a trade: from `start` up to `end` ("HH:MM", 24-hour; past midnight when end
+// comes first) on the clock of `tz` (the browser's zone when set on the board). Its close rules run at
+// any hour.
+export interface StrategyHours {
+  start: string;
+  end: string;
+  tz: string | null;
+}
+// Where now falls in those hours (backend `hours_now`): open or not, the strategy's clock now, and the
+// seconds until that changes.
+export interface StrategyHoursNow {
+  open: boolean;
+  start: string;
+  end: string;
+  tz: string;
+  now: string;
+  next_s: number;
 }
 export interface StrategyView extends StrategyDraft {
   id: number;
   enabled: boolean;
+  hours_now?: StrategyHoursNow | null;
+  // symbol -> when its re-entry wait after the last close on the pair ends (ISO); pairs still waiting only.
+  cooldown_until?: Record<string, string>;
+  pnl_today?: number;                                  // what the trades it closed today (UTC) made
+  target_hit?: { at: string; pnl: number } | null;     // it reached its daily target today: no new trades
   state: Record<string, { note?: string; at?: string; acted_bar?: string }> | null;
   last_run_at: string | null;
   last_result: string | null;
@@ -1195,26 +1272,40 @@ export interface StrategyCheckCondition {
   ok: boolean | null;   // null: could not read (no candles yet, no trade) - never counts as holding
   detail: string;
   label: string;
+  leans?: StrategyLean[];   // a rule over several timeframes: each ticked one's lean, as the strip reads it
+}
+// One timeframe's lean on closed bars (backend market_monitor.lean_of): side +1 up, -1 down, 0 neither, null =
+// no candles read yet; up / down = how many of its `of` readings point each way.
+export interface StrategyLean {
+  tf: string;
+  side: number | null;
+  up?: number;
+  down?: number;
+  of?: number;
 }
 export interface StrategyCheckSet {
   ok: boolean;
   group?: number;
-  groups: { ok: boolean; conditions: StrategyCheckCondition[] }[];
+  groups: { ok: boolean; off?: boolean; conditions: StrategyCheckCondition[] }[];   // off: switched off on the board
 }
 export interface StrategyCheck {
   symbol: string;
   paper: boolean;
   market_open: boolean | null;
   bars: Record<string, number>;
+  hours?: StrategyHoursNow | null;   // the draft's trading hours, now (null: none set)
+  stop?: { long: StrategyStopNow | null; short: StrategyStopNow | null };   // with a SuperTrend stop only
   long: StrategyCheckSet | null;
   short: StrategyCheckSet | null;
   exit_long: StrategyCheckSet;
   exit_short: StrategyCheckSet;
 }
 export interface StrategyActivity {
+  /** Negative for a close the engine didn't make (stop, target, by hand): read from the trade itself. */
   id: number;
   at: string | null;
   symbol: string | null;
+  asset_class?: AssetClass | null;
   event: string;
   detail: Record<string, unknown> | null;
 }

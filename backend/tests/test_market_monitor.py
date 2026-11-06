@@ -286,6 +286,29 @@ def test_a_timeframe_without_enough_history_says_so():
     clear_ohlcv_cache()
 
 
+def test_the_chart_panel_reads_a_10s_column():
+    """The panel above the chart has a 10s column, left of the 30s (asked for 2026-11-03). It reads like
+    the others: a cache life under one 10s bar, and its own bar length, so the volume read never takes
+    the forming 10s bar for a closed one."""
+    from app.data.ohlcv_cache import clear_ohlcv_cache
+
+    clear_ohlcv_cache()
+    assert mm.PAIR_TFS[1:3] == ("10s", "30s")
+    assert all(tf in mm._TTL and tf in mm._TF_SECONDS for tf in mm.PAIR_TFS)
+    assert mm._TTL["10s"] < 10
+    end = dt.datetime(2026, 3, 11, 9, tzinfo=dt.timezone.utc)
+    series = {tf: _bars(end - dt.timedelta(seconds=300 * s), dt.timedelta(seconds=s), 300)
+              for tf, s in mm._TF_SECONDS.items()}
+    row = mm.read_pair(_FakeBroker(series), "TEST", "crypto", mm.PAIR_TFS)
+    assert list(row["tfs"]) == list(mm.PAIR_TFS)
+    assert row["errors"] == []
+    assert row["tfs"]["10s"] is not None
+    bars = series["10s"]
+    assert mm.completed(bars, "10s", now=bars[-1].ts + dt.timedelta(seconds=4)) == bars[:-1]   # still forming
+    assert mm.completed(bars, "10s", now=bars[-1].ts + dt.timedelta(seconds=10)) is bars       # closed
+    clear_ohlcv_cache()
+
+
 def test_unchanged_series_is_not_re_read(monkeypatch):
     calls = []
     real = mm.read_timeframe
@@ -550,3 +573,33 @@ def test_15m_volume_is_judged_against_the_same_15_minute_slot():
     v = mm._volume_read(bars, "15m", now=now)
     assert v is not None and v["ratio"] == 1.0 and v["level"] == "normal"
     assert v["baseline"] == "same 15-min slot"
+
+
+def test_the_chart_panel_reads_a_3m_column():
+    """The 3m (asked for 2026-11-05) sits between the 1m and the 5m. Its forming bar is told from a closed
+    one by its own 3-minute length, and its cache lives under one of its bars."""
+    assert mm.PAIR_TFS[3:6] == ("1m", "3m", "5m")
+    assert mm._TF_SECONDS["3m"] == 180 and mm._TTL["1m"] <= mm._TTL["3m"] <= mm._TTL["5m"] < 180
+    start = dt.datetime(2026, 3, 11, 8, 0, tzinfo=dt.timezone.utc)
+    bars = _bars(start, dt.timedelta(minutes=3), 20)                       # the last one opens 08:57
+    assert len(mm.completed(bars, "3m", now=dt.datetime(2026, 3, 11, 8, 59, tzinfo=dt.timezone.utc))) == 19
+    assert len(mm.completed(bars, "3m", now=dt.datetime(2026, 3, 11, 9, 0, tzinfo=dt.timezone.utc))) == 20
+
+def test_the_chart_panel_reads_a_5s_column():
+    """The 5s (asked for 2026-11-06) is the panel's first column, left of the 10s, built from ticks like the
+    chart's 5s. Its cache lives under one of its bars, and its forming bar is told from a closed one by its
+    own 5-second length."""
+    from app.data.ohlcv_cache import clear_ohlcv_cache
+
+    clear_ohlcv_cache()
+    assert mm.PAIR_TFS[:3] == ("5s", "10s", "30s")
+    assert mm._TF_SECONDS["5s"] == 5 and mm._TTL["5s"] < 5
+    end = dt.datetime(2026, 3, 11, 9, tzinfo=dt.timezone.utc)
+    series = {tf: _bars(end - dt.timedelta(seconds=300 * s), dt.timedelta(seconds=s), 300)
+              for tf, s in mm._TF_SECONDS.items()}
+    row = mm.read_pair(_FakeBroker(series), "TEST", "crypto", mm.PAIR_TFS)
+    assert row["errors"] == [] and row["tfs"]["5s"] is not None
+    bars = series["5s"]
+    assert mm.completed(bars, "5s", now=bars[-1].ts + dt.timedelta(seconds=2)) == bars[:-1]   # still forming
+    assert mm.completed(bars, "5s", now=bars[-1].ts + dt.timedelta(seconds=5)) is bars        # closed
+    clear_ohlcv_cache()

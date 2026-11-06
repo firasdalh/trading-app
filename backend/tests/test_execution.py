@@ -405,6 +405,152 @@ def test_reconcile_skips_on_broker_outage(db_session, monkeypatch):
     assert pos.status == PositionStatus.OPEN.value
 
 
+# ---- a broker-side close its deal history already shows: no confirming wait ----
+
+class _HistoryBroker(_FakeBroker):
+    """A durable broker (MT5) whose book no longer holds the trade, with its deal history as
+    get_trade_history returns it."""
+    def __init__(self, trades=(), history_raises=False):
+        super().__init__(reconciles=True, book=[])
+        self._trades, self._history_raises = list(trades), history_raises
+
+    def get_trade_history(self, symbol, since):
+        if self._history_raises:
+            raise RuntimeError("history_deals_get failed")
+        return self._trades
+
+
+def _usoil_long(db_session, opened):
+    pos = Position(symbol="USOILm", asset_class="energy", direction="long", qty=0.21, entry_price=95.871,
+                   stop_loss=95.751, take_profit=96.029, status=PositionStatus.OPEN.value, last_price=95.79,
+                   opened_at=opened, source="strategy:1")
+    db_session.add(pos)
+    db_session.commit()
+    return pos
+
+
+def _deal_trade(direction, opened, *, by, exit_price, pnl, still_open=False):
+    return {"id": 2684003747, "direction": direction, "volume": 0.21, "entry_price": 95.871,
+            "opened_at": opened.isoformat(),
+            "exits": [{"price": exit_price, "at": (opened + timedelta(minutes=6)).isoformat(), "volume": 0.21,
+                       "pnl": pnl, "by": by}],
+            "pnl": pnl, "open": still_open, "source": "strategy:1"}
+
+
+def _last_event(db_session, symbol):
+    from app.models.db import AgentRun
+    return db_session.scalars(select(AgentRun).where(AgentRun.symbol == symbol).order_by(AgentRun.id.desc())).first()
+
+
+def test_a_stop_out_in_the_deal_history_is_booked_on_the_first_pass(db_session, monkeypatch):
+    """USOILm 2026-11-03: the broker's stop closed the long at 02:49:28 and the app kept it OPEN until 02:50:01,
+    so the chart drew its exit arrow beside a trade still open - it read as a second trade on the pair. With
+    the closing deal in the broker's own history there is nothing to confirm: closed on the first pass, at
+    the broker's price and P&L, and booked into the day the way the stop backstop books one."""
+    from app.execution import monitor as monitor_mod
+
+    monkeypatch.setattr(monitor_mod, "_MISSING_SINCE", {})
+    opened = NOW - timedelta(minutes=6)
+    pos = _usoil_long(db_session, opened)
+    before = get_or_create_daily_state(db_session).realized_pnl
+    broker = _HistoryBroker([_deal_trade("long", opened + timedelta(seconds=1), by="stop", exit_price=95.751,
+                                         pnl=-25.2)])
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
+
+    settings = get_or_create_settings(db_session)
+    assert monitor_mod._reconcile_closed_at_broker(db_session, settings, [pos], now=NOW) == 1
+    db_session.commit()
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.CLOSED.value and pos.closed_at is not None
+    assert pos.last_price == 95.751 and pos.realized_pnl == -25.2
+    assert get_or_create_daily_state(db_session).realized_pnl == round(before - 25.2, 2)
+    ev = _last_event(db_session, "USOILm")
+    assert ev.event == "position_closed"
+    assert ev.detail["reason"] == "stop" and ev.detail["broker_status"] == "closed at broker"
+
+
+def test_a_target_in_the_deal_history_closes_on_the_first_pass_unbooked(db_session, monkeypatch):
+    """A target the broker took is closed on the first pass too - and, as before, not booked into the day:
+    its result comes from the broker's history."""
+    from app.execution import monitor as monitor_mod
+
+    monkeypatch.setattr(monitor_mod, "_MISSING_SINCE", {})
+    opened = NOW - timedelta(minutes=6)
+    pos = _usoil_long(db_session, opened)
+    before = get_or_create_daily_state(db_session).realized_pnl
+    broker = _HistoryBroker([_deal_trade("long", opened, by="target", exit_price=96.029, pnl=33.18)])
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
+
+    settings = get_or_create_settings(db_session)
+    assert monitor_mod._reconcile_closed_at_broker(db_session, settings, [pos], now=NOW) == 1
+    db_session.commit()
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.CLOSED.value and pos.realized_pnl is None
+    assert get_or_create_daily_state(db_session).realized_pnl == before
+    ev = _last_event(db_session, "USOILm")
+    assert ev.event == "position_reconciled" and ev.detail["reason"] == "closed at broker (deal history)"
+
+
+@pytest.mark.parametrize("history", ["unreadable", "no deal", "still open", "other side", "other entry"])
+def test_without_a_closing_deal_the_confirming_wait_still_applies(db_session, monkeypatch, history):
+    """No proof, no early close: the empty book of a terminal waking from sleep (no closing deal), an
+    unreadable history, a trade with volume still open, a closed SHORT on the pair, or a closed long entered
+    ten minutes away (another trade) - each waits out the minute, as before."""
+    from app.execution import monitor as monitor_mod
+
+    monkeypatch.setattr(monitor_mod, "_MISSING_SINCE", {})
+    opened = NOW - timedelta(minutes=30)
+    pos = _usoil_long(db_session, opened)
+    trades = {
+        "unreadable": [], "no deal": [],
+        "still open": [_deal_trade("long", opened, by="app", exit_price=95.9, pnl=2.0, still_open=True)],
+        "other side": [_deal_trade("short", opened, by="stop", exit_price=95.9, pnl=-5.0)],
+        "other entry": [_deal_trade("long", opened + timedelta(minutes=10), by="stop", exit_price=95.751, pnl=-25.2)],
+    }[history]
+    broker = _HistoryBroker(trades, history_raises=history == "unreadable")
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
+
+    settings = get_or_create_settings(db_session)
+    assert monitor_mod._reconcile_closed_at_broker(db_session, settings, [pos], now=NOW) == 0
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.OPEN.value
+    assert monitor_mod._reconcile_closed_at_broker(db_session, settings, [pos],
+                                                   now=NOW + timedelta(seconds=61)) == 1
+    db_session.commit()
+    db_session.refresh(pos)
+    assert pos.status == PositionStatus.CLOSED.value and pos.realized_pnl is None
+    assert _last_event(db_session, "USOILm").detail["reason"] == "closed at broker (reconciled)"
+
+
+def test_a_stop_out_is_booked_once_in_a_monitor_pass(db_session, monkeypatch):
+    """Through monitor_positions: the reconcile books the broker's stop-out first, so the stop backstop
+    (the price is past the stop) never sees it, and the day holds the loss once."""
+    from app.execution import monitor as monitor_mod
+    from app.models.schemas import Quote
+
+    class _Broker(_HistoryBroker):
+        name = "fake-mt5"
+
+        def get_quote(self, symbol):
+            return Quote(symbol=symbol, price=95.70, ts=NOW)      # past the 95.751 stop
+
+        def close_position(self, symbol, direction=None):
+            raise AssertionError("the broker holds nothing to close")
+
+    monkeypatch.setattr(monitor_mod, "_MISSING_SINCE", {})
+    opened = datetime.now(timezone.utc) - timedelta(minutes=6)
+    pos = _usoil_long(db_session, opened)
+    before = get_or_create_daily_state(db_session).realized_pnl
+    broker = _Broker([_deal_trade("long", opened, by="stop", exit_price=95.751, pnl=-25.2)])
+    monkeypatch.setattr(monitor_mod, "get_broker_for", lambda ac, bm: broker)
+
+    out = monitor_positions(db_session)
+    db_session.refresh(pos)
+    assert out["checked"] == 0
+    assert pos.status == PositionStatus.CLOSED.value and pos.realized_pnl == -25.2
+    assert get_or_create_daily_state(db_session).realized_pnl == round(before - 25.2, 2)
+
+
 # ---- journal repair: recover realized P&L from broker deal history ----
 
 def _closed_bt(symbol, direction, entry, exit_, pnl, closed_at):

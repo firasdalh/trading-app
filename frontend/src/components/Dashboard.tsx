@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api/client";
+import { useFollowTrades } from "../followTrades";
 import { assetLabel, displaySymbol, fmtPrice, fmtUsd } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
@@ -74,6 +75,7 @@ import { PositionAdvicePanel } from "./PositionAdvicePanel";
 import { PositionsTable } from "./PositionsTable";
 import { SymbolPicker } from "./SymbolPicker";
 import { WatchlistPanel } from "./WatchlistPanel";
+import { DeskStrategyActivity } from "./StrategyActivityFeed";
 import { StrategyWidget } from "./StrategyWidget";
 import { MarketMonitor } from "./MarketMonitor";
 import { PriceAlerts } from "./PriceAlerts";
@@ -571,8 +573,44 @@ export function Dashboard({
     revealChart();
   };
 
+  // Follow trades (../followTrades.ts): when the charted trade closes, the chart moves on to the oldest trade
+  // still open once the screen has been left alone a moment. ON/OFF with the 👁 button by the open positions.
+  const [followTrades, setFollowTrades] = useLocalStorage("ta.followTrades", true);
+  const [followNote, setFollowNote] = useState<string | null>(null);
+  useFollowTrades({
+    on: followTrades,
+    symbol,
+    positions,
+    busy: !!preOrder,
+    onFollow: (to, from) => {
+      if (to.asset_class !== assetClass) setAssetClass(to.asset_class as AssetClass);
+      setSymbol(to.symbol);
+      revealChart();
+      setFollowNote(`${displaySymbol(from)} closed - now on ${displaySymbol(to.symbol)}, the oldest open trade`);
+    },
+  });
+  useEffect(() => {
+    if (!followNote) return;
+    const id = window.setTimeout(() => setFollowNote(null), 12_000);
+    return () => window.clearTimeout(id);
+  }, [followNote]);
+  const followButton = (
+    <button
+      onClick={() => setFollowTrades(!followTrades)}
+      aria-pressed={followTrades}
+      className={`rounded px-1.5 py-0.5 text-xs ${
+        followTrades ? "bg-amber-500/15 text-amber-300 hover:bg-amber-500/25" : "text-neutral-500 hover:text-neutral-300"
+      }`}
+      title={followTrades
+        ? "Follow trades is ON: when the charted trade closes, the chart moves to the oldest trade still open, once you have left the mouse and keyboard alone for 15 s. Click to turn it off."
+        : "Follow trades is OFF: the chart stays where you put it. Click to turn it on."}
+    >
+      👁 Follow {followTrades ? "ON" : "OFF"}
+    </button>
+  );
+
   const openN = (positions ?? []).length;
-  const floatingTotal = (positions ?? []).reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+  const floatingTotal =(positions ?? []).reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
   const armedN = armedLevels.length;
   const maxPos = settings?.risk.max_open_positions ?? null;
 
@@ -778,6 +816,7 @@ export function Dashboard({
                 {(positions ?? []).length > 0 && (
                   <span className={`${chartFull ? "flex" : "flex lg:hidden"} flex-wrap items-center gap-1.5`}>
                     <span className="text-xs text-neutral-500">● Open</span>
+                    {followButton}
                     {(positions ?? []).map((p) => {
                       const active = p.symbol.toUpperCase() === symbol.toUpperCase();
                       return (
@@ -804,6 +843,9 @@ export function Dashboard({
                 )}
                 {/* The timeframe, at the chart's top right - where a chart keeps it. */}
                 <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
+                  {followNote && (
+                    <span className="rounded bg-amber-500/15 px-2 py-0.5 text-xs text-amber-300" role="status">↪ {followNote}</span>
+                  )}
                   <TimeframeBadge tf={timeframe} compact={scalp} />
                   {timeframeSwitch}
                 </span>
@@ -915,6 +957,7 @@ export function Dashboard({
                     {fmtUsd(floatingTotal, { sign: true })}
                   </span>
                 )}
+                {followButton}
                 <button
                   onClick={() => onOpenDrawer("advisor")}
                   className="btn btn-ghost px-1.5 py-0.5 text-xs"
@@ -975,6 +1018,26 @@ export function Dashboard({
                 Nothing to approve and nothing armed — new approvals land here{chime ? " with a chime" : ""}.
               </div>
             )}
+          </SideSection>
+
+          {/* What the strategies did - what they opened and closed and why, what was refused - so the board
+              needn't be opened to find out (asked for 2026-11-02, under the approvals). Not mounted in full
+              screen, where this column is hidden. */}
+          <SideSection
+            title="Strategy activity"
+            hint="What your strategies opened and closed and why, newest first - click a row for the details"
+            body="bare"
+            actions={
+              <button
+                onClick={openStrategyBoard}
+                className="btn btn-ghost px-1.5 py-0.5 text-xs"
+                title="The Strategies board: build, change, start and stop them"
+              >
+                Board ›
+              </button>
+            }
+          >
+            {!chartFull && <DeskStrategyActivity onPick={pickStrategyPair} />}
           </SideSection>
 
           {/* Scalp mode puts the strategies here instead of the watchlist: what each running one reads
