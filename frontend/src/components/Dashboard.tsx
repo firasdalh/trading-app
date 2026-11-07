@@ -76,6 +76,7 @@ import { PositionsTable } from "./PositionsTable";
 import { SymbolPicker } from "./SymbolPicker";
 import { WatchlistPanel } from "./WatchlistPanel";
 import { DeskStrategyActivity } from "./StrategyActivityFeed";
+import { SIGNAL_PICK_EVENT } from "./StrategySignals";
 import { StrategyWidget } from "./StrategyWidget";
 import { MarketMonitor } from "./MarketMonitor";
 import { PriceAlerts } from "./PriceAlerts";
@@ -195,8 +196,15 @@ export function Dashboard({
   const [analyzing, setAnalyzing] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A manual stop moved past the per-trade risk: allowed (your call), but shown until dismissed.
-  const [slTpWarning, setSlTpWarning] = useState<string | null>(null);
+  // A manual stop moved past the per-trade risk: allowed (your call), but shown until dismissed - or until
+  // that trade is closed (it stayed up warning about a trade long gone, 2026-11-07).
+  const [slTpWarning, setSlTpWarning] = useState<{ symbol: string; direction?: string; text: string } | null>(null);
+  useEffect(() => {
+    if (!slTpWarning || !Array.isArray(positions)) return;
+    const open = positions.some((x) => x.symbol === slTpWarning.symbol
+      && (!slTpWarning.direction || x.direction === slTpWarning.direction));
+    if (!open) setSlTpWarning(null);
+  }, [positions, slTpWarning]);
   const [stBandBusy, setStBandBusy] = useState(false);
   const [aiReviewBusy, setAiReviewBusy] = useState(false);
 
@@ -361,7 +369,7 @@ export function Dashboard({
   ) => {
     try {
       const res = await api.setSlTp(p.symbol, p.asset_class as AssetClass, sl, tp, p.direction);
-      setSlTpWarning(res.warning ? `${p.symbol}: ${res.warning}` : null);
+      setSlTpWarning(res.warning ? { symbol: p.symbol, direction: p.direction, text: `${p.symbol}: ${res.warning}` } : null);
       if (res.warning && document.fullscreenElement) window.alert(`${p.symbol}: ${res.warning}`);
       onPositionsChanged();
     } catch (e) {
@@ -553,6 +561,17 @@ export function Dashboard({
     setSymbol(sym);
     revealChart();
   };
+  // A watch-only signal's pop-up (StrategySignals, mounted by App) charts its pair the same way.
+  const pickRef = useRef(pickStrategyPair);
+  pickRef.current = pickStrategyPair;
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ symbol?: string; assetClass?: AssetClass }>).detail;
+      if (d?.symbol && d.assetClass) pickRef.current(d.symbol, d.assetClass);
+    };
+    window.addEventListener(SIGNAL_PICK_EVENT, on);
+    return () => window.removeEventListener(SIGNAL_PICK_EVENT, on);
+  }, []);
   const openStrategyBoard = () => {
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
     onOpenDrawer("strategy");
@@ -629,7 +648,7 @@ export function Dashboard({
       )}
       {slTpWarning && (
         <div className="flex items-start justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
-          <span>⚠ {slTpWarning}</span>
+          <span>⚠ {slTpWarning.text}</span>
           <button onClick={() => setSlTpWarning(null)} className="text-amber-300/80 hover:text-amber-200" aria-label="Dismiss">
             ×
           </button>

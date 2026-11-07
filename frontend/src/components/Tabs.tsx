@@ -47,7 +47,9 @@ export function NavTabs({ items }: { items: NavItem[] }) {
               focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50
               ${viewOn ? "text-white" : drawerOn ? "bg-brand-500/15 text-white ring-1 ring-inset ring-brand-500/50" : "text-neutral-400 hover:bg-neutral-800/70 hover:text-neutral-100"}`}
           >
-            {t.icon && <Icon name={t.icon} />}
+            {/* The icons only where there is room: below 1800px they squeezed the account numbers
+                out of the header (the words are what is read). */}
+            {t.icon && <span className="hidden min-[1800px]:inline-flex"><Icon name={t.icon} /></span>}
             <span>{t.label}</span>
             {t.alert ? (
               <span

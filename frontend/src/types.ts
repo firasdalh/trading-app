@@ -1188,6 +1188,7 @@ export interface StrategyCatalog {
   conditions: StrategyConditionSpec[];
   max_groups: number;
   max_conditions: number;
+  max_pairs?: number;            // pairs one strategy reads (an older backend doesn't say: 10)
 }
 export interface StrategyDraft {
   name: string;

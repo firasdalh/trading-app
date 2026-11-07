@@ -11,6 +11,7 @@ import { RiskDashboard } from "./components/RiskDashboard";
 import { ScorecardPanel } from "./components/ScorecardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StrategyBoard } from "./components/StrategyBoard";
+import { SIGNAL_PICK_EVENT, SignalToasts, useStrategySignals } from "./components/StrategySignals";
 import { TargetCelebration, useTargetHits } from "./components/TargetCelebration";
 import type { NavItem } from "./components/Tabs";
 import { useLocalStorage } from "./hooks/useLocalStorage";
@@ -139,6 +140,23 @@ export default function App() {
     setDrawer(d);
   };
   const closeDrawer = useCallback(() => setDrawer(null), []);
+  // A watch-only group's signal (StrategySignals) is announced on every view; its "Chart ›" brings the
+  // desk up on that pair.
+  const pickSignal = (sym: string, ac: AssetClass) => {
+    setDrawer(null);
+    if (view === "desk") {
+      window.dispatchEvent(new CustomEvent(SIGNAL_PICK_EVENT, { detail: { symbol: sym, assetClass: ac } }));
+      return;
+    }
+    try {
+      localStorage.setItem("ta.symbol", JSON.stringify(sym));   // the desk reads it as it opens
+    } catch {
+      /* storage unavailable: the desk opens on its last pair */
+    }
+    setAssetClass(ac);
+    setStored("desk");
+  };
+  const [signals, dismissSignal] = useStrategySignals(pickSignal);
   // A chart window - on another screen, say - asks for a drawer (its Strategies widget's "Open the
   // board"): open it here and answer, so the window knows a desk heard it.
   useEffect(() => {
@@ -317,6 +335,7 @@ export default function App() {
 
       {/* One at a time: two targets hit together celebrate back to back. */}
       <TargetCelebration hit={targetHits[0] ?? null} onDone={dismissHit} />
+      <SignalToasts signals={signals} onPick={pickSignal} onDismiss={dismissSignal} />
     </div>
   );
 }

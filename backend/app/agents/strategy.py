@@ -70,6 +70,12 @@ _MAX_GROUPS = 6
 # 10 until 2026-11-03, then 12 so the ATR and spread filters fit beside a full group of entry rules, then 16
 # the same day: the user's BUY group was full again when the stochastic-with-room rule came.
 _MAX_CONDITIONS = 16
+# Pairs one strategy reads: 10 until 2026-11-07, then 13 at the user's request ("if it won't affect the
+# performance"). Measured that day on strategy 1's live pairs: a look costs ~13 ms a pair after a 10s close and
+# ~45 ms after a 1m close (the seconds bars built from ticks, then the rules), so a pass over 10 pairs took
+# 0.14 s / 0.52 s and 13 take ~0.16 s / ~0.68 s - with ATR(14) read off the bars' memo (_atr14), which took
+# ~1.4 ms a pair off every look between closes. About 1.5 s -> 1.8 s of CPU a minute.
+_MAX_PAIRS = 13
 # The levels and zones the "room" filters read: the windows the chart draws its lines (/market/levels,
 # 200 bars) and its order-block zones (/market/orderblocks, 500 bars) from.
 _LEVEL_BARS = 200
@@ -584,8 +590,16 @@ def _c_atr(p, s, b, ctx) -> Result:
     return True, f"{now}; at least {min(ratios):.2f}x on each of the last {k} bars"
 
 
+def _atr14(b: Bars) -> float | None:
+    """``atr(b.c, 14)`` - the same number, rounded the same - off the bars' memoized series. The spread rule
+    and one R read it on every look (the spread rule once a side per group it is in, watch-only ones too):
+    recomputed from all 500 bars each time it cost ~1.4 ms a pair a look (measured 2026-11-07)."""
+    s = b.atr(14)
+    return round(s[-1], 6) if s and s[-1] is not None else None
+
+
 def _c_spread(p, s, b, ctx) -> Result:
-    a = atr(b.c, 14)
+    a = _atr14(b)
     if ctx.spread is None or not a:
         return None, "no spread / ATR"
     pct = 100 * ctx.spread / a
@@ -1225,7 +1239,7 @@ def _stop_distance(session: Session, stop_atr: float, base: Bars | None, q: dict
     """One R: how far the order's stop goes - stop_atr x ATR(14) of the base timeframe, pushed out past
     the spread gate's minimum and the broker's stop level, as the scalp ticket does. None without a
     quote or an ATR."""
-    a = atr(base.c, 14) if base is not None else None
+    a = _atr14(base) if base is not None else None
     if not q or not a or a <= 0:
         return None
     return max(stop_atr * a, _stop_floor(session, q))
@@ -1529,6 +1543,53 @@ def _note(state: dict, symbol: str, text: str, now: datetime) -> dict:
     return {"symbol": symbol, "note": text}
 
 
+# Watch-only groups (asked 2026-11-06): a BUY / SELL group switched off on the board opens nothing, but it is
+# read on every look and a "signal" is logged the moment all of it starts to hold - the desk announces it.
+# (strategy, symbol, side, group) -> (held on the last look, when it last signalled). In memory: after a
+# restart a group already holding counts as seen, so a reload never replays a burst of signals.
+_WATCH: dict[tuple[int, str, str, int], tuple[bool, float]] = {}
+# At most one signal per pair, side and group in this long: a group flickering in and out on 5s bars would
+# otherwise ring every few seconds.
+_WATCH_GAP_S = 300.0
+
+
+def _watch(session: Session, cfg: StrategyConfig, rules: Rules, symbol: str, data: dict[str, Bars], ctx: Ctx,
+           q: dict | None, now: datetime) -> None:
+    """Read the switched-off BUY / SELL groups; log a "signal" when one starts to hold. Never trades.
+
+    Read whatever holds a trade back (a trade open, a cooldown, the daily cap or target, the kill-switch, an
+    unconfirmed live account): it opens nothing. Only the market has to be live and the strategy inside its
+    hours - outside them it is asleep, signals included."""
+    if not (rules.buy_off() or rules.sell_off()):
+        return
+    base = data.get(rules.timeframe)
+    if base is None or _stale(base, now):
+        return
+    hrs = hours_now(rules.hours, now)
+    if hrs and not hrs["open"]:
+        return
+    for side, s, groups, off in (("long", 1, rules.buy_rules(), rules.buy_off()),
+                                 ("short", -1, rules.sell_rules(), rules.sell_off())):
+        if rules.sides not in ("both", side):
+            continue
+        side_ctx = None
+        for gi in sorted(off):
+            if gi >= len(groups) or not groups[gi]:
+                continue
+            if side_ctx is None:
+                side_ctx = replace(ctx, risk=_side_risk(session, rules, data, q, s)) if rules.stop else ctx
+            ev = evaluate([groups[gi]], s, data, side_ctx, side)
+            key = (cfg.id, symbol, side, gi)
+            was = _WATCH.get(key)
+            last = was[1] if was else 0.0
+            if ev["ok"] and was is not None and not was[0] and now.timestamp() - last >= _WATCH_GAP_S:
+                last = now.timestamp()
+                _log(session, cfg, symbol, "signal", side=side, group=gi + 1, watch=True,
+                     price=side_ctx.ask if s > 0 else side_ctx.bid,
+                     rules=[c["label"] for c in ev["groups"][0]["conditions"]])
+            _WATCH[key] = (ev["ok"], last)
+
+
 def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, now: datetime,
               day: dict | None = None) -> dict:
     """One pair: manage the trades it holds, then look for an entry. ``day``: ``today_result``, when it
@@ -1550,6 +1611,10 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
     q = _quote(broker, symbol)
     ctx = Ctx(now=now, base_tf=cfg.timeframe, risk=_stop_distance(session, cfg.stop_atr, base, q), **_quote_ctx(q))
     own = strategy_source(cfg)
+    try:
+        _watch(session, cfg, rules, symbol, data, ctx, q, now)
+    except Exception as exc:  # noqa: BLE001 - a watch-only read never gets in the way of the trades
+        log.warning("strategy watch failed", extra={"strategy": cfg.id, "symbol": symbol, "error": str(exc)})
 
     # 1) The trades it manages: its own, and the user's on this pair when asked.
     mine = [p for p in _open_positions(session, symbol)
@@ -1611,7 +1676,9 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
             continue
         # With a SuperTrend stop each side has its own R: to the line on its side of the price.
         side_ctx = replace(ctx, risk=_side_risk(session, rules, data, q, s)) if rules.stop else ctx
-        ev = evaluate(groups, s, data, side_ctx, side, off=off)
+        # The switched-off groups were read by _watch: here they are empty, so they never hold and the
+        # others keep their places.
+        ev = evaluate([[] if gi in off else g for gi, g in enumerate(groups)], s, data, side_ctx, side, off=off)
         if ev["ok"]:
             st["acted_bar"] = bar        # one try per bar, filled or refused
             why = [c["label"] for c in ev["groups"][ev["group"]]["conditions"]]

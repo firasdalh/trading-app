@@ -438,7 +438,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
           detail: `⏱ ${fmtDur(watch.secs)} · ${keys ? "SPACE closes · Enter buy · 0 sell" : "✕ CLOSE is in the ticket"}`,
         }
       : keys
-        ? { tone: "idle", title: "⏎ ENTER = BUY · 0 = SELL", detail: "the first press stages the pre-order, the same key again sends it" }
+        ? { tone: "idle", title: "⏎ BUY · 0 SELL", detail: "1st press stages · 2nd sends" }
         : null;
   const viewKey = JSON.stringify([view && { ...view, hint: null }, hud]);
   const onViewRef = useRef(onView);

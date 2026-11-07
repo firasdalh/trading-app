@@ -6,6 +6,7 @@ import { usePolling } from "../hooks/usePolling";
 import { TF_SECONDS } from "../timeframes";
 import { NumberBox } from "./NumberBox";
 import { ActivityFeed } from "./StrategyActivityFeed";
+import { askNotifyPermission } from "./StrategySignals";
 import type {
   AssetClass,
   StrategyActivity,
@@ -542,7 +543,8 @@ function ConditionRow({ cond, where, catalog, tfs, onChange, onRemove, states }:
 
 // One rule set: groups of conditions. A group holds when ALL its conditions do; the set fires when
 // ANY group switched on does. One switched off (`off`, by place) is read like the others but never opens or
-// closes a trade. `check` is the live read for the BUY / SELL set; `checks` for the CLOSE set (one per side).
+// closes a trade. A BUY / SELL group switched off is on watch only (2026-11-06): shown in full, in blue, and
+// the desk announces it when all of it holds. `check` is the live read for the BUY / SELL set; `checks` for the CLOSE set (one per side).
 function RuleSet({ where, groups, off, onChange, catalog, tfs, baseTf, check, checks }: {
   where: Where;
   groups: StrategyGroups;
@@ -560,19 +562,24 @@ function RuleSet({ where, groups, off, onChange, catalog, tfs, baseTf, check, ch
   // Removing a group moves the ones after it up a place, and their switches with them.
   const removeGroup = (gi: number) =>
     onChange(groups.filter((_, i) => i !== gi), off.filter((i) => i !== gi).map((i) => (i > gi ? i - 1 : i)));
-  const flip = (gi: number) => onChange(groups, off.includes(gi) ? off.filter((i) => i !== gi) : [...off, gi].sort((a, b) => a - b));
+  const flip = (gi: number) => {
+    if (where !== "exit" && !off.includes(gi)) askNotifyPermission();   // going on watch: its signals notify
+    onChange(groups, off.includes(gi) ? off.filter((i) => i !== gi) : [...off, gi].sort((a, b) => a - b));
+  };
   const verb = where === "exit" ? "closes" : "opens";
   return (
     <div className="space-y-2">
       {groups.map((g, gi) => {
         const isOff = off.includes(gi);
+        const watch = isOff && where !== "exit";
         const held = check?.groups[gi]?.ok || (checks ?? []).some((c) => c.set?.groups[gi]?.ok);
         const closes = (checks ?? []).filter((c) => c.set?.groups[gi]?.ok).map((c) => c.prefix.replace("if ", "").trim());
         return (
           <div
             key={gi}
             className={`rounded-lg border p-2 ${
-              isOff ? "border-dashed border-neutral-700 bg-neutral-900/20" : held ? "border-bull/60 bg-bull/[0.05]" : "border-neutral-800 bg-neutral-900/40"
+              watch ? (held ? "border-sky-400/70 bg-sky-500/[0.06]" : "border-sky-500/40 bg-sky-500/[0.03]")
+                : isOff ? "border-dashed border-neutral-700 bg-neutral-900/20" : held ? "border-bull/60 bg-bull/[0.05]" : "border-neutral-800 bg-neutral-900/40"
             }`}
           >
             <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
@@ -583,17 +590,24 @@ function RuleSet({ where, groups, off, onChange, catalog, tfs, baseTf, check, ch
                 role="switch"
                 aria-checked={!isOff}
                 onClick={() => flip(gi)}
-                title={isOff
-                  ? `Off: still read here, but it ${verb} nothing. Click to switch it on.`
-                  : `On. Click to switch it off without deleting it: it stays here and is still read, but ${verb} nothing.`}
-                className={`rounded-full px-2 normal-case ${isOff ? "bg-neutral-800 text-neutral-400 hover:text-neutral-200" : "bg-bull/20 text-bull hover:bg-bull/30"}`}
+                title={watch
+                  ? "Watch only: read on every look, it opens nothing - when all of it holds you get a notification (a chime, a pop-up, and a system notification if the browser allows it). Click to switch it on: it trades again."
+                  : isOff
+                    ? `Off: still read here, but it ${verb} nothing. Click to switch it on.`
+                    : where === "exit"
+                      ? `On. Click to switch it off without deleting it: it stays here and is still read, but ${verb} nothing.`
+                      : "On: it opens trades. Click for watch only: it stays here and is read, opens nothing, and notifies you when all of it holds."}
+                className={`rounded-full px-2 normal-case ${
+                  watch ? "bg-sky-500/20 text-sky-200 hover:bg-sky-500/30"
+                    : isOff ? "bg-neutral-800 text-neutral-400 hover:text-neutral-200" : "bg-bull/20 text-bull hover:bg-bull/30"
+                }`}
               >
-                {isOff ? "○ off" : "● on"}
+                {watch ? "👁 watch only" : isOff ? "○ off" : "● on"}
               </button>
               {held && (
-                <span className={`rounded px-1.5 ${isOff ? "bg-neutral-800 text-neutral-400" : "bg-bull/20 text-bull"}`}>
-                  {closes.length ? `would close a ${closes.join(" or a ")} now` : isOff ? "would hold now" : "holds now"}
-                  {isOff && " · off"}
+                <span className={`rounded px-1.5 ${watch ? "bg-sky-500/20 text-sky-200" : isOff ? "bg-neutral-800 text-neutral-400" : "bg-bull/20 text-bull"}`}>
+                  {closes.length ? `would close a ${closes.join(" or a ")} now` : watch ? "signal now" : isOff ? "would hold now" : "holds now"}
+                  {isOff && !watch && " · off"}
                 </span>
               )}
               <button
@@ -604,7 +618,7 @@ function RuleSet({ where, groups, off, onChange, catalog, tfs, baseTf, check, ch
                 remove
               </button>
             </div>
-            <div className={`space-y-1 ${isOff ? "opacity-60" : ""}`}>
+            <div className={`space-y-1 ${isOff && !watch ? "opacity-60" : ""}`}>
               {g.map((c, ci) => (
                 <ConditionRow
                   key={ci}
@@ -920,9 +934,11 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
     }
   };
 
+  // Pairs one strategy reads: the backend's cap (13 since 2026-11-07; an older backend doesn't say it - 10).
+  const maxPairs = catalog.max_pairs ?? 10;
   const addPair = (symbol: string, ac: AssetClass) => {
     const s = symbol.trim();
-    if (!s || draft.pairs.some((p) => p.symbol.toUpperCase() === s.toUpperCase())) return;
+    if (!s || draft.pairs.length >= maxPairs || draft.pairs.some((p) => p.symbol.toUpperCase() === s.toUpperCase())) return;
     set({ pairs: [...draft.pairs, { symbol: s, asset_class: ac }] });
   };
 
@@ -937,7 +953,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
     if (!c) return "—";
     if (!c.groups.length) return "no rule";
     const on = c.groups.filter((g) => !g.off);           // a group switched off never fires
-    if (!on.length) return "every group off";
+    if (!on.length) return "watch only - opens nothing";
     const best = Math.max(...on.map((g) => g.conditions.filter((x) => x.ok === true).length));
     const of = on.length === 1 ? `/${on[0].conditions.length}` : "";
     return c.ok
@@ -946,6 +962,13 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
       : `${best}${of} hold`;
   };
   const fires = (c: StrategyCheckSet | null | undefined) => !!c?.ok && !offHours && !wait && !done;
+  // The board reads ONE pair live - the one picked in the Pairs row - so "now:" names it, from the read itself:
+  // gold's spread here was taken for BTC's on the desk widget (2026-11-07).
+  const readOn = check?.symbol ?? pair?.symbol;
+  const nowLabel = readOn ? `now on ${displaySymbol(readOn)}:` : "now:";
+  const nowTitle = readOn
+    ? `The live read of ${displaySymbol(readOn)} - the pair picked in the Pairs row above. Click another pair there to read that one.`
+    : undefined;
 
   return (
     <div className="space-y-3 text-sm">
@@ -1003,6 +1026,12 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
         </span>
         <span className="flex basis-full flex-wrap items-center gap-1.5 text-xs text-neutral-400">
           Pairs
+          <span
+            className={`tabular-nums ${draft.pairs.length >= maxPairs ? "text-amber-300" : "text-neutral-500"}`}
+            title={`One strategy reads up to ${maxPairs} pairs`}
+          >
+            {draft.pairs.length}/{maxPairs}
+          </span>
           {draft.pairs.map((p, i) => (
             <span key={p.symbol} className="flex items-center gap-1 rounded-full bg-neutral-800 px-2 py-0.5 text-neutral-200">
               <button onClick={() => setCheckPair(i)} className={i === checkPair ? "font-semibold text-amber-200" : ""} title="Show the live read for this pair">
@@ -1011,12 +1040,18 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
               <button onClick={() => set({ pairs: draft.pairs.filter((_, j) => j !== i) })} className="text-neutral-500 hover:text-bear" aria-label={`Remove ${p.symbol}`}>×</button>
             </span>
           ))}
-          {chartSymbol && !draft.pairs.some((p) => p.symbol.toUpperCase() === chartSymbol.toUpperCase()) && (
-            <button onClick={() => addPair(chartSymbol, assetClass)} className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 hover:text-neutral-200">
-              + {displaySymbol(chartSymbol)} (the chart's)
-            </button>
+          {draft.pairs.length >= maxPairs ? (
+            <span className="text-neutral-500">full - remove a pair to add another</span>
+          ) : (
+            <>
+              {chartSymbol && !draft.pairs.some((p) => p.symbol.toUpperCase() === chartSymbol.toUpperCase()) && (
+                <button onClick={() => addPair(chartSymbol, assetClass)} className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 hover:text-neutral-200">
+                  + {displaySymbol(chartSymbol)} (the chart's)
+                </button>
+              )}
+              <PairPicker added={draft.pairs} defaultClass={assetClass} chartSymbol={chartSymbol} onAdd={addPair} />
+            </>
           )}
-          <PairPicker added={draft.pairs} defaultClass={assetClass} chartSymbol={chartSymbol} onAdd={addPair} />
         </span>
         <HoursRow value={draft.hours} onChange={(h) => set({ hours: h })} now={check?.hours} />
         <LiveRow on={draft.live} onChange={(v) => set({ live: v })} real={!!check && !check.paper} />
@@ -1027,7 +1062,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
         <div className="mb-1.5 flex flex-wrap items-baseline gap-2">
           <h3 className="font-black tracking-wide text-bull">▲ BUY</h3>
           <span className="text-xs text-neutral-500">opens a long when every condition of a group holds (any one group is enough)</span>
-          {draft.sides !== "short" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${fires(check?.long) ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`}>now: {summary(check?.long)}</span>}
+          {draft.sides !== "short" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${fires(check?.long) ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`} title={nowTitle}>{nowLabel} {summary(check?.long)}</span>}
         </div>
         {draft.sides === "short"
           ? <p className="text-xs text-neutral-500">Off - this strategy only sells.{draft.mirror_short && " (Its SELL rules are these, mirrored - edit them here with “Buy & sell”.)"}</p>
@@ -1047,7 +1082,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
               my own SELL rules
             </button>
           </span>
-          {draft.sides !== "long" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${fires(check?.short) ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`}>now: {summary(check?.short)}</span>}
+          {draft.sides !== "long" && <span className={`ml-auto rounded px-1.5 text-xs font-semibold ${fires(check?.short) ? "bg-bull/20 text-bull" : "bg-neutral-800 text-neutral-400"}`} title={nowTitle}>{nowLabel} {summary(check?.short)}</span>}
         </div>
         {draft.sides === "long" ? (
           <p className="text-xs text-neutral-500">Off - this strategy only buys.</p>
@@ -1055,12 +1090,14 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
           <div className="space-y-1 rounded-lg border border-neutral-800 bg-neutral-900/30 p-2">
             {sell.length === 0 && <p className="text-xs text-neutral-500">Add BUY rules - the SELL ones are their mirror image.</p>}
             {sell.map((g, gi) => (
-              <div key={gi} className={`flex flex-wrap items-start gap-1.5 text-xs ${draft.off_groups.entry_long.includes(gi) ? "opacity-50" : ""}`}>
+              <div key={gi} className="flex flex-wrap items-start gap-1.5 text-xs">
                 <span
-                  className="mt-0.5 shrink-0 rounded bg-neutral-800 px-1.5 text-[10px] font-semibold uppercase text-neutral-500"
-                  title={draft.off_groups.entry_long.includes(gi) ? "Off with its BUY group: read, but it opens nothing" : undefined}
+                  className={`mt-0.5 shrink-0 rounded px-1.5 text-[10px] font-semibold uppercase ${
+                    draft.off_groups.entry_long.includes(gi) ? "bg-sky-500/20 text-sky-200" : "bg-neutral-800 text-neutral-500"
+                  }`}
+                  title={draft.off_groups.entry_long.includes(gi) ? "Watch only with its BUY group: read, opens nothing, and notifies you when all of it holds" : undefined}
                 >
-                  {gi > 0 ? "or " : ""}group {gi + 1}{draft.off_groups.entry_long.includes(gi) && " · off"}
+                  {gi > 0 ? "or " : ""}group {gi + 1}{draft.off_groups.entry_long.includes(gi) && " · 👁 watch only"}
                 </span>
                 <span className="flex flex-1 flex-wrap gap-1">
                   {g.map((c, ci) => {

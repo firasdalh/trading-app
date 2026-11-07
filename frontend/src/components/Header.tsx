@@ -108,7 +108,7 @@ export function Header({ settings, account, risk, positions, nav, automation, on
               height={24}
               className="h-6 w-6 shrink-0 rounded-md shadow-card"
             />
-            <span className="hidden text-sm font-semibold tracking-tight 2xl:inline">Trading Desk</span>
+            <span className="hidden text-sm font-semibold tracking-tight min-[2200px]:inline">Trading Desk</span>
             <span
               className={`rounded-md px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
                 realAccount || isLive ? "bg-bear text-white" : "bg-bull/15 text-bull ring-1 ring-inset ring-bull/30"
@@ -178,7 +178,7 @@ export function Header({ settings, account, risk, positions, nav, automation, on
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
               </svg>
-              <span className="hidden 2xl:inline">Settings</span>
+              <span className="hidden min-[2200px]:inline">Settings</span>
             </button>
             <button
               onClick={toggleKill}

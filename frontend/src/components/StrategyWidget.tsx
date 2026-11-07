@@ -46,9 +46,13 @@ function Chip({ c }: { c: StrategyCheckCondition }) {
 }
 
 // Every group of a side, a line each: any one group is enough. A group shows "GO" when all its conditions
-// hold - unless it is switched off on the board (dimmed: read, but it opens nothing), or `paused`: outside the
-// strategy's trading hours, while the pair waits out its cooldown, or once the strategy reached its daily target.
-function SideRow({ label, tone, set, paused }: { label: string; tone: string; set: StrategyCheckSet | null | undefined; paused?: boolean }) {
+// hold - unless it is switched off on the board, or `paused`: outside the strategy's trading hours, while the
+// pair waits out its cooldown, or once the strategy reached its daily target. A BUY / SELL group switched off
+// (`watch`) is on watch only: shown in full, in blue, "SIGNAL" when all of it holds - it opens nothing and the
+// desk announces the signal. A close rule switched off is dimmed: read, but it closes nothing.
+function SideRow({ label, tone, set, paused, watch }: {
+  label: string; tone: string; set: StrategyCheckSet | null | undefined; paused?: boolean; watch?: boolean;
+}) {
   if (!set?.groups.length) return null;
   return (
     <>
@@ -57,6 +61,7 @@ function SideRow({ label, tone, set, paused }: { label: string; tone: string; se
         const of = g.conditions.length;
         const pct = of ? n / of : 0;
         const go = g.ok && !paused && !g.off;
+        const eye = !!watch && !!g.off;
         return (
           <div key={gi} className="mt-1 flex items-start gap-1.5">
             <span
@@ -65,8 +70,24 @@ function SideRow({ label, tone, set, paused }: { label: string; tone: string; se
             >
               {gi ? "or" : label}
             </span>
-            {g.off ? (
-              <span className="mt-px w-[5.25rem] shrink-0 text-[10px] text-neutral-500" title="Switched off on the board: read here, but it opens nothing">
+            {eye ? (
+              <span
+                className="mt-1 flex shrink-0 items-center gap-1"
+                title="Watch only: read here, it opens nothing - you get a notification when all of it holds"
+              >
+                <span className="text-[10px] leading-none" aria-hidden="true">👁</span>
+                <span className="relative h-1.5 w-9 overflow-hidden rounded-full bg-neutral-800">
+                  <span
+                    className={`absolute inset-y-0 left-0 ${g.ok ? "bg-sky-300" : "bg-sky-500/70"}`}
+                    style={{ width: `${pct * 100}%` }}
+                  />
+                </span>
+                <span className={`min-w-[2rem] whitespace-nowrap text-[10px] tabular-nums ${g.ok ? "font-bold text-sky-300" : "text-sky-300/90"}`}>
+                  {g.ok ? "SIGNAL" : `${n}/${of}`}
+                </span>
+              </span>
+            ) : g.off ? (
+              <span className="mt-px w-[5.25rem] shrink-0 text-[10px] text-neutral-500" title="Switched off on the board: read here, but it closes nothing">
                 ○ off
               </span>
             ) : (
@@ -82,7 +103,7 @@ function SideRow({ label, tone, set, paused }: { label: string; tone: string; se
                 </span>
               </span>
             )}
-            <span className={`flex min-w-0 flex-wrap gap-0.5 ${g.off ? "opacity-40" : ""}`}>{g.conditions.map((c, i) => <Chip key={i} c={c} />)}</span>
+            <span className={`flex min-w-0 flex-wrap gap-0.5 ${g.off && !eye ? "opacity-40" : ""}`}>{g.conditions.map((c, i) => <Chip key={i} c={c} />)}</span>
           </div>
         );
       })}
@@ -169,7 +190,23 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
           >
             <div className="flex items-center gap-1.5">
               <span className={`h-2 w-2 shrink-0 rounded-full ${s.enabled ? "animate-pulse bg-bull" : "bg-neutral-600"}`} />
-              <span className="truncate font-semibold text-neutral-100" title={s.name}>{s.name}</span>
+              <span className="min-w-0 truncate font-semibold text-neutral-100" title={s.name}>{s.name}</span>
+              <button
+                onClick={() => void run(s, !s.enabled)}
+                disabled={busy === s.id}
+                className={`ml-auto shrink-0 rounded border px-1.5 py-px text-[10px] font-semibold disabled:opacity-50 ${
+                  s.enabled ? "border-bear/50 text-bear hover:bg-bear/15" : "border-bull/50 text-bull hover:bg-bull/15"
+                }`}
+                title={s.enabled
+                  ? "Stop it. A trade it holds stays on its stop and target."
+                  : "Start it - it trades a demo / paper account only, through the Risk Manager"}
+              >
+                {busy === s.id ? "…" : s.enabled ? "■ Stop" : "▶ Start"}
+              </button>
+            </div>
+            {/* Its settings as chips, then today's result - on the line under the name, so the name is
+                never cut short by them ("EMA + SuperTrend s...", 2026-11-07). */}
+            <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-neutral-500">
               <span className="shrink-0 rounded bg-neutral-800 px-1 text-[10px] text-sky-300" title="Base timeframe">{s.timeframe}</span>
               {s.live && (
                 <span className="shrink-0 rounded bg-bear/25 px-1 text-[10px] font-bold text-bear" title="It trades a real account too: real money, no approval per order (while LIVE trading is confirmed)">
@@ -197,31 +234,19 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
                   🎯 {done ? `target hit · back ${done.resumes}` : `+${fmtUsd(s.daily_target)}`}
                 </span>
               )}
-              <button
-                onClick={() => void run(s, !s.enabled)}
-                disabled={busy === s.id}
-                className={`ml-auto shrink-0 rounded border px-1.5 py-px text-[10px] font-semibold disabled:opacity-50 ${
-                  s.enabled ? "border-bear/50 text-bear hover:bg-bear/15" : "border-bull/50 text-bull hover:bg-bull/15"
-                }`}
-                title={s.enabled
-                  ? "Stop it. A trade it holds stays on its stop and target."
-                  : "Start it - it trades a demo / paper account only, through the Risk Manager"}
+              <span
+                className="flex flex-wrap gap-x-2"
+                title="Today (UTC): the trades it closed, from the journal - stops and targets included"
               >
-                {busy === s.id ? "…" : s.enabled ? "■ Stop" : "▶ Start"}
-              </button>
-            </div>
-            <div
-              className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-neutral-500"
-              title="Today (UTC): the trades it closed, from the journal - stops and targets included"
-            >
-              <span>today {closed.length} closed{mine.length ? ` · ${mine.length} open` : ""}</span>
-              {closed.length > 0 && (
-                <>
-                  <span><span className="text-bull">{wins}W</span> <span className="text-bear">{closed.length - wins}L</span></span>
-                  <span className={`font-semibold tabular-nums ${net >= 0 ? "text-bull" : "text-bear"}`}>{fmtUsd(net, { sign: true })}</span>
-                </>
-              )}
-              {!s.enabled && <span className="text-neutral-600">stopped</span>}
+                <span>today {closed.length} closed{mine.length ? ` · ${mine.length} open` : ""}</span>
+                {closed.length > 0 && (
+                  <>
+                    <span><span className="text-bull">{wins}W</span> <span className="text-bear">{closed.length - wins}L</span></span>
+                    <span className={`font-semibold tabular-nums ${net >= 0 ? "text-bull" : "text-bear"}`}>{fmtUsd(net, { sign: true })}</span>
+                  </>
+                )}
+                {!s.enabled && <span className="text-neutral-600">stopped</span>}
+              </span>
             </div>
 
             {s.enabled && s.pairs.map((p) => {
@@ -268,12 +293,12 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
                     // Outside its trading hours, while the pair waits out its cooldown, or once the daily target
                     // is reached, the rules still read, dimmed: they open nothing until then.
                     <div className={offHours || wait || done ? "opacity-50" : undefined}>
-                      {s.sides !== "short" && <SideRow label="▲ BUY" tone="text-bull" set={check.long} paused={offHours || !!wait || !!done} />}
+                      {s.sides !== "short" && <SideRow label="▲ BUY" tone="text-bull" set={check.long} paused={offHours || !!wait || !!done} watch />}
                       {/* A hairline between the two sides, green into red, so each side's chips read as one block. */}
                       {s.sides === "both" && (
                         <div className="mx-1 mb-0.5 mt-1.5 h-px bg-gradient-to-r from-bull/40 via-neutral-600/30 to-bear/40" aria-hidden="true" />
                       )}
-                      {s.sides !== "long" && <SideRow label="▼ SELL" tone="text-bear" set={check.short} paused={offHours || !!wait || !!done} />}
+                      {s.sides !== "long" && <SideRow label="▼ SELL" tone="text-bear" set={check.short} paused={offHours || !!wait || !!done} watch />}
                       {check.market_open === false && <div className="mt-0.5 text-[10px] text-neutral-500">market closed</div>}
                     </div>
                   )}

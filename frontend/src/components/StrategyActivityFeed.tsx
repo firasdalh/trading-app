@@ -6,7 +6,8 @@ import type { AssetClass, StrategyActivity } from "../types";
 
 /**
  * What the strategies did, newest first: what they opened and the rules that held, what they closed and
- * why (a close rule, the stop, the target, a hand close), and the signals refused or held back. A row
+ * why (a close rule, the stop, the target, a hand close), the signals refused or held back, and the signals
+ * of a group on watch only (it opens nothing - asked 2026-11-06). A row
  * opens to show the details. Shared by the Strategies board (one strategy) and the desk's sidebar (every
  * strategy, so the board needn't be opened to find out - asked for 2026-11-02).
  */
@@ -15,12 +16,15 @@ const TONE: Record<string, string> = {
   opened: "text-bull", closed: "text-sky-300", refused: "text-amber-300", blocked: "text-amber-300",
   not_filled: "text-amber-300", close_failed: "text-bear", started: "text-amber-200", stopped: "text-neutral-400",
   edited: "text-neutral-500", stop_moved: "text-sky-200", stop_move_failed: "text-bear", target_reached: "text-bull",
+  signal: "text-cyan-300",
 };
 // How a trade ended when its strategy did not close it (the backend reads it from the exit price).
 const BY: Record<string, string> = { stop: "stop hit", target: "target hit", other: "closed outside the strategy" };
 // A refused or held-back signal repeats on every bar while the rules hold: one row per run of them.
 const REPEATS = new Set(["refused", "blocked", "not_filled"]);
-const RUN_GAP_MS = 120_000;
+const RUN_GAP_MS = 15 * 60_000;
+// The same reason with its numbers ticking ("1.7h to the Friday close", then "1.6h") is the same reason.
+const sameReason = (r: unknown) => String(r ?? "").replace(/\d+(?:\.\d+)?/g, "#");
 // A stop following a SuperTrend line moves at most once a bar of that line's timeframe: one row per trade.
 const STOP_MOVES = new Set(["stop_moved", "stop_move_failed"]);
 const STOP_GAP_MS = 30 * 60_000;
@@ -40,7 +44,11 @@ function rowsOf(items: StrategyActivity[]): Row[] {
   const runs = new Map<string, Row>();
   for (const a of items) {
     const d = a.detail ?? {};
-    const key = REPEATS.has(a.event) || STOP_MOVES.has(a.event) ? [a.event, a.symbol, d.side, d.reason].join("|") : "";
+    const key = REPEATS.has(a.event) || STOP_MOVES.has(a.event) ? [a.event, a.symbol, d.side, sameReason(d.reason)].join("|") : "";
+    if (!key) {
+      // Anything else on this pair ends its runs: a refusal before an open stays its own row.
+      for (const [k, r] of runs) if (r.a.symbol === a.symbol) runs.delete(k);
+    }
     const run = key ? runs.get(key) : undefined;
     const gap = STOP_MOVES.has(a.event) ? STOP_GAP_MS : RUN_GAP_MS;
     if (run && run.first && a.at && Date.parse(run.first) - Date.parse(a.at) <= gap) {
@@ -104,12 +112,17 @@ function ActivityRow({ row, fresh, onPick }: {
       >
         <span className="w-16 shrink-0 tabular-nums text-neutral-500">{hms(a.at)}</span>
         <span className={`font-semibold ${TONE[a.event] ?? "text-neutral-300"}`}>{a.event.replace(/_/g, " ")}</span>
-        {n > 1 && <span className="text-neutral-500">×{n}</span>}
+        {n > 1 && <span className="text-neutral-500" title={`${n} times, ${hms(first)} - ${hms(a.at)}`}>×{n}</span>}
         {side && <span className={d.side === "long" ? "text-bull" : "text-bear"}>{side}</span>}
         {a.symbol && <span className="text-neutral-200">{displaySymbol(a.symbol)}</span>}
         {a.event === "opened" && lots != null && <span className="tabular-nums text-neutral-400">{lots} lot</span>}
         {a.event === "stop_moved" && num("to") != null && <span className="tabular-nums text-neutral-400">→ {fmtPrice(num("to"))}</span>}
         {a.event === "target_reached" && <span className="text-neutral-400">🎯 done for the day</span>}
+        {a.event === "signal" && (
+          <span className="text-neutral-400">
+            👁 group {String(d.group ?? "")} · watch only{num("price") != null && ` · at ${fmtPrice(num("price"))}`}
+          </span>
+        )}
         {pnl != null && <b className={pnl >= 0 ? "text-bull" : "text-bear"}>{fmtUsd(pnl, { sign: true })}</b>}
         {by && (
           <span className={by === "stop" ? "text-bear/90" : by === "target" ? "text-bull/90" : "text-neutral-400"}>
@@ -166,6 +179,9 @@ function ActivityRow({ row, fresh, onPick }: {
             </>
           )}
           {a.event === "close_failed" && <Rules title="It tried to close on:" rules={rules} />}
+          {a.event === "signal" && (
+            <Rules title={`Group ${String(d.group ?? "")} is on watch only: all of it held, and it opened nothing. Its rules:`} rules={rules} />
+          )}
           {a.event === "stop_moved" && (
             <div className="tabular-nums text-neutral-300">
               {n > 1 && `${n} moves, ${hms(first)} - ${hms(a.at)}. The last: `}

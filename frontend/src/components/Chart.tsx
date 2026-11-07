@@ -22,6 +22,7 @@ import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
 import { OrderBlockPrimitive, type ObZone } from "./orderBlockZones";
 import { EmaRibbonPrimitive } from "./emaRibbon";
 import { TradeHistoryPrimitive, type HistTrade } from "./tradeHistory";
+import { AutoFibPrimitive, autoFib, fibExplain, fibPosition, fibStatus, liveFib, type AutoFib } from "./autoFib";
 import { RSI_PERIOD_EVENT } from "../rsiPeriod";
 import { OrderFlowPane } from "./OrderFlowPane";
 import { PICK_EVENT, addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
@@ -87,6 +88,15 @@ const dispToUtc = (dispSec: number): number =>
   TZ_MODE === "utc" ? dispSec : dispSec + new Date(dispSec * 1000).getTimezoneOffset() * 60;
 
 // What to tell the user their axis is in, e.g. "Asia/Dubai (UTC+4)".
+// The toolbar chip's short form: which clock the axis is in, in as few letters as say it (the chip's
+// title has the rest). The long form took ~120px of a toolbar row that then wrapped.
+function tzShort(mode: "local" | "utc"): string {
+  if (mode === "utc") return "UTC";
+  const hrs = -new Date().getTimezoneOffset() / 60;
+  const abs = Math.abs(hrs);
+  return `Local ${hrs < 0 ? "−" : "+"}${Number.isInteger(abs) ? abs : abs.toFixed(1)}`;
+}
+
 function tzLabel(mode: "local" | "utc"): string {
   if (mode === "utc") return "UTC · broker day";
   try {
@@ -1219,6 +1229,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   // say different things: one is your trade, the other is the market's structure.
   const obRef = useRef<OrderBlockPrimitive | null>(null);
   const ribbonRef = useRef<EmaRibbonPrimitive | null>(null);   // EMA 10 / 20, green above / red below
+  const fibRef = useRef<AutoFibPrimitive | null>(null);        // the auto Fibonacci (autoFib.ts)
   // Past trades on the pair, MT5-style (tradeHistory.ts): what is drawn, and the one under the pointer.
   const histRef = useRef<TradeHistoryPrimitive | null>(null);
   const [hist, setHist] = useState<{ symbol: string; trades: ChartTrade[] } | null>(null);
@@ -1350,6 +1361,9 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const [showBand, setShowBand] = usePersisted(sk("chart.showBand"), !scalp);
   const [showStructure, setShowStructure] = usePersisted(sk("chart.showStructure"), false);
   const [showChannel, setShowChannel] = usePersisted(sk("chart.showChannel"), false);
+  // Auto Fibonacci: the leg it measured (for the toolbar tag); the primitive draws the same one.
+  const [showFib, setShowFib] = usePersisted(sk("chart.showFib"), false);
+  const [fib, setFib] = useState<AutoFib | null>(null);
   const [showSR, setShowSR] = usePersisted<Record<string, boolean>>(
     sk("chart.srByTf"), { "1h": false, "4h": false, "1d": false });
   // --- extra overlays, all off by default so nobody's chart changes without asking ---
@@ -1485,6 +1499,18 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     series.attachPrimitive(histPrim);
     histRef.current = histPrim;
 
+    // The Fibonacci's running end follows the live bar's high / low between candle reloads.
+    const fibPrim = new AutoFibPrimitive({
+      liveBar: () => {
+        const ts = barTimesRef.current;
+        const lb = lastBarRef.current;
+        if (!ts.length || !lb) return null;
+        return { index: ts.length - 1 + ((lb.time as number) > ts[ts.length - 1] ? 1 : 0), high: lb.high, low: lb.low, close: lb.close };
+      },
+    });
+    series.attachPrimitive(fibPrim);
+    fibRef.current = fibPrim;
+
     chartRef.current = chart;
     seriesRef.current = series;
     volumeRef.current = volume;
@@ -1569,7 +1595,9 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       series.detachPrimitive(zones);
       series.detachPrimitive(ribbon);
       series.detachPrimitive(histPrim);
+      series.detachPrimitive(fibPrim);
       histRef.current = null;
+      fibRef.current = null;
       ribbonRef.current = null;
       zonesRef.current = null;
       obRef.current = null;
@@ -1853,6 +1881,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         applyBand(series.candles);
         applyChannel(series.candles);
         lastBarRef.current = candleData[candleData.length - 1] ?? null;
+        applyFib(series.candles);
         const last = series.candles[series.candles.length - 1];
         if (last) setLegend({ open: last.open, high: last.high, low: last.low, close: last.close });
         // Reset the view ONLY when this is a different chart. The same loader also runs on a bar
@@ -1899,6 +1928,8 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         for (const s of vwapBandRefs.current) s.setData([]);
         for (const s of stochRefs.current) s.setData([]);
         ribbonRef.current?.setPoints([]);
+        fibRef.current?.setFib(null);
+        setFib(null);
         stRef.current?.setData([]);
         emaHiRef.current?.setData([]);
         emaLoRef.current?.setData([]);
@@ -1956,6 +1987,11 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     applySuperTrend(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSt]);
+
+  useEffect(() => {
+    applyFib(candlesRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showFib]);
 
   // Scalp mode draws the live bid and ask: a buy fills at the ask, a sell at the bid, and the candles
   // (the bid on MT5) never show the side a buy pays. Moved in place every poll rather than re-created.
@@ -2319,6 +2355,14 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   // Regression channel = the algorithmic trend line (mid) + dynamic resistance/support (bands), drawn
   // over the last LB bars. Mirrors the backend indicators.regression_channel the engine reads.
+  // Auto Fibonacci (autoFib.ts): the trend on THIS timeframe's candles and the leg it is drawn on,
+  // found again on every reload - so a new swing or a switch of timeframe redraws it.
+  function applyFib(candles: Candle[]) {
+    const f = showFib ? autoFib(candles) : null;
+    fibRef.current?.setFib(f);
+    setFib(f);
+  }
+
   function applyChannel(candles: Candle[]) {
     const mid = chanMidRef.current, up = chanUpRef.current, lo = chanLoRef.current;
     if (!mid || !up || !lo) return;
@@ -3973,7 +4017,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   return (
     <div ref={rootRef} className={`relative${fills ? " flex min-h-0 flex-1 flex-col" : ""}`}>
-      <div ref={toolbarRef} className={`${scalp ? "mb-1 p-1" : "mb-2 p-1.5"} flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40`}>
+      <div ref={toolbarRef} className={`${scalp ? "mb-1 p-1" : "mb-2 p-1.5"} flex flex-wrap items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-900/40`}>
         {/* Three menus instead of fifteen chips. The counts keep "what is on" visible without
             every option being permanently on screen. */}
         <ToolMenu label="📈 EMA" count={EMA_CONFIG.filter(({ period }) => showEma[period]).length}
@@ -3998,7 +4042,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         </ToolMenu>
 
         <ToolMenu label="📊 Indicators"
-                  count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel].filter(Boolean).length}
+                  count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel, showFib].filter(Boolean).length}
                   open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))}>
           <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI {RSI_P}</MenuItem>
           <div
@@ -4058,6 +4102,10 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
                     tip="Regression channel: the algorithmic trend line (mid) + dynamic resistance/support bands. Shown for your read; tested and NOT used to gate trades.">
             Regression channel
           </MenuItem>
+          <MenuItem on={showFib} onClick={() => setShowFib((v) => !v)} dot="#34d399"
+                    tip="Finds the trend on THIS timeframe and draws the Fibonacci on the swing that matters - on any timeframe. Uptrend (higher highs and lows): from the swing low of the latest push up to its high. Downtrend: from the swing high of the latest drop to its low. A squeeze: the move price is still inside. 0.236 to 0.786 are where a pullback often stalls (0.618 thick); ext 1.272 / 1.618 beyond the swing are targets. Drawn on the last FINISHED swing, so its levels and targets stay put while price runs to them; it moves to the next swing once that one is finished (price turned 3 x ATR off it). Past the 1 the swing is broken: 1.272 / 1.618 beyond the 1 show where a break runs. Shown for your read; not used to gate trades.">
+            Auto Fibonacci
+          </MenuItem>
         </ToolMenu>
 
         <ToolMenu label="📍 Levels"
@@ -4104,6 +4152,48 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
             </MenuItem>
           ))}
         </ToolMenu>
+
+        {showFib && (() => {
+          // Where price is on the leg NOW (a live bar past the 1 breaks it at once, as the drawing shows).
+          const lb = lastBarRef.current;
+          const ts = barTimesRef.current;
+          const live = lb && ts.length
+            ? { index: ts.length - 1 + ((lb.time as number) > ts[ts.length - 1] ? 1 : 0), high: lb.high, low: lb.low }
+            : null;
+          const f = fib ? liveFib(fib, live) : null;
+          const at = f && lb ? fibPosition(f, lb.close) : null;
+          const st = f ? fibStatus(f, at) : null;
+          const zone = st?.zone ?? null;
+          const fmt = (v: number) => fmtPrice(v, priceDec);
+          return (
+            <span
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${
+                !f ? "bg-neutral-800 text-neutral-400" : f.broken ? "bg-amber-500/15 text-amber-300" : f.trend === "up" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+              }`}
+              title={f ? fibExplain(f, at, fmt)
+                       : "Auto Fibonacci: no finished swing on this chart yet (price has to turn 3 x ATR off a high or a low). It draws as soon as one is finished."}
+            >
+              <span>
+                📐 Fib {f ? (f.trend === "up" ? "▲ up" : "▼ down") : "· no clear swing yet"}
+                {st?.text}
+              </span>
+              {zone && (
+                <span className="rounded-full px-1.5 font-bold text-neutral-950" style={{ backgroundColor: zone.color }}>
+                  {zone.label.toLowerCase()}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowFib(false)}
+                title="Clear the Fibonacci from the chart (📊 Indicators → Auto Fibonacci brings it back)"
+                aria-label="Clear the Fibonacci"
+                className="rounded px-0.5 leading-none text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100"
+              >
+                ✕
+              </button>
+            </span>
+          );
+        })()}
 
         {ovl.ob && obStatus && (
           <span
@@ -4243,7 +4333,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
               : `Axis is in ${tzLabel("local")} — your computer's clock. Price levels are UNAFFECTED: PDH/PDL and every other level are measured over the 00:00 UTC trading day either way, so they match every other trader. Click to show the axis in UTC instead.`
           }
         >
-          🕐 {tzLabel(tzMode)}
+          🕐 {tzShort(tzMode)}
         </button>
         {/* Candle-close countdown. "Wait for the close, not the wick" is only actionable if you know
             how long that is — so this reads as a traffic light rather than a number you have to
@@ -4334,25 +4424,31 @@ Click for the full breakdown. Info only — it gates nothing.`}
           ⊹ Recenter
         </button>
 
-        {/* Hand-drawn lines: arm a tool, click the chart. Saved per pair and kept until deleted. */}
+        {/* Hand-drawn lines: arm a tool, click the chart. Saved per pair and kept until deleted.
+            The four drawing tools are icons (the name is in the tooltip) so the toolbar fits one row;
+            Arm and Trade open trades, so they keep their names - a click on them is never a guess. */}
         <span className="ml-1 flex items-center gap-1 border-l border-neutral-800 pl-2">
           {([
-            ["f", "🖊 Pen", "Free hand — press and drag to draw any shape, exactly like a pen on paper."],
-            ["t", "╱ Trend", "Trend line — press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
-            ["h", "─ Level", "Level — one click puts a horizontal line across the whole chart, with its price on the axis."],
-            ["alert", "🔔 Alert", "Price alert — click a price to set an alert line. It stays on the chart until price reaches it, then you get the chime and a desktop notification and the line goes. It never places an order. Drag the line to move it; remove it from Price alerts in the sidebar."],
-            ["arm", "⚡ Arm", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
-            ["trade", "▶ Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance and the risk you pick on the ticket (never above your per-trade cap)."],
-          ] as const).map(([mode, label, tip]) => (
-            <button
-              key={mode}
-              onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode((m) => (m === mode ? "off" : mode)); }}
-              className={`rounded px-2 py-0.5 text-xs transition ${drawMode === mode ? "bg-sky-600 text-white" : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"}`}
-              title={tip}
-            >
-              {label}
-            </button>
-          ))}
+            ["f", "🖊", "Pen", "Free hand — press and drag to draw any shape, exactly like a pen on paper."],
+            ["t", "╱", "Trend line", "Press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
+            ["h", "─", "Level", "One click puts a horizontal line across the whole chart, with its price on the axis."],
+            ["alert", "🔔", "Price alert", "Click a price to set an alert line. It stays on the chart until price reaches it, then you get the chime and a desktop notification and the line goes. It never places an order. Drag the line to move it; remove it from Price alerts in the sidebar."],
+            ["arm", "⚡", "Arm", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
+            ["trade", "▶", "Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance and the risk you pick on the ticket (never above your per-trade cap)."],
+          ] as const).map(([mode, icon, name, tip]) => {
+            const named = mode === "arm" || mode === "trade";
+            return (
+              <button
+                key={mode}
+                onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode((m) => (m === mode ? "off" : mode)); }}
+                className={`rounded py-0.5 text-xs transition ${named ? "px-2" : "w-7 text-center"} ${drawMode === mode ? "bg-sky-600 text-white" : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"}`}
+                title={`${name}: ${tip}`}
+                aria-label={name}
+              >
+                {named ? `${icon} ${name}` : icon}
+              </button>
+            );
+          })}
           {drawings.length > 0 && (
             <button
               onClick={() => setDrawList((v) => !v)}
@@ -4945,7 +5041,14 @@ Click for the full breakdown. Info only — it gates nothing.`}
         {/* Scalp mode: what the next key does. On the left, under the price legend: the right is where
             the newest candles and the staged order's own tags are. Out of the way while a line is
             being dragged or a drop was refused (those readouts need the attention then). */}
-        {scalp && hud && !dragHint && !dragErr && (
+        {scalp && hud && !dragHint && !dragErr && hud.tone === "idle" && (
+          // Nothing staged, no trade: just the keys, one quiet line (the box covered the candles).
+          <div className="pointer-events-none absolute left-2 top-7 z-20 flex items-baseline gap-2 rounded-md border border-neutral-800 bg-neutral-950/75 px-2 py-0.5 text-[11px] text-neutral-400 backdrop-blur-sm">
+            <span className="font-semibold text-neutral-300">{hud.title}</span>
+            {hud.detail && <span className="text-neutral-500">{hud.detail}</span>}
+          </div>
+        )}
+        {scalp && hud && !dragHint && !dragErr && hud.tone !== "idle" && (
           <div
             className={`pointer-events-none absolute left-2 top-7 z-20 flex max-w-[34rem] items-center gap-3 rounded-lg border bg-neutral-950/85 px-3 py-1 shadow-lg backdrop-blur-sm ${
               hud.tone === "long" || hud.tone === "win"
@@ -5249,7 +5352,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
             The swatches use the band hues at a readable opacity — the hue is what identifies a
             session, and at the bands' own 5% a swatch this size would be invisible. */}
         {ovl.sessions && (
-          <div className="pointer-events-none absolute bottom-8 left-2 z-10 flex items-center gap-2.5 rounded bg-neutral-950/70 px-2 py-1 text-[10px] text-neutral-400">
+          <div className="pointer-events-none absolute bottom-8 left-14 z-10 flex items-center gap-2.5 rounded bg-neutral-950/70 px-2 py-1 text-[10px] text-neutral-400">
             {([
               ["Asia", "rgba(56,189,248,0.75)", "Tokyo / Sydney — 00:00-08:00 UTC. Thinnest liquidity; breaks here fail most often."],
               ["London", "rgba(167,139,250,0.75)", "08:00-13:00 UTC. The first big-volume session of the day."],

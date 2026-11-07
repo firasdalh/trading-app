@@ -673,6 +673,39 @@ def test_a_group_takes_up_to_sixteen_conditions():
     assert strategy_catalog()["max_conditions"] == 16
 
 
+def test_a_strategy_takes_up_to_thirteen_pairs():
+    # 10 until 2026-11-07, then 13 at the user's request - once measured: 3 more pairs add ~0.04 s to the pass
+    # after a 10s close and ~0.15 s after a 1m close.
+    from app.api.strategy_routes import StrategyIn, strategy_catalog
+
+    pairs = [{"symbol": f"PAIR{i}m", "asset_class": "forex"} for i in range(13)]
+    assert len(StrategyIn(pairs=pairs).pairs) == 13
+    with pytest.raises(ValidationError):
+        StrategyIn(pairs=pairs + [{"symbol": "PAIR13m", "asset_class": "forex"}])
+    assert strategy_catalog()["max_pairs"] == 13
+
+
+def test_the_memoized_atr_is_the_same_number():
+    # The spread rule and one R read ATR(14) off the bars' memo (_atr14) instead of recomputing it: it must be
+    # atr() exactly, its rounding included - one R sizes the orders.
+    import random
+
+    from app.agents.indicators import atr
+
+    rnd = random.Random(7)
+    assert st._atr14(st.Bars("30s", [])) is None
+    for n in (1, 14, 15, 16, 40, 500):
+        for scale in (1e-4, 1.0, 30_000.0):
+            closes = [scale * (1 + 0.01 * rnd.uniform(-1, 1)) for _ in range(n)]
+            bars = st.Bars("30s", _candles(closes, "30s"))
+            assert st._atr14(bars) == atr(bars.c, 14)
+            assert st._atr14(bars) == st._atr14(bars)            # the memo's second read
+    bars = _bars(RISING)
+    p = st.clean_params(st.CATALOG["spread"], {"max_pct": 25})
+    ok, detail = st._c_spread(p, 1, bars, st.Ctx(now=NOW, spread=0.1))
+    assert detail == f"spread {100 * 0.1 / atr(bars.c, 14):.0f}% of ATR"
+
+
 # ----------------------------------------------------------------- a SuperTrend close rule is a TURN
 
 def test_a_supertrend_close_rule_needs_a_turn_after_the_entry():
@@ -1616,3 +1649,84 @@ def test_5s_is_an_unticked_timeframes_chip():
     ev = st.evaluate([[cond]], 1, data, st.Ctx(now=NOW, base_tf="5s"), "long")
     assert ev["ok"] is True
     assert ev["groups"][0]["conditions"][0]["label"] == "All of 5S · 10S lean up on the Timeframes strip"
+
+
+# ----------------------------------------------------------------- watch-only groups (2026-11-06)
+
+def _signals(session) -> list:
+    from app.models.db import AgentRun
+
+    return session.scalars(select(AgentRun).where(AgentRun.agent == "strategy", AgentRun.event == "signal")
+                           .order_by(AgentRun.id)).all()
+
+
+def _look(session, cfg, holder, closes, at):
+    """One engine look at ``at`` on fresh bars of ``closes``."""
+    from app.data import ohlcv_cache
+
+    ohlcv_cache._cache.clear()
+    st._BAR_CACHE.clear()
+    holder["broker"] = _Broker(closes)
+    return st.run_strategy(session, cfg, now=at)
+
+
+def test_a_switched_off_group_signals_once_when_it_starts_to_hold_and_opens_nothing(db_session, engine, monkeypatch):
+    """A group switched off is watch only (asked 2026-11-06): read on every look, a "signal" logged the moment
+    all of it starts to hold - not again while it keeps holding, nor within the gap after a flicker - and
+    never a trade. Only the sides the strategy trades; a restart replays nothing."""
+    calls, holder = engine
+    st._WATCH.clear()
+    monkeypatch.setattr(st, "_WATCH_GAP_S", 100.0)
+    cfg = _strategy(db_session, sides="long", off_groups={**ALL_ON, "entry_long": [0]})
+    s = lambda sec: NOW + timedelta(seconds=sec)   # noqa: E731
+
+    _look(db_session, cfg, holder, FALLING, s(0))          # first sight: nothing holds
+    assert _signals(db_session) == []
+    _look(db_session, cfg, holder, RISING, s(30))          # it starts to hold
+    sig = _signals(db_session)
+    assert len(sig) == 1 and sig[0].symbol == "BTCUSDm"
+    d = sig[0].detail
+    assert (d["side"], d["group"], d["watch"], d["strategy_id"]) == ("long", 1, True, cfg.id)
+    assert d["rules"] == [st.label(_cond("trend"), "long")] and d["price"] == RISING[-1] + 0.05   # the ask
+    _look(db_session, cfg, holder, RISING, s(60))          # still holding: no second signal
+    _look(db_session, cfg, holder, FALLING, s(90))         # a mirrored SELL would hold - it trades long only
+    _look(db_session, cfg, holder, RISING, s(120))         # back within the gap: quiet
+    assert len(_signals(db_session)) == 1
+    _look(db_session, cfg, holder, FALLING, s(150))
+    _look(db_session, cfg, holder, RISING, s(180))         # past the gap: a new signal
+    assert [x.detail["side"] for x in _signals(db_session)] == ["long", "long"]
+    st._WATCH.clear()                                       # a restart while it holds
+    _look(db_session, cfg, holder, RISING, s(210))
+    assert len(_signals(db_session)) == 2
+    assert calls["assess"] == [] and calls["exec"] == []
+
+
+def test_a_watch_signal_comes_through_what_holds_a_trade_back(db_session, engine):
+    """It opens nothing, so a trade open on the pair (no new entry) does not silence it; a SELL group of its
+    own signals as a SELL."""
+    calls, holder = engine
+    st._WATCH.clear()
+    db_session.add(Position(symbol="BTCUSDm", asset_class="crypto", direction="long", qty=0.1, entry_price=100.0,
+                            stop_loss=90.0, status=PositionStatus.OPEN.value, source="manual", opened_at=NOW))
+    db_session.commit()
+    cfg = _strategy(db_session, entry_short=[[_cond("trend")]], mirror_short=False,
+                    off_groups={**ALL_ON, "entry_short": [0]})
+    _look(db_session, cfg, holder, RISING, NOW)
+    out = _look(db_session, cfg, holder, FALLING, NOW + timedelta(seconds=30))
+    assert "you have a trade open" in out[0]["note"]
+    assert [(x.detail["side"], x.detail["group"]) for x in _signals(db_session)] == [("short", 1)]
+    assert calls["exec"] == []
+
+
+def test_no_watch_signal_outside_its_hours_or_with_every_group_on(db_session, engine):
+    calls, holder = engine
+    st._WATCH.clear()
+    asleep = _strategy(db_session, off_groups={**ALL_ON, "entry_long": [0]},
+                       hours={"start": "13:00", "end": "14:00", "tz": "UTC"})          # NOW is 12:00 UTC
+    _look(db_session, asleep, holder, FALLING, NOW)
+    _look(db_session, asleep, holder, RISING, NOW + timedelta(seconds=30))
+    assert _signals(db_session) == [] and st._WATCH == {}
+    trading = _strategy(db_session, name="on")
+    _look(db_session, trading, holder, FALLING, NOW)
+    _look(db_session, trading, holder, RISING, NOW + timedelta(seconds=30))
+    assert _signals(db_session) == [] and len(calls["exec"]) == 1                     # it opened instead

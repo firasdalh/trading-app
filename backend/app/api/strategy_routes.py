@@ -91,7 +91,7 @@ class StopIn(BaseModel):
 
 class StrategyIn(BaseModel):
     name: str = Field("My strategy", min_length=1, max_length=64)
-    pairs: list[PairIn] = Field(default_factory=list, max_length=10)
+    pairs: list[PairIn] = Field(default_factory=list, max_length=engine._MAX_PAIRS)
     timeframe: str = "1m"
     sides: Literal["long", "short", "both"] = "both"
     entry_long: list[list[ConditionIn]] = Field(default_factory=list)
@@ -252,7 +252,8 @@ def _get(session: Session, sid: int) -> StrategyConfig:
 @router.get("/catalog")
 def strategy_catalog() -> dict:
     return {"timeframes": engine.TIMEFRAMES, "conditions": engine.catalog(),
-            "max_groups": engine._MAX_GROUPS, "max_conditions": engine._MAX_CONDITIONS}
+            "max_groups": engine._MAX_GROUPS, "max_conditions": engine._MAX_CONDITIONS,
+            "max_pairs": engine._MAX_PAIRS}
 
 
 class CheckIn(BaseModel):
