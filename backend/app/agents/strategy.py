@@ -10,7 +10,8 @@ rule set fires when ANY group does ("EMA 10 x 20 AND RSI rising" OR "EMA 20 x 50
 Every condition reads CLOSED bars of its own timeframe only - the forming bar repaints - and an exit
 waits for a bar that closed after the entry, so a trade is never closed on the bars that opened it.
 It can keep trading hours too (``hours_now``): it then opens trades only inside them, on the user's
-clock, while its close rules keep running at any hour on the trades it holds. And a daily target
+clock, while its close rules keep running at any hour on the trades it holds - and with ``crypto_24h``
+its crypto pairs keep no hours at all and open around the clock (``pair_hours``). And a daily target
 (``today_result``): once the trades it closed today have made that much, it opens nothing more until
 the next day, managing the trades it still holds the same way.
 
@@ -1400,6 +1401,15 @@ def hours_now(hours: dict | None, now: datetime) -> dict | None:
             "now": local.strftime("%H:%M"), "next_s": (edge - m) % 1440 * 60 - local.second}
 
 
+def pair_hours(hours: dict | None, asset_class: str | None) -> dict | None:
+    """The trading hours that hold for one pair: the strategy's own - or none for a crypto pair when its
+    ``crypto_24h`` is on (asked 2026-11-09: "I want that the crypto keep working 24 hours"). Crypto never
+    closes, so those pairs open trades around the clock while the others keep the window."""
+    if hours and hours.get("crypto_24h") and str(asset_class or "").lower() == AssetClass.CRYPTO.value:
+        return None
+    return hours
+
+
 def _log(session: Session, cfg: StrategyConfig, symbol: str | None, event: str, **detail) -> None:
     session.add(AgentRun(agent="strategy", symbol=symbol, event=event,
                          detail={"strategy_id": cfg.id, "name": cfg.name, **detail}))
@@ -1584,10 +1594,28 @@ def _watch(session: Session, cfg: StrategyConfig, rules: Rules, symbol: str, dat
             last = was[1] if was else 0.0
             if ev["ok"] and was is not None and not was[0] and now.timestamp() - last >= _WATCH_GAP_S:
                 last = now.timestamp()
-                _log(session, cfg, symbol, "signal", side=side, group=gi + 1, watch=True,
-                     price=side_ctx.ask if s > 0 else side_ctx.bid,
+                entry = side_ctx.ask if s > 0 else side_ctx.bid
+                _log(session, cfg, symbol, "signal", side=side, group=gi + 1, watch=True, price=entry,
+                     **_signal_levels(session, cfg, rules, data, q, s, entry),
                      rules=[c["label"] for c in ev["groups"][0]["conditions"]])
             _WATCH[key] = (ev["ok"], last)
+
+
+def _signal_levels(session: Session, cfg: StrategyConfig, rules: Rules, data: dict[str, Bars], q: dict | None,
+                   side: int, entry: float | None) -> dict:
+    """Where the strategy would have put the stop and the target had it taken a watch signal - its own one R
+    (_side_risk) and target_r - so the journal's signal review replays it by them (2026-11-08). {} when there is
+    no stop to place; never in the way of the signal itself."""
+    try:
+        risk = _side_risk(session, rules, data, q, side)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not risk or risk <= 0 or entry is None:
+        return {}
+    out = {"stop": round(entry - side * risk, 8), "risk": round(risk, 8)}
+    if cfg.target_r:
+        out["target"] = round(entry + side * float(cfg.target_r) * risk, 8)
+    return out
 
 
 def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, now: datetime,
@@ -1603,7 +1631,8 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
     real = not getattr(broker, "is_paper", False)
     if real and not cfg.live:
         return _note(state, symbol, "live account - its 'Trade the live account' switch is off (demo only)", now)
-    rules = Rules.of(cfg)
+    # The hours that hold for THIS pair: none for a crypto pair while its crypto trades around the clock.
+    rules = replace(Rules.of(cfg), hours=pair_hours(cfg.hours, ac))
     data = load_bars(broker, symbol, rules.tfs(), now, rules.sizes())
     base = data.get(cfg.timeframe)
     if base is None or len(base) < _MIN_BARS:
@@ -1659,7 +1688,7 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
         # Done for the day. As outside its hours, the trades it holds were managed above.
         return _note(state, symbol, f"daily target reached - {_usd(day['pnl'])} today, target ${cfg.daily_target:,.2f}: "
                                     "no new trades until 00:00 UTC", now)
-    hrs = hours_now(cfg.hours, now)
+    hrs = hours_now(rules.hours, now)
     if hrs and not hrs["open"]:
         # Only the entries wait: the trades it holds were managed above, at any hour.
         return _note(state, symbol, f"outside its hours - no new trades until {hrs['start']}", now)
@@ -1758,7 +1787,8 @@ def check_now(session: Session, rules: Rules, symbol: str, asset_class: str, now
     ctx = Ctx(now=now, base_tf=rules.timeframe, risk=_stop_distance(session, rules.stop_atr, data.get(rules.timeframe), q),
               **_quote_ctx(q))
     out: dict = {"symbol": symbol, "paper": bool(getattr(broker, "is_paper", False)),
-                 "bars": {tf: len(b) for tf, b in data.items()}, "hours": hours_now(rules.hours, now)}
+                 "bars": {tf: len(b) for tf, b in data.items()},
+                 "hours": hours_now(pair_hours(rules.hours, asset_class), now)}
     try:
         out["market_open"] = bool(broker.market_open(symbol))
     except Exception:  # noqa: BLE001

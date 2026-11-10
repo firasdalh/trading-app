@@ -1153,6 +1153,57 @@ def test_the_board_saves_trading_hours(db_session):
                                                                                    "tz": None}
 
 
+def test_pair_hours_lets_only_crypto_off_and_only_when_asked():
+    on = {**_hrs("09:00", "12:00"), "crypto_24h": True}
+    assert st.pair_hours(on, "crypto") is None and st.pair_hours(on, "CRYPTO") is None
+    assert st.pair_hours(on, "forex") == on and st.pair_hours(on, "metal") == on and st.pair_hours(on, None) == on
+    off = _hrs("09:00", "12:00")
+    assert st.pair_hours(off, "crypto") == off
+    assert st.pair_hours(None, "crypto") is None
+
+
+def test_crypto_trades_around_the_clock_while_the_others_keep_the_hours(db_session, engine):
+    """crypto_24h (asked 2026-11-09: "I want that the crypto keep working 24 hours"): outside the window its
+    crypto pairs still open - crypto never closes - and the other pairs wait for the window."""
+    calls, _ = engine
+    pairs = [{"symbol": "BTCUSDm", "asset_class": "crypto"}, {"symbol": "XAUUSDm", "asset_class": "metal"}]
+    cfg = _strategy(db_session, pairs=pairs, hours={**_hrs("09:00", "12:00"), "crypto_24h": True})   # NOW: 12:00:30
+    out = {r["symbol"]: r for r in st.run_strategy(db_session, cfg, now=NOW)}
+    assert out["BTCUSDm"].get("opened") == "long"
+    assert out["XAUUSDm"]["note"] == "outside its hours - no new trades until 09:00"
+    assert [p.symbol for p, _ in calls["assess"]] == ["BTCUSDm"]
+
+
+def test_without_crypto_24h_crypto_keeps_the_hours_too(db_session, engine):
+    calls, _ = engine
+    cfg = _strategy(db_session, hours={**_hrs("09:00", "12:00"), "crypto_24h": False})
+    out = st.run_strategy(db_session, cfg, now=NOW)
+    assert calls["assess"] == [] and out[0]["note"] == "outside its hours - no new trades until 09:00"
+
+
+def test_the_board_reads_crypto_as_around_the_clock(db_session, engine):
+    rules = st.Rules(timeframe="1m", entry_long=[[_cond("trend")]], hours={**_hrs("13:00", "17:00"), "crypto_24h": True})
+    assert st.check_now(db_session, rules, "BTCUSDm", "crypto", now=NOW)["hours"] is None
+    assert st.check_now(db_session, rules, "XAUUSDm", "metal", now=NOW)["hours"]["open"] is False
+
+
+def test_the_board_saves_crypto_around_the_clock(db_session):
+    from app.api.strategy_routes import StrategyIn, create_strategy, update_strategy
+
+    pairs = [{"symbol": "BTCUSDm", "asset_class": "crypto"}, {"symbol": "XAUUSDm", "asset_class": "metal"},
+             {"symbol": "ETHUSDm", "asset_class": "crypto"}]
+    window = {"start": "05:00", "end": "23:31", "tz": "Asia/Dubai"}
+    view = create_strategy(StrategyIn(pairs=pairs, hours={**window, "crypto_24h": True}), session=db_session)
+    assert view.hours == {**window, "crypto_24h": True} and view.hours_24h == ["BTCUSDm", "ETHUSDm"]
+    # Off, it is not kept at all: hours saved before it existed read the same, and a save that leaves the
+    # hours alone records no change to them.
+    view = update_strategy(view.id, StrategyIn(pairs=pairs, hours={**window, "crypto_24h": False}), session=db_session)
+    assert view.hours == window and view.hours_24h == []
+    view = update_strategy(view.id, StrategyIn(pairs=pairs, hours=None), session=db_session)
+    assert view.hours is None and view.hours_24h == []           # all day: no window to be let off
+    assert StrategyIn(hours={**window, "crypto_24h": False}).rules().hours == window
+
+
 # ----------------------------------------------------------------- the daily target
 
 def _won(session, cfg, pnl, closed, symbol="ETHUSDm", source=None):
@@ -1730,3 +1781,13 @@ def test_no_watch_signal_outside_its_hours_or_with_every_group_on(db_session, en
     _look(db_session, trading, holder, FALLING, NOW)
     _look(db_session, trading, holder, RISING, NOW + timedelta(seconds=30))
     assert _signals(db_session) == [] and len(calls["exec"]) == 1                     # it opened instead
+
+
+def test_a_crypto_pair_watches_around_the_clock_too(db_session, engine):
+    calls, holder = engine
+    st._WATCH.clear()
+    cfg = _strategy(db_session, off_groups={**ALL_ON, "entry_long": [0]},
+                    hours={"start": "13:00", "end": "14:00", "tz": "UTC", "crypto_24h": True})   # NOW is 12:00 UTC
+    _look(db_session, cfg, holder, FALLING, NOW)
+    _look(db_session, cfg, holder, RISING, NOW + timedelta(seconds=30))
+    assert [x.symbol for x in _signals(db_session)] == ["BTCUSDm"] and calls["exec"] == []

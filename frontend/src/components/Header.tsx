@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { usePolling } from "../hooks/usePolling";
 import { AccountAlerts, AccountKpis } from "./AccountBar";
+import { DeskClock } from "./DeskClock";
 import { NavTabs, type NavItem } from "./Tabs";
 import type { AccountState, PositionView, RiskState, SettingsResponse } from "../types";
 
@@ -32,6 +33,8 @@ interface Props {
  */
 export function Header({ settings, account, risk, positions, nav, automation, onKillSwitchChange, onOpenSettings, onOpenAutomation }: Props) {
   const [busy, setBusy] = useState(false);
+  // The account strip's box: the clock beside it steps aside when the account numbers need the room.
+  const stripRef = useRef<HTMLDivElement>(null);
   // Two-step power off: the first click arms it, the second does it. A single click on a control
   // that stops trade management is too easy to hit by accident.
   const [armed, setArmed] = useState(false);
@@ -133,9 +136,13 @@ export function Header({ settings, account, risk, positions, nav, automation, on
           <span className="hidden h-7 w-px shrink-0 bg-neutral-800 xl:block" aria-hidden="true" />
 
           {/* The account. Its own line below xl, so nothing in it is ever squeezed or hidden. */}
-          <div className="order-last w-full min-w-0 overflow-x-auto border-t border-neutral-800/70 pt-1.5 xl:order-none xl:w-auto xl:flex-1 xl:border-0 xl:pt-0">
+          <div ref={stripRef} className="order-last w-full min-w-0 overflow-x-auto border-t border-neutral-800/70 pt-1.5 xl:order-none xl:w-auto xl:flex-1 xl:border-0 xl:pt-0">
             <AccountKpis account={account} risk={risk} settings={settings} positions={positions} />
           </div>
+
+          {/* Your time, always in sight (asked 2026-11-08): in the gap the account strip leaves before the tabs -
+              and out of the way while the account numbers need that room. */}
+          <DeskClock strip={stripRef} />
 
           <div className="ml-auto min-w-0 overflow-x-auto xl:ml-0">
             <NavTabs items={nav} />

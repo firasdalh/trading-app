@@ -127,7 +127,7 @@ function SignalCard({ s, onPick, onClose }: {
   const when = s.at ? new Date(s.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "";
   const ask = typeof Notification !== "undefined" && Notification.permission === "default";
   return (
-    <div role="status" className="pointer-events-auto w-[23rem] max-w-[calc(100vw-2rem)] rounded-lg border border-sky-400/60 bg-neutral-900/95 p-2.5 text-xs shadow-xl backdrop-blur-sm">
+    <div role="status" className="pointer-events-auto w-[23rem] max-w-[calc(100vw-2rem)] rounded-lg border border-fuchsia-400/60 bg-neutral-900/95 p-2.5 text-xs shadow-xl backdrop-blur-sm">
       <div className="flex items-start gap-2">
         <span className="text-base leading-none" aria-hidden="true">👁</span>
         <div className="min-w-0 flex-1">
@@ -137,7 +137,7 @@ function SignalCard({ s, onPick, onClose }: {
             {s.price != null && <span className="tabular-nums text-neutral-300">at {fmtPrice(s.price)}</span>}
             <span className="ml-auto tabular-nums text-neutral-500">{when}</span>
           </div>
-          <div className="mt-0.5 text-sky-200/90">
+          <div className="mt-0.5 text-fuchsia-200/90">
             {s.name ?? "Strategy"} · group {s.group} · watch only - it opened nothing
           </div>
         </div>
@@ -178,7 +178,7 @@ function SignalCard({ s, onPick, onClose }: {
               onPick(s.symbol, s.assetClass as AssetClass);
               onClose();
             }}
-            className="ml-auto whitespace-nowrap rounded bg-sky-500/20 px-2 py-0.5 font-semibold text-sky-200 hover:bg-sky-500/30"
+            className="ml-auto whitespace-nowrap rounded bg-fuchsia-500/20 px-2 py-0.5 font-semibold text-fuchsia-200 hover:bg-fuchsia-500/30"
           >
             Chart {displaySymbol(s.symbol)} ›
           </button>

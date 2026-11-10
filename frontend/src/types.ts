@@ -1242,6 +1242,9 @@ export interface StrategyHours {
   start: string;
   end: string;
   tz: string | null;
+  // Its crypto pairs keep no hours: they open at any hour, day and night, while the others keep the window
+  // (asked 2026-11-09: "I want that the crypto keep working 24 hours"). Kept only when on.
+  crypto_24h?: boolean;
 }
 // Where now falls in those hours (backend `hours_now`): open or not, the strategy's clock now, and the
 // seconds until that changes.
@@ -1257,6 +1260,7 @@ export interface StrategyView extends StrategyDraft {
   id: number;
   enabled: boolean;
   hours_now?: StrategyHoursNow | null;
+  hours_24h?: string[];   // its pairs that keep no hours: the crypto ones, with crypto_24h on
   // symbol -> when its re-entry wait after the last close on the pair ends (ISO); pairs still waiting only.
   cooldown_until?: Record<string, string>;
   pnl_today?: number;                                  // what the trades it closed today (UTC) made
@@ -1294,13 +1298,54 @@ export interface StrategyCheck {
   paper: boolean;
   market_open: boolean | null;
   bars: Record<string, number>;
-  hours?: StrategyHoursNow | null;   // the draft's trading hours, now (null: none set)
+  hours?: StrategyHoursNow | null;   // the draft's trading hours, now (null: none set, or crypto with crypto 24/7)
   stop?: { long: StrategyStopNow | null; short: StrategyStopNow | null };   // with a SuperTrend stop only
   long: StrategyCheckSet | null;
   short: StrategyCheckSet | null;
   exit_long: StrategyCheckSet;
   exit_short: StrategyCheckSet;
 }
+/** GET /api/strategies/signal-review: the watch signals, each judged as the trade it would have been - in at its
+ *  price, out at the strategy's own stop or target, whichever came first (backend signal_review.py). */
+export interface SignalReviewSignal {
+  id: number;
+  at: string;
+  symbol: string | null;
+  strategy_id: number | null;
+  name: string | null;
+  side: "long" | "short" | null;
+  group: number | null;
+  price: number | null;
+  rules: string[];
+  result: "win" | "loss" | "timeout" | "open" | "unknown";
+  r?: number | null;
+  levels?: "logged" | "estimated" | "none";   // estimated: logged before signals kept their stop and target
+  stop?: number | null;
+  target?: number | null;
+  exit_at?: string | null;
+  exit_price?: number | null;
+  mfe_r?: number | null;    // how far it went for it, in R
+  mae_r?: number | null;    // and against it
+  same_bar?: boolean;       // stop and target inside one candle: counted as the stop
+  spread?: number;
+  why?: string;
+}
+/** A save of a strategy, with what it changed (null: saved before edits recorded that). */
+export interface SignalReviewEdit {
+  id: number;
+  at: string;
+  strategy_id: number | null;
+  name: string | null;
+  changes: string[] | null;
+}
+export interface SignalReview {
+  signals: SignalReviewSignal[];
+  edits: SignalReviewEdit[];
+  horizon_h: number;
+  days: number;
+  now: string;
+}
+
 export interface StrategyActivity {
   /** Negative for a close the engine didn't make (stop, target, by hand): read from the trade itself. */
   id: number;

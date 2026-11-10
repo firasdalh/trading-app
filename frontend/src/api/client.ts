@@ -533,6 +533,9 @@ export const api = {
     }),
   strategyActivity: (id: number) => request<import("../types").StrategyActivity[]>(`/api/strategies/${id}/activity`),
   // Every strategy's, newest first (the desk's feed).
+  // The watch signals, each judged as the trade it would have been, and the strategy edits between them.
+  signalReview: (days = 30) =>
+    request<import("../types").SignalReview>(`/api/strategies/signal-review?days=${days}`),
   strategyActivityAll: (limit = 40) =>
     request<import("../types").StrategyActivity[]>(`/api/strategies/activity?limit=${limit}`),
 

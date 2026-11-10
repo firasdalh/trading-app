@@ -111,11 +111,13 @@ function SideRow({ label, tone, set, paused, watch }: {
   );
 }
 
-export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: {
+export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard, boardLink = true }: {
   positions: PositionView[] | null;
   chartSymbol?: string;
   onPick?: (symbol: string, assetClass: AssetClass) => void;
   onOpenBoard?: () => void;
+  // The footer's "Open the board ›" - off in the desk's sidebar, whose section header links the board already.
+  boardLink?: boolean;
 }) {
   const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState<number | null>(null);
@@ -182,6 +184,8 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
         const wins = closed.filter((t) => t.pnl > 0).length;
         const mine = (positions ?? []).filter((p) => p.source === src);
         const offHours = !!s.hours && s.hours_now?.open === false;
+        // Its pairs that keep no hours - the crypto ones, with "crypto 24/7" on: live while the others sleep.
+        const allDay = new Set(s.hours_24h ?? []);
         const done = targetDone(s);
         return (
           <div
@@ -219,9 +223,11 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
               {s.enabled && s.hours && (
                 <span
                   className={`shrink-0 rounded px-1 text-[10px] ${s.hours_now?.open ? "bg-bull/15 text-bull" : "bg-neutral-800 text-neutral-400"}`}
-                  title={`Trading hours ${s.hours.start}–${s.hours.end} (${zoneLabel(s.hours.tz)}): it opens trades only then. A trade it holds keeps its close rules, stop and target at any hour.`}
+                  title={`Trading hours ${s.hours.start}–${s.hours.end} (${zoneLabel(s.hours.tz)}): it opens trades only then. A trade it holds keeps its close rules, stop and target at any hour.${
+                    allDay.size ? ` Crypto 24/7: ${[...allDay].map(displaySymbol).join(", ")} open trades at any hour.` : ""}`}
                 >
                   ⏰ {s.hours_now ? (s.hours_now.open ? `on until ${s.hours.end}` : `off until ${s.hours.start}`) : `${s.hours.start}–${s.hours.end}`}
+                  {allDay.size > 0 && <span className="font-semibold text-bull"> · crypto 24/7</span>}
                 </span>
               )}
               {s.enabled && s.daily_target != null && (
@@ -251,6 +257,7 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
 
             {s.enabled && s.pairs.map((p) => {
               const check = checks?.[`${s.id}|${p.symbol}`];
+              const off = offHours && !allDay.has(p.symbol);
               const trade = mine.find((x) => sameSym(x.symbol, p.symbol));
               const note = s.state?.[p.symbol]?.note;
               const wait = trade ? null : pairWait(s, p.symbol);
@@ -292,13 +299,13 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
                   ) : (
                     // Outside its trading hours, while the pair waits out its cooldown, or once the daily target
                     // is reached, the rules still read, dimmed: they open nothing until then.
-                    <div className={offHours || wait || done ? "opacity-50" : undefined}>
-                      {s.sides !== "short" && <SideRow label="▲ BUY" tone="text-bull" set={check.long} paused={offHours || !!wait || !!done} watch />}
+                    <div className={off || wait || done ? "opacity-50" : undefined}>
+                      {s.sides !== "short" && <SideRow label="▲ BUY" tone="text-bull" set={check.long} paused={off || !!wait || !!done} watch />}
                       {/* A hairline between the two sides, green into red, so each side's chips read as one block. */}
                       {s.sides === "both" && (
                         <div className="mx-1 mb-0.5 mt-1.5 h-px bg-gradient-to-r from-bull/40 via-neutral-600/30 to-bear/40" aria-hidden="true" />
                       )}
-                      {s.sides !== "long" && <SideRow label="▼ SELL" tone="text-bear" set={check.short} paused={offHours || !!wait || !!done} watch />}
+                      {s.sides !== "long" && <SideRow label="▼ SELL" tone="text-bear" set={check.short} paused={off || !!wait || !!done} watch />}
                       {check.market_open === false && <div className="mt-0.5 text-[10px] text-neutral-500">market closed</div>}
                     </div>
                   )}
@@ -313,7 +320,7 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard }: 
         <span title="Each line is one group of rules - any one group is enough. Each chip is one of its conditions: ✓ holds now, ✗ doesn't, … can't be read yet. Hover a chip for what it read.">
           rules read every 5 s · not backtested
         </span>
-        {onOpenBoard && (
+        {onOpenBoard && boardLink && (
           <button onClick={onOpenBoard} className="text-neutral-400 hover:text-amber-200">Open the board ›</button>
         )}
       </div>

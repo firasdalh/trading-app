@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { api } from "../api/client";
 import { useFollowTrades } from "../followTrades";
 import { assetLabel, displaySymbol, fmtPrice, fmtUsd } from "../format";
@@ -9,6 +10,7 @@ import { useScalpSpec, type PreOrder, type PreOrderView, type ScalpHud } from ".
 import { SCALP_FAST, SCALP_TFS, TF_SECONDS, TIMEFRAMES, analysisTimeframe } from "../timeframes";
 import { ChartWindowMenu, ScalpToggle } from "./ChartWindow";
 import { ScalpTicket } from "./ScalpTicket";
+import { growIn, rememberFrom, shrinkBack, type MorphFrom } from "./fullscreenMorph";
 import { TimeframeBadge, TimeframeSwitch } from "./TimeframeSwitch";
 import type {
   AccountState,
@@ -218,8 +220,22 @@ export function Dashboard({
   // button) still leaves the layout correct.
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const [chartFull, setChartFull] = useState(false);
+  // The move between the two is animated (fullscreenMorph.ts, asked 2026-11-08): the block opens out of its card
+  // and, on the way back, a panel shrinks into the card. `morphFrom` is where the card was when full screen was
+  // asked for; `wasFull` tells a real exit from a fullscreenchange that isn't ours.
+  const morphFrom = useRef<MorphFrom | null>(null);
+  const wasFull = useRef(false);
   useEffect(() => {
-    const onChange = () => setChartFull(document.fullscreenElement === chartWrapRef.current);
+    const onChange = () => {
+      const el = chartWrapRef.current;
+      const full = !!el && document.fullscreenElement === el;
+      // Rendered at once, so the animation starts on the new layout rather than on a frame of the old one.
+      flushSync(() => setChartFull(full));
+      if (el && full && !wasFull.current) growIn(el, morphFrom.current);
+      else if (el && !full && wasFull.current) shrinkBack(el.parentElement ?? el);
+      wasFull.current = full;
+      if (!full) morphFrom.current = null;
+    };
     document.addEventListener("fullscreenchange", onChange);
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
@@ -270,7 +286,10 @@ export function Dashboard({
     const el = chartWrapRef.current;
     if (!el) return;
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
-    else void el.requestFullscreen?.().catch(() => {});   // denied -> stay inline
+    else {
+      morphFrom.current = rememberFrom(el.parentElement ?? el);   // the card: the opening starts from it
+      void el.requestFullscreen?.().catch(() => { morphFrom.current = null; });   // denied -> stay inline
+    }
   };
   const liveQuote = useQuoteSocket(symbol, assetClass);
   const { data: brokerInfo } = usePolling(() => api.brokerInfo(assetClass), 6000, [assetClass]);
@@ -740,26 +759,21 @@ export function Dashboard({
                 (() => {
                   const configured = settings?.app.broker_map?.[assetClass];
                   const fallback = configured && configured !== brokerInfo.name;
+                  // Only a FALLBACK shows: orders are going to the simulator instead of the broker you
+                  // configured. The healthy "mt5 · live" repeated the header's LIVE / PAPER badge (removed
+                  // 2026-11-08 - "remove any no-need duplication").
+                  if (!fallback) return null;
                   return (
-                    // The healthy case is shown only on wide windows (the header already says
-                    // PAPER/LIVE); a FALLBACK is shown always, because it means orders are going to
-                    // the simulator instead of the broker you configured.
                     <span
-                      className={`rounded px-2 py-0.5 text-[11px] ${
-                        fallback ? "bg-warn/20 text-warn" : "hidden bg-neutral-800 text-neutral-400 2xl:inline"
-                      }`}
-                      title={
-                        fallback
-                          ? `Configured '${configured}' is unavailable — using the simulator. Check broker keys / MT5 terminal.`
-                          : "Active broker for this asset class"
-                      }
+                      className="rounded bg-warn/20 px-2 py-0.5 text-[11px] text-warn"
+                      title={`Configured '${configured}' is unavailable — using the simulator. Check broker keys / MT5 terminal.`}
                     >
-                      {fallback ? `${configured}→${brokerInfo.name} (fallback)` : brokerInfo.name} ·{" "}
-                      {brokerInfo.is_paper ? "paper" : "live"}
+                      {configured}→{brokerInfo.name} (fallback) · {brokerInfo.is_paper ? "paper" : "live"}
                     </span>
                   );
                 })()}
-              {liveQuote && (
+              {/* Not in scalp mode: the ticket's SELL / BUY carry the live prices there. */}
+              {liveQuote && !scalp && (
                 <span className="text-sm tabular-nums font-semibold text-neutral-100" title={`${liveQuote.symbol} live price`}>
                   {fmtPrice(liveQuote.price)}
                 </span>
@@ -1046,7 +1060,8 @@ export function Dashboard({
             title="Strategy activity"
             hint="What your strategies opened and closed and why, newest first - click a row for the details"
             body="bare"
-            actions={
+            // Scalp mode has the Strategies section right below, with its own "Board ›": one link, not two.
+            actions={scalp ? undefined : (
               <button
                 onClick={openStrategyBoard}
                 className="btn btn-ghost px-1.5 py-0.5 text-xs"
@@ -1054,7 +1069,7 @@ export function Dashboard({
               >
                 Board ›
               </button>
-            }
+            )}
           >
             {!chartFull && <DeskStrategyActivity onPick={pickStrategyPair} />}
           </SideSection>
@@ -1078,7 +1093,7 @@ export function Dashboard({
               }
             >
               {!chartFull && (
-                <StrategyWidget positions={positions} chartSymbol={symbol} onPick={pickStrategyPair} onOpenBoard={openStrategyBoard} />
+                <StrategyWidget positions={positions} chartSymbol={symbol} onPick={pickStrategyPair} onOpenBoard={openStrategyBoard} boardLink={false} />
               )}
             </SideSection>
           ) : (

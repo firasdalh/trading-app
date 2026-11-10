@@ -56,10 +56,12 @@ _HHMM = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 class HoursIn(BaseModel):
     """Its trading hours: it opens trades from ``start`` up to ``end`` (24-hour, past midnight when end
-    comes first) on the clock of ``tz`` - the board sends the browser's zone; none = this machine's."""
+    comes first) on the clock of ``tz`` - the board sends the browser's zone; none = this machine's.
+    ``crypto_24h``: its crypto pairs keep no hours and open around the clock (engine.pair_hours)."""
     start: str = Field(pattern=_HHMM)
     end: str = Field(pattern=_HHMM)
     tz: str | None = Field(None, max_length=64)
+    crypto_24h: bool = False
 
     @model_validator(mode="after")
     def _a_real_window(self) -> "HoursIn":
@@ -71,6 +73,14 @@ class HoursIn(BaseModel):
             except (ZoneInfoNotFoundError, ValueError):
                 raise ValueError(f"trading hours: unknown time zone '{self.tz}'") from None
         return self
+
+    def stored(self) -> dict:
+        """As the strategy keeps them: ``crypto_24h`` only when on, so hours saved before it existed read the
+        same, and an edit that leaves the hours alone records no change to them."""
+        out = self.model_dump()
+        if not out["crypto_24h"]:
+            del out["crypto_24h"]
+        return out
 
 
 class StopIn(BaseModel):
@@ -156,7 +166,7 @@ class StrategyIn(BaseModel):
         return engine.Rules(timeframe=self.timeframe, sides=self.sides, entry_long=self.groups("entry_long"),
                             entry_short=self.groups("entry_short"), mirror_short=self.mirror_short,
                             exit_rules=self.groups("exit_rules"), stop_atr=self.stop_atr,
-                            hours=self.hours.model_dump() if self.hours else None,
+                            hours=self.hours.stored() if self.hours else None,
                             stop=self.stop.model_dump() if self.stop else None, off=self.off_groups)
 
 
@@ -181,6 +191,7 @@ class StrategyView(BaseModel):
     hours: dict | None = None
     stop: dict | None = None              # a SuperTrend stop (StopIn); None = stop_atr x ATR
     hours_now: dict | None = None         # engine.hours_now: may it open a trade now, and until when
+    hours_24h: list[str] = []             # its pairs that keep no hours: crypto, with crypto_24h on (engine.pair_hours)
     # symbol -> when its re-entry wait after the last close ends (engine.cooldown_until), pairs still waiting only
     cooldown_until: dict[str, str] = {}
     daily_target: float | None = None
@@ -216,6 +227,8 @@ def _view(session: Session, row: StrategyConfig) -> StrategyView:
         manage_manual=row.manage_manual, cooldown_minutes=row.cooldown_minutes if row.cooldown_minutes is not None else 0,
         loss_cooldown_minutes=row.loss_cooldown_minutes if row.loss_cooldown_minutes is not None else 5,
         hours=row.hours or None, hours_now=engine.hours_now(row.hours, now), stop=row.stop or None,
+        hours_24h=[p.get("symbol") for p in row.pairs or []
+                   if row.hours and p.get("symbol") and engine.pair_hours(row.hours, p.get("asset_class")) is None],
         cooldown_until={sym: _iso(t) for sym, t in waits.items() if sym and t and t > now},
         daily_target=row.daily_target, off_groups=off_groups_of(row.off_groups), live=bool(row.live),
         pnl_today=day["pnl"],
@@ -236,7 +249,7 @@ def _apply(row: StrategyConfig, req: StrategyIn) -> None:
     row.max_trades_day, row.manage_manual = req.max_trades_day, req.manage_manual
     row.cooldown_minutes, row.loss_cooldown_minutes = req.cooldown_minutes, req.loss_cooldown_minutes
     row.stop = req.stop.model_dump() if req.stop else None
-    row.hours = req.hours.model_dump() if req.hours else None
+    row.hours = req.hours.stored() if req.hours else None
     row.daily_target = req.daily_target
     row.off_groups = off_groups_of(req.off_groups)
     row.live = req.live
@@ -287,10 +300,18 @@ def create_strategy(req: StrategyIn, session: Session = Depends(get_session)) ->
 
 @router.put("/{sid}", response_model=StrategyView)
 def update_strategy(sid: int, req: StrategyIn, session: Session = Depends(get_session)) -> StrategyView:
+    from app.agents.signal_review import describe_changes, snapshot
+
     row = _get(session, sid)
+    before = snapshot(row)
     _apply(row, req)
+    # What changed, in words - the journal's signal review shows it above the signals that followed (2026-11-08).
+    try:
+        changes = describe_changes(before, snapshot(row))
+    except Exception:  # noqa: BLE001
+        changes = None
     session.add(AgentRun(agent="strategy", event="edited", detail={"strategy_id": row.id, "name": row.name,
-                                                                    "running": row.enabled}))
+                                                                    "running": row.enabled, "changes": changes}))
     session.commit()
     session.refresh(row)
     return _view(session, row)
@@ -389,6 +410,16 @@ def _feed(session: Session, sid: int | None, limit: int) -> list[dict]:
                                           "target": p.take_profit}}))
     items.sort(key=lambda it: it[0], reverse=True)
     return [e for _, e in items[:limit]]
+
+
+@router.get("/signal-review")
+def signal_review(days: int = Query(30, ge=1, le=365), session: Session = Depends(get_session)) -> dict:
+    """Every watch-only signal of the last ``days``, newest first, with what it WOULD have done had it been
+    traded (in at its price, out at the strategy's stop or target, whichever came first - signal_review.py), and
+    the strategies' edits in that time with what each changed. Reads the broker's history; never trades."""
+    from app.agents.signal_review import review
+
+    return review(session, days)
 
 
 @router.get("/activity")

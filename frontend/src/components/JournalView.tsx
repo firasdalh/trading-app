@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import type { CalibrationBucket, GroupStat, JournalBreakdown, JournalStats, PeriodBreakdown, ReflectionReport } from "../types";
+import { SignalReviewCard } from "./SignalReview";
 import { srcLabel, srcColor } from "./sourceMeta";
 
 // Midpoint of a "70-80%" bucket label, used to judge whether the realized win rate matches the
@@ -202,6 +203,9 @@ export function JournalView() {
       </div>
 
       <PerformanceCard perf={perf} />
+
+      {/* What each watch signal would have done if traded, split at each change to the strategy (2026-11-08). */}
+      <SignalReviewCard />
 
       <BreakdownCard breakdown={breakdown} />
 

@@ -159,11 +159,15 @@ function span(mins: number): string {
 }
 
 // When it may OPEN a trade: all day, or from one time up to another (past midnight when the end comes
-// first). `now` is the backend's read of the draft's hours (the live check), on the strategy's clock.
-function HoursRow({ value, onChange, now }: {
+// first). `now` is the backend's read of the draft's hours (the live check), on the strategy's clock, for the
+// pair the board reads - none for a crypto pair with "crypto 24/7" on (`readsCrypto`). `crypto`: the draft's
+// crypto pairs, which that box lets off the hours (asked 2026-11-09: "I want that the crypto keep working 24 hours").
+function HoursRow({ value, onChange, now, crypto, readsCrypto }: {
   value: StrategyHours | null;
   onChange: (h: StrategyHours | null) => void;
   now: StrategyHoursNow | null | undefined;
+  crypto: string[];
+  readsCrypto: boolean;
 }) {
   const len = value ? (minsOf(value.end) - minsOf(value.start) + 1440) % 1440 : 0;
   const pastMidnight = !!value && minsOf(value.end) > 0 && minsOf(value.end) < minsOf(value.start);
@@ -204,6 +208,30 @@ function HoursRow({ value, onChange, now }: {
               {now.open
                 ? `on now - until ${now.end} (${span(Math.ceil(now.next_s / 60))} left)`
                 : `off now - starts at ${now.start} (in ${span(Math.ceil(now.next_s / 60))})`}
+            </span>
+          )}
+          {!now && readsCrypto && value.crypto_24h && (
+            <span className="rounded bg-bull/20 px-1.5 py-0.5 font-semibold text-bull">on now - crypto, at any hour</span>
+          )}
+          <label
+            className={`inline-flex cursor-pointer select-none items-center gap-1 rounded border px-1.5 py-0.5 ${
+              value.crypto_24h ? "border-bull/40 bg-bull/10 text-bull" : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
+            }`}
+            title="Crypto never closes. With this on, its crypto pairs (BTC, ETH ...) open trades at any hour, day and night, and the other pairs keep these hours. With 'Trade the live account' on, that is real money at night too."
+          >
+            <input
+              type="checkbox"
+              checked={!!value.crypto_24h}
+              onChange={(e) => onChange({ ...value, crypto_24h: e.target.checked })}
+              className="accent-emerald-500"
+            />
+            crypto 24/7
+          </label>
+          {value.crypto_24h && (
+            <span className="text-neutral-500">
+              {crypto.length
+                ? `${crypto.map(displaySymbol).join(", ")} ${crypto.length === 1 ? "trades" : "trade"} at any hour; the others keep these hours`
+                : "no crypto pair in it yet"}
             </span>
           )}
         </>
@@ -1053,7 +1081,13 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
             </>
           )}
         </span>
-        <HoursRow value={draft.hours} onChange={(h) => set({ hours: h })} now={check?.hours} />
+        <HoursRow
+          value={draft.hours}
+          onChange={(h) => set({ hours: h })}
+          now={check?.hours}
+          crypto={draft.pairs.filter((p) => p.asset_class === "crypto").map((p) => p.symbol)}
+          readsCrypto={pair?.asset_class === "crypto"}
+        />
         <LiveRow on={draft.live} onChange={(v) => set({ live: v })} real={!!check && !check.paper} />
       </div>
 

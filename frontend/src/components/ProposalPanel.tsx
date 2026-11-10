@@ -70,7 +70,9 @@ interface Props {
   equity?: number | null;
   onApprove: (lots?: number | null) => void;
   onReject: () => void;
-  onRunAnalysis?: () => void;   // re-run analysis for the charted symbol (same as the top button)
+  // Re-run analysis for the charted symbol - the open trade's "Re-check now". The panel has no Run analysis
+  // button of its own any more: the desk's, at the top, is the one (2026-11-08).
+  onRunAnalysis?: () => void;
   analyzing?: boolean;
   scenario?: AiScenarioRead | null;   // Step 4: AI two-scenario read (info only)
   scenarioBusy?: boolean;
@@ -150,16 +152,7 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
   if (!result) {
     return (
       <div className="card space-y-2 text-sm text-neutral-400">
-        <div>No proposal yet. Pick a symbol and run analysis.</div>
-        {onRunAnalysis && (
-          <button
-            onClick={onRunAnalysis}
-            disabled={analyzing}
-            className="btn btn-primary"
-          >
-            {analyzing ? "Analyzing…" : "Run analysis"}
-          </button>
-        )}
+        <div>No proposal yet. Pick a symbol and press Run analysis at the top.</div>
       </div>
     );
   }
@@ -172,8 +165,6 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
         status={status}
         positionOpen={positionOpen}
         onShow={() => setShowOld(true)}
-        onRunAnalysis={onRunAnalysis}
-        analyzing={analyzing}
       />
     );
   }
@@ -241,16 +232,6 @@ export function ProposalPanel({ result, status, positionOpen, openPosition, arme
         <div className="flex items-center gap-2">
           <ReviewBadge decision={proposal.review_decision} />
           <StatusBadge status={status} positionOpen={positionOpen} standAside={noTrade && !proposal.watch} />
-          {onRunAnalysis && (
-            <button
-              onClick={onRunAnalysis}
-              disabled={analyzing}
-              className="btn btn-primary"
-              title="Re-run analysis for the charted symbol"
-            >
-              {analyzing ? "Analyzing…" : "Run analysis"}
-            </button>
-          )}
         </div>
       </div>
 
@@ -1640,13 +1621,11 @@ function LiveTiles({ pos, proposal, planIsTrade }: { pos: PositionView; proposal
 // A read 3+ bars old with nothing open on the pair, folded to one line. The full panel looked
 // exactly like a current analysis — "Risk Manager: APPROVED", a confidence bar, a path measured from
 // a price long gone — for a trade that closed weeks ago.
-function StaleReadCard({ result, status, positionOpen, onShow, onRunAnalysis, analyzing }: {
+function StaleReadCard({ result, status, positionOpen, onShow }: {
   result: AnalyzeResponse;
   status: string | null;
   positionOpen?: boolean | null;
   onShow: () => void;
-  onRunAnalysis?: () => void;
-  analyzing?: boolean;
 }) {
   const p = result.proposal;
   const dir = p.direction === "no_trade" ? (p.watch ? "WATCHING" : "NO TRADE") : p.direction.toUpperCase();
@@ -1676,15 +1655,10 @@ function StaleReadCard({ result, status, positionOpen, onShow, onRunAnalysis, an
           <span className="text-neutral-300">{st}</span>
         </>
       )}
-      <span className="text-neutral-500">— too old to act on.</span>
+      <span className="text-neutral-500">— too old to act on. Run analysis at the top reads it fresh.</span>
       <button onClick={onShow} className="btn btn-ghost px-2 py-0.5 text-xs" title="Show the old analysis, for reference only">
         Show old read ▸
       </button>
-      {onRunAnalysis && (
-        <button onClick={onRunAnalysis} disabled={analyzing} className="btn btn-primary ml-auto">
-          {analyzing ? "Analyzing…" : "Run analysis"}
-        </button>
-      )}
     </div>
   );
 }

@@ -12,7 +12,7 @@ import { ScorecardPanel } from "./components/ScorecardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StrategyBoard } from "./components/StrategyBoard";
 import { SIGNAL_PICK_EVENT, SignalToasts, useStrategySignals } from "./components/StrategySignals";
-import { TargetCelebration, useTargetHits } from "./components/TargetCelebration";
+import { WinCelebration, useWinningCloses } from "./components/WinCelebration";
 import type { NavItem } from "./components/Tabs";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 import { usePolling } from "./hooks/usePolling";
@@ -82,8 +82,9 @@ export default function App() {
   const { data: hybrid } = usePolling(() => api.hybridState(), 30000, [bump]);
   // Price alerts are checked HERE, once, so they fire whichever view is open (not only the desk).
   useAlertWatcher();
-  // A trade closing at its take-profit gets a celebration - also watched here, on every view.
-  const [targetHits, dismissHit] = useTargetHits(positions);
+  // Every trade closing in profit gets a celebration - at the target, by hand, by a strategy's rule or on a
+  // trailed stop (WinCelebration.tsx, 2026-11-08) - watched here, on every view.
+  const [wins, dismissWin] = useWinningCloses(positions);
   // EVERYTHING that can act without a click, in one place. Only the Hybrid had a live dot; RSI-Over
   // auto-watch, the per-pair auto-trader, the advisor's auto-execute and armed setups were each
   // buried in their own panel (full review 2026-10-20).
@@ -333,8 +334,8 @@ export default function App() {
         <StrategyBoard assetClass={assetClass} />
       </Drawer>
 
-      {/* One at a time: two targets hit together celebrate back to back. */}
-      <TargetCelebration hit={targetHits[0] ?? null} onDone={dismissHit} />
+      {/* One at a time: wins that close together celebrate back to back. */}
+      <WinCelebration win={wins[0] ?? null} queued={wins.length - 1} onDone={dismissWin} />
       <SignalToasts signals={signals} onPick={pickSignal} onDismiss={dismissSignal} />
     </div>
   );

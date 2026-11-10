@@ -16,7 +16,7 @@ const TONE: Record<string, string> = {
   opened: "text-bull", closed: "text-sky-300", refused: "text-amber-300", blocked: "text-amber-300",
   not_filled: "text-amber-300", close_failed: "text-bear", started: "text-amber-200", stopped: "text-neutral-400",
   edited: "text-neutral-500", stop_moved: "text-sky-200", stop_move_failed: "text-bear", target_reached: "text-bull",
-  signal: "text-cyan-300",
+  signal: "text-fuchsia-300",   // the signals' colour: their pop-up and their 👁 markers on the chart
 };
 // How a trade ended when its strategy did not close it (the backend reads it from the exit price).
 const BY: Record<string, string> = { stop: "stop hit", target: "target hit", other: "closed outside the strategy" };

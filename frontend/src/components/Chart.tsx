@@ -25,7 +25,8 @@ import { TradeHistoryPrimitive, type HistTrade } from "./tradeHistory";
 import { AutoFibPrimitive, autoFib, fibExplain, fibPosition, fibStatus, liveFib, type AutoFib } from "./autoFib";
 import { RSI_PERIOD_EVENT } from "../rsiPeriod";
 import { OrderFlowPane } from "./OrderFlowPane";
-import { PICK_EVENT, addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
+import { SessionLegend } from "./SessionLegend";
+import { addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
 import { fmtPrice, fmtUsd } from "../format";
 import { TF_SECONDS, analysisTimeframe, isSecondsTf } from "../timeframes";
 import type { AiScenarioRead, AssetClass, BreakPlan, Candle, ChartTrade, KeyLevels, MarketContext, MarketEvent, PositionView, TradeProposal } from "../types";
@@ -111,6 +112,12 @@ function tzLabel(mode: "local" | "utc"): string {
 
 // --- Past trades (MT5-style history, tradeHistory.ts) ---------------------------------------------
 const HIST_POLL_MS = 15_000;
+// Watch-only signals on the chart (2026-11-08): read this often from the strategies' activity feed - its last 200
+// events, which reach a few days back. "What price did after it" is measured over the hour after the signal.
+const SIG_POLL_MS = 20_000;
+const SIG_HORIZON_S = 3600;
+const SIGNAL_COLOR = "#e879f9";   // fuchsia-400: the signals' colour - the pop-up, the feed and these markers
+type ChartSignal = { id: number; at: number; side: "long" | "short"; price: number | null; group: number; name: string | null };
 // Why a trade closed, from MT5's deal reason. "app" is anything the app sent - a strategy's close rule,
 // the close button, Space, the advisor: MT5 records them all the same way.
 const HIST_BY: Record<string, string> = {
@@ -1234,6 +1241,13 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const histRef = useRef<TradeHistoryPrimitive | null>(null);
   const [hist, setHist] = useState<{ symbol: string; trades: ChartTrade[] } | null>(null);
   const [histTip, setHistTip] = useState<{ key: string; x: number; y: number } | null>(null);
+  // Watch-only signals on this pair (at = UTC seconds), the candles that carry them (bar time on the axis ->
+  // signals, rebuilt with the markers), and the candle under the pointer when it carries one.
+  const [signals, setSignals] = useState<{ symbol: string; list: ChartSignal[] } | null>(null);
+  const signalsRef = useRef(signals);
+  signalsRef.current = signals;
+  const sigByBarRef = useRef<Map<number, ChartSignal[]>>(new Map());
+  const [sigTip, setSigTip] = useState<{ time: number; x: number; y: number } | null>(null);
   const [stratNames, setStratNames] = useState<Record<string, string>>({});
   // The last TRUE cross of EMA 10 over / under EMA 20 (see trueCrosses), for the legend.
   const [emaCross, setEmaCross] = useState<{ up: boolean; ago: number; pending: boolean } | null>(null);
@@ -1265,6 +1279,9 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     // drop is refused.
     hint?: (p: number) => string | null;
     title?: string;
+    // A live order (a position's SL / TP, an armed setup's levels): the drop waits for Confirm - a touch on
+    // the chart must not move one by mistake (2026-11-08).
+    confirm?: boolean;
   };
   const handlesRef = useRef<DragHandle[]>([]);
   const dragRef = useRef<DragHandle | null>(null);
@@ -1275,6 +1292,39 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   onSetArmedRef.current = onSetArmedLevels;
   const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null; extra?: string | null } | null>(null);
   const [dragErr, setDragErr] = useState<string | null>(null);
+  // A dropped live-order line is NOT sent until "Move it" is clicked (asked 2026-11-08). On the drop the line
+  // goes back to where the order is; a dashed amber line marks the proposal and the bar under the toolbar asks.
+  // Unconfirmed, it lapses.
+  const CONFIRM_S = 20;
+  type PendingMove = { handle: DragHandle; to: number; ghost: IPriceLine | null; timer: number };
+  const pendingRef = useRef<PendingMove | null>(null);
+  const [pending, setPending] = useState<{ key: string; label: string; from: number; to: number; pos: PositionView | null } | null>(null);
+  const clearPending = (note?: string) => {
+    const pm = pendingRef.current;
+    if (!pm) return;
+    window.clearTimeout(pm.timer);
+    if (pm.ghost) {
+      try { seriesRef.current?.removePriceLine(pm.ghost); } catch { /* the series was rebuilt under it */ }
+    }
+    pendingRef.current = null;
+    setPending(null);
+    if (note) setDragErr(note);
+  };
+  const confirmPending = () => {
+    const pm = pendingRef.current;
+    if (!pm) return;
+    // Through the CURRENT handle - they are rebuilt on every poll - so the level sent along with it (the TP with
+    // a moved SL, and the reverse) is the broker's latest; and checked again, since the price moved meanwhile.
+    const h = handlesRef.current.find((x) => x.key === pm.handle.key);
+    clearPending();
+    if (!h) return setDragErr(`${pm.handle.label} not moved — that order is no longer there.`);
+    if (!h.validate(pm.to)) return setDragErr(`${h.label} not moved — ${h.why}.`);
+    h.commit(pm.to);
+  };
+  const clearPendingRef = useRef(clearPending);
+  clearPendingRef.current = clearPending;
+  // Another pair or timeframe rebuilds the series under the dashed line: the proposal goes with it.
+  useEffect(() => () => clearPendingRef.current(), [symbol, timeframe]);
 
   // Hand drawing: the saved set, the stroke in progress, and the canvas it's painted on.
   const [drawings, saveDrawings] = useDrawings(symbol);
@@ -1375,8 +1425,8 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     // target, and where is price between them" is the first thing you look at on a live trade.
     // `hist` (past trades, MT5-style) defaults ON: it was asked for to be seen, in both modes.
     scalp
-      ? { pd: true, pw: false, open: true, sessions: true, vwap: true, vwapb: true, pivots: false, bb: true, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true, hist: true }
-      : { pd: false, pw: false, open: false, sessions: false, vwap: false, vwapb: false, pivots: false, bb: false, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true, hist: true },
+      ? { pd: true, pw: false, open: true, sessions: true, vwap: true, vwapb: true, pivots: false, bb: true, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true, hist: true, sig: true }
+      : { pd: false, pw: false, open: false, sessions: false, vwap: false, vwapb: false, pivots: false, bb: false, rr: false, div: false, choch: false, ob: false, days: true, zones: true, emaRibbon: true, emaCross: true, hist: true, sig: true },
     true,
   );
   // Which toolbar menu is open (only one at a time — two dropdowns overlapping is worse than
@@ -1589,6 +1639,10 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       const hit = param.point ? histPrim.hit(param.point.x, param.point.y) : null;
       histPrim.setHover(hit?.key ?? null);
       setHistTip((was) => (!hit ? null : was && was.key === hit.key && was.x === hit.x && was.y === hit.y ? was : hit));
+      // A watch signal's candle under the pointer: its details and what price did after it (sigTip).
+      const pt = param.point;
+      const at = pt && typeof param.time === "number" && sigByBarRef.current.has(param.time) ? param.time : null;
+      setSigTip((was) => (at == null || !pt ? null : was && was.time === at ? was : { time: at, x: pt.x, y: pt.y }));
     });
 
     return () => {
@@ -2018,7 +2072,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   useEffect(() => {
     applyMarkers(candlesRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showPb, showStructure, positions, symbol, ovl.zones, ovl.choch, ovl.div, ovl.emaCross, showEma]);
+  }, [showPb, showStructure, positions, symbol, ovl.zones, ovl.choch, ovl.div, ovl.emaCross, showEma, signals, ovl.sig]);
 
   useEffect(() => {
     applyBand(candlesRef.current);
@@ -2326,6 +2380,37 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           ?? (ovl.zones ? "" : `ENTRY ${pnl >= 0 ? "+" : "−"}$${amount.replace("-", "")}`),
       });
     }
+    // WATCH-ONLY SIGNALS (2026-11-08): each on the candle it fired INSIDE (the last one opened by then - the
+    // entry marker's rule), with the watch's 👁, so it can be judged later against the bars after it. Pointing at
+    // its candle shows how far price went each way (sigTip).
+    const byBar = new Map<number, ChartSignal[]>();
+    const sg = signalsRef.current;
+    if (ovl.sig && sg && sg.symbol === symbol) {
+      const times = candles.map((c) => toTime(c) as number);
+      const barSec = TF_SECONDS[timeframe] ?? 60;
+      for (const sig of sg.list) {
+        const at = utcToDisp(sig.at);
+        if (at < times[0] || at >= times[times.length - 1] + barSec) continue;   // outside the loaded bars
+        let lo = 0;
+        let hi = times.length - 1;
+        while (hi > lo) {
+          const mid = (lo + hi + 1) >> 1;
+          if (times[mid] <= at) lo = mid;
+          else hi = mid - 1;
+        }
+        byBar.set(times[lo], [...(byBar.get(times[lo]) ?? []), sig]);
+      }
+      for (const [t, list] of byBar) {
+        // One arrow per side per candle - two signals in one candle say "×2". Both sides in the signals' own
+        // fuchsia (the pop-up's colour), on no other marker, line or zone here: a 👁 arrow is never taken for a
+        // trade, an EMA cross or a pullback (2026-11-08).
+        const buys = list.filter((x) => x.side === "long").length;
+        const sells = list.length - buys;
+        if (buys) markers.push({ time: t as UTCTimestamp, position: "belowBar", color: SIGNAL_COLOR, shape: "arrowUp", text: `👁 BUY${buys > 1 ? ` ×${buys}` : ""}` });
+        if (sells) markers.push({ time: t as UTCTimestamp, position: "aboveBar", color: SIGNAL_COLOR, shape: "arrowDown", text: `👁 SELL${sells > 1 ? ` ×${sells}` : ""}` });
+      }
+    }
+    sigByBarRef.current = byBar;
     // lightweight-charts requires markers in ascending time order.
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     series.setMarkers(markers);
@@ -2735,6 +2820,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           key: `pos-sl-${p.id ?? p.symbol}`, label: "SL", refPos: p, line: slLine, price: p.stop_loss,
           validate: (x) => (isLong ? x < mkt() : x > mkt()),
           why: `a ${p.direction} stop must stay ${isLong ? "below" : "above"} the current price — it would trigger immediately`,
+          confirm: true,
           commit: (x) => onSetSlTpRef.current?.(x, p.take_profit ?? null, p.direction),
         });
       }
@@ -2743,6 +2829,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           key: `pos-tp-${p.id ?? p.symbol}`, label: "TP", refPos: p, line: tpLine, price: p.take_profit,
           validate: (x) => (isLong ? x > mkt() : x < mkt()),
           why: `a ${p.direction} target must stay ${isLong ? "above" : "below"} the current price — it would fill immediately`,
+          confirm: true,
           commit: (x) => onSetSlTpRef.current?.(p.stop_loss ?? null, x, p.direction),
         });
       }
@@ -2863,6 +2950,41 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     };
   }, [symbol, assetClass, histDays, ovl.hist, openHere]);
 
+  // WATCH-ONLY SIGNALS (asked 2026-11-08): every BUY / SELL a strategy group on watch logged for this pair, marked
+  // on its candle (applyMarkers) to be judged later - did price go its way? From the strategies' activity feed.
+  useEffect(() => {
+    if (!ovl.sig) {
+      setSignals(null);
+      return;
+    }
+    let alive = true;
+    const load = () =>
+      api.strategyActivityAll(200)
+        .then((items) => {
+          if (!alive) return;
+          const list: ChartSignal[] = [];
+          for (const a of items) {
+            const d = (a.detail ?? {}) as Record<string, unknown>;
+            if (a.event !== "signal" || !a.at || a.symbol?.toUpperCase() !== symbol.toUpperCase()) continue;
+            if (d.side !== "long" && d.side !== "short") continue;
+            const at = Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(a.at) ? a.at : `${a.at}Z`) / 1000;
+            if (!Number.isFinite(at)) continue;
+            list.push({
+              id: a.id, at, side: d.side, price: typeof d.price === "number" ? d.price : null,
+              group: typeof d.group === "number" ? d.group : 0, name: typeof d.name === "string" ? d.name : null,
+            });
+          }
+          setSignals({ symbol, list });
+        })
+        .catch(() => { /* keep what is drawn; the next poll tries again */ });
+    load();
+    const id = window.setInterval(load, SIG_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [symbol, ovl.sig]);
+
   // The strategies' names, for "opened by" in a trade's details - read once, and again if one is missing.
   const histStrats = (hist?.trades ?? []).map((t) => t.source).filter((s): s is string => !!s?.startsWith("strategy:"));
   const missingStrat = histStrats.some((s) => !(s.slice(9) in stratNames));
@@ -2966,6 +3088,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           key: `armed-${a.id}-trigger`, label: "Trigger", refPos: null, line: trigLine,
           price: a.trigger_price, validate: (x) => x > 0,
           why: "a trigger must be a positive price",
+          confirm: true,
           commit: (x) => onSetArmedRef.current?.(a.id, { trigger_price: x }),
         });
       }
@@ -2976,6 +3099,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           // An arm has no market position yet, so its levels are judged against the TRIGGER —
           // the price it will enter at — which is the right reference here.
           why: `an armed ${a.direction} stop must sit ${isLong ? "below" : "above"} the trigger`,
+          confirm: true,
           commit: (x) => onSetArmedRef.current?.(a.id, { stop_loss: x }),
         });
       }
@@ -2984,6 +3108,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           key: `armed-${a.id}-tp`, label: "TP", refPos: null, line: tpLine, price: a.take_profit,
           validate: (x) => (isLong ? x > a.trigger_price : x < a.trigger_price),
           why: `an armed ${a.direction} target must sit ${isLong ? "above" : "below"} the trigger`,
+          confirm: true,
           commit: (x) => onSetArmedRef.current?.(a.id, { take_profit: x }),
         });
       }
@@ -3409,6 +3534,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     // added later is deliberately NOT here: warm tones at low opacity over a near-black chart read
     // as dirty olive, which is what made this look muddy. Blue/violet/green sit cleanly over black
     // at the same opacity, so New York simply runs 13:00-21:00 and swallows the overlap.
+    // SessionLegend.tsx is their key, and lights the one we are in now: same hours, same hues.
     //
     // Drawn per BAR rather than as one rectangle per day: bars are unevenly spaced across weekends
     // and holidays, so a band computed from times alone would drift off the candles it describes.
@@ -3649,17 +3775,6 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     return () => window.clearTimeout(t);
   }, [dragErr]);
 
-  // The sidebar's "Pick on chart": switch to the alert tool, so the next click on the chart sets it.
-  useEffect(() => {
-    const onPick = () => {
-      draftRef.current = null;
-      dirtyRef.current += 1;
-      setDrawMode("alert");
-    };
-    window.addEventListener(PICK_EVENT, onPick);
-    return () => window.removeEventListener(PICK_EVENT, onPick);
-  }, []);
-
   // Esc drops the tool and any half-drawn stroke.
   useEffect(() => {
     if (drawMode === "off") return;
@@ -3725,6 +3840,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       if (drawModeRef.current !== "off") return;
       const handle = handleAt(e);
       if (!handle) return;
+      clearPendingRef.current();   // a new drag replaces a proposal still waiting
       dragRef.current = handle;
       dragPriceRef.current = null;
       chartRef.current?.applyOptions({ handleScroll: false, handleScale: false });
@@ -3747,6 +3863,23 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       if (!drag.validate(price)) {
         drag.line.applyOptions(drag.title != null ? { price: drag.price, title: drag.title } : { price: drag.price });
         setDragErr(`${drag.label} not moved — ${drag.why}.`);
+        return;
+      }
+      if (drag.confirm) {
+        // A live order: nothing is sent on the drop. Back to where the order is; a dashed amber line marks the
+        // proposal; the bar asks.
+        drag.line.applyOptions(drag.title != null ? { price: drag.price, title: drag.title } : { price: drag.price });
+        clearPendingRef.current();
+        const ghost = seriesRef.current?.createPriceLine({
+          price, color: "#f59e0b", lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: true,
+          title: `${drag.label} → ? confirm`,
+        }) ?? null;
+        const timer = window.setTimeout(
+          () => clearPendingRef.current(`${drag.label} not moved — it wasn't confirmed within ${CONFIRM_S} s.`),
+          CONFIRM_S * 1000,
+        );
+        pendingRef.current = { handle: drag, to: price, ghost, timer };
+        setPending({ key: drag.key, label: drag.label, from: drag.price, to: price, pos: drag.refPos });
         return;
       }
       drag.commit(price);
@@ -4142,6 +4275,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
             ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
             ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
             ["hist", "Trade history (MT5 style)", "Your past trades on this pair, drawn the way MetaTrader does: each deal is an arrow with its tip on the price - a buy blue and pointing up, a sell red and pointing down - so a buy opens on a blue arrow and closes on a red one. A dotted line joins each entry to its exit (blue = a buy, red = a sell), with the result at the exit. Point at an arrow for the details: lots, times, prices, who opened it and why it closed (stop, target, the app, MT5). From the broker's own deal history, every trade on the account - the terminal's and the phone's too."],
+            ["sig", "Watch signals (👁)", "Each BUY / SELL signal of a strategy group on watch - the trade it would have taken - on the candle it fired in, in the signals' own fuchsia: 👁 BUY under the bar, 👁 SELL over it. Point at one for what price did after it: its best and worst move in the hour after, and where price is now against it. From the strategies' activity feed (its last 200 events - a few days)."],
             ["rr", "Risk / reward bands", "Full-width bands entry→stop (red) and entry→target (green). With Trade zones on, only armed setups get these; otherwise positions and proposals too."],
             ["ob", "Order blocks", "Supply and demand zones: the candle an impulsive move departed from, where that move also BROKE a swing. Cyan = demand (below price), amber = supply (above). Brighter means stronger; a hollow, dashed box has already been traded into, and the first return to a zone is the clean one. The tag reads side · strength · FVG (an imbalance was left on the way out) · how many times it has been tested."],
             ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
@@ -4425,14 +4559,14 @@ Click for the full breakdown. Info only — it gates nothing.`}
         </button>
 
         {/* Hand-drawn lines: arm a tool, click the chart. Saved per pair and kept until deleted.
-            The four drawing tools are icons (the name is in the tooltip) so the toolbar fits one row;
-            Arm and Trade open trades, so they keep their names - a click on them is never a guess. */}
+            The three drawing tools are icons (the name is in the tooltip) so the toolbar fits one row;
+            Arm and Trade open trades, so they keep their names - a click on them is never a guess.
+            The price alert is its own labelled button on the chart, by Full screen (2026-11-08). */}
         <span className="ml-1 flex items-center gap-1 border-l border-neutral-800 pl-2">
           {([
             ["f", "🖊", "Pen", "Free hand — press and drag to draw any shape, exactly like a pen on paper."],
             ["t", "╱", "Trend line", "Press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
             ["h", "─", "Level", "One click puts a horizontal line across the whole chart, with its price on the axis."],
-            ["alert", "🔔", "Price alert", "Click a price to set an alert line. It stays on the chart until price reaches it, then you get the chime and a desktop notification and the line goes. It never places an order. Drag the line to move it; remove it from Price alerts in the sidebar."],
             ["arm", "⚡", "Arm", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
             ["trade", "▶", "Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance and the risk you pick on the ticket (never above your per-trade cap)."],
           ] as const).map(([mode, icon, name, tip]) => {
@@ -4973,6 +5107,71 @@ Click for the full breakdown. Info only — it gates nothing.`}
           </>
         )}
 
+        {/* A watch signal's details while the pointer is on its candle: what it said, and what price did after it -
+            how far its way and against it in the hour after, and where price is now against it. */}
+        {sigTip && ovl.sig && (() => {
+          const list = sigByBarRef.current.get(sigTip.time);
+          const c = candlesRef.current;
+          if (!list?.length || !c.length) return null;
+          const times = c.map((k) => toTime(k) as number);
+          const i0 = times.indexOf(sigTip.time);
+          if (i0 < 0) return null;
+          const barSec = TF_SECONDS[timeframe] ?? 60;
+          const flipX = sigTip.x > (containerRef.current?.clientWidth ?? 0) * 0.6;
+          const flipY = sigTip.y > (containerRef.current?.clientHeight ?? 0) * 0.55;
+          const move = (v: number, base: number) =>
+            `${v >= 0 ? "+" : "−"}${fmtPrice(Math.abs(v), priceDec)} (${v >= 0 ? "+" : "−"}${Math.abs((v / base) * 100).toFixed(2)}%)`;
+          return (
+            <div
+              className="pointer-events-none absolute z-30 w-max max-w-[26rem] rounded-md border border-fuchsia-400/60 bg-neutral-950/95 px-2.5 py-1.5 text-[11px] leading-snug text-neutral-300 shadow-xl"
+              style={{
+                left: sigTip.x + (flipX ? -14 : 14), top: sigTip.y + (flipY ? -10 : 10),
+                transform: `translate(${flipX ? "-100%" : "0"}, ${flipY ? "-100%" : "0"})`,
+              }}
+            >
+              {list.map((sig) => {
+                const long = sig.side === "long";
+                const px = sig.price ?? c[i0].close;
+                // The bars after its candle, up to an hour on: how far price went its way, and against it.
+                const end = utcToDisp(sig.at + SIG_HORIZON_S);
+                let best = 0;
+                let worst = 0;
+                let n = 0;
+                for (let i = i0 + 1; i < c.length && times[i] <= end; i++) {
+                  n++;
+                  const up = c[i].high - px;
+                  const down = px - c[i].low;
+                  best = Math.max(best, long ? up : down);
+                  worst = Math.max(worst, long ? down : up);
+                }
+                const covered = Math.min(SIG_HORIZON_S, times[c.length - 1] + barSec - utcToDisp(sig.at));
+                const now = (c[c.length - 1].close - px) * (long ? 1 : -1);
+                return (
+                  <div key={sig.id} className="py-0.5">
+                    <div className="font-semibold text-neutral-100">
+                      <span className="text-fuchsia-300">👁 {long ? "▲ BUY" : "▼ SELL"} signal</span>
+                      <span className="font-normal text-neutral-400"> · {dealTime(new Date(sig.at * 1000).toISOString())} · at {fmtPrice(px, priceDec)}</span>
+                    </div>
+                    <div className="text-neutral-500">{sig.name ?? "Strategy"} · group {sig.group} - watch only, it opened nothing</div>
+                    {n > 0 ? (
+                      <div className="tabular-nums">
+                        {covered >= SIG_HORIZON_S ? "the hour after" : `the ${Math.max(1, Math.round(covered / 60))} min after`}:{" "}
+                        <span className="text-bull">best {best > 0 ? move(best, px) : "none"}</span> ·{" "}
+                        <span className="text-bear">worst {worst > 0 ? move(-worst, px) : "none"}</span>
+                      </div>
+                    ) : (
+                      <div className="text-neutral-500">no candle after it yet</div>
+                    )}
+                    <div className="tabular-nums">
+                      now: <span className={now >= 0 ? "text-bull" : "text-bear"}>{move(now, px)}</span> {long ? "for the buy" : "for the sell"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+
         {/* A past trade's details while the pointer is on one of its arrows (tradeHistory.ts). */}
         {histTip && ovl.hist && (() => {
           const t = hist?.symbol === symbol ? hist.trades.find((x) => String(x.id) === histTip.key) : undefined;
@@ -5035,6 +5234,45 @@ Click for the full breakdown. Info only — it gates nothing.`}
         {dragErr && (
           <div className="pointer-events-none absolute left-1/2 top-9 z-30 max-w-[26rem] -translate-x-1/2 rounded bg-bear/90 px-2.5 py-1.5 text-xs font-medium text-white shadow-lg">
             ⚠ {dragErr}
+          </div>
+        )}
+
+        {/* A dropped SL / TP / armed level waits here for a click - nothing went to the broker yet. */}
+        {pending && (
+          <div
+            role="alertdialog"
+            aria-label={`Confirm moving the ${pending.label}`}
+            className="absolute left-1/2 top-9 z-30 -translate-x-1/2 overflow-hidden rounded-lg border border-amber-500/70 bg-neutral-950/95 text-xs shadow-xl backdrop-blur-sm"
+          >
+            <div className="flex items-center gap-3 whitespace-nowrap px-3 py-2">
+              <span className="text-neutral-300">
+                Move{" "}
+                <b className={pending.label === "SL" ? "text-bear" : pending.label === "TP" ? "text-bull" : "text-amber-300"}>{pending.label}</b>{" "}
+                <span className="tabular-nums">{fmtPrice(pending.from, priceDec)}</span> →{" "}
+                <b className="tabular-nums text-amber-200">{fmtPrice(pending.to, priceDec)}</b>
+                {pending.pos && usdAtLevel(pending.pos, pending.to) && (
+                  <span className="text-neutral-500"> ({usdAtLevel(pending.pos, pending.to)} if hit)</span>
+                )}
+                ?
+              </span>
+              <button
+                onClick={confirmPending}
+                className="rounded bg-amber-500 px-2.5 py-1 font-semibold text-neutral-950 hover:bg-amber-400"
+                title="Send the new level to the broker"
+              >
+                ✓ Move it
+              </button>
+              <button
+                onClick={() => clearPending()}
+                className="rounded border border-neutral-600 px-2.5 py-1 text-neutral-300 hover:border-neutral-400 hover:text-white"
+                title="Leave the order where it is"
+              >
+                ✕ Keep
+              </button>
+            </div>
+            {/* The time left to decide: unconfirmed, the move lapses and the order stays where it is. */}
+            <div key={`${pending.key}@${pending.to}`} className="h-0.5 bg-amber-500/80" style={{ animation: `pend-left ${CONFIRM_S}s linear forwards` }} />
+            <style>{"@keyframes pend-left{from{width:100%}to{width:0%}}"}</style>
           </div>
         )}
 
@@ -5325,16 +5563,36 @@ Click for the full breakdown. Info only — it gates nothing.`}
           </div>
         )}
 
-        {/* Sits over the chart's top-right corner (clear of the ~72px price axis) rather than at
-            the end of the toolbar, where it was one more chip competing for a row that wraps. */}
-        <button
-          ref={fsBtnRef}
-          onClick={toggleFullscreen}
-          className="absolute right-[78px] top-1.5 z-20 rounded border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-xs text-neutral-300 shadow backdrop-blur-sm transition hover:border-sky-600 hover:bg-neutral-800 hover:text-white"
-          title={isFull ? "Exit full screen (Esc)" : "Full screen — price, RSI and MACD together"}
-        >
-          {isFull ? "⤡ Exit" : "⛶ Full screen"}
-        </button>
+        {/* Sit over the chart's top-right corner (clear of the ~72px price axis) rather than at
+            the end of the toolbar, where each was one more chip competing for a row that wraps. */}
+        <div className="absolute right-[78px] top-1.5 z-20 flex items-center gap-1.5">
+          {/* The price alert: click it, then click the price. On the chart, where the price is, rather
+              than at the bottom of the sidebar (asked 2026-11-08); its count is this pair's alerts. */}
+          {(() => {
+            const here = priceAlerts.filter((a) => a.symbol.toUpperCase() === symbol.toUpperCase()).length;
+            const on = drawMode === "alert";
+            return (
+              <button
+                onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode((m) => (m === "alert" ? "off" : "alert")); }}
+                aria-pressed={on}
+                className={`rounded border px-2 py-1 text-xs shadow backdrop-blur-sm transition ${
+                  on ? "border-sky-500 bg-sky-600 text-white"
+                    : "border-yellow-500/40 bg-neutral-900/80 text-yellow-300 hover:border-yellow-400 hover:bg-neutral-800 hover:text-yellow-200"}`}
+                title={`Price alert: click this, then click a price on the chart. The line stays until price reaches it - then the chime and a desktop notification, and the line goes. It never places an order. Drag the line to move it; to remove one, Price alerts in the sidebar lists them.${here ? ` ${here} on ${symbol} now.` : ""}`}
+              >
+                🔔 Alert{here > 0 && <span className="ml-1 rounded-full bg-yellow-400/20 px-1.5 text-[10px] tabular-nums">{here}</span>}
+              </button>
+            );
+          })()}
+          <button
+            ref={fsBtnRef}
+            onClick={toggleFullscreen}
+            className="rounded border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-xs text-neutral-300 shadow backdrop-blur-sm transition hover:border-sky-600 hover:bg-neutral-800 hover:text-white"
+            title={isFull ? "Exit full screen (Esc)" : "Full screen — price, RSI and MACD together"}
+          >
+            {isFull ? "⤡ Exit" : "⛶ Full screen"}
+          </button>
+        </div>
 
         {/* Session bands and risk/reward zones paint BEHIND the candles. The chart's own background
             is transparent, so a canvas underneath shows through — tinting on top would recolour the
@@ -5349,22 +5607,10 @@ Click for the full breakdown. Info only — it gates nothing.`}
         {/* Key for the session bands. One small legend rather than a name written inside every
             block: on a 1h chart there are three sessions a day and several days on screen, so
             in-place labels would repeat a dozen times to say something you only need told once.
-            The swatches use the band hues at a readable opacity — the hue is what identifies a
-            session, and at the bands' own 5% a swatch this size would be invisible. */}
-        {ovl.sessions && (
-          <div className="pointer-events-none absolute bottom-8 left-14 z-10 flex items-center gap-2.5 rounded bg-neutral-950/70 px-2 py-1 text-[10px] text-neutral-400">
-            {([
-              ["Asia", "rgba(56,189,248,0.75)", "Tokyo / Sydney — 00:00-08:00 UTC. Thinnest liquidity; breaks here fail most often."],
-              ["London", "rgba(167,139,250,0.75)", "08:00-13:00 UTC. The first big-volume session of the day."],
-              ["New York", "rgba(34,197,94,0.75)", "13:00-21:00 UTC, and it overlaps London until 16:00 — the busiest window of the day."],
-            ] as const).map(([name, colour, tip]) => (
-              <span key={name} className="flex items-center gap-1" title={tip}>
-                <span className="h-2.5 w-3.5 rounded-sm" style={{ backgroundColor: colour }} />
-                {name}
-              </span>
-            ))}
-          </div>
-        )}
+            The session we are in now is lit in its own colour with the time it has left, the
+            others dimmed (SessionLegend.tsx): under a trade's stop/target zones and the Fibonacci
+            zones, the faint bands alone stopped saying which session it is (2026-11-08). */}
+        {ovl.sessions && <SessionLegend />}
 
         {/* The ink layer. Transparent to the mouse unless a tool is armed, so the crosshair, the
             SL/TP drags and panning all behave normally the rest of the time. */}

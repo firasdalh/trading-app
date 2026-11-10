@@ -97,13 +97,6 @@ export function moveAlert(id: string, price: number, current: number | null) {
   })));
 }
 
-/** Ask the chart to switch to its 🔔 Alert tool: the next click on the chart sets the alert there.
- *  (The sidebar's Add button with an empty box - nobody should have to type a price.) */
-export const PICK_EVENT = "price-alert:pick";
-export function requestChartPick() {
-  window.dispatchEvent(new Event(PICK_EVENT));
-}
-
 export function removeAlert(id: string) {
   setAlerts(alerts.filter((a) => a.id !== id));
 }

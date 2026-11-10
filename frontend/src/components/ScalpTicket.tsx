@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { api } from "../api/client";
-import { playCelebration } from "../celebrate";
+import { playCelebration, winJingle } from "../celebrate";
 import { useScalpRsiPeriod } from "../rsiPeriod";
 import { fmtPrice, fmtUsd } from "../format";
 import { play } from "../hooks/useApprovalChime";
@@ -46,7 +46,6 @@ const CLOSE_NOTES = [{ hz: 1046.5, at: 0, len: 0.08 }, { hz: 659.25, at: 0.07, l
 const STAGE_NOTES = [{ hz: 587.33, at: 0, len: 0.07 }];
 const REFUSED_NOTES = [{ hz: 233.08, at: 0, len: 0.22 }];
 const R1_NOTES = [{ hz: 1174.66, at: 0, len: 0.06 }, { hz: 1567.98, at: 0.06, len: 0.12 }];  // D6 -> G6
-const TARGET_NOTES = [{ hz: 783.99, at: 0, len: 0.08 }, { hz: 987.77, at: 0.08, len: 0.08 }, { hz: 1318.5, at: 0.16, len: 0.24 }];
 
 // Pips for FX (a pip is 10 points on a 5- or 3-digit quote), plain price distance for everything else.
 function distText(d: number, spec: ScalpSpec, assetClass: AssetClass): string {
@@ -95,6 +94,10 @@ function loadSeen(): Seen {
  * Sending re-reads the bid/ask first, so the size is worked out at the price the order really fills
  * at, not from the last 1.5-second poll. The levels you placed are sent exactly as placed.
  */
+// Narrower than this, line 1 goes compact. Full screen on the user's 1745px window gives the ticket ~1720px
+// and the full line needs ~1480; beside the sidebar it gets ~1270 (measured 2026-11-08).
+const COMPACT_BELOW = 1520;
+
 export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, positions, pre, setPre, onView, onOpened }: {
   symbol: string;
   assetClass: AssetClass;
@@ -128,10 +131,24 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   const [fold, setFold] = useLocalStorage("scalp.fold", false);
   // The bull vs bear tug of war on the trade bar, and its ending when the trade closes (TugOfWar.tsx).
   const [tug, setTug] = useLocalStorage("scalp.tug", true);
+  // Compact line 1 below full-screen width (asked 2026-11-08): beside the sidebar the size read-out and the
+  // leverage bar pushed SELL / BUY and the switches onto a line of their own. Compact stacks the read-outs in
+  // two small lines and trims the gaps and buttons, so the desk's ticket is one clean line like full screen's.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const fit = () => setCompact(el.clientWidth > 0 && el.clientWidth < COMPACT_BELOW);
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const [busy, setBusy] = useState<"long" | "short" | "close" | null>(null);
   const [flash, setFlash] = useState<{
     dir: "long" | "short" | "close"; text: string; tone?: "win" | "loss" | "target";
-    party?: { win: Kind; kind: "target" | "stop" | "close" };   // a close: who won the tug of war
+    party?: { win: Kind; kind: "target" | "stop" | "close"; won?: boolean };   // a close: who won the tug of war, and did it pay
   } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const inFlight = useRef(false);
@@ -254,12 +271,13 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
         dir: "close",
         text: atTarget ? `🎯 TARGET HIT ${usd}` : atStop ? `${last.pnl >= 0 ? "stopped in profit" : "stopped out"} ${usd}` : `closed ${usd} (at the broker or elsewhere)`,
         tone: atTarget ? "target" : last.pnl >= 0 ? "win" : "loss",
-        party: { win: winnerOf(last.dir, last.pnl), kind: atTarget ? "target" : atStop ? "stop" : "close" },
+        party: { win: winnerOf(last.dir, last.pnl), kind: atTarget ? "target" : atStop ? "stop" : "close", won: last.pnl > 0 },
       });
-      // A win gets a celebration clip for its amount; a loss, or no clips, the ticket's own notes.
+      // Any win celebrates (2026-11-08 - not only a target): a clip for its amount, or a win jingle without clips.
+      // A loss gets the ticket's own close notes.
       if (sound) {
-        const notes = atTarget ? TARGET_NOTES : CLOSE_NOTES;
-        void playCelebration(last.pnl, { target: atTarget }).then((ok) => { if (!ok) play(notes, 0.1); });
+        if (last.pnl > 0) void playCelebration(last.pnl, { target: atTarget }).then((ok) => { if (!ok) winJingle(atTarget ? "confetti" : "coins"); });
+        else play(CLOSE_NOTES, 0.1);
       }
     }
     if (newest && watch) lastTrade.current = { id: String(newest.id), sym: symbol, dir: watch.dir, pnl: watch.pnl, at: watch.at };
@@ -341,9 +359,12 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
       await api.liveClose(newest.symbol, newest.asset_class as AssetClass, newest.direction);
       setFlash({
         dir: "close", text: `closed ≈ ${fmtUsd(pnl, { sign: true })}`, tone: pnl >= 0 ? "win" : "loss",
-        party: { win: winnerOf(newest.direction === "short" ? "short" : "long", pnl), kind: "close" },
+        party: { win: winnerOf(newest.direction === "short" ? "short" : "long", pnl), kind: "close", won: pnl > 0 },
       });
-      if (sound) void playCelebration(pnl).then((ok) => { if (!ok) play(CLOSE_NOTES, 0.1); });
+      if (sound) {
+        if (pnl > 0) void playCelebration(pnl).then((ok) => { if (!ok) winJingle("coins"); });
+        else play(CLOSE_NOTES, 0.1);
+      }
       onOpened();
     } catch (e) {
       closedHere.current = null;
@@ -421,7 +442,9 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
     },
   } : null;
   const word = (d: "long" | "short") => (d === "long" ? "BUY" : "SELL");
-  // A staged order speaks first; then the trade you're in, with its money; then the idle keys.
+  // A staged order speaks first; then, in a trade, what the armed keys do; then the idle keys. The trade's money,
+  // R, verdict and clock are NOT repeated on the chart: the ticket's trade line, right above it, has them all
+  // (the chart's copy went 2026-11-08 - "remove any no-need duplication").
   const hud: ScalpHud | null = view
     ? {
         tone: view.dir,
@@ -431,12 +454,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
         detail: `TP +${fmtUsd(view.tpUsd)} · SL ${fmtUsd(view.slUsd)} · R:R ${view.rr.toFixed(2)}${keys ? " · Del cancels" : ""}`,
       }
     : watch
-      ? {
-          tone: watch.pnl >= 0 ? "win" : "loss",
-          big: fmtUsd(watch.pnl, { sign: true }),
-          title: `${watch.dir === "long" ? "▲ LONG" : "▼ SHORT"} ${watch.lots}${watch.r != null ? ` · ${fmtR(watch.r)}` : ""} · ${watch.verdict.title}`,
-          detail: `⏱ ${fmtDur(watch.secs)} · ${keys ? "SPACE closes · Enter buy · 0 sell" : "✕ CLOSE is in the ticket"}`,
-        }
+      ? (keys ? { tone: "idle", title: "SPACE closes", detail: "⏎ BUY · 0 SELL · 1st press stages · 2nd sends" } : null)
       : keys
         ? { tone: "idle", title: "⏎ BUY · 0 SELL", detail: "1st press stages · 2nd sends" }
         : null;
@@ -462,7 +480,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
             ? `Send this ${word(dir)} now${keys ? ` (or press ${key})` : ""}: ${plan?.lots ?? 0} lot at market, with the stop and target on the chart. ${why ? `Not sendable: ${why}` : ""}`
             : `Stage a ${word(dir)} pre-order on the chart${keys ? ` (key: ${key})` : ""} - drag its stop and target, then click again${keys ? ` or press ${key}` : ""} to send`
         }
-        className={`relative flex min-w-[6.75rem] flex-col items-center justify-center rounded-lg border-2 px-3 py-0.5 font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${
+        className={`relative flex ${compact ? "min-w-[5.75rem] px-2" : "min-w-[6.75rem] px-3"} flex-col items-center justify-center rounded-lg border-2 py-0.5 font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${
           long
             ? "border-bull bg-bull/20 text-bull hover:bg-bull/30 hover:shadow-[0_0_18px_-4px_rgba(38,166,154,0.8)]"
             : "border-bear bg-bear/20 text-bear hover:bg-bear/30 hover:shadow-[0_0_18px_-4px_rgba(239,83,80,0.8)]"
@@ -484,15 +502,16 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   const state = day?.locked
     ? { cls: "bg-amber-500/20 text-amber-300", text: "🔒 LOCKED FOR TODAY" }
     : watch
-      ? { cls: watch.pnl >= 0 ? "bg-bull/20 text-bull" : "bg-bear/20 text-bear", text: `● IN TRADE ${watch.dir === "long" ? "▲" : "▼"} ${fmtUsd(watch.pnl, { sign: true })}` }
+      // The state and its side, coloured by the money - the amount itself is the trade line's, right under it.
+      ? { cls: watch.pnl >= 0 ? "bg-bull/20 text-bull" : "bg-bear/20 text-bear", text: `● IN TRADE ${watch.dir === "long" ? "▲" : "▼"}` }
       : pre
         ? { cls: pre.dir === "long" ? "bg-bull/20 text-bull" : "bg-bear/20 text-bear", text: `🎯 PRE-ORDER ${word(pre.dir)}` }
         : { cls: "bg-neutral-800 text-neutral-400", text: "READY · pick a side" };
 
   return (
-    <div className="relative mb-1.5 shrink-0 overflow-hidden rounded-lg border border-amber-500/40 bg-gradient-to-br from-amber-500/[0.08] via-neutral-900/80 to-neutral-900/80 text-xs shadow-[0_0_28px_-14px_rgba(245,158,11,0.7)]">
+    <div ref={rootRef} className="relative mb-1.5 shrink-0 overflow-hidden rounded-lg border border-amber-500/40 bg-gradient-to-br from-amber-500/[0.08] via-neutral-900/80 to-neutral-900/80 text-xs shadow-[0_0_28px_-14px_rgba(245,158,11,0.7)]">
       {/* Line 1: the mode and its state, how big the next order is, and the two sides. */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-2.5 py-1">
+      <div className={`flex flex-wrap items-center ${compact ? "gap-x-2" : "gap-x-3"} gap-y-1.5 px-2.5 py-1`}>
         <span className="font-black uppercase italic tracking-wider text-amber-300" title="Scalp mode: manual trading on the fast charts. Every order goes with its stop and target, through the Risk Manager.">
           ⚡ Scalp
         </span>
@@ -506,7 +525,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
                 onClick={(e) => { e.currentTarget.blur(); setLevel(k); }}
                 aria-pressed={level === k}
                 title={`${p.label}: a stopped-out trade loses ${+(riskOf(k) * 100).toFixed(2)}% of equity${spec?.equity ? ` (${fmtUsd(-(riskOf(k) * spec.equity))})` : ""}, the trade's leverage is capped at ${p.maxLev}x, and sending locks for the day after a ${stopPct[k] ?? p.dailyStop * 100}% loss${stopOn ? "" : " (daily stop OFF)"}.`}
-                className={`rounded-md border px-1.5 py-0.5 font-semibold transition ${
+                className={`rounded-md border ${compact ? "px-1" : "px-1.5"} py-0.5 font-semibold transition ${
                   level === k ? LEVEL_TONE[k] : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
                 }`}
               >
@@ -535,7 +554,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
           />
           %
         </label>
-        <label className="flex min-w-[12rem] flex-1 items-center gap-2" title="Leverage: the trade's size against your equity. The size is capped so a stopped-out trade stays inside the preset, so a wider stop means a smaller size.">
+        <label className={`flex ${compact ? "min-w-[8rem]" : "min-w-[12rem]"} flex-1 items-center gap-2`} title="Leverage: the trade's size against your equity. The size is capped so a stopped-out trade stays inside the preset, so a wider stop means a smaller size.">
           <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Lev</span>
           <input
             type="range"
@@ -558,16 +577,35 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
             onPointerUp={(e) => e.currentTarget.blur()}
             className="min-w-0 flex-1 accent-amber-500"
           />
-          <span className="text-sm font-bold tabular-nums text-amber-200">{plan ? `${plan.leverage.toFixed(1)}x` : "—"}</span>
-          <span className="text-[10px] text-neutral-500">{asked == null ? "max" : "of"} {plan ? `${plan.maxLeverage.toFixed(1)}x` : ""}</span>
+          {/* Compact: the figure over its "max", in one narrow column. Otherwise side by side, as before. */}
+          <span className={compact ? "flex flex-col items-end leading-none" : "contents"}>
+            <span className="text-sm font-bold tabular-nums text-amber-200">{plan ? `${plan.leverage.toFixed(1)}x` : "—"}</span>
+            <span className={`${compact ? "text-[9px]" : "text-[10px]"} text-neutral-500`}>{asked == null ? "max" : "of"} {plan ? `${plan.maxLeverage.toFixed(1)}x` : ""}</span>
+          </span>
         </label>
         <span
-          className="tabular-nums text-neutral-400"
+          className={`tabular-nums text-neutral-400 ${compact ? "flex flex-col text-[10px] leading-tight" : ""}`}
           title="The size the next order opens, its notional value and the margin it holds. The account leverage (1:…) Exness gives you only decides how much margin a position holds; it is set in the Exness Personal Area - the app can read it, not change it. The leverage bar is the trade's own size against your equity."
         >
-          <b className="text-neutral-100">{plan ? plan.lots : "—"} lot</b>
-          {plan && plan.lots > 0 && <> · {fmtUsd(plan.notional)}{plan.margin != null && <> · mgn {fmtUsd(plan.margin)}</>}</>}
-          {spec && <span className="text-neutral-500"> · 1:{spec.account_leverage ?? "?"} · free {fmtUsd(spec.margin_free)}</span>}
+          {compact ? (
+            // Two small lines: the size, then what it holds and what is left.
+            <>
+              <span>
+                <b className="text-[11px] text-neutral-100">{plan ? plan.lots : "—"} lot</b>
+                {plan && plan.lots > 0 && <> · {fmtUsd(plan.notional)}</>}
+              </span>
+              <span className="text-neutral-500">
+                {plan && plan.lots > 0 && plan.margin != null && <>mgn {fmtUsd(plan.margin)} · </>}
+                {spec && <>1:{spec.account_leverage ?? "?"} · free {fmtUsd(spec.margin_free)}</>}
+              </span>
+            </>
+          ) : (
+            <>
+              <b className="text-neutral-100">{plan ? plan.lots : "—"} lot</b>
+              {plan && plan.lots > 0 && <> · {fmtUsd(plan.notional)}{plan.margin != null && <> · mgn {fmtUsd(plan.margin)}</>}</>}
+              {spec && <span className="text-neutral-500"> · 1:{spec.account_leverage ?? "?"} · free {fmtUsd(spec.margin_free)}</span>}
+            </>
+          )}
         </span>
         <span className="ml-auto flex items-stretch gap-1.5">
           {sideButton("short")}
@@ -827,7 +865,8 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
         return tug && flash.party && !watch ? (
           <ErrorBoundary name="trade ending" fallback={row}>
             <TugParty win={flash.party.win} kind={flash.party.kind} text={flash.text} />
-            {flash.party.kind === "target" && <TugConfetti win={flash.party.win} />}
+            {/* Every win, not only a target (2026-11-08). */}
+            {(flash.party.kind === "target" || flash.party.won) && <TugConfetti win={flash.party.win} />}
           </ErrorBoundary>
         ) : row;
       })()}
