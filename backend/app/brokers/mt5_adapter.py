@@ -993,6 +993,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 for d in ds
             )
             close_ts = int(getattr(last_out, "time", 0) or 0)
+            open_ts = int(getattr(first_in, "time", 0) or 0)
             sym = getattr(first_in, "symbol", "")
             out.append(PositionView(
                 id=pid,
@@ -1006,6 +1007,8 @@ class Mt5BrokerAdapter(BrokerAdapter):
                 unrealized_pnl=0.0,
                 realized_pnl=round(net, 2),
                 closed_at=datetime.fromtimestamp(close_ts, tz=timezone.utc) if close_ts else None,
+                # The entry deal's time: the journal reads the trading session off it (2026-11-10).
+                opened_at=datetime.fromtimestamp(open_ts, tz=timezone.utc) if open_ts else None,
                 # From the entry deal's comment. The journal prefers this machine's own Position row
                 # when it has one (it keeps the full source); this covers the trades it never saw.
                 source=source_from_comment(getattr(first_in, "comment", None)),

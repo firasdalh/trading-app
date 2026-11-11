@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import { displaySymbol, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import type { AssetClass, PositionView, StrategyCheck, StrategyCheckCondition, StrategyCheckSet, StrategyView } from "../types";
-import { draftOf, LeanStrip, pairWait, targetDone, zoneLabel } from "./StrategyBoard";
+import { draftOf, hoursChip, hoursText, LeanStrip, pairWait, targetDone } from "./StrategyBoard";
 
 /**
  * STRATEGIES AT A GLANCE: the Strategies board's live read, where the chart is - scalp mode's sidebar
@@ -223,10 +223,10 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard, bo
               {s.enabled && s.hours && (
                 <span
                   className={`shrink-0 rounded px-1 text-[10px] ${s.hours_now?.open ? "bg-bull/15 text-bull" : "bg-neutral-800 text-neutral-400"}`}
-                  title={`Trading hours ${s.hours.start}–${s.hours.end} (${zoneLabel(s.hours.tz)}): it opens trades only then. A trade it holds keeps its close rules, stop and target at any hour.${
+                  title={`Trading hours: it opens trades only ${hoursText(s.hours)}. A trade it holds keeps its close rules, stop and target at any hour.${
                     allDay.size ? ` Crypto 24/7: ${[...allDay].map(displaySymbol).join(", ")} open trades at any hour.` : ""}`}
                 >
-                  ⏰ {s.hours_now ? (s.hours_now.open ? `on until ${s.hours.end}` : `off until ${s.hours.start}`) : `${s.hours.start}–${s.hours.end}`}
+                  ⏰ {hoursChip(s.hours, s.hours_now)}
                   {allDay.size > 0 && <span className="font-semibold text-bull"> · crypto 24/7</span>}
                 </span>
               )}

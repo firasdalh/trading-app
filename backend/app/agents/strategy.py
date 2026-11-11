@@ -9,9 +9,10 @@ Each rule set is a list of GROUPS of conditions: a group holds when ALL its cond
 rule set fires when ANY group does ("EMA 10 x 20 AND RSI rising" OR "EMA 20 x 50 AND 1h trend up").
 Every condition reads CLOSED bars of its own timeframe only - the forming bar repaints - and an exit
 waits for a bar that closed after the entry, so a trade is never closed on the bars that opened it.
-It can keep trading hours too (``hours_now``): it then opens trades only inside them, on the user's
-clock, while its close rules keep running at any hour on the trades it holds - and with ``crypto_24h``
-its crypto pairs keep no hours at all and open around the clock (``pair_hours``). And a daily target
+It can keep trading hours too (``hours_now``) - a window on the user's clock, or the trading sessions it
+may open in (``_sessions_now``: London, New York ..., the journal's own session hours): it then opens
+trades only inside them, while its close rules keep running at any hour on the trades it holds - and
+with ``crypto_24h`` its crypto pairs keep no hours at all and open around the clock (``pair_hours``). And a daily target
 (``today_result``): once the trades it closed today have made that much, it opens nothing more until
 the next day, managing the trades it still holds the same way.
 
@@ -49,6 +50,7 @@ from app.agents.indicators import (
 from app.agents.market_monitor import PAIR_TFS, lean_read
 from app.agents.order_blocks import find_order_blocks
 from app.core.logging import get_logger
+from app.core.sessions import KEYS as SESSION_KEYS, name_of as session_name, session_at
 from app.models.db import AgentRun, Position, StrategyConfig, TradeProposalRecord
 from app.models.enums import AssetClass, Direction, PositionStatus, ProposalStatus
 from app.models.schemas import Candle
@@ -1379,26 +1381,81 @@ def _hhmm(text: str) -> int:
     return int(h) * 60 + int(m)
 
 
+def _hours_zone(hours: dict):
+    """The clock a strategy's hours are written on: ``tz`` (the user's browser zone), or this machine's own."""
+    try:
+        return ZoneInfo(hours["tz"]) if hours.get("tz") else None
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
 def hours_now(hours: dict | None, now: datetime) -> dict | None:
     """Where ``now`` falls in a strategy's trading hours (asked for 2026-11-03: "run from 9 am, stop at
     12"): whether it may open a trade now, and in how many seconds that changes. The hours run from
     ``start`` up to ``end`` (past midnight when end comes first) on the strategy's clock - ``tz``, the
-    user's browser zone, or this machine's own when there is none. None = no hours: around the clock."""
-    if not hours or not hours.get("start") or not hours.get("end"):
+    user's browser zone, or this machine's own when there is none - or, kept as ``sessions``, through the
+    trading sessions picked (``_sessions_now``). None = no hours: around the clock."""
+    if not hours:
+        return None
+    if "sessions" in hours:
+        return _sessions_now(hours, now)
+    if not hours.get("start") or not hours.get("end"):
         return None
     start, end = _hhmm(hours["start"]), _hhmm(hours["end"])
     if start == end:
         return None
-    try:
-        zone = ZoneInfo(hours["tz"]) if hours.get("tz") else None
-    except (ZoneInfoNotFoundError, ValueError):
-        zone = None
-    local = _utc(now).astimezone(zone)
+    local = _utc(now).astimezone(_hours_zone(hours))
     m = local.hour * 60 + local.minute
     inside = start <= m < end if start < end else (m >= start or m < end)
     edge = end if inside else start
     return {"open": inside, "start": hours["start"], "end": hours["end"], "tz": hours.get("tz") or local.tzname(),
             "now": local.strftime("%H:%M"), "next_s": (edge - m) % 1440 * 60 - local.second}
+
+
+def _sessions_now(hours: dict, now: datetime) -> dict | None:
+    """``hours_now`` for hours kept as trading sessions (asked 2026-11-11: "add also the option to open in specific
+    sessions ... between sessions and London, and maybe New York"): it may open a trade only while the UTC hour is
+    in one of them. They are the journal's own session hours (app/core/sessions.py), so its "Sessions - which one
+    pays" card counts the strategy's trades on exactly the hours it trades.
+
+    ``start``-``end``: the stretch it is in, or the next one - sessions back to back run as one (London + New York
+    is 08-21 UTC) - written on the strategy's clock; ``opens``: the session that stretch starts with; ``session``:
+    the one it is now. Every session picked is every hour: None. None it knows of: it never opens."""
+    picked = set(hours.get("sessions") or ())
+    on = [session_at(h) in picked for h in range(24)]
+    if all(on):
+        return None
+    zone = _hours_zone(hours)
+    utc = _utc(now).astimezone(timezone.utc).replace(microsecond=0)
+    local = utc.astimezone(zone)
+    h0 = utc.hour
+    out = {"open": on[h0], "sessions": [k for k in SESSION_KEYS if k in picked], "session": session_at(h0),
+           "tz": hours.get("tz") or local.tzname(), "now": local.strftime("%H:%M")}
+    if not any(on):
+        return {**out, "start": "", "end": "", "opens": None, "next_s": 0}
+    top = utc.replace(minute=0, second=0)
+
+    def at(k: int) -> datetime:          # the top of the UTC hour k hours on (back, when k < 0)
+        return top + timedelta(hours=k)
+
+    flip = next(k for k in range(1, 25) if on[(h0 + k) % 24] != on[h0])
+    if on[h0]:
+        first, last = 1 - next(b for b in range(1, 25) if not on[(h0 - b) % 24]), flip
+    else:
+        first, last = flip, next(k for k in range(flip + 1, flip + 25) if not on[(h0 + k) % 24])
+    return {**out, "start": at(first).astimezone(zone).strftime("%H:%M"),
+            "end": at(last).astimezone(zone).strftime("%H:%M"), "opens": session_at((h0 + first) % 24),
+            "next_s": int((at(flip) - utc).total_seconds())}
+
+
+def off_hours_note(hrs: dict) -> str:
+    """Why a strategy outside its trading hours opens no new trade, and until when (the board's note)."""
+    if "sessions" not in hrs:
+        return f"outside its hours - no new trades until {hrs['start']}"
+    if not hrs.get("opens"):
+        return "no trading session picked - no new trades"
+    return (f"outside its sessions - {session_name(hrs['session'])} now; no new trades until {hrs['start']} "
+            f"({session_name(hrs['opens'])})")
 
 
 def pair_hours(hours: dict | None, asset_class: str | None) -> dict | None:
@@ -1691,7 +1748,7 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
     hrs = hours_now(rules.hours, now)
     if hrs and not hrs["open"]:
         # Only the entries wait: the trades it holds were managed above, at any hour.
-        return _note(state, symbol, f"outside its hours - no new trades until {hrs['start']}", now)
+        return _note(state, symbol, off_hours_note(hrs), now)
     if _stale(base, now) or not broker.market_open(symbol):
         return _note(state, symbol, "market closed / no fresh candles", now)
     if _trades_today(session, cfg, now) >= cfg.max_trades_day:

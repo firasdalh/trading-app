@@ -253,6 +253,28 @@ def test_submit_order_rejected():
     assert res.error == "requote"
 
 
+def test_closed_trades_carry_the_time_they_opened():
+    """The journal reads each trade's session off its open (2026-11-10): the entry deal's time, as the exit
+    deal's is the close."""
+    class Deals(FakeMt5):
+        DEAL_ENTRY_IN = 0
+        DEAL_ENTRY_OUT = 1
+        DEAL_TYPE_BUY = 0
+
+        def history_deals_get(self, frm, to):
+            return [
+                SimpleNamespace(position_id=7, entry=0, type=0, time=1_762_675_200, symbol="BTCUSDm", price=100.0,
+                                volume=0.1, profit=0.0, swap=0.0, commission=0.0, comment=""),
+                SimpleNamespace(position_id=7, entry=1, type=1, time=1_762_675_500, symbol="BTCUSDm", price=101.0,
+                                volume=0.1, profit=10.0, swap=0.0, commission=-0.5, comment=""),
+            ]
+
+    [t] = _adapter(Deals()).get_closed_trades(datetime(2026, 11, 1, tzinfo=timezone.utc))
+    assert t.opened_at == datetime.fromtimestamp(1_762_675_200, tz=timezone.utc)
+    assert t.closed_at == datetime.fromtimestamp(1_762_675_500, tz=timezone.utc)
+    assert t.realized_pnl == 9.5 and t.direction == "long" and t.session is None   # tagged by the journal
+
+
 def test_realized_pnl_sums_deal_history():
     from datetime import datetime, timezone
     pnl = _adapter().get_realized_pnl(datetime.now(timezone.utc))

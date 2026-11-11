@@ -264,6 +264,7 @@ export interface PositionView {
   opened_at: string | null;   // when it was opened — used to mark the entry CANDLE on the chart
   cost_usd: number | null;
   closed_at: string | null;
+  session?: string | null;   // the trading session it OPENED in - journal rows only (sessions.ts keys)
   // The stop the trade was OPENED with (from the app's own order/proposal records; null for trades
   // opened in the terminal). R is measured against this, so widening a stop can't shrink a loss in R.
   initial_stop_loss?: number | null;
@@ -1189,6 +1190,7 @@ export interface StrategyCatalog {
   max_groups: number;
   max_conditions: number;
   max_pairs?: number;            // pairs one strategy reads (an older backend doesn't say: 10)
+  sessions?: string[];           // the sessions its hours can be kept as (an older backend doesn't say: none)
 }
 export interface StrategyDraft {
   name: string;
@@ -1235,19 +1237,29 @@ export interface StrategyStopNow {
   line: number;
   tf: string;
 }
-// When a strategy may OPEN a trade: from `start` up to `end` ("HH:MM", 24-hour; past midnight when end
-// comes first) on the clock of `tz` (the browser's zone when set on the board). Its close rules run at
-// any hour.
-export interface StrategyHours {
-  start: string;
-  end: string;
+// When a strategy may OPEN a trade (backend HoursIn), one of two kinds - its close rules run at any hour:
+//  - a window: from `start` up to `end` ("HH:MM", 24-hour; past midnight when end comes first) on the clock of
+//    `tz` (the browser's zone when set on the board);
+//  - `sessions` (asked 2026-11-11: "add also the option to open in specific sessions ... between sessions and
+//    London, and maybe New York"): only in the trading sessions picked - the journal's session hours on the UTC
+//    clock (sessions.ts); `tz` then only writes their times out.
+export type StrategyHours = StrategyWindowHours | StrategySessionHours;
+interface StrategyHoursBase {
   tz: string | null;
   // Its crypto pairs keep no hours: they open at any hour, day and night, while the others keep the window
   // (asked 2026-11-09: "I want that the crypto keep working 24 hours"). Kept only when on.
   crypto_24h?: boolean;
 }
+export interface StrategyWindowHours extends StrategyHoursBase {
+  start: string;
+  end: string;
+}
+export interface StrategySessionHours extends StrategyHoursBase {
+  sessions: string[];   // sessions.ts keys, in the day's order; at least one - all five = every hour
+}
 // Where now falls in those hours (backend `hours_now`): open or not, the strategy's clock now, and the
-// seconds until that changes.
+// seconds until that changes. `start`-`end`: the window - or, kept as sessions, the stretch of them it is in
+// or the next one (sessions back to back run as one), `opens` the session that stretch starts with.
 export interface StrategyHoursNow {
   open: boolean;
   start: string;
@@ -1255,6 +1267,9 @@ export interface StrategyHoursNow {
   tz: string;
   now: string;
   next_s: number;
+  sessions?: string[];
+  session?: string;          // the session it is now
+  opens?: string | null;     // null: no session it knows of picked - it never opens
 }
 export interface StrategyView extends StrategyDraft {
   id: number;
@@ -1354,4 +1369,42 @@ export interface StrategyActivity {
   asset_class?: AssetClass | null;
   event: string;
   detail: Record<string, unknown> | null;
+}
+
+// The journal by trading session (GET /api/journal/sessions, 2026-11-10): the trade log's closed trades by the
+// session each one OPENED in, and by its UTC hour, each split by who opened them. In $, as the broker booked them.
+export interface SessionStat {
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;        // 0-1
+  net_pnl: number;
+  avg_pnl: number | null;         // $ a trade
+  profit_factor: number | null;   // gross win / gross loss; null without a losing trade
+}
+export interface SessionSourceStat {
+  source: string;                 // strategy:1 / manual / ...
+  stat: SessionStat;
+}
+export interface SessionRow {
+  key: string;
+  name: string;
+  start_utc: number;              // hour, inclusive
+  end_utc: number;                // hour, exclusive
+  about: string;
+  total: SessionStat;
+  sources: SessionSourceStat[];
+}
+export interface SessionHourRow {
+  hour_utc: number;
+  session: string;
+  total: SessionStat;
+  sources: SessionSourceStat[];
+}
+export interface SessionsView {
+  trades: number;                 // counted: closed, with a booked result and an open time
+  skipped: number;
+  since: string | null;           // the open of the oldest one counted
+  sessions: SessionRow[];         // Asia, Middle East, London, New York, between sessions
+  hours: SessionHourRow[];        // UTC 0-23
 }

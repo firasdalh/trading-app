@@ -26,6 +26,7 @@ import { AutoFibPrimitive, autoFib, fibExplain, fibPosition, fibStatus, liveFib,
 import { RSI_PERIOD_EVENT } from "../rsiPeriod";
 import { OrderFlowPane } from "./OrderFlowPane";
 import { SessionLegend } from "./SessionLegend";
+import { sessionAtHour } from "../sessions";
 import { addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
 import { fmtPrice, fmtUsd } from "../format";
 import { TF_SECONDS, analysisTimeframe, isSecondsTf } from "../timeframes";
@@ -3530,7 +3531,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     }
 
     // --- trading sessions ---------------------------------------------------------------------
-    // Full-height tint, three cool colours, as originally built. The amber overlap band that got
+    // Full-height tint, a cool colour a session (../sessions.ts; Middle East joined 2026-11-10). The amber overlap band that got
     // added later is deliberately NOT here: warm tones at low opacity over a near-black chart read
     // as dirty olive, which is what made this look muddy. Blue/violet/green sit cleanly over black
     // at the same opacity, so New York simply runs 13:00-21:00 and swallows the overlap.
@@ -3548,11 +3549,9 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         // have been painted over the middle of Asia. (Kept from the later fix: this was wrong in
         // the first version, and it is a correctness bug rather than a look.)
         const hour = new Date(dispToUtc(times[i]) * 1000).getUTCHours();
-        const band =
-          hour < 8 ? "rgba(56,189,248,0.05)"                    // Asia
-            : hour < 13 ? "rgba(167,139,250,0.06)"              // London
-              : hour < 21 ? "rgba(34,197,94,0.05)"              // New York (incl. the London overlap)
-                : null;
+        // Asia, Middle East, London, New York (incl. the London overlap); no band between sessions.
+        const sess = sessionAtHour(hour);
+        const band = sess.band != null ? `rgba(${sess.rgb},${sess.band})` : null;
         if (!band) continue;
         const x = xOfTime(dispToUtc(times[i]));
         if (x == null || x < -bs || x > plotW + bs) continue;
@@ -4272,7 +4271,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
             ["vwapb", "VWAP bands (±1σ, ±2σ)", "One and two volume-weighted standard deviations either side of the session VWAP. Inside ±1σ is where the session trades most; out at ±2σ price is stretched, and a scalp entered there chases the move."],
             ["pivots", "Daily pivots (P, R1-R2, S1-S2)", "Floor pivots from yesterday's high, low and close: P = (H + L + C) / 3, R1 = 2P - L, S1 = 2P - H, R2 / S2 = P ± (H - L). Levels many intraday traders watch, so price often pauses at them."],
             ["bb", "Bollinger bands (20, 2)", "A 20-bar average with bands two standard deviations either side. Narrow bands = a quiet market coiling; price riding a band = a strong push; a close back inside after a band poke = the push fading."],
-            ["sessions", "Session shading", "Asia / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
+            ["sessions", "Session shading", "Asia / Middle East / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
             ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
             ["hist", "Trade history (MT5 style)", "Your past trades on this pair, drawn the way MetaTrader does: each deal is an arrow with its tip on the price - a buy blue and pointing up, a sell red and pointing down - so a buy opens on a blue arrow and closes on a red one. A dotted line joins each entry to its exit (blue = a buy, red = a sell), with the result at the exit. Point at an arrow for the details: lots, times, prices, who opened it and why it closed (stop, target, the app, MT5). From the broker's own deal history, every trade on the account - the terminal's and the phone's too."],
             ["sig", "Watch signals (👁)", "Each BUY / SELL signal of a strategy group on watch - the trade it would have taken - on the candle it fired in, in the signals' own fuchsia: 👁 BUY under the bar, 👁 SELL over it. Point at one for what price did after it: its best and worst move in the hour after, and where price is now against it. From the strategies' activity feed (its last 200 events - a few days)."],

@@ -21,5 +21,9 @@ export const SOURCE_META: Record<string, { label: string; color: string }> = {
   unknown: { label: "Unknown", color: "text-neutral-500" },
 };
 
-export const srcLabel = (s: string): string => SOURCE_META[s]?.label ?? s;
-export const srcColor = (s: string): string => SOURCE_META[s]?.color ?? "text-neutral-300";
+// A strategy's own trades carry "strategy:<id>": they read "Strategy 1" (2026-11-10).
+const strategyId = (s: string): string | undefined => /^strategy:(\d+)$/.exec(s)?.[1];
+export const srcLabel = (s: string): string =>
+  SOURCE_META[s]?.label ?? (strategyId(s) ? `Strategy ${strategyId(s)}` : s);
+export const srcColor = (s: string): string =>
+  SOURCE_META[s]?.color ?? (strategyId(s) ? "text-orange-300" : "text-neutral-300");

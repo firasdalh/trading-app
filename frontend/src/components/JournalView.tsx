@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import type { CalibrationBucket, GroupStat, JournalBreakdown, JournalStats, PeriodBreakdown, ReflectionReport } from "../types";
+import { ResultTag, SessionStatsCard, SessionTag } from "./SessionStats";
 import { SignalReviewCard } from "./SignalReview";
 import { srcLabel, srcColor } from "./sourceMeta";
 
@@ -40,6 +41,9 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 export function JournalView() {
   const [bump, setBump] = useState(0);
   const { data: trades } = usePolling(() => api.journalTrades(100), 8000, [bump]);
+  // The backend tags each row with the session it opened in (2026-11-10). An older one sends no `session` at all:
+  // then the column stays away rather than reading "—" all the way down.
+  const withSessions = !!trades?.some((t) => t.session !== undefined);
   const { data: calib } = usePolling(() => api.journalCalibration(), 10000, [bump]);
   const { data: perf } = usePolling(() => api.journalStats(), 10000, [bump]);
   const { data: breakdown } = usePolling(() => api.journalBreakdown(), 10000, [bump]);
@@ -204,6 +208,9 @@ export function JournalView() {
 
       <PerformanceCard perf={perf} />
 
+      {/* Which session pays: the closed trades by the session each one opened in (2026-11-10). */}
+      <SessionStatsCard />
+
       {/* What each watch signal would have done if traded, split at each change to the strategy (2026-11-08). */}
       <SignalReviewCard />
 
@@ -248,22 +255,24 @@ export function JournalView() {
             <table className="w-full whitespace-nowrap text-sm">
               <thead className="sticky top-0 bg-neutral-900 text-left text-xs text-neutral-400">
                 <tr>
-                  <th className="py-1 pr-3">Closed</th><th className="pr-3">Symbol</th><th className="pr-3">Side</th>
-                  <th className="pr-3">Source</th>
+                  <th className="py-1 pr-3">Closed</th>{withSessions && <th className="pr-3">Session</th>}<th className="pr-3">Symbol</th>
+                  <th className="pr-3">Side</th><th className="pr-3">Source</th>
                   <th className="pr-3 text-right">Qty</th><th className="pr-3 text-right">Entry</th>
-                  <th className="pr-3 text-right">Exit</th><th className="text-right">Realized P&amp;L</th>
+                  <th className="pr-3 text-right">Exit</th><th className="pr-3">Result</th><th className="text-right">Realized P&amp;L</th>
                 </tr>
               </thead>
               <tbody>
                 {trades.map((t) => (
                   <tr key={t.id} className="border-t border-neutral-800">
                     <td className="py-1 pr-3 text-neutral-400">{fmtDate(t.closed_at)}</td>
+                    {withSessions && <td className="pr-3"><SessionTag session={t.session} openedAt={t.opened_at} /></td>}
                     <td className="pr-3">{t.symbol}</td>
                     <td className={`pr-3 ${t.direction === "long" ? "text-bull" : "text-bear"}`}>{t.direction}</td>
                     <td className={`pr-3 text-xs ${srcColor(t.source ?? "unknown")}`}>{srcLabel(t.source ?? "unknown")}</td>
                     <td className="pr-3 text-right tabular-nums">{t.qty}</td>
                     <td className="pr-3 text-right tabular-nums">{fmtPrice(t.entry_price)}</td>
                     <td className="pr-3 text-right tabular-nums">{fmtPrice(t.last_price)}</td>
+                    <td className="pr-3"><ResultTag pnl={t.realized_pnl} /></td>
                     <td className={`text-right tabular-nums ${(t.realized_pnl ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
                       {t.realized_pnl == null ? "—" : fmtUsd(t.realized_pnl, { sign: true })}
                     </td>

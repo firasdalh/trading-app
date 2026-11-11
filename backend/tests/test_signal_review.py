@@ -97,6 +97,13 @@ def test_crypto_around_the_clock_reads_in_the_change_list():
     assert lines == ["trading hours: 05:00-23:31 Asia/Dubai → 05:00-23:31 Asia/Dubai, crypto 24/7"]
 
 
+def test_trading_sessions_read_in_the_change_list():
+    window = {"start": "05:00", "end": "23:31", "tz": "Asia/Dubai"}
+    sessions = {"sessions": ["london", "between"], "tz": "Asia/Dubai", "crypto_24h": True}
+    assert sr.describe_changes(snap(hours=window), snap(hours=sessions)) == [
+        "trading hours: 05:00-23:31 Asia/Dubai → sessions: London + Between sessions, crypto 24/7"]
+
+
 def test_a_new_group_is_one_line():
     after = snap(entry_long=snap()["entry_long"] + [[{"type": "spread", "tf": "1m", "params": {"max_pct": 20}}]])
     assert sr.describe_changes(snap(), after) == ["BUY group 2 added (1 conditions)"]

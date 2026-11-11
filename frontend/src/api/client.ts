@@ -449,6 +449,7 @@ export const api = {
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
   journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
   journalBreakdown: () => request<import("../types").JournalBreakdown>("/api/journal/breakdown"),
+  journalSessions: () => request<import("../types").SessionsView>("/api/journal/sessions"),
   // Today's trades with your own reasons + avg R per tag (daily review).
   journalReview: () =>
     request<{

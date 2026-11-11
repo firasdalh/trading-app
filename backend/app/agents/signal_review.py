@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.sessions import name_of as session_name
 from app.models.db import AgentRun, StrategyConfig
 from app.models.schemas import Candle
 
@@ -341,7 +342,10 @@ def describe_changes(before: dict, after: dict) -> list[str]:
         def hours_text(h) -> str:
             if not h:
                 return "around the clock"
-            text = f"{h.get('start')}-{h.get('end')} {h.get('tz') or ''}".strip()
+            if "sessions" in h:
+                text = f"sessions: {' + '.join(session_name(k) for k in h.get('sessions') or []) or 'none'}"
+            else:
+                text = f"{h.get('start')}-{h.get('end')} {h.get('tz') or ''}".strip()
             return f"{text}, crypto 24/7" if h.get("crypto_24h") else text
         out.append(f"trading hours: {hours_text(before.get('hours'))} → {hours_text(after.get('hours'))}")
     was_p = [p.get("symbol") for p in before.get("pairs") or []]

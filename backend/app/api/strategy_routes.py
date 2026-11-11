@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.agents import strategy as engine
 from app.core.database import get_session
 from app.core.logging import get_logger
+from app.core.sessions import KEYS as SESSION_KEYS
 from app.models.db import AgentRun, Position, StrategyConfig
 from app.models.enums import AssetClass, PositionStatus
 
@@ -55,17 +56,29 @@ _HHMM = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 
 class HoursIn(BaseModel):
-    """Its trading hours: it opens trades from ``start`` up to ``end`` (24-hour, past midnight when end
-    comes first) on the clock of ``tz`` - the board sends the browser's zone; none = this machine's.
+    """Its trading hours, one of two kinds:
+      - a window: it opens trades from ``start`` up to ``end`` (24-hour, past midnight when end comes first)
+        on the clock of ``tz`` - the board sends the browser's zone; none = this machine's;
+      - ``sessions`` (asked 2026-11-11: "add also the option to open in specific sessions"): it opens trades
+        only in the trading sessions picked - the journal's session hours on the UTC clock
+        (app/core/sessions.py); ``tz`` then only writes their times out (engine._sessions_now).
     ``crypto_24h``: its crypto pairs keep no hours and open around the clock (engine.pair_hours)."""
-    start: str = Field(pattern=_HHMM)
-    end: str = Field(pattern=_HHMM)
+    start: str | None = Field(None, pattern=_HHMM)
+    end: str | None = Field(None, pattern=_HHMM)
+    sessions: list[str] = Field(default_factory=list, max_length=12)
     tz: str | None = Field(None, max_length=64)
     crypto_24h: bool = False
 
     @model_validator(mode="after")
     def _a_real_window(self) -> "HoursIn":
-        if self.start == self.end:
+        if self.sessions:
+            unknown = [k for k in self.sessions if k not in SESSION_KEYS]
+            if unknown:
+                raise ValueError(f"trading hours: '{unknown[0]}' is not a trading session "
+                                 f"({', '.join(SESSION_KEYS)})")
+        elif not self.start or not self.end:
+            raise ValueError("trading hours: give a start and an end, or pick the sessions it may open in")
+        elif self.start == self.end:
             raise ValueError("trading hours: the start and the end are the same - pick 'all day' instead")
         if self.tz:
             try:
@@ -75,11 +88,15 @@ class HoursIn(BaseModel):
         return self
 
     def stored(self) -> dict:
-        """As the strategy keeps them: ``crypto_24h`` only when on, so hours saved before it existed read the
-        same, and an edit that leaves the hours alone records no change to them."""
-        out = self.model_dump()
-        if not out["crypto_24h"]:
-            del out["crypto_24h"]
+        """As the strategy keeps them: the window or the sessions - never both; the sessions in the day's order,
+        once each - and ``crypto_24h`` only when on. So hours saved before sessions or crypto_24h existed read
+        the same, and an edit that leaves the hours alone records no change to them."""
+        if self.sessions:
+            out = {"sessions": [k for k in SESSION_KEYS if k in self.sessions], "tz": self.tz}
+        else:
+            out = {"start": self.start, "end": self.end, "tz": self.tz}
+        if self.crypto_24h:
+            out["crypto_24h"] = True
         return out
 
 
@@ -266,7 +283,9 @@ def _get(session: Session, sid: int) -> StrategyConfig:
 def strategy_catalog() -> dict:
     return {"timeframes": engine.TIMEFRAMES, "conditions": engine.catalog(),
             "max_groups": engine._MAX_GROUPS, "max_conditions": engine._MAX_CONDITIONS,
-            "max_pairs": engine._MAX_PAIRS}
+            "max_pairs": engine._MAX_PAIRS,
+            # The trading sessions its hours can be kept as (HoursIn.sessions): the board offers them only then.
+            "sessions": list(SESSION_KEYS)}
 
 
 class CheckIn(BaseModel):

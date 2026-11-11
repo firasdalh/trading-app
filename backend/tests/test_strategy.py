@@ -1204,6 +1204,115 @@ def test_the_board_saves_crypto_around_the_clock(db_session):
     assert StrategyIn(hours={**window, "crypto_24h": False}).rules().hours == window
 
 
+# ----------------------------------------------------------------- trading sessions as its hours
+
+def _ses(*keys, tz="Asia/Dubai", **more):
+    return {"sessions": list(keys), "tz": tz, **more}
+
+
+def test_sessions_open_only_in_the_sessions_picked():
+    """Asked 2026-11-11: "add also the option to open in specific sessions ... between sessions and London". The
+    journal's own session hours (UTC): Asia 0-6, Middle East 6-8, London 8-13, New York 13-21, between 21-24."""
+    picks = _ses("between", "london")
+    assert [h for h in range(24) if st.hours_now(picks, _at(h, 30))["open"]] == [8, 9, 10, 11, 12, 21, 22, 23]
+    assert st.hours_now(picks, _at(9, 15)) == {                        # 13:15 in Dubai
+        "open": True, "sessions": ["london", "between"], "session": "london", "opens": "london",
+        "start": "12:00", "end": "17:00", "tz": "Asia/Dubai", "now": "13:15", "next_s": 3 * 3600 + 45 * 60}
+    ny = st.hours_now(picks, _at(14, 0, 30))     # New York is not picked: next, between sessions at 01:00 Dubai
+    assert ny["open"] is False and ny["session"] == "new_york" and ny["opens"] == "between"
+    assert (ny["start"], ny["end"], ny["next_s"]) == ("01:00", "04:00", 7 * 3600 - 30)
+    assert st.hours_now(picks, _at(12, 59, 59))["open"] is True and st.hours_now(picks, _at(13, 0))["open"] is False
+
+
+def test_sessions_back_to_back_run_as_one_stretch_even_past_midnight():
+    day = st.hours_now(_ses("london", "new_york", tz="UTC"), _at(7, 0))
+    assert day["open"] is False and (day["start"], day["end"], day["opens"], day["next_s"]) == ("08:00", "21:00", "london", 3600)
+    night = _ses("between", "asia", tz="UTC")
+    late = st.hours_now(night, _at(22, 0))
+    assert late["open"] is True and (late["start"], late["end"], late["next_s"]) == ("21:00", "06:00", 8 * 3600)
+    early = st.hours_now(night, _at(5, 59, 59))
+    assert early["open"] is True and early["session"] == "asia" and early["opens"] == "between" and early["next_s"] == 1
+    assert st.hours_now(night, _at(6, 0))["open"] is False
+
+
+def test_every_session_is_every_hour_and_none_known_is_never():
+    assert st.hours_now(_ses("asia", "middle_east", "london", "new_york", "between"), _at(3)) is None
+    never = st.hours_now({"sessions": ["mars"], "tz": "UTC"}, _at(10))
+    assert never["open"] is False and never["opens"] is None
+    assert st.off_hours_note(never) == "no trading session picked - no new trades"
+
+
+def test_outside_its_sessions_it_opens_nothing_and_says_until_when(db_session, engine):
+    calls, _ = engine
+    cfg = _strategy(db_session, hours=_ses("new_york", "between"))      # NOW is 12:00:30 UTC: London
+    out = st.run_strategy(db_session, cfg, now=NOW)
+    assert calls["assess"] == []
+    assert out[0]["note"] == "outside its sessions - London now; no new trades until 17:00 (New York)"
+    cfg.hours = _ses("london")
+    db_session.commit()
+    out = st.run_strategy(db_session, cfg, now=NOW)                   # the same bar, now inside
+    assert out[0].get("opened") == "long" and len(calls["assess"]) == 1
+
+
+def test_outside_its_sessions_its_close_rules_still_run(db_session, engine):
+    calls, holder = engine
+    holder["broker"] = _Broker(FALLING)
+    cfg = _strategy(db_session, hours=_ses("asia"))
+    mine = Position(symbol="BTCUSDm", asset_class="crypto", direction="long", qty=0.1, entry_price=110,
+                    stop_loss=100, status=PositionStatus.OPEN.value, source=f"strategy:{cfg.id}",
+                    opened_at=NOW - timedelta(hours=3))
+    db_session.add(mine)
+    db_session.commit()
+    st.run_strategy(db_session, cfg, now=NOW)
+    assert [c[0] for c in calls["close"]] == [mine.id]
+
+
+def test_crypto_24h_lets_crypto_off_the_sessions_too(db_session, engine):
+    calls, _ = engine
+    pairs = [{"symbol": "BTCUSDm", "asset_class": "crypto"}, {"symbol": "XAUUSDm", "asset_class": "metal"}]
+    cfg = _strategy(db_session, pairs=pairs, hours=_ses("asia", crypto_24h=True))
+    out = {r["symbol"]: r for r in st.run_strategy(db_session, cfg, now=NOW)}
+    assert out["BTCUSDm"].get("opened") == "long"
+    assert out["XAUUSDm"]["note"] == "outside its sessions - London now; no new trades until 04:00 (Asia)"
+    assert [p.symbol for p, _ in calls["assess"]] == ["BTCUSDm"]
+
+
+def test_the_board_reads_the_drafts_sessions(db_session, engine):
+    rules = st.Rules(timeframe="1m", entry_long=[[_cond("trend")]], hours=_ses("new_york"))
+    out = st.check_now(db_session, rules, "BTCUSDm", "crypto", now=NOW)
+    assert out["hours"]["open"] is False and out["hours"]["opens"] == "new_york"
+    assert out["hours"]["next_s"] == 59 * 60 + 30 and out["hours"]["start"] == "17:00"
+    assert out["long"]["ok"] is True                # the rules still read; only the engine's entries wait
+
+
+def test_the_board_saves_trading_sessions(db_session):
+    from app.api.strategy_routes import StrategyIn, create_strategy, update_strategy
+
+    for bad in ({"sessions": ["london", "tokyo"]},                    # not one of the sessions
+                {"sessions": []},                                     # neither sessions nor a window
+                {"tz": "Asia/Dubai"},
+                {"sessions": ["london"], "tz": "Mars/Olympus"}):
+        with pytest.raises(ValidationError):
+            StrategyIn(hours=bad)
+    # Kept in the day's order, once each; a window sent along is dropped - one kind of hours at a time.
+    view = create_strategy(StrategyIn(hours={"sessions": ["between", "london", "london"], "start": "09:00",
+                                             "end": "12:00", "tz": "Asia/Dubai", "crypto_24h": True}),
+                           session=db_session)
+    assert view.hours == {"sessions": ["london", "between"], "tz": "Asia/Dubai", "crypto_24h": True}
+    assert view.hours_now["sessions"] == ["london", "between"] and isinstance(view.hours_now["open"], bool)
+    view = update_strategy(view.id, StrategyIn(hours={"start": "09:00", "end": "12:00", "tz": "Asia/Dubai"}),
+                           session=db_session)
+    assert view.hours == {"start": "09:00", "end": "12:00", "tz": "Asia/Dubai"}       # a window again: no sessions
+    every = StrategyIn(hours={"sessions": ["asia", "middle_east", "london", "new_york", "between"]}).rules()
+    assert st.hours_now(every.hours, NOW) is None                     # every session: around the clock
+
+
+def test_the_catalog_says_which_sessions_it_knows():
+    from app.api.strategy_routes import strategy_catalog
+
+    assert strategy_catalog()["sessions"] == ["asia", "middle_east", "london", "new_york", "between"]
+
+
 # ----------------------------------------------------------------- the daily target
 
 def _won(session, cfg, pnl, closed, symbol="ETHUSDm", source=None):

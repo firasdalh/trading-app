@@ -1,6 +1,7 @@
 """Journal / reflection routes (Milestone 9).
 
-- GET  /api/journal/trades            -> recent CLOSED positions (the trade log).
+- GET  /api/journal/trades            -> recent CLOSED positions (the trade log), each with its session.
+- GET  /api/journal/sessions          -> the same trades by the trading session they opened in, and by hour.
 - GET  /api/journal/chart-trades      -> one pair's trades, entry + every exit, for the chart's history.
 - POST /api/journal/reflect           -> run the read-only Reflection agent now.
 - GET  /api/journal/reflection/latest -> the most recent stored reflection (or null).
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.reflection import latest_reflection, run_reflection
 from app.core.database import get_session
+from app.core.sessions import SESSIONS, session_at, session_of, utc_hour
 from app.core.state import get_or_create_risk_config, get_or_create_settings
 from app.models.db import entry_risk
 from app.models.db import Position
@@ -104,29 +106,36 @@ def _attribute_sources(session: Session, broker_trades: list[PositionView]) -> N
             used.add(best_i)
 
 
-@router.get("/trades", response_model=list[PositionView])
-def closed_trades(
-    limit: int = Query(100, ge=1, le=500),
-    session: Session = Depends(get_session),
-) -> list[PositionView]:
-    """Closed-trade log. Prefers the broker's own deal history (MT5) so entry/exit/P&L/date
-    match the Exness journal exactly; falls back to app-tracked closed positions otherwise.
-    The broker rows are attributed a source by matching back to the app's own positions."""
+def _journal_trades(session: Session, limit: int | None = None) -> list[PositionView]:
+    """The journal's closed trades, newest first, each tagged with the trading session it OPENED in
+    (app.core.sessions). Prefers the broker's own deal history (MT5) so entry/exit/P&L/date match the
+    Exness journal exactly; falls back to app-tracked closed positions otherwise. The broker rows are
+    attributed a source by matching back to the app's own positions."""
     from app.risk.service import broker_closed_trades
 
     broker_trades = broker_closed_trades(session)  # already respects the journal reset marker
     if broker_trades is not None:
         _attribute_sources(session, broker_trades)
-        return broker_trades[:limit]
+        out = broker_trades if limit is None else broker_trades[:limit]
+    else:
+        conds = [Position.status == PositionStatus.CLOSED.value]
+        reset = get_or_create_settings(session).journal_reset_at
+        if reset is not None:
+            conds.append(Position.closed_at >= reset)
+        q = select(Position).where(*conds).order_by(Position.closed_at.desc())
+        out = [PositionView.model_validate(r) for r in session.scalars(q if limit is None else q.limit(limit)).all()]
+    for v in out:
+        v.session = session_of(v.opened_at)
+    return out
 
-    conds = [Position.status == PositionStatus.CLOSED.value]
-    reset = get_or_create_settings(session).journal_reset_at
-    if reset is not None:
-        conds.append(Position.closed_at >= reset)
-    rows = session.scalars(
-        select(Position).where(*conds).order_by(Position.closed_at.desc()).limit(limit)
-    ).all()
-    return [PositionView.model_validate(r) for r in rows]
+
+@router.get("/trades", response_model=list[PositionView])
+def closed_trades(
+    limit: int = Query(100, ge=1, le=500),
+    session: Session = Depends(get_session),
+) -> list[PositionView]:
+    """Closed-trade log: the newest ``limit`` of the journal's trades (_journal_trades)."""
+    return _journal_trades(session, limit)
 
 
 @router.get("/chart-trades")
@@ -318,6 +327,94 @@ def breakdown(session: Session = Depends(get_session)) -> JournalBreakdown:
         daily=_periods(rows, lambda r: r.closed_at.strftime("%Y-%m-%d"), 60),
         weekly=_periods(rows, _iso_week, 26),
         monthly=_periods(rows, lambda r: r.closed_at.strftime("%Y-%m"), 24),
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  Sessions: the log's closed trades by the trading session each one OPENED in
+#  (app.core.sessions) and by the hour - which part of the day pays (2026-11-10).
+# --------------------------------------------------------------------------- #
+
+class SessionStat(BaseModel):
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float | None        # fraction 0-1
+    net_pnl: float                # $
+    avg_pnl: float | None         # $ a trade
+    profit_factor: float | None   # gross win / gross loss; None without a losing trade
+
+
+class SourceStat(BaseModel):
+    source: str                   # who opened them: strategy:1 / manual / ...
+    stat: SessionStat
+
+
+class SessionRow(BaseModel):
+    key: str
+    name: str
+    start_utc: int                # hour, inclusive
+    end_utc: int                  # hour, exclusive
+    about: str
+    total: SessionStat
+    sources: list[SourceStat]     # the same trades split by who opened them, the most trades first
+
+
+class HourRow(BaseModel):
+    hour_utc: int
+    session: str
+    total: SessionStat
+    sources: list[SourceStat]
+
+
+class SessionsView(BaseModel):
+    trades: int                   # counted: closed, with a booked result and an open time
+    skipped: int                  # closed trades left out for want of either
+    since: datetime | None        # the open of the oldest one counted
+    sessions: list[SessionRow]    # in the day's order: Asia, Middle East, London, New York, between
+    hours: list[HourRow]          # every UTC hour, 0-23
+
+
+def _session_stat(rows: list[PositionView]) -> SessionStat:
+    pnl = [r.realized_pnl or 0.0 for r in rows]
+    n = len(pnl)
+    win, loss = [x for x in pnl if x > 0], [x for x in pnl if x < 0]
+    return SessionStat(
+        trades=n, wins=len(win), losses=len(loss),
+        win_rate=round(len(win) / n, 3) if n else None,
+        net_pnl=round(sum(pnl), 2),
+        avg_pnl=round(sum(pnl) / n, 2) if n else None,
+        profit_factor=round(sum(win) / -sum(loss), 2) if loss else None,
+    )
+
+
+def _source_split(rows: list[PositionView]) -> list[SourceStat]:
+    from collections import defaultdict
+    buckets: dict[str, list] = defaultdict(list)
+    for r in rows:
+        buckets[r.source or "unknown"].append(r)
+    return [SourceStat(source=k, stat=_session_stat(v))
+            for k, v in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+
+
+@router.get("/sessions", response_model=SessionsView)
+def by_session(session: Session = Depends(get_session)) -> SessionsView:
+    """Which session pays: the trade log's own closed trades (broker truth, the journal's window) grouped by
+    the trading session each one OPENED in, and by its UTC hour, each split by who opened them. In $, as the
+    log - the broker's rows carry no risk to read R from."""
+    rows = _journal_trades(session)
+    counted = [r for r in rows if r.opened_at is not None and r.realized_pnl is not None]
+    hours: dict[int, list[PositionView]] = {h: [] for h in range(24)}
+    for r in counted:
+        hours[utc_hour(r.opened_at)].append(r)
+    opens = [r.opened_at if r.opened_at.tzinfo else r.opened_at.replace(tzinfo=timezone.utc) for r in counted]
+    return SessionsView(
+        trades=len(counted), skipped=len(rows) - len(counted), since=min(opens) if opens else None,
+        sessions=[SessionRow(key=s["key"], name=s["name"], start_utc=s["start"], end_utc=s["end"], about=s["about"],
+                             total=_session_stat(rs), sources=_source_split(rs))
+                  for s in SESSIONS for rs in [[r for r in counted if r.session == s["key"]]]],
+        hours=[HourRow(hour_utc=h, session=session_at(h), total=_session_stat(rs), sources=_source_split(rs))
+               for h, rs in hours.items()],
     )
 
 

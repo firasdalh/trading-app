@@ -368,6 +368,9 @@ class PositionView(BaseModel):
     # When the trade closed (closed trades only). For the broker-truth journal this is the
     # exit deal's time, so it matches the Exness journal.
     closed_at: datetime | None = None
+    # The trading session it OPENED in (app.core.sessions: asia / middle_east / london / new_york / between).
+    # Journal rows only; None elsewhere, or without an open time.
+    session: str | None = None
 
 
 # --------------------------------------------------------------------------- #
