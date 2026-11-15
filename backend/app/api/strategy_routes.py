@@ -9,16 +9,19 @@
 - POST /api/strategies/check         -> what a draft's rules read on a pair right now (reads only).
 - GET  /api/strategies/{id}/activity -> what it opened, closed and was refused.
 - GET  /api/strategies/activity      -> the same for every strategy, newest first (the desk's feed).
+- GET  /api/strategies/{id}/learning -> what it learned from its own closed trades (app/agents/learning.py).
+- POST /api/strategies/{id}/learning/act -> apply / ignore / un-ignore / undo one of those lessons.
 """
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agents import strategy as engine
@@ -56,28 +59,36 @@ _HHMM = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 
 class HoursIn(BaseModel):
-    """Its trading hours, one of two kinds:
+    """Its trading hours, one of three kinds:
       - a window: it opens trades from ``start`` up to ``end`` (24-hour, past midnight when end comes first)
         on the clock of ``tz`` - the board sends the browser's zone; none = this machine's;
       - ``sessions`` (asked 2026-11-11: "add also the option to open in specific sessions"): it opens trades
         only in the trading sessions picked - the journal's session hours on the UTC clock
-        (app/core/sessions.py); ``tz`` then only writes their times out (engine._sessions_now).
+        (app/core/sessions.py); ``tz`` then only writes their times out (engine._sessions_now);
+      - ``hours_utc`` (asked 2026-11-11: "turn on / off the hours which made bad trades for our strategy"): it
+        opens trades only in the UTC hours picked, 0-23 - the hours the Journal's strip counts its trades in
+        (engine._hour_picks_now). With more than one kind sent, the hours win, then the sessions.
     ``crypto_24h``: its crypto pairs keep no hours and open around the clock (engine.pair_hours)."""
     start: str | None = Field(None, pattern=_HHMM)
     end: str | None = Field(None, pattern=_HHMM)
     sessions: list[str] = Field(default_factory=list, max_length=12)
+    hours_utc: list[int] = Field(default_factory=list, max_length=48)
     tz: str | None = Field(None, max_length=64)
     crypto_24h: bool = False
 
     @model_validator(mode="after")
     def _a_real_window(self) -> "HoursIn":
-        if self.sessions:
+        if self.hours_utc:
+            bad = [h for h in self.hours_utc if not 0 <= h <= 23]
+            if bad:
+                raise ValueError(f"trading hours: {bad[0]} is not an hour of the day (0-23, UTC)")
+        elif self.sessions:
             unknown = [k for k in self.sessions if k not in SESSION_KEYS]
             if unknown:
                 raise ValueError(f"trading hours: '{unknown[0]}' is not a trading session "
                                  f"({', '.join(SESSION_KEYS)})")
         elif not self.start or not self.end:
-            raise ValueError("trading hours: give a start and an end, or pick the sessions it may open in")
+            raise ValueError("trading hours: give a start and an end, or pick the sessions or the hours it may open in")
         elif self.start == self.end:
             raise ValueError("trading hours: the start and the end are the same - pick 'all day' instead")
         if self.tz:
@@ -91,7 +102,9 @@ class HoursIn(BaseModel):
         """As the strategy keeps them: the window or the sessions - never both; the sessions in the day's order,
         once each - and ``crypto_24h`` only when on. So hours saved before sessions or crypto_24h existed read
         the same, and an edit that leaves the hours alone records no change to them."""
-        if self.sessions:
+        if self.hours_utc:
+            out = {"hours_utc": sorted(set(self.hours_utc)), "tz": self.tz}
+        elif self.sessions:
             out = {"sessions": [k for k in SESSION_KEYS if k in self.sessions], "tz": self.tz}
         else:
             out = {"start": self.start, "end": self.end, "tz": self.tz}
@@ -285,7 +298,9 @@ def strategy_catalog() -> dict:
             "max_groups": engine._MAX_GROUPS, "max_conditions": engine._MAX_CONDITIONS,
             "max_pairs": engine._MAX_PAIRS,
             # The trading sessions its hours can be kept as (HoursIn.sessions): the board offers them only then.
-            "sessions": list(SESSION_KEYS)}
+            "sessions": list(SESSION_KEYS),
+            # Its hours can be picked one by one too (HoursIn.hours_utc): the board offers "by hour" only then.
+            "hour_picks": True}
 
 
 class CheckIn(BaseModel):
@@ -400,11 +415,15 @@ def _feed(session: Session, sid: int | None, limit: int) -> list[dict]:
     configs = session.scalars(select(StrategyConfig)).all()
     names = {c.id: c.name for c in configs}
     classes = {p.get("symbol"): p.get("asset_class") for c in configs for p in (c.pairs or [])}
-    rows = session.scalars(select(AgentRun).where(AgentRun.agent == "strategy")
-                           .order_by(AgentRun.id.desc()).limit(1000)).all()
+    # Just ``limit`` rows from the database, one strategy's picked out there (2026-11-11): it read the last 1000
+    # events on every call of the desk's three feeds, ~0.15 s of CPU each.
+    q = select(AgentRun).where(AgentRun.agent == "strategy")
+    if sid is not None:
+        q = q.where(func.json_extract(AgentRun.detail, "$.strategy_id") == sid)
+    rows = session.scalars(q.order_by(AgentRun.id.desc()).limit(limit)).all()
     items = [(_utc(r.created_at), {"id": r.id, "at": _iso(r.created_at), "symbol": r.symbol,
                                    "asset_class": classes.get(r.symbol), "event": r.event, "detail": r.detail})
-             for r in rows if sid is None or (r.detail or {}).get("strategy_id") == sid][:limit]
+             for r in rows]
     mine = Position.source == f"strategy:{sid}" if sid is not None else Position.source.like("strategy:%")
     done = session.scalars(select(Position).where(Position.status == PositionStatus.CLOSED.value,
                                                   Position.closed_at.is_not(None), mine)
@@ -451,3 +470,126 @@ def all_activity(limit: int = Query(40, ge=1, le=200), session: Session = Depend
 def strategy_activity(sid: int, limit: int = Query(40, ge=1, le=200),
                       session: Session = Depends(get_session)) -> list[dict]:
     return _feed(session, sid, limit)
+
+
+# --------------------------------------------------------------------------- what the strategy learned (2026-11-13)
+# Asked 2026-11-12: "make the strategy learn from itself so it keeps getting better". It studies its own closed trades
+# (app/agents/learning.py); the board shows the lessons, and a lesson changes the strategy only on the user's click
+# here - through the same validation and the same edit record as the board's own save.
+
+def _config_of(row: StrategyConfig) -> dict:
+    """A saved strategy as the board sends it (StrategyIn): what a lesson's change is made on, then validated as."""
+    return {"name": row.name, "pairs": copy.deepcopy(list(row.pairs or [])), "timeframe": row.timeframe,
+            "sides": row.sides, "entry_long": copy.deepcopy(list(row.entry_long or [])),
+            "entry_short": copy.deepcopy(list(row.entry_short or [])), "mirror_short": bool(row.mirror_short),
+            "exit_rules": copy.deepcopy(list(row.exit_rules or [])), "risk_pct": row.risk_pct,
+            "stop_atr": row.stop_atr, "target_r": row.target_r, "max_trades_day": row.max_trades_day,
+            "manage_manual": bool(row.manage_manual),
+            "cooldown_minutes": row.cooldown_minutes if row.cooldown_minutes is not None else 0,
+            "loss_cooldown_minutes": row.loss_cooldown_minutes if row.loss_cooldown_minutes is not None else 5,
+            "hours": copy.deepcopy(row.hours) if row.hours else None,
+            "stop": copy.deepcopy(row.stop) if row.stop else None, "daily_target": row.daily_target,
+            "off_groups": off_groups_of(row.off_groups), "live": bool(row.live)}
+
+
+# A lesson never touches these (RISK.md): what it risks, how often it may trade, the live switch.
+_NOT_LEARNED = ("risk_pct", "cooldown_minutes", "loss_cooldown_minutes", "max_trades_day", "live", "daily_target",
+                "manage_manual")
+# What a lesson can change - kept before / after so an undo can put it back.
+_LEARNED = ("pairs", "sides", "hours", "entry_long", "target_r", "stop_atr")
+
+
+class LearningAct(BaseModel):
+    key: str = Field(min_length=1, max_length=96)
+    action: Literal["apply", "ignore", "unignore", "undo"]
+
+
+@router.get("/{sid}/learning")
+def strategy_learning(sid: int, session: Session = Depends(get_session)) -> dict:
+    """What the strategy learned from its own closed trades: the parts of its entries that lose or win far from
+    luck, what other targets / stop sizes would have made, and the lessons applied with how its trades did since.
+    Reads the database only - the scheduler keeps the trades' facts up to date (learning.learning_tick)."""
+    from app.agents import learning
+
+    row = _get(session, sid)
+    return learning.build(session, row, _config_of(row))
+
+
+def _save_learned(session: Session, row: StrategyConfig, new_cfg: dict, by: str, title: str | None) -> list[str] | None:
+    """Validate ``new_cfg`` as the board's save would, save it, and record the edit with what changed."""
+    from pydantic import ValidationError
+
+    from app.agents.signal_review import describe_changes, snapshot
+
+    before = _config_of(row)
+    if any(new_cfg.get(k) != before.get(k) for k in _NOT_LEARNED):
+        raise HTTPException(status_code=500, detail="refused: a lesson may not change risk, cooldowns or the live switch")
+    try:
+        req = StrategyIn.model_validate(new_cfg)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"the change doesn't fit the strategy: {exc.errors()[0]['msg']}") from None
+    snap = snapshot(row)
+    _apply(row, req)
+    try:
+        changes = describe_changes(snap, snapshot(row))
+    except Exception:  # noqa: BLE001
+        changes = None
+    session.add(AgentRun(agent="strategy", event="edited", detail={"strategy_id": row.id, "name": row.name,
+                                                                    "running": row.enabled, "changes": changes,
+                                                                    "by": by, "lesson": title}))
+    return changes
+
+
+@router.post("/{sid}/learning/act")
+def strategy_learning_act(sid: int, req: LearningAct, session: Session = Depends(get_session)) -> dict:
+    """The user's answer to one lesson: ``apply`` its change (only a strong one, only a change the strategy doesn't
+    make yet), ``ignore`` it, ``unignore`` it, or ``undo`` an applied one (only while what it changed is still as it
+    left it). Each is recorded (AgentRun agent "learning"); a change is also an edit, as a save on the board is."""
+    from app.agents import learning
+
+    row = _get(session, sid)
+    view = learning.build(session, row, _config_of(row))
+    lesson = next((p for p in view["lessons"] + view["ignored"] if p["key"] == req.key), None)
+
+    def note(event: str, **d) -> None:
+        session.add(AgentRun(agent="learning", event=event,
+                             detail={"strategy_id": row.id, "name": row.name, "key": req.key, **d}))
+
+    if req.action in ("ignore", "apply") and lesson is None:
+        raise HTTPException(status_code=404, detail="that lesson isn't there any more - its numbers changed")
+    if req.action == "ignore":
+        note("ignored", title=lesson["title"])
+    elif req.action == "unignore":
+        note("unignored")
+    elif req.action == "apply":
+        if lesson["strength"] != "strong":
+            raise HTTPException(status_code=409, detail="not sure enough yet - it needs more trades")
+        act = lesson.get("action")
+        if not act:
+            raise HTTPException(status_code=409, detail="no setting on the board says this yet")
+        if act.get("done"):
+            raise HTTPException(status_code=409, detail="the strategy already does this")
+        before = _config_of(row)
+        try:
+            new_cfg = learning.apply_change(before, act)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        changes = _save_learned(session, row, new_cfg, "lesson", lesson["title"])
+        after = _config_of(row)
+        touched = [k for k in _LEARNED if before.get(k) != after.get(k)]
+        note("applied", title=lesson["title"], changes=changes, before={k: before.get(k) for k in touched},
+             after={k: after.get(k) for k in touched},
+             stats={"n": lesson.get("n"), "r_sum": lesson.get("r_sum"), "t": lesson.get("t")})
+    else:  # undo
+        st = learning.decisions(session, row.id)["state"].get(req.key)
+        if not st or st.get("status") != "applied":
+            raise HTTPException(status_code=404, detail="that lesson isn't applied")
+        cur = _config_of(row)
+        if any(cur.get(k) != v for k, v in (st.get("after") or {}).items()):
+            raise HTTPException(status_code=409, detail="the strategy was changed since - undo it on the board")
+        _save_learned(session, row, {**cur, **(st.get("before") or {})}, "undo lesson", st.get("title"))
+        note("undone", title=st.get("title"))
+    session.commit()
+    session.refresh(row)
+    return {"ok": True, "strategy": _view(session, row).model_dump(),
+            "learning": learning.build(session, row, _config_of(row))}

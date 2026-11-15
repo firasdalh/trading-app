@@ -182,6 +182,20 @@ def _shadow_eval_tick() -> None:
         log.warning("shadow eval tick failed", extra={"error": str(exc)})
 
 
+def _learning_tick() -> None:
+    """Keep each strategy's study of its own trades up to date (app/agents/learning.py): its closed trades, their
+    fingerprints and what-ifs from the broker's history, and a note when a lesson first turns strong. It never
+    changes a strategy - the user applies a lesson on the board."""
+    from app.agents.learning import learning_tick
+    from app.core.database import session_scope
+
+    try:
+        with session_scope() as session:
+            learning_tick(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("learning tick failed", extra={"error": str(exc)})
+
+
 def _register_monitor_job() -> None:
     from app.core.scheduler import get_scheduler
 
@@ -216,8 +230,12 @@ def _register_monitor_job() -> None:
     # scorecard + the AI's self-learning brief current without needing the panel open).
     sched.add_job(_shadow_eval_tick, "interval", seconds=600, id="shadow_eval",
                   replace_existing=True, max_instances=1)
+    # Every 2 min: each strategy's study of its own closed trades (reads the broker's history, changes nothing).
+    sched.add_job(_learning_tick, "interval", seconds=120, id="strategy_learning",
+                  replace_existing=True, max_instances=1)
     log.info("position monitor (10s) + scanner (20s) + advisor (30s) + hybrid (60s) + "
-             "conditional watch (15s) + rsi-over watch (60s) + strategies (1s) + shadow-eval (600s) scheduled")
+             "conditional watch (15s) + rsi-over watch (60s) + strategies (1s) + shadow-eval (600s) + "
+             "strategy learning (120s) scheduled")
 
 
 @asynccontextmanager

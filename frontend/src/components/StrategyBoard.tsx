@@ -3,11 +3,12 @@ import { api } from "../api/client";
 import { assetLabel, displaySymbol, fmtUsd } from "../format";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
-import { localHour, SESSIONS, sessionByKey, utcHour } from "../sessions";
+import { localHour, SESSIONS, sessionAtHour, sessionByKey, utcHour } from "../sessions";
 import type { TradingSession } from "../sessions";
 import { TF_SECONDS } from "../timeframes";
 import { NumberBox } from "./NumberBox";
 import { ActivityFeed } from "./StrategyActivityFeed";
+import { StrategyLearning } from "./StrategyLearning";
 import { askNotifyPermission } from "./StrategySignals";
 import type {
   AssetClass,
@@ -37,7 +38,8 @@ const NAMES: Record<string, string> = {
   macd: "MACD histogram", stoch_cross: "Stochastic cross (turning out of a zone)",
   stoch_room: "Stochastic with room (our way, not overbought / oversold)", vwap: "VWAP side", volume: "Volume spike",
   bb_break: "Bollinger breakout", candles: "Candle colour", clean_candle: "Candle with us (no doji / star / hammer)", structure: "Structure (HH / HL)", sr_room: "Room to S/R (1h / 4h / 1d)",
-  zone_room: "Room to supply / demand", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter",
+  zone_room: "Room to supply / demand", fib_zone: "Fibonacci zone (room to the target)",
+  dont_chase: "Not chasing (a fresh push only)", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter",
   rsi_extreme: "Take profit: RSI stretched", profit_r: "Take profit: at +R", time_stop: "Time stop",
 };
 
@@ -162,13 +164,42 @@ function span(mins: number): string {
   return h ? (m ? `${h} h ${m} min` : `${h} h`) : `${m} min`;
 }
 
+// "+42", "−7", "+1.2k": an hour's result on the "by hour" strip, as the Journal's strip writes it.
+const short = (v: number) => {
+  const a = Math.abs(v);
+  const body = a >= 1000 ? `${(a / 1000).toFixed(1)}k` : a >= 10 ? String(Math.round(a)) : a.toFixed(1);
+  return `${v < 0 ? "−" : "+"}${body}`;
+};
+
 // "+$528", "−$921": a session's result on its chip, in whole dollars.
 const usd0 = (v: number) => `${v < 0 ? "−" : "+"}$${Math.abs(Math.round(v)).toLocaleString("en-US")}`;
 const sessionName = (key: string | null | undefined) => sessionByKey(key)?.name ?? key ?? "";
 
 // A strategy's trading hours in words, on this clock: "from 09:00 to 12:00 (your clock, GMT+4)", or "in London
 // (12:00-17:00) and Between sessions (01:00-04:00), your clock, GMT+4" - sessions keep fixed UTC hours.
+// UTC hours picked one by one, as runs [first hour, hour after the last) - an hour past midnight joins the
+// evening's run. All 24: one run.
+export function hourRuns(hours: number[]): [number, number][] {
+  const on = new Set(hours);
+  if (on.size >= 24) return [[0, 24]];
+  const off = [...Array(24).keys()].find((h) => !on.has(h)) ?? 0;
+  const runs: [number, number][] = [];
+  for (let k = 1; k <= 24; k++) {
+    const h = (off + k) % 24;
+    if (!on.has(h)) continue;
+    const last = runs[runs.length - 1];
+    if (last && last[1] % 24 === h) last[1] = last[1] + 1;
+    else runs.push([h, h + 1]);
+  }
+  return runs;
+}
+
 export function hoursText(h: StrategyHours): string {
+  if ("hours_utc" in h) {
+    if (h.hours_utc.length >= 24) return "at every hour";
+    const runs = hourRuns(h.hours_utc).map(([a, b]) => `${localHour(a)}-${localHour(b % 24)}`);
+    return `${runs.length > 1 ? "in the hours" : "in the hours of"} ${runs.join(", ")} (${zoneLabel(null)})`;
+  }
   if (!("sessions" in h)) return `from ${h.start} to ${h.end} (${zoneLabel(h.tz)})`;
   const names = SESSIONS.filter((s) => h.sessions.includes(s.key))
     .map((s) => `${s.name} (${localHour(s.from)}-${localHour(s.to % 24)})`);
@@ -180,6 +211,7 @@ export function hoursText(h: StrategyHours): string {
 
 // The desk widget's hours chip: on until when, or off until when - with the session, when the hours are sessions.
 export function hoursChip(h: StrategyHours, now: StrategyHoursNow | null | undefined): string {
+  if ("hours_utc" in h) return now ? (now.open ? `on until ${now.end}` : `off until ${now.start}`) : "every hour";
   if (!("sessions" in h)) return now ? (now.open ? `on until ${h.end}` : `off until ${h.start}`) : `${h.start}–${h.end}`;
   if (!now) return "every session";
   if (!now.opens) return "no session picked";
@@ -195,7 +227,9 @@ export function hoursChip(h: StrategyHours, now: StrategyHoursNow | null | undef
 // "crypto 24/7" on (`readsCrypto`), nor with every session picked (every hour). `crypto`: the draft's crypto pairs,
 // which that box lets off the hours (asked 2026-11-09: "I want that the crypto keep working 24 hours").
 // `canSessions`: the backend keeps hours as sessions (its catalog lists them) - an older one would refuse them.
-function HoursRow({ value, onChange, now, crypto, readsCrypto, stats, source, canSessions }: {
+// `canHours`: it keeps hours picked one by one too ("by hour", 2026-11-11: "turn on / off the hours which made bad
+// trades for our strategy") - the Journal's hour strip, each hour with this strategy's own result, clicked off or on.
+function HoursRow({ value, onChange, now, crypto, readsCrypto, stats, source, canSessions, canHours }: {
   value: StrategyHours | null;
   onChange: (h: StrategyHours | null) => void;
   now: StrategyHoursNow | null | undefined;
@@ -204,9 +238,27 @@ function HoursRow({ value, onChange, now, crypto, readsCrypto, stats, source, ca
   stats: SessionsView | null | undefined;
   source: string | null;
   canSessions: boolean;
+  canHours: boolean;
 }) {
-  const win = value && !("sessions" in value) ? value : null;
+  const win = value && "start" in value ? value : null;
   const ses = value && "sessions" in value ? value : null;
+  const picks = value && "hours_utc" in value ? value : null;
+  // The last hours picked here; picking "by hour" from the sessions starts from their hours.
+  const lastPicks = useRef<number[]>([...Array(24).keys()]);
+  if (picks) lastPicks.current = picks.hours_utc;
+  const seedPicks = () =>
+    ses ? SESSIONS.filter((s) => ses.sessions.includes(s.key)).flatMap((s) => [...Array(s.to - s.from).keys()].map((k) => s.from + k))
+      : lastPicks.current;
+  // An hour on or off. One always stays on: with none it would never open a trade ("all day" is for no limit).
+  const toggleHour = (h: number) => {
+    if (!picks) return;
+    const on = picks.hours_utc.includes(h);
+    if (on && picks.hours_utc.length === 1) return;
+    onChange({ ...picks, hours_utc: on ? picks.hours_utc.filter((x) => x !== h) : [...picks.hours_utc, h].sort((a, b) => a - b) });
+  };
+  // The strip's colour strength: an hour's result against this strategy's biggest hour, as the Journal's strip does.
+  const maxHour = Math.max(1, ...(stats?.hours ?? []).map((r) =>
+    Math.abs((source ? r.sources.find((x) => x.source === source)?.stat.net_pnl : undefined) ?? 0)));
   // The last window and the last sessions set here: switching to the other kind and back keeps them.
   const lastWin = useRef<StrategyWindowHours>({ start: "09:00", end: "12:00", tz: BROWSER_TZ });
   const lastSes = useRef<string[]>(SESSIONS.map((s) => s.key));
@@ -305,6 +357,15 @@ function HoursRow({ value, onChange, now, crypto, readsCrypto, stats, source, ca
             in sessions
           </button>
         )}
+        {(canHours || picks) && (
+          <button
+            onClick={() => !picks && onChange({ hours_utc: seedPicks(), tz: BROWSER_TZ, ...keep24 })}
+            className={tab(!!picks)}
+            title="Hour by hour: each hour of the day on your clock with what this strategy's own trades opened in it made - click one to switch it off or on. The same hours as the Journal's 'By the hour it opened' strip."
+          >
+            by hour
+          </button>
+        )}
       </span>
       {win && (
         <>
@@ -332,6 +393,55 @@ function HoursRow({ value, onChange, now, crypto, readsCrypto, stats, source, ca
               : `off now - starts at ${now.start} (in ${left})`}
         </span>
       )}
+      {picks && (
+        <span className="flex basis-full gap-0.5" role="group" aria-label="Trading hours, one by one">
+          {[...Array(24).keys()]
+            .map((h) => ({ h, at: (((h * 60 - new Date().getTimezoneOffset()) % 1440) + 1440) % 1440 }))
+            .sort((a, b) => a.at - b.at)
+            .map(({ h }) => {
+              const on = picks.hours_utc.includes(h);
+              const sess = sessionAtHour(h);
+              const row = stats?.hours.find((r) => r.hour_utc === h);
+              const mine = source ? row?.sources.find((x) => x.source === source)?.stat : undefined;
+              const pnl = mine?.trades ? mine.net_pnl : null;
+              const a = pnl == null ? 0 : Math.min(0.85, 0.25 + Math.abs(pnl) / maxHour);
+              const last = on && picks.hours_utc.length === 1;
+              return (
+                <button
+                  key={h}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => toggleHour(h)}
+                  className={`min-w-0 flex-1 ${last ? "cursor-default" : ""}`}
+                  title={`${localHour(h)}-${localHour((h + 1) % 24)} your clock (${utcHour(h)} UTC, ${sess.name}): ${on ? "ON" : "OFF"}.${
+                    mine?.trades
+                      ? ` This strategy's trades opened in this hour since ${since}: ${mine.trades}, ${mine.win_rate != null ? `${Math.round(mine.win_rate * 100)}% won, ` : ""}${fmtUsd(mine.net_pnl, { sign: true })}.${mine.trades < 5 ? " Few trades - that says little." : ""}`
+                      : source && stats ? " No trade of this strategy opened in this hour yet." : ""}\n${
+                    last ? "The only hour on - switch another on first, or pick 'all day'." : on ? "Click: it stops opening trades in this hour." : "Click: it may open trades in this hour again."}`}
+                >
+                  <div className="h-1 rounded-t-sm" style={{ backgroundColor: `rgba(${sess.rgb},${on ? 0.85 : 0.2})` }} />
+                  <div
+                    className={`flex h-8 items-center justify-center rounded-b-sm text-[10px] font-semibold tabular-nums ${
+                      on ? "text-white/90" : "text-neutral-600 line-through"}`}
+                    style={{
+                      backgroundColor: !on ? "rgb(10,10,10)"
+                        : pnl == null ? "rgb(38,38,38)" : `rgba(${pnl >= 0 ? "34,197,94" : "239,68,68"},${a.toFixed(2)})`,
+                      outline: on ? undefined : "1px dashed rgb(64,64,64)",
+                    }}
+                  >
+                    {pnl == null ? (on ? "·" : "off") : short(pnl)}
+                  </div>
+                  <div className={`mt-0.5 text-center text-[9px] tabular-nums ${on ? "text-neutral-400" : "text-neutral-600"}`}>
+                    {localHour(h).slice(0, 2)}
+                  </div>
+                </button>
+              );
+            })}
+        </span>
+      )}
+      {picks && picks.hours_utc.length >= 24 && (
+        <span className="text-amber-300/90">all 24 on = every hour - click the hours it should skip</span>
+      )}
       {ses && ses.sessions.length === SESSIONS.length && (
         <span className="text-amber-300/90">all five = every hour - untick the sessions it should skip</span>
       )}
@@ -343,7 +453,7 @@ function HoursRow({ value, onChange, now, crypto, readsCrypto, stats, source, ca
           className={`inline-flex cursor-pointer select-none items-center gap-1 rounded border px-1.5 py-0.5 ${
             value.crypto_24h ? "border-bull/40 bg-bull/10 text-bull" : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
           }`}
-          title={`Crypto never closes. With this on, its crypto pairs (BTC, ETH ...) open trades at any hour, day and night, and the other pairs keep these ${ses ? "sessions" : "hours"}. With 'Trade the live account' on, that is real money at night too.`}
+          title={`Crypto never closes. With this on, its crypto pairs (BTC, ETH ...) open trades at any hour, day and night, and the other pairs keep these ${ses ? "sessions" : "hours"}. With 'Trade the live account' on, that is real money at night too. With it off, crypto keeps these ${ses ? "sessions" : "hours"} like the rest.`}
         >
           <input
             type="checkbox"
@@ -359,6 +469,13 @@ function HoursRow({ value, onChange, now, crypto, readsCrypto, stats, source, ca
           {crypto.length
             ? `${crypto.map(displaySymbol).join(", ")} ${crypto.length === 1 ? "trades" : "trade"} at any hour; the others keep these ${ses ? "sessions" : "hours"}`
             : "no crypto pair in it yet"}
+        </span>
+      )}
+      {picks && (
+        <span className="basis-full text-[10px] text-neutral-500">
+          Click an hour to switch it off or on - it opens trades only in the hours on. {source && since
+            ? `Each hour shows what this strategy's own trades opened in it made since ${since} (hover for the count and win rate; a handful of trades says little), on your clock.`
+            : "A saved strategy shows its own result in each hour."} The trades it holds keep their close rules, stop and target at any hour.
         </span>
       )}
       {ses && source && since && (
@@ -528,9 +645,11 @@ function sentence(spec: StrategyConditionSpec | undefined, where: Where, params:
       const p = spec.params.find((x) => x.key === k);
       const v = params[k] ?? p?.default ?? 0;
       if (p?.kind === "tf") return v ? ` ${p.label} ` : "";
+      if (p?.kind === "pick") return v ? ` ${p.label} ·` : "";
       return p?.kind === "bool" ? (v ? "on" : "off") : String(flip ? 100 - v : v);
     })
     .replace(/\s+/g, " ")
+    .replace(/·\s*·/g, "·")
     .trim();
 }
 
@@ -656,6 +775,24 @@ function ConditionRow({ cond, where, catalog, tfs, onChange, onRemove, states }:
                 title={on ? `${p.label} is read - click to leave it out` : `Click to read ${p.label} too`}
                 className={`mx-px rounded border px-1 text-[10px] font-semibold ${
                   on ? "border-sky-500/60 bg-sky-500/20 text-sky-200" : "border-neutral-700 text-neutral-500 hover:text-neutral-300"
+                }`}
+              >
+                {p.label}
+              </button>
+            );
+          }
+          if (p.kind === "pick") {
+            // A place a trade may open in (Fibonacci zone): violet like the chart's Fibonacci targets.
+            const on = v >= 1;
+            return (
+              <button
+                key={i}
+                type="button"
+                aria-pressed={on}
+                onClick={() => set(on ? 0 : 1)}
+                title={on ? `A trade may open ${p.label} - click to rule it out` : `Ruled out - click to let a trade open ${p.label} too`}
+                className={`mx-px rounded border px-1 text-[10px] font-semibold ${
+                  on ? "border-violet-400/60 bg-violet-500/20 text-violet-200" : "border-neutral-700 text-neutral-500 line-through hover:text-neutral-300"
                 }`}
               >
                 {p.label}
@@ -969,7 +1106,8 @@ function PairPicker({ added, defaultClass, chartSymbol, onAdd }: {
  * watch what they read on a pair right now, and let them trade.
  *
  * A strategy runs on the backend (app/agents/strategy.py), every few seconds, on closed bars; it keeps
- * running with this board closed. It only trades a demo / paper account, every order carries a
+ * running with this board closed. It trades a demo / paper account - the real one only with its Live switch on (and
+ * LIVE trading confirmed) - every order carries a
  * broker-side stop and goes through the Risk Manager, and it is saved stopped: running it is its own
  * click.
  */
@@ -1029,7 +1167,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
 
   // While its hours are kept as sessions: what each session's trades made (the journal's "Sessions - which one
   // pays") - the session picker shows this strategy's own.
-  const bySession = !!draft?.hours && "sessions" in draft.hours;
+  const bySession = !!draft?.hours && ("sessions" in draft.hours || "hours_utc" in draft.hours);
   const { data: sessionStats } = usePolling(
     () => (bySession ? api.journalSessions() : Promise.resolve(null)),
     60_000,
@@ -1079,7 +1217,9 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
     try {
       const out = await api.runStrategy(s.id, on);
       setDraft(draftOf(out));
-      setMsg({ tone: "ok", text: on ? "Running - on a demo / paper account only." : "Stopped. Its open trade (if any) stays on its stop and target." });
+      setMsg({ tone: "ok", text: on
+        ? out.live ? "Running - on the REAL account (its Live switch is on), while LIVE trading is confirmed." : "Running - on a demo / paper account only."
+        : "Stopped. Its open trade (if any) stays on its stop and target." });
     } catch (e) {
       setMsg({ tone: "err", text: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -1125,7 +1265,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
     const best = Math.max(...on.map((g) => g.conditions.filter((x) => x.ok === true).length));
     const of = on.length === 1 ? `/${on[0].conditions.length}` : "";
     return c.ok
-      ? (done ? "holds - daily target reached" : offHours ? `holds - outside its ${bySession ? "sessions" : "hours"}`
+      ? (done ? "holds - daily target reached" : offHours ? `holds - outside its ${draft.hours && "sessions" in draft.hours ? "sessions" : "hours"}`
         : wait ? `holds - waits until ${wait.until}` : "fires now")
       : `${best}${of} hold`;
   };
@@ -1230,6 +1370,7 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
           stats={sessionStats}
           source={typeof sel === "number" ? `strategy:${sel}` : null}
           canSessions={!!catalog.sessions?.length}
+          canHours={!!catalog.hour_picks}
         />
         <LiveRow on={draft.live} onChange={(v) => set({ live: v })} real={!!check && !check.paper} />
       </div>
@@ -1362,8 +1503,9 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
           <button onClick={() => void run(false)} disabled={busy} className="btn border border-bear/60 bg-bear/15 text-bear hover:bg-bear/25">■ Stop</button>
         ) : (
           <button onClick={() => void run(true)} disabled={busy} className="btn border border-bull/60 bg-bull/15 text-bull hover:bg-bull/25"
-                  title="Start it: from now on the backend checks it every few seconds and trades by it - on a demo / paper account only">
-            ▶ {dirty ? "Save & run" : "Run"} (paper)
+                  title={`Start it: from now on the backend checks it every few seconds and trades by it - ${
+                    draft.live ? "on the REAL account (its Live switch is on)" : "on a demo / paper account only"}`}>
+            ▶ {dirty ? "Save & run" : "Run"} ({draft.live ? "live" : "paper"})
           </button>
         )}
         {saved && !saved.enabled && (
@@ -1402,6 +1544,8 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
             : "This broker is a REAL account right now: this strategy trades a demo only (Live account: demo only)."}
         </div>
       )}
+
+      {typeof sel === "number" && <StrategyLearning strategyId={sel} dirty={dirty} />}
 
       <p className="rounded-lg border border-neutral-800 bg-neutral-900/30 px-3 py-2 text-[11px] leading-relaxed text-neutral-500">
         How it trades: the backend reads a running strategy about a second after each candle closes on any timeframe its

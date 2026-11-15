@@ -1,4 +1,3 @@
-import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { ChartWindow } from "./components/ChartWindow";
@@ -22,10 +21,10 @@ const crashed = (error: Error) => (
   </div>
 );
 
+// No React.StrictMode (2026-11-11): the desk always runs on the dev server, where StrictMode mounts every effect
+// twice - each of the ~60 reads the desk makes on load went out twice, and the backend answered the burst in 3-30 s.
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <ErrorBoundary name="desk" fallback={crashed}>
-      {chartWindow ? <ChartWindow /> : <App />}
-    </ErrorBoundary>
-  </React.StrictMode>,
+  <ErrorBoundary name="desk" fallback={crashed}>
+    {chartWindow ? <ChartWindow /> : <App />}
+  </ErrorBoundary>,
 );

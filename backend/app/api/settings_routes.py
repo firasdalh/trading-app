@@ -763,16 +763,21 @@ def _fill_initial_stops(session: Session, positions: list[PositionView]) -> None
     if not positions:
         return
     filled = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
-    orders = session.scalars(
-        select(Order).where(Order.status.in_(filled), Order.stop_loss.is_not(None))
+    # Only the four fields it reads, on the pairs that are open (2026-11-11): the whole rows - their JSON
+    # payloads, the proposals' texts - cost ~0.1-0.2 s of CPU on every call of this 4-second poll.
+    open_keys = {_norm_symbol(p.symbol) for p in positions}
+    orders = [o for o in session.execute(
+        select(Order.symbol, Order.side, Order.created_at, Order.stop_loss)
+        .where(Order.status.in_(filled), Order.stop_loss.is_not(None))
         .order_by(Order.id.desc()).limit(500)
-    ).all()
-    proposals = session.scalars(
-        select(TradeProposalRecord).where(
-            TradeProposalRecord.status == ProposalStatus.EXECUTED.value,
-            TradeProposalRecord.stop_loss.is_not(None),
-        ).order_by(TradeProposalRecord.id.desc()).limit(500)
-    ).all()
+    ).all() if _norm_symbol(o.symbol) in open_keys]
+    proposals = [r for r in session.execute(
+        select(TradeProposalRecord.symbol, TradeProposalRecord.direction, TradeProposalRecord.created_at,
+               TradeProposalRecord.stop_loss)
+        .where(TradeProposalRecord.status == ProposalStatus.EXECUTED.value,
+               TradeProposalRecord.stop_loss.is_not(None))
+        .order_by(TradeProposalRecord.id.desc()).limit(500)
+    ).all() if _norm_symbol(r.symbol) in open_keys]
     app_rows = session.scalars(
         select(Position).where(Position.status == PositionStatus.OPEN.value)
     ).all()
@@ -1401,3 +1406,64 @@ def hybrid_stats(session: Session = Depends(get_session)) -> HybridStatsView:
         armed_setups=int(armed), triggered_armed=int(triggered), skipped_low_conf=skipped,
         last_opened=last_opened, last_opened_at=last_opened_at,
     )
+
+
+# --------------------------------------------------------------------------- where the CPU goes (2026-11-11)
+# The worker burned ~1.3 cores with the desk open, and every answer waited on the interpreter (the same reads
+# took 58-160 ms offline, 3-7 s live). No outside profiler may attach, so the worker samples itself: every
+# thread's Python stack, every few ms, for a few seconds. Read-only.
+_IDLE = ("threading.py:wait", "threading.py:_wait_for_tstate_lock", "queue.py:get", "selectors.py:select",
+         "selector_events.py:_run_once", "windows_events.py:select", "windows_events.py:_poll",
+         "concurrent/futures/thread.py:_worker", "concurrent\\futures\\thread.py:_worker", "socket.py:accept",
+         "apscheduler/schedulers/blocking.py", "base_events.py:_run_once", "diagnostics_hot")
+
+
+@router.get("/diagnostics/hot", tags=["diagnostics"])
+def diagnostics_hot(seconds: float = 10.0, every_ms: float = 5.0, top: int = 40) -> dict:
+    """Where the worker's threads are, sampled: each thread's Python stack every ``every_ms`` for ``seconds``
+    (at most 30). Threads waiting idle are left out. Returns the busiest app frames (the innermost app/
+    line of each sample, and each whole stack in short) with how often they were seen."""
+    import collections
+    import os
+    import sys
+    import threading
+    import time as _time
+
+    seconds = max(1.0, min(30.0, seconds))
+    gap = max(0.001, every_ms / 1000)
+    me = threading.get_ident()
+    names = {t.ident: t.name for t in threading.enumerate()}
+    leaf, stacks, threads = collections.Counter(), collections.Counter(), collections.Counter()
+    samples = 0
+    end = _time.monotonic() + seconds
+    t_cpu = _time.process_time()
+    t_wall = _time.monotonic()
+    while _time.monotonic() < end:
+        samples += 1
+        for ident, frame in sys._current_frames().items():
+            if ident == me:
+                continue
+            chain, f = [], frame
+            while f is not None:
+                code = f.f_code
+                chain.append((code.co_filename, f.f_lineno, code.co_name))
+                f = f.f_back
+            top_file, _, top_name = chain[0]
+            here = f"{os.path.basename(top_file)}:{top_name}"
+            if any(here.startswith(x) or x in top_file.replace("\\", "/") + ":" + top_name for x in _IDLE):
+                continue
+            app = [c for c in chain if f"{os.sep}app{os.sep}" in c[0] or "/app/" in c[0]]
+            inner = app[0] if app else chain[0]
+            leaf[f"{os.path.basename(inner[0])}:{inner[1]} {inner[2]}"] += 1
+            short = " < ".join(f"{os.path.basename(c[0])}:{c[2]}" for c in (app or chain)[:6])
+            stacks[f"{here} || {short}"] += 1
+            threads[names.get(ident, str(ident))] += 1
+        _time.sleep(gap)
+    wall = _time.monotonic() - t_wall
+    return {
+        "seconds": round(wall, 1), "samples": samples,
+        "process_cpu_cores": round((_time.process_time() - t_cpu) / wall, 2) if wall else None,
+        "busy_threads": threads.most_common(20),
+        "app_lines": leaf.most_common(top),
+        "stacks": stacks.most_common(top),
+    }

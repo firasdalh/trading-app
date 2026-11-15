@@ -23,7 +23,8 @@ const MAX_CHECKS = 8;    // pairs read per round, across the running strategies;
 const SHORT: Record<string, string> = {
   ema_cross: "EMA×", ema_above: "EMA>", price_ema: "vs EMA", trend: "Trend", tf_align: "TFs", supertrend: "ST", adx: "ADX",
   rsi_rising: "RSI↗", rsi_level: "RSI", macd: "MACD", stoch_cross: "Stoch×", stoch_room: "Stoch", vwap: "VWAP", volume: "Vol",
-  bb_break: "BB", candles: "Candles", clean_candle: "Bar", structure: "HH/HL", sr_room: "S/R", zone_room: "Zone", atr: "ATR", spread: "Spread", session: "Session",
+  bb_break: "BB", candles: "Candles", clean_candle: "Bar", structure: "HH/HL", sr_room: "S/R", zone_room: "Zone",
+  fib_zone: "Fib", dont_chase: "Chase", atr: "ATR", spread: "Spread", session: "Session",
   rsi_extreme: "RSI TP", profit_r: "+R", time_stop: "Time",
 };
 
@@ -203,7 +204,9 @@ export function StrategyWidget({ positions, chartSymbol, onPick, onOpenBoard, bo
                 }`}
                 title={s.enabled
                   ? "Stop it. A trade it holds stays on its stop and target."
-                  : "Start it - it trades a demo / paper account only, through the Risk Manager"}
+                  : s.live
+                    ? "Start it - it trades the REAL account (its Live switch is on), through the Risk Manager"
+                    : "Start it - it trades a demo / paper account only, through the Risk Manager"}
               >
                 {busy === s.id ? "…" : s.enabled ? "■ Stop" : "▶ Start"}
               </button>

@@ -4,6 +4,7 @@ import { fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import { localHour, sessionAtHour, sessionByKey, utcHour } from "../sessions";
 import type { SessionSourceStat, SessionStat } from "../types";
+import { FoldButton, useFold } from "./JournalFold";
 import { srcColor, srcLabel } from "./sourceMeta";
 
 /**
@@ -53,6 +54,7 @@ export function ResultTag({ pnl }: { pnl: number | null }) {
 }
 
 export function SessionStatsCard() {
+  const fold = useFold();
   const { data } = usePolling(() => api.journalSessions(), 30000, []);
   const [who, setWho] = useState("all");
   if (!data || data.trades === 0) return null;
@@ -82,7 +84,10 @@ export function SessionStatsCard() {
   return (
     <div className="card space-y-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <span className="text-sm font-semibold">Sessions — which one pays</span>
+        <span className="flex items-center gap-1 text-sm font-semibold">
+          <FoldButton name="Sessions" />
+          Sessions — which one pays
+        </span>
         <span className="text-xs text-neutral-500">
           {shown} closed trade{shown === 1 ? "" : "s"}{since ? ` since ${since}` : ""} from your broker's history, each
           counted in the session it opened in
@@ -102,6 +107,7 @@ export function SessionStatsCard() {
         </div>
       </div>
 
+      {!fold?.folded && (<>
       <div className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-sm">
           <thead className="text-left text-xs text-neutral-400">
@@ -196,6 +202,7 @@ export function SessionStatsCard() {
         ★ best needs {MIN_RANKED}+ trades in a session. Middle East = the Gulf markets' first hours, before London.
         {data.skipped > 0 && ` ${data.skipped} trade${data.skipped === 1 ? "" : "s"} left out: no open time or result.`}
       </p>
+      </>)}
     </div>
   );
 }

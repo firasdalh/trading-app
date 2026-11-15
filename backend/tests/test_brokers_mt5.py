@@ -584,3 +584,47 @@ def test_three_minute_ohlcv_reads_the_terminals_m3_bars():
     assert s.timeframe == "3m" and len(s.candles) == 5
     assert fake.tfs == [M3FakeMt5.TIMEFRAME_M3]
     assert mt5_adapter._TF_SECONDS["3m"] == 180
+
+
+class _NoMoney(FakeMt5):
+    """order_check answers 10019 (no money); order_send must then never be called."""
+    def __init__(self):
+        super().__init__()
+        self.sent = []
+
+    def order_check(self, req):
+        return SimpleNamespace(retcode=10019, margin=412.3, margin_free=-316.18, comment="No money")
+
+    def account_info(self):
+        return SimpleNamespace(equity=1150.0, balance=1210.0, margin_free=96.12, trade_mode=0, login=123,
+                               server="Exness-Demo")
+
+    def order_send(self, req):
+        self.sent.append(req)
+        return super().order_send(req)
+
+
+def test_an_order_the_account_cant_carry_is_never_sent():
+    """2026-11-10: 86 DE30m buys reached the live server, each refused 'no money'. The terminal's own
+    funds check now refuses it first, with the margin it needs and what is free."""
+    fake = _NoMoney()
+    res = _adapter(fake).submit_order(OrderRequest(symbol="EURUSD", asset_class=AssetClass.FOREX, side=OrderSide.BUY,
+                                                   order_type=OrderType.MARKET, qty=1.41, stop_loss=1.095))
+    assert fake.sent == []
+    assert res.status == OrderStatus.REJECTED and res.filled_qty == 0
+    assert res.error.startswith("not enough free margin: 1.41 lots need $412.30, $96.12 is free")
+
+
+def test_a_passing_or_failed_funds_check_lets_the_order_go():
+    class Ok(_NoMoney):
+        def order_check(self, req):
+            return SimpleNamespace(retcode=0, margin=12.0, margin_free=900.0, comment="Done")
+
+    class Broken(_NoMoney):
+        def order_check(self, req):
+            raise RuntimeError("terminal busy")
+
+    for fake in (Ok(), Broken()):
+        res = _adapter(fake).submit_order(OrderRequest(symbol="EURUSD", asset_class=AssetClass.FOREX,
+                                                       side=OrderSide.BUY, order_type=OrderType.MARKET, qty=1.0))
+        assert res.status == OrderStatus.FILLED and len(fake.sent) == 1

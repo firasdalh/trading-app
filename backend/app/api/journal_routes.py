@@ -40,14 +40,18 @@ def calibration(session: Session = Depends(get_session)) -> list[CalibrationBuck
     """Per-confidence-bucket win rate + avg R over CLOSED app-tracked trades — i.e. does the
     engine's confidence actually predict outcomes? (Does "70%" win ~70%?) Use it to recalibrate
     the score and the Hybrid auto-open threshold once enough trades have accumulated."""
+    # A trade with no score is left out: a strategy's trades carry confidence 0.0 (its rules don't score a setup),
+    # and all 191 of them sat in "0-50%" as if the engine had scored them low (2026-11-11).
     conds = [Position.status == PositionStatus.CLOSED.value,
-             Position.confidence.is_not(None), Position.realized_pnl.is_not(None),
+             Position.confidence.is_not(None), Position.confidence > 0, Position.realized_pnl.is_not(None),
              # Manual trades were stored with confidence 1.0 and filled the top bucket with
              # discretionary trades; they carry no engine score (full review 2026-10-20).
              (Position.source.is_(None)) | (~Position.source.like("manual%"))]
-    reset = get_or_create_settings(session).journal_reset_at
-    if reset is not None:
-        conds.append(Position.closed_at >= reset)
+    settings = get_or_create_settings(session)
+    # The account it trades now: a demo account's trades never mix into a live account's journal (2026-11-11).
+    conds.append(Position.broker_env == settings.broker_env)
+    if settings.journal_reset_at is not None:
+        conds.append(Position.closed_at >= settings.journal_reset_at)
     rows = session.scalars(select(Position).where(*conds)).all()
     edges = [(0.0, 0.5), (0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.01)]
     out: list[CalibrationBucket] = []
@@ -65,67 +69,144 @@ def calibration(session: Session = Depends(get_session)) -> list[CalibrationBuck
     return out
 
 
-def _attribute_sources(session: Session, broker_trades: list[PositionView]) -> None:
-    """The broker's deal history has no 'source' (it doesn't know who opened a trade), so every row
-    would read 'Unknown'. Attribute each broker trade to the app's own closed Position (which DOES
-    carry the source) by normalized symbol + direction + entry (±0.5%) + nearest close time, one app
-    row per broker trade. A broker trade left with no match keeps the source the adapter read from
-    its entry-deal comment (mt5_adapter.source_from_comment): the app's own tag when it placed the
-    trade - including from ANOTHER machine on the same account, whose DB this one never sees - or
-    'manual' for an untagged trade placed in the terminal or on the phone."""
-    from app.risk.service import _norm_symbol
+# A broker trade and the app's own row for it: the app records a position as its order fills, a second or two
+# after the entry deal (252 of 252 real-account rows within 120 s, 2026-11-11).
+_MATCH_S = 180
 
-    def _aware(dt):
-        if dt is None:
-            return None
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+def _utc(dt: datetime | None) -> datetime | None:
+    """A naive time is UTC already (how the DB keeps them)."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _family(src: str | None) -> str:
+    """'manual_from_…' reads 'manual': a long source is cut short in the comment's 31 characters."""
+    s = src or ""
+    return "manual" if s.startswith("manual") else s
+
+
+def _pair_app_rows(session: Session, trades: list[PositionView]) -> dict[int, Position]:
+    """The app's own closed row for each broker trade it placed - {index in ``trades``: row}. Same symbol and side,
+    entry within 0.5%, OPENED within _MATCH_S of it (closed, when either has no open time), and the source the
+    trade's MT5 tag names, when it names one. Closest pairs first, each trade and each row once - who gets a row
+    never hangs on the list's order. The row holds what the broker's history doesn't: the risk taken (the R
+    denominator), and who opened a trade tagged before the comment named the source."""
+    from app.risk.service import _norm_symbol
 
     rows = session.scalars(
         select(Position).where(Position.status == PositionStatus.CLOSED.value,
                                Position.source.is_not(None))
     ).all()
-    used: set[int] = set()
-    for bt in broker_trades:
-        best_i, best_key = None, None
-        for i, p in enumerate(rows):
-            if i in used or p.direction != bt.direction:
-                continue
-            if _norm_symbol(p.symbol) != _norm_symbol(bt.symbol):
-                continue
+    by_key: dict[tuple[str, str], list[int]] = {}
+    for i, p in enumerate(rows):
+        by_key.setdefault((_norm_symbol(p.symbol), p.direction), []).append(i)
+    pairs = []
+    for j, bt in enumerate(trades):
+        tag = bt.source or "app"
+        for i in by_key.get((_norm_symbol(bt.symbol), bt.direction), ()):
+            p = rows[i]
+            if tag != "app" and _family(p.source) != _family(tag):
+                continue                         # the broker's record says someone else opened it
             be = abs(bt.entry_price or 0.0)
             rel = abs((p.entry_price or 0.0) - (bt.entry_price or 0.0)) / max(be, 1e-9)
             if rel > 0.005:
                 continue
-            pc, bc = _aware(p.closed_at), _aware(bt.closed_at)
-            dt = abs((pc - bc).total_seconds()) if (pc and bc) else 1e12
-            key = (rel, dt)
-            if best_key is None or key < best_key:
-                best_key, best_i = key, i
-        if best_i is not None:
-            bt.source = rows[best_i].source
-            used.add(best_i)
+            pt, bt_t = _utc(p.opened_at), _utc(bt.opened_at)
+            if not (pt and bt_t):
+                pt, bt_t = _utc(p.closed_at), _utc(bt.closed_at)
+            if not (pt and bt_t):
+                continue
+            dt = abs((pt - bt_t).total_seconds())
+            if dt <= _MATCH_S:                   # further apart: another trade at a similar price, not this one
+                pairs.append((dt, rel, j, i))
+    out: dict[int, Position] = {}
+    used: set[int] = set()
+    for _dt, _rel, j, i in sorted(pairs):
+        if j not in out and i not in used:
+            out[j] = rows[i]
+            used.add(i)
+    return out
 
 
-def _journal_trades(session: Session, limit: int | None = None) -> list[PositionView]:
-    """The journal's closed trades, newest first, each tagged with the trading session it OPENED in
-    (app.core.sessions). Prefers the broker's own deal history (MT5) so entry/exit/P&L/date match the
-    Exness journal exactly; falls back to app-tracked closed positions otherwise. The broker rows are
-    attributed a source by matching back to the app's own positions."""
+def _attribute_sources(session: Session, broker_trades: list[PositionView]) -> dict[int, Position]:
+    """Who opened each broker trade. MT5's deal history has no source field, but every order the app sends
+    carries "ai-trading-app:<source>" as its comment, which the adapter reads off the ENTRY deal
+    (mt5_adapter.source_from_comment) - the broker's own record, from any machine on the account. It is kept:
+    an untagged trade was placed by hand, in the terminal or on the phone, and stays 'manual' whatever the
+    app's rows say.
+
+    Only a trade the tag can't place - 'app' (a bare "ai-trading-app", from an app version that didn't write
+    the source yet), or no source at all (a broker without tags) - takes the source of the app's own row for
+    the SAME trade (_pair_app_rows). Returns those pairs.
+
+    Until 2026-11-11 every trade was re-matched on symbol + side + entry price alone, however far apart in time,
+    and the app's row won over the tag: 40 phone trades (-$1,602) read as strategy:1, borrowing rows from other
+    days - many from the demo account, which a real account's history never holds."""
+    pairs = _pair_app_rows(session, broker_trades)
+    for j, row in pairs.items():
+        if (broker_trades[j].source or "app") == "app":
+            broker_trades[j].source = row.source
+    return pairs
+
+
+def _journal_book(session: Session) -> list[tuple[PositionView, Position | None]]:
+    """Every closed trade of the journal, newest first, each tagged with the trading session it OPENED in
+    (app.core.sessions), with the app's own row for it when the app placed it (None: a phone / terminal trade).
+
+    Prefers the broker's own deal history (MT5): entry / exit / P&L / date match the Exness journal, and every
+    trade on the account counts, the phone's too; the app's rows add who opened a legacy-tagged trade and the
+    risk taken. Without that history: the app's own closed rows on the account it trades now
+    (settings.broker_env) - a demo account's trades never mix into a live account's journal."""
     from app.risk.service import broker_closed_trades
 
     broker_trades = broker_closed_trades(session)  # already respects the journal reset marker
     if broker_trades is not None:
-        _attribute_sources(session, broker_trades)
-        out = broker_trades if limit is None else broker_trades[:limit]
+        pairs = _attribute_sources(session, broker_trades)
+        book = [(bt, pairs.get(j)) for j, bt in enumerate(broker_trades)]
     else:
-        conds = [Position.status == PositionStatus.CLOSED.value]
-        reset = get_or_create_settings(session).journal_reset_at
-        if reset is not None:
-            conds.append(Position.closed_at >= reset)
-        q = select(Position).where(*conds).order_by(Position.closed_at.desc())
-        out = [PositionView.model_validate(r) for r in session.scalars(q if limit is None else q.limit(limit)).all()]
-    for v in out:
+        settings = get_or_create_settings(session)
+        conds = [Position.status == PositionStatus.CLOSED.value, Position.broker_env == settings.broker_env]
+        if settings.journal_reset_at is not None:
+            conds.append(Position.closed_at >= settings.journal_reset_at)
+        rows = session.scalars(select(Position).where(*conds).order_by(Position.closed_at.desc())).all()
+        book = [(PositionView.model_validate(r), r) for r in rows]
+    for v, _row in book:
         v.session = session_of(v.opened_at)
+    return book
+
+
+def _journal_trades(session: Session, limit: int | None = None) -> list[PositionView]:
+    """The journal's closed trades (_journal_book), newest first - the newest ``limit``."""
+    trades = [v for v, _row in _journal_book(session)]
+    return trades if limit is None else trades[:limit]
+
+class EquityTrade(BaseModel):
+    closed_at: datetime
+    opened_at: datetime | None = None
+    pnl: float
+    source: str
+    symbol: str
+    direction: str
+    r: float | None = None
+
+
+@router.get("/equity", response_model=list[EquityTrade])
+def equity(session: Session = Depends(get_session)) -> list[EquityTrade]:
+    """Every closed trade of the journal (_journal_book), OLDEST first, in a few fields: what the Journal's
+    performance charts draw (2026-11-11, "enhance the performance visualization") - the equity curve and its
+    drawdown, each day's P&L and the spread of the results, for the whole account or one source. The broker's $
+    (swap and commission in), the source MT5 recorded, R where the app's own row holds the risk taken."""
+    out: list[EquityTrade] = []
+    for v, row in _journal_book(session):
+        if v.realized_pnl is None or v.closed_at is None:
+            continue
+        risk = entry_risk(row) if row is not None else None
+        out.append(EquityTrade(closed_at=_utc(v.closed_at), opened_at=_utc(v.opened_at), pnl=round(v.realized_pnl, 2),
+                               source=v.source or "unknown", symbol=v.symbol, direction=str(v.direction),
+                               r=round(v.realized_pnl / risk, 2) if risk else None))
+    out.sort(key=lambda t: t.closed_at)
     return out
 
 
@@ -197,18 +278,17 @@ class JournalStats(BaseModel):
 
 @router.get("/stats", response_model=JournalStats)
 def stats(session: Session = Depends(get_session)) -> JournalStats:
-    """Expectancy + R-multiple performance over CLOSED app-tracked trades (those with a recorded
-    risk_amount). Answers 'what's the edge, in R?' and 'how deep was the worst drawdown?' — the
-    numbers a desk reviews. Complements /calibration (which buckets the same trades by confidence)."""
-    conds = [Position.status == PositionStatus.CLOSED.value,
-             Position.realized_pnl.is_not(None), Position.risk_amount.is_not(None)]
-    reset = get_or_create_settings(session).journal_reset_at
-    if reset is not None:
-        conds.append(Position.closed_at >= reset)
-    rows = session.scalars(
-        select(Position).where(*conds).order_by(Position.closed_at.asc())
-    ).all()
-    rows = [r for r in rows if entry_risk(r)]  # need the entry risk for an R-multiple
+    """Expectancy + R-multiple performance over the journal's closed trades that carry a recorded risk: the ones
+    the app placed on this account (its own row holds the risk taken; a phone or terminal trade has none). The $
+    are the broker's, swap and commission in. Answers 'what's the edge, in R?' and 'how deep was the worst
+    drawdown?' — the numbers a desk reviews. Complements /calibration (which buckets the app's trades by
+    confidence). Until 2026-11-11 it read every app row: 227 of its 480 trades were the demo account's."""
+    from types import SimpleNamespace
+
+    rows = [SimpleNamespace(realized_pnl=v.realized_pnl, closed_at=_utc(v.closed_at), risk_amount=entry_risk(r))
+            for v, r in _journal_book(session)
+            if r is not None and v.realized_pnl is not None and entry_risk(r)]
+    rows.sort(key=lambda x: x.closed_at or datetime.min.replace(tzinfo=timezone.utc))   # oldest first: the R curve
     n = len(rows)
     if n == 0:
         return JournalStats(trades=0, wins=0, losses=0, win_rate=None, expectancy_r=None,
@@ -265,6 +345,8 @@ class PeriodBreakdown(BaseModel):
 class JournalBreakdown(BaseModel):
     by_source: list[GroupStat]       # all-time, per source (the headline comparison)
     by_pair: list[GroupStat]         # all-time, per pair
+    # The same per pair, for each source's trades alone - "By pair ... I want it also for the strategy" (2026-11-11).
+    by_pair_source: dict[str, list[GroupStat]] = {}
     daily: list[PeriodBreakdown]
     weekly: list[PeriodBreakdown]
     monthly: list[PeriodBreakdown]
@@ -310,12 +392,14 @@ def _periods(rows: list, key, limit: int) -> list[PeriodBreakdown]:
 @router.get("/breakdown", response_model=JournalBreakdown)
 def breakdown(session: Session = Depends(get_session)) -> JournalBreakdown:
     """Closed-trade performance broken down by SOURCE (who opened it) and PAIR, plus a daily/weekly/
-    monthly time split. App-tracked positions only (they carry source + risk_amount)."""
-    conds = [Position.status == PositionStatus.CLOSED.value, Position.realized_pnl.is_not(None)]
-    reset = get_or_create_settings(session).journal_reset_at
-    if reset is not None:
-        conds.append(Position.closed_at >= reset)
-    rows = [r for r in session.scalars(select(Position).where(*conds)).all() if r.closed_at is not None]
+    monthly time split - over the journal's trades (_journal_book): the broker's history, the phone's trades in,
+    each with the source MT5 recorded; R where the app's own row holds the risk taken. Until 2026-11-11 it read
+    the app's rows only: a demo account's trades in, the phone's out."""
+    from types import SimpleNamespace
+
+    rows = [SimpleNamespace(realized_pnl=v.realized_pnl, source=v.source, symbol=v.symbol, closed_at=_utc(v.closed_at),
+                            risk_amount=entry_risk(r) if r is not None else None)
+            for v, r in _journal_book(session) if v.realized_pnl is not None and v.closed_at is not None]
 
     def _iso_week(r) -> str:
         y, w, _ = r.closed_at.isocalendar()
@@ -324,6 +408,8 @@ def breakdown(session: Session = Depends(get_session)) -> JournalBreakdown:
     return JournalBreakdown(
         by_source=_group(rows, lambda r: r.source or "unknown"),
         by_pair=_group(rows, lambda r: r.symbol),
+        by_pair_source={src: _group([r for r in rows if (r.source or "unknown") == src], lambda r: r.symbol)
+                        for src in {r.source or "unknown" for r in rows}},
         daily=_periods(rows, lambda r: r.closed_at.strftime("%Y-%m-%d"), 60),
         weekly=_periods(rows, _iso_week, 26),
         monthly=_periods(rows, lambda r: r.closed_at.strftime("%Y-%m"), 24),
@@ -445,6 +531,7 @@ def clear_journal_reset(session: Session = Depends(get_session)) -> JournalReset
 class BackfillResult(BaseModel):
     sources_labelled: int   # legacy positions whose NULL source was set (no longer "Unknown")
     pnl_recovered: int      # closed positions whose realized P&L was recovered from broker history
+    pnl_corrected: int = 0  # closed positions whose stored P&L was not their own trade's - now the broker's
 
 
 @router.post("/backfill", response_model=BackfillResult)
@@ -457,10 +544,12 @@ def backfill(session: Session = Depends(get_session)) -> BackfillResult:
        trades — the app only ever rows a position it opened itself.
     2. P&L — closed rows that closed broker-side never booked a $ result, so the stats + by-source
        breakdown dropped them. We recover realized P&L + exit from the broker's own deal history.
+    3. P&L that is not the row's own (2026-11-11) — a row its own broker trade can be found for gets that trade's
+       result where it holds another: a neighbour's, from the old price-only match, or the app's estimate.
 
-    Idempotent: only fills rows that are still missing the data.
+    Idempotent: a second run changes nothing.
     """
-    from app.execution.monitor import fill_realized_pnl_from_broker
+    from app.execution.monitor import correct_realized_pnl_from_broker, fill_realized_pnl_from_broker
 
     # 1. Source: legacy NULL -> "analysis" (the recorded source of the analysis pipeline).
     legacy = session.scalars(select(Position).where(Position.source.is_(None))).all()
@@ -478,7 +567,11 @@ def backfill(session: Session = Depends(get_session)) -> BackfillResult:
     recovered = fill_realized_pnl_from_broker(session, closed_missing)
     if recovered:
         session.commit()
-    return BackfillResult(sources_labelled=len(legacy), pnl_recovered=recovered)
+    # 3. P&L that is someone else's: the row's own broker trade's result.
+    corrected = correct_realized_pnl_from_broker(session)
+    if corrected:
+        session.commit()
+    return BackfillResult(sources_labelled=len(legacy), pnl_recovered=recovered, pnl_corrected=corrected)
 
 
 @router.post("/reflect", response_model=ReflectionReport)
@@ -531,50 +624,43 @@ def daily_review(session: Session = Depends(get_session)) -> dict:
     """The day in one card: today's closed trades with their R, source and the trader's own reason
     and tags; today's totals and longest losing run; and avg R per tag over the whole journal (only
     once a tag has 10+ trades). The data to tell planned trades from impulsive ones was never
-    captured before (full review 2026-10-20)."""
-    from datetime import datetime, timezone
+    captured before (full review 2026-10-20).
 
-    from sqlalchemy import select
-
-    from app.models.db import Position, entry_risk
-    from app.models.enums import PositionStatus
-
+    The journal's trades (_journal_book) closed since 00:00 UTC - the broker's day, the one the header's DAY P&L
+    counts: every trade on this account, the phone's too, in the broker's $ (swap and commission in). The note and
+    tags are the app's own row's, R where that row holds the risk taken. Until 2026-11-11 it read the app's rows
+    only: no phone trade, the app's estimate of each P&L, and the demo account's trades in the per-tag averages."""
     now = datetime.now(timezone.utc)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    reset = get_or_create_settings(session).journal_reset_at
-    rows = session.scalars(select(Position).where(Position.status == PositionStatus.CLOSED.value,
-                                                  Position.realized_pnl.is_not(None))
-                           .order_by(Position.closed_at)).all()
+    book = [(v, row) for v, row in _journal_book(session) if v.realized_pnl is not None and v.closed_at is not None]
+    book.sort(key=lambda vr: _utc(vr[0].closed_at))                 # oldest first: the losing run
 
-    def aware(dt):
-        return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    def r_of(v, row):
+        risk = entry_risk(row) if row is not None else None
+        return round(v.realized_pnl / risk, 2) if risk else None
 
-    if reset is not None:
-        rows = [r for r in rows if aware(r.closed_at) and aware(r.closed_at) >= aware(reset)]
+    def review_of(row) -> dict:
+        return (row.review or {}) if row is not None else {}
 
-    def r_of(p):
-        risk = entry_risk(p)
-        return round(p.realized_pnl / risk, 2) if risk else None
-
-    today = [p for p in rows if aware(p.closed_at) and aware(p.closed_at) >= day_start]
+    today = [(v, row) for v, row in book if _utc(v.closed_at) >= day_start]
     streak = longest = 0
-    for p in today:
-        streak = streak + 1 if (p.realized_pnl or 0) < 0 else 0
+    for v, _row in today:
+        streak = streak + 1 if (v.realized_pnl or 0) < 0 else 0
         longest = max(longest, streak)
     tags: dict[str, list[float]] = {}
-    for p in rows:
-        for t in ((p.review or {}).get("tags") or []):
-            r = r_of(p)
+    for v, row in book:
+        for t in (review_of(row).get("tags") or []):
+            r = r_of(v, row)
             if r is not None:
                 tags.setdefault(t, []).append(r)
     return {
         "date": day_start.date().isoformat(),
-        "trades": [{"symbol": p.symbol, "direction": p.direction, "source": p.source,
-                    "pnl": round(p.realized_pnl or 0.0, 2), "r": r_of(p),
-                    "note": (p.review or {}).get("note"), "tags": (p.review or {}).get("tags") or [],
-                    "closed_at": aware(p.closed_at).isoformat()} for p in today],
-        "net_pnl": round(sum(p.realized_pnl or 0.0 for p in today), 2),
-        "total_r": round(sum(r for p in today if (r := r_of(p)) is not None), 2),
+        "trades": [{"symbol": v.symbol, "direction": v.direction, "source": v.source,
+                    "pnl": round(v.realized_pnl or 0.0, 2), "r": r_of(v, row),
+                    "note": review_of(row).get("note"), "tags": review_of(row).get("tags") or [],
+                    "closed_at": _utc(v.closed_at).isoformat()} for v, row in today],
+        "net_pnl": round(sum(v.realized_pnl or 0.0 for v, _row in today), 2),
+        "total_r": round(sum(r for v, row in today if (r := r_of(v, row)) is not None), 2),
         "longest_losing_run": longest,
         "by_tag": [{"tag": t, "trades": len(v), "avg_r": round(sum(v) / len(v), 2)}
                    for t, v in sorted(tags.items()) if len(v) >= 10],

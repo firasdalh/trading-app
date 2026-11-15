@@ -198,6 +198,9 @@ _CLOSED_MEMORY_S = 1800.0   # how long a 'market closed' refusal marks the symbo
 _CLOSED_REFUSALS: dict[str, float] = {}   # symbol -> when the broker last said 'market closed'
 
 
+_NO_MONEY = 10019   # TRADE_RETCODE_NO_MONEY: the account can't carry the margin
+
+
 def _retcode_error(result, fallback: str) -> str:
     """Readable error for a non-DONE order_send result: prefer the mapped retcode meaning, then
     the broker comment, else the fallback with the raw code."""
@@ -776,6 +779,15 @@ class Mt5BrokerAdapter(BrokerAdapter):
             if request.take_profit is not None:
                 req["tp"] = float(request.take_profit)
 
+            # The terminal's own funds check first (2026-11-11). With the margin used up by other trades, the
+            # strategy sent 86 DE30m buys to the LIVE server in 3.5 h (2026-11-10 04:13-07:48 UTC), one a bar,
+            # each refused 10019 "no money". One it can't carry is refused here and never sent.
+            short = self._margin_short(req, lots)
+            if short:
+                log.warning("order blocked: not enough free margin", extra={"symbol": sym, "reason": short})
+                return OrderResult(status=OrderStatus.REJECTED, error=short,
+                                   raw={"retcode": _NO_MONEY, "comment": "refused before sending (order_check)"})
+
             log.info("submitting MT5 order", extra={"symbol": sym, "side": request.side.value,
                                                     "lots": lots, "paper": self._paper})
             result = mt5.order_send(req)
@@ -801,6 +813,37 @@ class Mt5BrokerAdapter(BrokerAdapter):
         except Exception as exc:
             log.exception("MT5 submit_order error")
             return OrderResult(status=OrderStatus.ERROR, error=str(exc))
+
+    def _margin_short(self, req: dict, lots: float) -> str | None:
+        """Why the account can't carry ``req`` - "not enough free margin: 1.41 lots need $412.30, $96.12 is
+        free" - when the terminal's own pre-trade check (``order_check``, the one the server makes) answers
+        no money (10019). None when it can, and whenever the check itself can't be made: the order then goes
+        out and the server decides, as before."""
+        mt5 = self._mt5
+        check = getattr(mt5, "order_check", None)
+        if check is None:
+            return None
+        try:
+            res = check(req)
+        except Exception:  # noqa: BLE001 - a failed check is not a refusal
+            return None
+        if res is None or getattr(res, "retcode", None) != _NO_MONEY:
+            return None
+        try:
+            need = float(getattr(res, "margin", 0) or 0)
+        except (TypeError, ValueError):
+            need = 0.0
+        try:
+            acct = mt5.account_info()
+            free = float(getattr(acct, "margin_free", 0) or 0) if acct is not None else None
+        except Exception:  # noqa: BLE001
+            free = None
+        text = "not enough free margin"
+        if need > 0:
+            text += f": {lots:g} lots need ${need:,.2f}"
+            if free is not None:
+                text += f", ${free:,.2f} is free"
+        return text + " - lower the risk, or wait for a trade to close"
 
     def get_open_positions(self) -> list[PositionView]:
         mt5 = self._mt5

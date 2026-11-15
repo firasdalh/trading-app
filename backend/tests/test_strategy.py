@@ -1311,6 +1311,60 @@ def test_the_catalog_says_which_sessions_it_knows():
     from app.api.strategy_routes import strategy_catalog
 
     assert strategy_catalog()["sessions"] == ["asia", "middle_east", "london", "new_york", "between"]
+    assert strategy_catalog()["hour_picks"] is True
+
+
+# ----------------------------------------------------------------- trading hours picked one by one
+
+def _picks(*hs, tz="Asia/Dubai", **more):
+    return {"hours_utc": list(hs), "tz": tz, **more}
+
+
+def test_hour_picks_open_only_in_the_hours_picked():
+    """Asked 2026-11-11: "turn on / off the hours which made bad trades for our strategy"."""
+    picks = _picks(8, 9, 10, 11, 12, 16, 17)
+    assert [h for h in range(24) if st.hours_now(picks, _at(h, 30))["open"]] == [8, 9, 10, 11, 12, 16, 17]
+    mid = st.hours_now(picks, _at(9, 15))                              # 13:15 in Dubai
+    assert mid["open"] is True and (mid["start"], mid["end"]) == ("12:00", "17:00")
+    assert mid["next_s"] == 3 * 3600 + 45 * 60 and mid["hours_utc"] == [8, 9, 10, 11, 12, 16, 17]
+    gap = st.hours_now(picks, _at(13, 0, 30))                          # 13-16 UTC switched off
+    assert gap["open"] is False and (gap["start"], gap["end"]) == ("20:00", "22:00") and gap["next_s"] == 3 * 3600 - 30
+    assert st.hours_now(_picks(*range(24)), _at(3)) is None             # every hour
+
+
+def test_outside_its_picked_hours_it_opens_nothing_and_says_until_when(db_session, engine):
+    calls, _ = engine
+    cfg = _strategy(db_session, hours=_picks(16, 17))                   # NOW is 12:00:30 UTC
+    out = st.run_strategy(db_session, cfg, now=NOW)
+    assert calls["assess"] == [] and out[0]["note"] == "outside its hours - no new trades until 20:00"
+    cfg.hours = _picks(12)
+    db_session.commit()
+    out = st.run_strategy(db_session, cfg, now=NOW)
+    assert out[0].get("opened") == "long" and len(calls["assess"]) == 1
+
+
+def test_crypto_24h_lets_crypto_off_the_picked_hours_too(db_session, engine):
+    calls, _ = engine
+    pairs = [{"symbol": "BTCUSDm", "asset_class": "crypto"}, {"symbol": "XAUUSDm", "asset_class": "metal"}]
+    cfg = _strategy(db_session, pairs=pairs, hours=_picks(3, crypto_24h=True))
+    out = {r["symbol"]: r for r in st.run_strategy(db_session, cfg, now=NOW)}
+    assert out["BTCUSDm"].get("opened") == "long"
+    assert out["XAUUSDm"]["note"] == "outside its hours - no new trades until 07:00"
+
+
+def test_the_board_saves_hour_picks(db_session):
+    from app.api.strategy_routes import StrategyIn, create_strategy
+
+    for bad in ({"hours_utc": [24]}, {"hours_utc": [-1]}, {"hours_utc": []}):
+        with pytest.raises(ValidationError):
+            StrategyIn(hours=bad)
+    # Kept sorted, once each; the hours win over sessions or a window sent along.
+    view = create_strategy(StrategyIn(hours={"hours_utc": [17, 8, 8, 12], "sessions": ["london"], "start": "09:00",
+                                             "end": "12:00", "tz": "Asia/Dubai", "crypto_24h": True}),
+                           session=db_session)
+    assert view.hours == {"hours_utc": [8, 12, 17], "tz": "Asia/Dubai", "crypto_24h": True}
+    assert view.hours_now["hours_utc"] == [8, 12, 17] and isinstance(view.hours_now["open"], bool)
+    assert st.off_hours_note({**st.hours_now({"hours_utc": [99]}, NOW)}) == "no trading hour picked - no new trades"
 
 
 # ----------------------------------------------------------------- the daily target
@@ -1900,3 +1954,125 @@ def test_a_crypto_pair_watches_around_the_clock_too(db_session, engine):
     _look(db_session, cfg, holder, FALLING, NOW)
     _look(db_session, cfg, holder, RISING, NOW + timedelta(seconds=30))
     assert [x.symbol for x in _signals(db_session)] == ["BTCUSDm"] and calls["exec"] == []
+
+
+# ----------------------------------------------------------------- non-fills and the loss pause (2026-11-11)
+
+def _not_filled(error):
+    from app.models.enums import OrderStatus
+    from app.models.schemas import OrderResult
+
+    def fake(session, record):
+        return OrderResult(status=OrderStatus.REJECTED, error=error)
+    return fake
+
+
+class _Clock(_Broker):
+    """Candles that close with the clock: the engine tries once per closed bar and calls old bars stale."""
+    def __init__(self, closes, at):
+        super().__init__(closes)
+        self.at = at
+
+    def get_ohlcv(self, symbol, timeframe="1m", limit=200):
+        return OHLCVSeries(symbol=symbol, timeframe=timeframe, candles=_candles(self.closes, timeframe, end=self.at))
+
+
+def _run_at(session, cfg, holder, t):
+    holder["broker"].at = t
+    return st.run_strategy(session, cfg, now=t)
+
+
+def test_a_margin_refusal_is_logged_with_its_reason_and_the_pair_waits(db_session, engine, monkeypatch):
+    """2026-11-10: 86 DE30m orders refused 'no money', one every bar for 3.5 h, logged as 'expired'."""
+    from app.models.db import AgentRun
+
+    calls, holder = engine
+    holder["broker"] = _Clock(RISING, NOW)
+    monkeypatch.setattr("app.execution.executor.execute_proposal", _not_filled("not enough money"))
+    cfg = _strategy(db_session)
+    out = _run_at(db_session, cfg, holder, NOW)
+    assert out[0]["not_filled"] == "not enough money"
+    row = db_session.scalars(select(AgentRun).where(AgentRun.event == "not_filled")).one()
+    assert row.detail["reason"] == "not enough money"
+    rec = db_session.query(TradeProposalRecord).one()
+    assert rec.status == ProposalStatus.EXPIRED.value and rec.risk_reason == "not filled: not enough money"
+    # the next bars: no new order until the margin wait is over
+    for m in (1, 5, 14):
+        out = _run_at(db_session, cfg, holder, NOW + timedelta(minutes=m))
+        assert "not filled (not enough money) - tries again in" in out[0]["note"]
+    assert len(calls["assess"]) == 1
+    _run_at(db_session, cfg, holder, NOW + timedelta(minutes=st.NOT_FILLED_MARGIN_WAIT_MIN, seconds=30))
+    assert len(calls["assess"]) == 2
+
+
+def test_any_other_non_fill_waits_a_little(db_session, engine, monkeypatch):
+    calls, holder = engine
+    holder["broker"] = _Clock(RISING, NOW)
+    monkeypatch.setattr("app.execution.executor.execute_proposal", _not_filled("requote"))
+    cfg = _strategy(db_session)
+    _run_at(db_session, cfg, holder, NOW)
+    out = _run_at(db_session, cfg, holder, NOW + timedelta(minutes=1))
+    assert "tries again in 1 min" in out[0]["note"] and len(calls["assess"]) == 1
+    _run_at(db_session, cfg, holder, NOW + timedelta(minutes=st.NOT_FILLED_WAIT_MIN, seconds=30))
+    assert len(calls["assess"]) == 2
+
+
+def test_a_side_that_just_lost_waits_out_the_loss_pause_before_its_rules_are_read(db_session, engine):
+    """The Risk Manager refused these on every bar (~40 'loss cooldown' rows since 2026-11-10)."""
+    calls, holder = engine
+    holder["broker"] = _Clock(RISING, NOW)
+    cfg = _strategy(db_session, sides="long", loss_cooldown_minutes=30)
+    db_session.add(Position(symbol="BTCUSDm", asset_class="crypto", direction="long", qty=0.1, entry_price=110,
+                            last_price=100, realized_pnl=-57.53, status=PositionStatus.CLOSED.value,
+                            source=f"strategy:{cfg.id}", opened_at=NOW - timedelta(minutes=12),
+                            closed_at=NOW - timedelta(minutes=10)))
+    db_session.commit()
+    out = _run_at(db_session, cfg, holder, NOW)
+    assert calls["assess"] == []
+    assert out[0]["note"] == "buys paused after a losing long - 20 min left"
+    _run_at(db_session, cfg, holder, NOW + timedelta(minutes=20, seconds=30))
+    assert len(calls["assess"]) == 1
+
+
+def test_a_won_trade_sets_no_loss_pause(db_session, engine):
+    calls, _ = engine
+    cfg = _strategy(db_session, sides="long", loss_cooldown_minutes=30)
+    db_session.add(Position(symbol="BTCUSDm", asset_class="crypto", direction="long", qty=0.1, entry_price=100,
+                            last_price=110, realized_pnl=12.0, status=PositionStatus.CLOSED.value,
+                            source=f"strategy:{cfg.id}", opened_at=NOW - timedelta(minutes=12),
+                            closed_at=NOW - timedelta(minutes=10)))
+    db_session.commit()
+    st.run_strategy(db_session, cfg, now=NOW)
+    assert len(calls["assess"]) == 1
+
+
+def test_the_feed_reads_only_what_it_shows_and_one_strategys_own(db_session):
+    """The desk's feeds read the last 1000 events on every call (2026-11-11); now the database hands back the rows
+    asked for, one strategy's picked out in SQL."""
+    from app.api.strategy_routes import _feed
+    from app.models.db import AgentRun
+
+    a = _strategy(db_session, name="a")
+    b = _strategy(db_session, name="b")
+    for i in range(30):
+        db_session.add(AgentRun(agent="strategy", symbol="BTCUSDm", event="refused",
+                                detail={"strategy_id": a.id if i % 3 else b.id, "name": "x", "reason": f"r{i}"}))
+    db_session.add(AgentRun(agent="monitor", symbol="BTCUSDm", event="position_closed", detail={"strategy_id": a.id}))
+    db_session.commit()
+    every = _feed(db_session, None, 5)
+    assert [e["detail"]["reason"] for e in every] == ["r29", "r28", "r27", "r26", "r25"]
+    only_b = _feed(db_session, b.id, 50)
+    assert len(only_b) == 10 and all(e["detail"]["strategy_id"] == b.id for e in only_b)
+    assert [e["detail"]["reason"] for e in only_b][:2] == ["r27", "r24"]
+
+
+def test_the_engine_writes_the_entrys_fingerprint_into_its_opened_log(db_session, engine):
+    """learning.py studies each trade by what the market looked like at its entry: the engine writes it as it opens."""
+    from app.models.db import AgentRun
+
+    cfg = _strategy(db_session)
+    assert st.run_strategy(db_session, cfg, now=NOW)[0].get("opened") == "long"
+    run = db_session.scalars(select(AgentRun).where(AgentRun.event == "opened")).one()
+    fp = run.detail["fp"]
+    assert fp["v"] == 1 and fp["streak"] >= 1 and fp["hour"] == NOW.hour and fp["session"] == "london"
+    assert fp["spread_pct"] is not None and fp["ext20"] > 0

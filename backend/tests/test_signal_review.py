@@ -104,6 +104,13 @@ def test_trading_sessions_read_in_the_change_list():
         "trading hours: 05:00-23:31 Asia/Dubai → sessions: London + Between sessions, crypto 24/7"]
 
 
+def test_hour_picks_read_in_the_change_list():
+    sessions = {"sessions": ["london", "between"], "tz": "Asia/Dubai"}
+    hours = {"hours_utc": [8, 9, 10, 11, 12, 16, 23], "tz": "Asia/Dubai"}
+    assert sr.describe_changes(snap(hours=sessions), snap(hours=hours)) == [
+        "trading hours: sessions: London + Between sessions → hours 08:00-13:00, 16:00-17:00, 23:00-00:00 UTC"]
+
+
 def test_a_new_group_is_one_line():
     after = snap(entry_long=snap()["entry_long"] + [[{"type": "spread", "tf": "1m", "params": {"max_pct": 20}}]])
     assert sr.describe_changes(snap(), after) == ["BUY group 2 added (1 conditions)"]

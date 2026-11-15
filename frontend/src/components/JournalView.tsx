@@ -1,10 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api/client";
 import { fmtPrice, fmtUsd } from "../format";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
-import type { CalibrationBucket, GroupStat, JournalBreakdown, JournalStats, PeriodBreakdown, ReflectionReport } from "../types";
+import type { CalibrationBucket, GroupStat, JournalBreakdown, PeriodBreakdown, ReflectionReport } from "../types";
 import { ResultTag, SessionStatsCard, SessionTag } from "./SessionStats";
 import { SignalReviewCard } from "./SignalReview";
+import { FoldButton, FoldProvider, useFold, type Fold } from "./JournalFold";
+import { PerformanceCard } from "./PerformanceCharts";
 import { srcLabel, srcColor } from "./sourceMeta";
 
 // Midpoint of a "70-80%" bucket label, used to judge whether the realized win rate matches the
@@ -37,9 +40,33 @@ function sinceText(iso: string): string {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
+// The Journal's sections, in page order. Each folds to its title line (▾ by the title) and can be hidden from the
+// page (the "Sections" strip) - asked 2026-11-11: "the option to hide or collapse some area". Kept in this browser.
+const SECTIONS = [
+  { id: "today", name: "Today's review" },
+  { id: "reflection", name: "Reflection" },
+  { id: "performance", name: "Performance" },
+  { id: "sessions", name: "Sessions" },
+  { id: "signals", name: "Signal review" },
+  { id: "breakdown", name: "Breakdown" },
+  { id: "calibration", name: "Score vs result" },
+  { id: "trades", name: "Closed trades" },
+] as const;
+type SectionId = (typeof SECTIONS)[number]["id"];
+
 // Journal: closed-trade log + the read-only Reflection agent's patterns and lessons.
 export function JournalView() {
   const [bump, setBump] = useState(0);
+  // The sections hidden from the page, and those folded to their title line. The reflection report is long: it
+  // starts folded, as it always did.
+  const [hidden, setHidden] = useLocalStorage<string[]>("ta.journal.hidden", []);
+  const [folded, setFolded] = useLocalStorage<string[]>("ta.journal.folded", ["reflection"]);
+  const foldOf = (id: SectionId): Fold => ({
+    folded: folded.includes(id),
+    toggle: () => setFolded((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id])),
+  });
+  const section = (id: SectionId, node: ReactNode) =>
+    hidden.includes(id) ? null : <FoldProvider value={foldOf(id)}>{node}</FoldProvider>;
   const { data: trades } = usePolling(() => api.journalTrades(100), 8000, [bump]);
   // The backend tags each row with the session it opened in (2026-11-10). An older one sends no `session` at all:
   // then the column stays away rather than reading "—" all the way down.
@@ -90,7 +117,10 @@ export function JournalView() {
       setBump((b) => b + 1);
       setError(
         `Repaired: labelled ${r.sources_labelled} legacy source${r.sources_labelled === 1 ? "" : "s"}, ` +
-          `recovered P&L for ${r.pnl_recovered} closed trade${r.pnl_recovered === 1 ? "" : "s"}.`,
+          `recovered P&L for ${r.pnl_recovered} closed trade${r.pnl_recovered === 1 ? "" : "s"}.` +
+          (r.pnl_corrected
+            ? ` Corrected ${r.pnl_corrected} trade${r.pnl_corrected === 1 ? "" : "s"} whose stored result was not its own - now the broker's figure.`
+            : ""),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -98,7 +128,10 @@ export function JournalView() {
       setBusy(false);
     }
   };
-  const [open, setOpen] = useState(false);  // the report is long — collapsed by default
+  // The reflection report's fold is its section's (folded by default: the report is long).
+  const open = !folded.includes("reflection");
+  const setOpen = (v: boolean) =>
+    setFolded((f) => (v ? f.filter((x) => x !== "reflection") : f.includes("reflection") ? f : [...f, "reflection"]));
 
   useEffect(() => {
     api.reflectionLatest().then(setReflection).catch(() => {});
@@ -121,11 +154,49 @@ export function JournalView() {
     // Full width with the desk's own gutter (p-3 / gap-3): a centred max-w-7xl column made the
     // Journal look like a different app from the edge-to-edge desk you switch from.
     <div className="space-y-3 p-3">
-      <DailyReview />
+      {/* Which sections show, and folding them all at once (2026-11-11: "the option to hide or collapse some area"). */}
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        <span
+          className="cursor-help text-neutral-500"
+          title="Click a section to hide it from this page, and again to bring it back. ▾ by a section's title folds it to that one line. Kept in this browser."
+        >
+          Sections
+        </span>
+        {SECTIONS.map((s) => {
+          const on = !hidden.includes(s.id);
+          return (
+            <button
+              key={s.id}
+              type="button"
+              aria-pressed={on}
+              onClick={() => setHidden((h) => (on ? [...h, s.id] : h.filter((x) => x !== s.id)))}
+              className={`rounded-full border px-2 py-0.5 transition ${
+                on
+                  ? "border-neutral-600 bg-neutral-800/60 text-neutral-200 hover:border-neutral-400"
+                  : "border-dashed border-neutral-700 text-neutral-500 line-through hover:text-neutral-300"
+              }`}
+              title={on ? `Hide ${s.name} from this page` : `Show ${s.name} again`}
+            >
+              {s.name}
+            </button>
+          );
+        })}
+        <span className="ml-auto flex items-center gap-3 text-neutral-500">
+          <button type="button" onClick={() => setFolded(SECTIONS.map((s) => s.id))} className="hover:text-neutral-200" title="Fold every section to its title line">
+            ▸ Fold all
+          </button>
+          <button type="button" onClick={() => setFolded([])} className="hover:text-neutral-200" title="Open every section">
+            ▾ Open all
+          </button>
+        </span>
+      </div>
+
+      {section("today", <DailyReview />)}
+      {section("reflection", (
       <div className="card space-y-3">
         <div className="flex items-center justify-between gap-2">
           <button
-            onClick={() => setOpen((v) => !v)}
+            onClick={() => setOpen(!open)}
             className="flex items-center gap-2 text-left text-sm font-semibold hover:text-white"
             title={open ? "Collapse the report" : "Expand the report"}
           >
@@ -205,28 +276,34 @@ export function JournalView() {
           </>
         )}
       </div>
+      ))}
 
-      <PerformanceCard perf={perf} />
+      {/* Drawn (2026-11-11, "enhance the performance visualization"): the equity curve, P&L by day, each trade's result. */}
+      {section("performance", <PerformanceCard perf={perf} bump={bump} />)}
 
       {/* Which session pays: the closed trades by the session each one opened in (2026-11-10). */}
-      <SessionStatsCard />
+      {section("sessions", <SessionStatsCard />)}
 
       {/* What each watch signal would have done if traded, split at each change to the strategy (2026-11-08). */}
-      <SignalReviewCard />
+      {section("signals", <SignalReviewCard />)}
 
-      <BreakdownCard breakdown={breakdown} />
+      {section("breakdown", <BreakdownCard breakdown={breakdown} />)}
 
-      <CalibrationCard calib={calib} />
+      {section("calibration", <CalibrationCard calib={calib} />)}
 
+      {section("trades", (
       <div className="card">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="text-sm font-semibold">Closed trades ({trades?.length ?? 0})</span>
+          <span className="flex items-center gap-1 text-sm font-semibold">
+            <FoldButton name="Closed trades" />
+            Closed trades ({trades?.length ?? 0})
+          </span>
           <div className="flex items-center gap-3">
             <button
               onClick={repairJournal}
               disabled={busy}
               className="text-xs text-neutral-500 hover:text-brand-400"
-              title="Repair app-tracked rows: label legacy 'Unknown' trades and recover missing P&L from broker history (for the by-source stats). Non-destructive."
+              title="Repair app-tracked rows: label legacy 'Unknown' trades, recover missing P&L from broker history, and give every row its own trade's result as the broker booked it (what the strategy's daily target, the loss cooldown and the scorecard read). Your broker's history is never touched."
             >
               Repair ⟳
             </button>
@@ -248,7 +325,7 @@ export function JournalView() {
             </button>
           </div>
         </div>
-        {!trades || trades.length === 0 ? (
+        {folded.includes("trades") ? null : !trades || trades.length === 0 ? (
           <div className="text-sm text-neutral-500">No closed trades yet.</div>
         ) : (
           <div className="max-h-[28rem] overflow-auto">
@@ -283,6 +360,7 @@ export function JournalView() {
           </div>
         )}
       </div>
+      ))}
     </div>
   );
 }
@@ -330,13 +408,36 @@ function StatTable({ rows, firstCol, nameFn, nameCls }: {
 }
 
 function BreakdownCard({ breakdown }: { breakdown: JournalBreakdown | null }) {
+  const fold = useFold();
   const [period, setPeriod] = useState<"daily" | "weekly" | "monthly">("daily");
+  // Whose trades By pair shows - "By pair (all-time) - I want it also for the strategy" (2026-11-11). Kept per browser.
+  const [pairWho, setPairWho] = useLocalStorage<string>("ta.journal.pairWho", "all");
   if (!breakdown || breakdown.by_source.length === 0) return null;
   const buckets: PeriodBreakdown[] = breakdown[period];
+  // Its choices: every source, the most trades first. An older backend sends no per-source split: no choices.
+  const bySrc = breakdown.by_pair_source;
+  const choices: [string, number][] = [
+    ["all", breakdown.by_source.reduce((n, g) => n + g.trades, 0)],
+    ...[...breakdown.by_source].sort((a, b) => b.trades - a.trades).map((g): [string, number] => [g.label, g.trades]),
+  ];
+  const who = bySrc && pairWho !== "all" && bySrc[pairWho] ? pairWho : "all";
+  const pairRows = who === "all" || !bySrc ? breakdown.by_pair : bySrc[who];
   return (
     <div className="card space-y-4">
-      <div className="text-sm font-semibold">Breakdown — who's making money</div>
+      <div>
+        <div className="flex items-center gap-1 text-sm font-semibold">
+          <FoldButton name="Breakdown" />
+          Breakdown — who's making money
+        </div>
+        {!fold?.folded && (
+          <p className="text-xs text-neutral-500">
+            Your broker's history: every trade on this account, your phone's included - never the demo account's. Who
+            opened each one is MT5's own record of it; R only where the app recorded the risk taken.
+          </p>
+        )}
+      </div>
 
+      {!fold?.folded && (<>
       <div>
         <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">By source (all-time)</div>
         <StatTable firstCol="Source" rows={breakdown.by_source} nameFn={srcLabel} nameCls={srcColor} />
@@ -384,41 +485,30 @@ function BreakdownCard({ breakdown }: { breakdown: JournalBreakdown | null }) {
       </div>
 
       <div>
-        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">By pair (all-time)</div>
+        <div className="mb-1 flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">By pair (all-time)</span>
+          {bySrc && (
+            <div className="ml-auto flex flex-wrap gap-1" role="group" aria-label="Whose trades, by pair">
+              {choices.map(([k, n]) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setPairWho(k)}
+                  className={`rounded px-2 py-0.5 text-xs ${who === k ? "bg-neutral-700 text-white" : "bg-neutral-900 text-neutral-400 hover:text-neutral-200"}`}
+                  title={k === "all" ? "Every closed trade, by pair" : `Only the trades opened by ${srcLabel(k)}, by pair`}
+                >
+                  <span className={k === "all" || who === k ? "" : srcColor(k)}>{k === "all" ? "All" : srcLabel(k)}</span>{" "}
+                  <span className="tabular-nums text-neutral-500">{n}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <div className="max-h-[20rem] overflow-auto pr-1">
-          <StatTable firstCol="Pair" rows={breakdown.by_pair} />
+          <StatTable firstCol="Pair" rows={pairRows} />
         </div>
       </div>
-    </div>
-  );
-}
-
-// Performance in R: expectancy (the edge), win rate, profit factor, and the worst R-drawdown —
-// the numbers a desk reviews. R = realized P&L / risk taken, so it's instrument-agnostic.
-function PerformanceCard({ perf }: { perf: JournalStats | null }) {
-  if (!perf || perf.trades === 0) return null;
-  const exp = perf.expectancy_r;
-  return (
-    <div className="card">
-      <div className="mb-1 text-sm font-semibold">Performance (R)</div>
-      <p className="mb-2 text-xs text-neutral-500">
-        R = profit ÷ risk taken. Expectancy is your edge per trade; positive means the system makes
-        money over time. Over {perf.trades} closed trade{perf.trades === 1 ? "" : "s"} with recorded risk.
-      </p>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-        <Tile label="Expectancy"
-              value={exp == null ? "—" : `${exp >= 0 ? "+" : ""}${exp.toFixed(2)}R`}
-              valueClass={(exp ?? 0) >= 0 ? "text-bull" : "text-bear"} />
-        <Tile label="Win rate" value={perf.win_rate == null ? "—" : `${(perf.win_rate * 100).toFixed(0)}%`} />
-        <Tile label="Avg win" value={perf.avg_win_r == null ? "—" : `+${perf.avg_win_r.toFixed(2)}R`}
-              valueClass="text-bull" />
-        <Tile label="Avg loss" value={perf.avg_loss_r == null ? "—" : `${perf.avg_loss_r.toFixed(2)}R`}
-              valueClass="text-bear" />
-        <Tile label="Profit factor" value={perf.profit_factor == null ? "—" : perf.profit_factor.toFixed(2)} />
-        <Tile label="Max drawdown"
-              value={perf.max_drawdown_r == null ? "—" : `-${perf.max_drawdown_r.toFixed(2)}R`}
-              valueClass="text-bear" />
-      </div>
+      </>)}
     </div>
   );
 }
@@ -427,15 +517,20 @@ function PerformanceCard({ perf }: { perf: JournalStats | null }) {
 // Green = the bucket wins at least as often as its midpoint implies (calibrated/underconfident);
 // red = it wins much less often (overconfident — the score is inflating those setups).
 function CalibrationCard({ calib }: { calib: CalibrationBucket[] | null }) {
+  const fold = useFold();
   const withTrades = (calib ?? []).filter((b) => b.trades > 0);
   const total = withTrades.reduce((n, b) => n + b.trades, 0);
   return (
     <div className="card">
-      <div className="mb-1 text-sm font-semibold">Score bucket vs result</div>
+      <div className="mb-1 flex items-center gap-1 text-sm font-semibold">
+        <FoldButton name="Score vs result" />
+        Score bucket vs result
+      </div>
+      {!fold?.folded && (<>
       <p className="mb-2 text-xs text-neutral-500">
         Do higher-scored setups actually make more? Judge by Avg R, not win rate: the score is a
         checklist, not a win probability, and with ~3R targets a sound engine wins only 35–45%.
-        Manual trades carry no score and are left out. Needs ≈20+ trades per bucket.
+        Manual and strategy trades carry no score and are left out. Needs ≈20+ trades per bucket.
       </p>
       {total === 0 ? (
         <div className="text-sm text-neutral-500">
@@ -473,6 +568,7 @@ function CalibrationCard({ calib }: { calib: CalibrationBucket[] | null }) {
           </tbody>
         </table>
       )}
+      </>)}
     </div>
   );
 }
@@ -497,12 +593,18 @@ function DailyReview() {
   useEffect(() => {
     void api.journalReview().then(setData).catch(() => setData(null));
   }, []);
+  const fold = useFold();
   if (!data) return null;
   const r = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`);
   return (
     <div className="card">
       <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
-        <span className="text-sm font-semibold">Today&apos;s review · {data.date}</span>
+        <span className="flex items-center gap-1 text-sm font-semibold">
+          <FoldButton name="Today's review" />
+          <span title="The broker's day - from 00:00 UTC, as the header's DAY P&L: every trade closed on the account, your phone's too, in the broker's $">
+            Today&apos;s review · {data.date}
+          </span>
+        </span>
         <span className="text-xs text-neutral-400">
           {data.trades.length} closed · <span className={data.net_pnl >= 0 ? "text-bull" : "text-bear"}>
             {data.net_pnl >= 0 ? "+" : "-"}${Math.abs(data.net_pnl).toFixed(2)}</span> · {r(data.total_r)}
@@ -511,6 +613,7 @@ function DailyReview() {
           )}
         </span>
       </div>
+      {!fold?.folded && (<>
       {data.trades.length === 0 ? (
         <div className="text-xs text-neutral-500">No trades closed today.</div>
       ) : (
@@ -518,7 +621,7 @@ function DailyReview() {
           {data.trades.map((t, i) => (
             <li key={i} className="flex flex-wrap gap-x-2 text-neutral-300">
               <span className="font-medium">{t.symbol}</span>
-              <span className="text-neutral-500">{t.direction} · {t.source ?? "terminal"}</span>
+              <span className="text-neutral-500">{t.direction} · <span className={srcColor(t.source ?? "manual")}>{srcLabel(t.source ?? "manual")}</span></span>
               <span className={(t.r ?? t.pnl) >= 0 ? "text-bull" : "text-bear"}>{r(t.r)}</span>
               {t.tags.length > 0 && <span className="text-neutral-500">[{t.tags.join(", ")}]</span>}
               {t.note && <span className="italic text-neutral-500">“{t.note}”</span>}
@@ -534,6 +637,7 @@ function DailyReview() {
             kind of trade actually pays.{data.tags_below_10.length > 0 && ` Collecting: ${data.tags_below_10.join(", ")}.`}</>
         )}
       </div>
+      </>)}
     </div>
   );
 }

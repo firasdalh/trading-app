@@ -674,6 +674,34 @@ class AgentRun(Base):
     detail: Mapped[dict | None] = mapped_column(JSON)
 
 
+class StrategyTradeFact(Base):
+    """One closed trade of a strategy as its self-study keeps it (app/agents/learning.py, asked 2026-11-12: "make
+    the strategy learn from itself"): the broker's result ($, and R where the app's row holds the risk taken), what
+    the market looked like at the entry (``fp``: from the engine's 'opened' log, or MT5's 1m history for older
+    trades - ``fp_from``), and what other targets / stop sizes would have made (``whatif``: {"t0.9|s1": R}).
+    ``key`` = strategy | symbol | side | open time: each trade once."""
+
+    __tablename__ = "strategy_trade_facts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    strategy_id: Mapped[int] = mapped_column(Integer, index=True)
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(8))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pnl: Mapped[float | None] = mapped_column(Float)
+    r: Mapped[float | None] = mapped_column(Float)
+    entry: Mapped[float | None] = mapped_column(Float)          # the broker's fill
+    risk_dist: Mapped[float | None] = mapped_column(Float)      # one R in price: |entry - stop| as the engine logged
+    fp: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    fp_from: Mapped[str | None] = mapped_column(String(8))      # entry | history
+    fp_tries: Mapped[int | None] = mapped_column(Integer)
+    whatif: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    whatif_tries: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ShadowDecision(Base):
     """SHADOW SCORECARD: one row per AI decision, capturing BOTH the AI's call and the deterministic
     engine's call on the SAME setup + entry price, so a grader can later replay the following candles

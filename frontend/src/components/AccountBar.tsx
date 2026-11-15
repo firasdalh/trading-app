@@ -31,14 +31,29 @@ function Stat({ label, value, valueClass = "", title, extra }: {
  * It used to be a card under the header, which made it a third horizontal band before the chart and
  * scrolled away with the page. In the header it is visible on every view, including Journal.
  */
+// 00:00 UTC - when the broker's day, and this cell's, starts - on this clock ("04:00" in Dubai).
+const utcMidnightHere = () => {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+    .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+};
+
 export function AccountKpis({ account, risk, settings, positions }: Props) {
   const equity = account?.equity ?? null;
-  const realized = account?.daily_realized_pnl ?? risk?.realized_pnl ?? 0;
+  // Closed today: the risk state's figure first - the broker's own deal history since 00:00 UTC, every trade on the
+  // account (the phone's too), swap and commission in. The MT5 account snapshot's daily_realized_pnl is always 0.0
+  // (the adapter never fills it), and taking it first made this cell show open P&L only: "+$0.00" after a +$54 day
+  // (2026-11-09; the user, 2026-11-11: "why is it always zero? I don't know how much I'm making per day").
+  const realized = risk?.realized_pnl ?? account?.daily_realized_pnl ?? 0;
   const floating = positions && positions.length
     ? positions.reduce((s, p) => s + (p.unrealized_pnl || 0), 0)
     : (risk?.unrealized_pnl ?? 0);
   const dayPnl = realized + floating;
-  const dayPct = equity && equity > 0 ? (dayPnl / equity) * 100 : null;
+  // A % of what the account held when the day began (the risk state's starting equity). Of the equity NOW, a losing
+  // day read worse than it was: -$97.75 showed -8.76% (of $1,116) where it was -8.05% of the day's $1,214 (2026-11-11).
+  const dayBase = risk?.starting_equity && risk.starting_equity > 0 ? risk.starting_equity
+    : equity != null ? equity - dayPnl : null;
+  const dayPct = dayBase && dayBase > 0 ? (dayPnl / dayBase) * 100 : null;
 
   const openN = account?.open_positions ?? positions?.length ?? 0;
   const maxPos = settings?.risk.max_open_positions ?? null;
@@ -83,7 +98,9 @@ export function AccountKpis({ account, risk, settings, positions }: Props) {
       <Stat label="Equity" value={equity != null ? fmtUsd(equity) : "—"} />
       <Stat
         label="Day P&L"
-        title="Realized today + open floating P&L"
+        title={`Today, on the broker's day - from 00:00 UTC (${utcMidnightHere()} your time): closed ${fmtUsd(realized, { sign: true })} + open now ${
+          fmtUsd(floating, { sign: true })}. Every trade on the account counts, your phone's too; swap and commission in.${
+          dayBase ? ` The % is of ${fmtUsd(dayBase)}, what the account held when the day began.` : ""}`}
         valueClass={pnlClass}
         value={
           equity != null ? (

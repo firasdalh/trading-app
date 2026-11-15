@@ -327,7 +327,7 @@ export default function App() {
       <Drawer
         open={drawer === "strategy"}
         title="Strategies"
-        subtitle="Your own rules: when to buy, when to sell, when to close - from indicators on any timeframes. Runs on a demo / paper account, through the Risk Manager."
+        subtitle="Your own rules: when to buy, when to sell, when to close - from indicators on any timeframes. Each runs through the Risk Manager, on a demo / paper account - or on the real one when its Live switch is on."
         onClose={closeDrawer}
         widthClass="max-w-[84rem]"
       >

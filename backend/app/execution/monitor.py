@@ -11,6 +11,7 @@ executor, not here.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -284,51 +285,103 @@ def _aware(dt):
 def fill_realized_pnl_from_broker(session: Session, positions: list[Position]) -> int:
     """Recover realized P&L + exit price for CLOSED app rows that never booked it (closed broker-side
     / in the terminal, so the monitor only reconciled them to CLOSED without a $ result). Pulled from
-    the broker's OWN deal history (broker truth), matched to each row by normalized symbol + direction
-    + entry price (±0.5%) + nearest close time, one broker trade per row.
+    the broker's OWN deal history (broker truth): the row's OWN trade, paired exactly as the journal pairs
+    them (journal_routes._pair_app_rows - same symbol and side, entry within 0.5%, OPENED within 3 minutes,
+    the source MT5 tagged it with, closest pairs first, each broker trade to one row over the whole history).
 
-    Journal-only: this fills the row's ``realized_pnl``/``last_price`` for the stats + by-source
-    breakdown. It does NOT book into the daily-loss state (that already comes from broker truth), so
-    it can never double-count. Returns the number of rows filled.
+    Until 2026-11-11 it took the closest ENTRY PRICE at any time apart, and some rows got another trade's
+    result (row 255 JP225m: +$1.02, another JP225m trade's - its own made +$23.64). Those rows feed the
+    strategy's daily target, the loss cooldown and the scorecard. A row it can't place now keeps no $ result
+    rather than take someone else's.
+
+    It does NOT book into the daily-loss state (that already comes from broker truth), so it can never
+    double-count. Returns the number of rows filled.
     """
-    from app.risk.service import _norm_symbol, broker_closed_trades
+    from app.api.journal_routes import _pair_app_rows
+    from app.risk.service import broker_closed_trades
 
-    targets = [p for p in positions
-               if p.realized_pnl is None and p.status == PositionStatus.CLOSED.value]
+    targets = {p.id for p in positions if p.realized_pnl is None and p.status == PositionStatus.CLOSED.value}
     if not targets:
         return 0
     broker_trades = broker_closed_trades(session)  # list[PositionView] | None (respects journal reset)
     if not broker_trades:
         return 0
-
-    used: set[int] = set()
     filled = 0
-    for p in sorted(targets, key=lambda x: _aware(x.closed_at) or datetime.min.replace(tzinfo=timezone.utc)):
-        best_i, best_key = None, None
-        for i, bt in enumerate(broker_trades):
-            if i in used or bt.direction != p.direction:
-                continue
-            if _norm_symbol(bt.symbol) != _norm_symbol(p.symbol):
-                continue
-            pe = abs(p.entry_price or 0.0)
-            rel = abs((bt.entry_price or 0.0) - (p.entry_price or 0.0)) / max(pe, 1e-9)
-            if rel > 0.005:   # >0.5% entry gap -> not the same trade
-                continue
-            bc, pc = _aware(bt.closed_at), _aware(p.closed_at)
-            dt = abs((bc - pc).total_seconds()) if (bc and pc) else 1e12
-            key = (rel, dt)
-            if best_key is None or key < best_key:
-                best_key, best_i = key, i
-        if best_i is not None:
-            bt = broker_trades[best_i]
-            p.realized_pnl = bt.realized_pnl
-            if bt.last_price:
-                p.last_price = bt.last_price
-            p.unrealized_pnl = 0.0
-            used.add(best_i)
-            session.add(p)
-            filled += 1
+    for j, row in _pair_app_rows(session, broker_trades).items():
+        bt = broker_trades[j]
+        if row.id not in targets or bt.realized_pnl is None:
+            continue
+        row.realized_pnl = bt.realized_pnl
+        if bt.last_price:
+            row.last_price = bt.last_price
+        row.unrealized_pnl = 0.0
+        session.add(row)
+        filled += 1
     return filled
+
+
+def correct_realized_pnl_from_broker(session: Session) -> int:
+    """The Journal's Repair (2026-11-11): every closed app row its own broker trade can be found for
+    (_pair_app_rows) gets THAT trade's result - the broker's $, swap and commission in - where the row holds
+    something else: another trade's result from the old price-only match, or the app's own estimate at the
+    close. What the strategy's daily target, the loss cooldown and the scorecard read is then the broker's.
+    Returns the number of rows changed. The caller commits."""
+    return _correct_rows(session)[0]
+
+
+def _correct_rows(session: Session, ids: set[int] | None = None) -> tuple[int, set[int]]:
+    """``correct_realized_pnl_from_broker`` for the rows in ``ids`` (None = every closed row): the number
+    changed, and the ids its own broker trade was found for (changed or already right)."""
+    from app.api.journal_routes import _pair_app_rows
+    from app.risk.service import broker_closed_trades
+
+    broker_trades = broker_closed_trades(session)
+    if not broker_trades:
+        return 0, set()
+    changed, paired = 0, set()
+    for j, row in _pair_app_rows(session, broker_trades).items():
+        bt = broker_trades[j]
+        if (ids is not None and row.id not in ids) or bt.realized_pnl is None \
+                or row.status != PositionStatus.CLOSED.value:
+            continue
+        paired.add(row.id)
+        if row.realized_pnl is not None and abs(row.realized_pnl - bt.realized_pnl) < 0.005:
+            continue
+        row.realized_pnl = bt.realized_pnl
+        if bt.last_price:
+            row.last_price = bt.last_price
+        row.unrealized_pnl = 0.0
+        session.add(row)
+        changed += 1
+    return changed, paired
+
+
+# A trade the app closes itself is booked at the app's own estimate (its quote, no commission): row 503 UKOIL
+# -12.08 where the broker booked -13.44 (2026-11-11). The loss pause, the daily target and the scorecard read
+# that row, so each fresh close gets its own broker trade's result as soon as the deal history has it: the
+# rows closed in the last TRUE_UP_WINDOW, not yet matched, read at most once every TRUE_UP_EVERY_S.
+TRUE_UP_WINDOW = timedelta(minutes=30)
+TRUE_UP_EVERY_S = 45.0
+_TRUED: set[int] = set()            # rows already matched to their own broker trade
+_TRUE_UP_LAST = [float("-inf")]     # time.monotonic() of the last read of the deal history
+
+
+def true_up_recent_closes(session: Session, now: datetime | None = None) -> int:
+    """Give the rows closed in the last TRUE_UP_WINDOW their own broker trade's result (``_correct_rows``).
+    Reads the deal history only while such a row is still unmatched, at most every TRUE_UP_EVERY_S. Returns
+    the number of rows changed; the caller commits. Never books into the daily-loss state (broker truth)."""
+    now = now or datetime.now(timezone.utc)
+    rows = session.scalars(select(Position).where(
+        Position.status == PositionStatus.CLOSED.value, Position.closed_at >= now - TRUE_UP_WINDOW)).all()
+    todo = {r.id for r in rows if r.id not in _TRUED}
+    if not todo or time.monotonic() - _TRUE_UP_LAST[0] < TRUE_UP_EVERY_S:
+        return 0
+    _TRUE_UP_LAST[0] = time.monotonic()
+    changed, paired = _correct_rows(session, todo)
+    _TRUED.update(paired)
+    if changed:
+        log.info("fresh closes trued up to the broker's result", extra={"rows": changed})
+    return changed
 
 
 def flatten_before_weekend(session: Session) -> int:
@@ -454,6 +507,14 @@ def monitor_positions(session: Session) -> dict:
         flattened = flatten_before_weekend(session)
     except Exception as exc:  # noqa: BLE001 - never let this break the monitoring loop
         log.warning("weekend flatten pass failed", extra={"error": str(exc)})
+
+    # Fresh closes: the broker's own result in place of the app's estimate (true_up_recent_closes).
+    try:
+        if true_up_recent_closes(session):
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - best-effort, never break monitoring
+        session.rollback()
+        log.warning("true-up of fresh closes failed", extra={"error": str(exc)})
 
     # Account-truth daily-loss guard (realized today + floating vs the RISK.md limit).
     try:

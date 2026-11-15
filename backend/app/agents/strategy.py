@@ -48,6 +48,8 @@ from app.agents.indicators import (
     supertrend_series,
 )
 from app.agents.market_monitor import PAIR_TFS, lean_read
+from app.agents.fib import PLACE_NAMES as FIB_PLACE_NAMES, PLACES as FIB_PLACES, auto_fib, place as fib_place, \
+    zone_name as fib_zone_name
 from app.agents.order_blocks import find_order_blocks
 from app.core.logging import get_logger
 from app.core.sessions import KEYS as SESSION_KEYS, name_of as session_name, session_at
@@ -89,7 +91,9 @@ _TOUCH_ATR = 0.25                          # a swing this close to a level (in A
 _ALIGN_TFS = PAIR_TFS
 _ALIGN_BARS = 500
 _TURN_STEPS = 400
-_BARS_NEEDED = {"zone_room": _ZONE_BARS, "tf_align": _ALIGN_BARS}   # conditions that read further back than _BARS
+# "Fibonacci zone" reads the candles the chart loads (400), so its leg is the one the chart's Auto Fibonacci draws.
+_FIB_BARS = 400
+_BARS_NEEDED = {"zone_room": _ZONE_BARS, "tf_align": _ALIGN_BARS, "fib_zone": _FIB_BARS}   # conditions that read further back than _BARS
 
 
 def _utc(ts: datetime) -> datetime:
@@ -209,6 +213,11 @@ class Bars:
         few strong demand zones below could push out the supply zone right above an entry."""
         return self._m(("zones",), lambda: find_order_blocks(self.c[-_ZONE_BARS:], max_blocks=1000))
 
+    def fib(self):
+        """The chart's Auto Fibonacci on the last _FIB_BARS closed bars (app/agents/fib.py): the trend's latest
+        FINISHED leg, or None while there are too few swings."""
+        return self._m(("fib",), lambda: auto_fib(self.c[-_FIB_BARS:]))
+
 
 def closed_only(candles: list[Candle], tf: str, now: datetime) -> list[Candle]:
     """Drop the bar still forming: its close, high and low are not final yet."""
@@ -257,7 +266,7 @@ class Param:
     lo: float
     hi: float
     step: float = 1.0
-    kind: str = "num"     # num | bool
+    kind: str = "num"     # num | bool | tf (a timeframe ticked) | pick (a choice ticked, shown as a chip)
 
 
 @dataclass(frozen=True)
@@ -493,6 +502,23 @@ def _c_candles(p, s, b, ctx) -> Result:
     return n_ok == k, f"{n_ok}/{k} {'green' if s > 0 else 'red'}"
 
 
+def _c_dont_chase(p, s, b, ctx) -> Result:
+    """Not chasing (2026-11-12, from strategy 1's 221 real trades): the closes in a row that had ALREADY gone the
+    trade's way before the entry - each one past the close before it - at most ``max``. The first close back our
+    way after a pullback (1 or less) won 58% of 88 trades, +$889; after 2 or more, 43% of 133, -$731: the push had
+    mostly run by the time every indicator agreed, and price pulled back into the stop."""
+    n = int(p["max"])
+    if len(b) < 2:
+        return None, "not enough bars"
+    k = 0
+    for j in range(len(b.c) - 1, 0, -1):
+        if s * (b.c[j].close - b.c[j - 1].close) > 0:
+            k += 1
+        else:
+            break
+    return k <= n, f"{k} close{'s' if k != 1 else ''} in a row {'higher' if s > 0 else 'lower'} (at most {n})"
+
+
 def _c_clean_candle(p, s, b, ctx) -> Result:
     """The last ``bars`` candles closed the trade's way AND their shape doesn't argue against it: a real
     body (at least ``body``% of the range - not a doji or a spinning top) and no rejection wick against
@@ -666,6 +692,74 @@ def _c_zone_room(p, s, b, ctx) -> Result:
     gap_r = ((z.bottom - price) if s > 0 else (price - z.top)) / ctx.risk
     return gap_r >= float(p["room"]), \
         f"{name} {_fmt(z.bottom)}-{_fmt(z.top)} (strength {z.strength}) {gap_r:.1f}R {side}"
+
+
+def _fib_where(f, pl) -> str:
+    """Where price is on the leg, the way the chart's Fibonacci tag says it: 0.55 (golden zone), ext 1.12, 1.30 past
+    the 1 ..."""
+    if pl.broken:
+        return f"{pl.pos:.2f}" + (" past its 1" if pl.pos > 1 else "")
+    if pl.pos < 0:
+        return f"ext {1 - pl.pos:.2f}"
+    name = fib_zone_name(pl.pos)
+    return f"{pl.pos:.2f}" + (f" ({name})" if name else "")
+
+
+def _c_fib_zone(p, s, b, ctx) -> Result:
+    """Where on the Auto Fibonacci a trade may open (asked 2026-11-15: "when every indicator already agrees, price has
+    often reached the Fibonacci target zone or passed it, and the trade turns against us - wait for the pullback;
+    only enter while there is still distance to the target zone"). The leg is the chart's own (fib.py, the trend's
+    latest finished swing), read on this timeframe's closed bars; the place is read the trade's way (fib.place): a
+    pullback, at the swing, past it, in the target zone, past 1.618, or no target ahead. It holds when that place is
+    ticked and - before the target zone - at least ``room`` R is left to the zone's start (0 = no minimum)."""
+    price = ctx.ask if s > 0 else ctx.bid
+    if not price:
+        return None, "no quote"
+    picked = [k for k in FIB_PLACES if p.get(k)]
+    if not picked:
+        return None, "no place ticked"
+    f = b.fib()
+    if f is None:
+        return None, "no Fibonacci yet - too few swings"
+    pl = fib_place(f, price, s)
+    if pl is None:
+        return None, "no leg"
+    trade = "a buy" if s > 0 else "a sell"
+    leg = f"{'▲ up' if f.trend == 'up' else '▼ down'} leg {_fmt(f.a.price)} → {_fmt(f.b.price)}"
+    if pl.place == "against":
+        why = "it failed (price past its 1)" if pl.broken else "it runs the other way"
+        detail = f"{leg}, {why} - no target ahead for {trade}"
+        return bool(p.get("against")), detail + ("" if p.get("against") else " - not ticked")
+    zone = "the break zone" if pl.broken else "the target zone"
+    if pl.place in ("zone", "beyond"):
+        span = f"{_fmt(pl.target)}-{_fmt(pl.target_end)}"
+        where = f"in {zone} ({span})" if pl.place == "zone" else f"past 1.618 ({_fmt(pl.target_end)}): both targets hit"
+        detail = f"{leg}{' broken' if pl.broken else ''} · price {_fib_where(f, pl)}, {where}"
+        return bool(p.get(pl.place)), detail + ("" if p.get(pl.place) else " - not ticked: wait for the pullback")
+    room = float(p.get("room") or 0)
+    gap_r = None
+    if ctx.risk:
+        gap_r = s * (pl.target - price) / ctx.risk
+    ahead = f"{gap_r:.1f}R before {zone} ({_fmt(pl.target)})" if gap_r is not None else f"{zone} at {_fmt(pl.target)}"
+    detail = f"{leg}{' broken' if pl.broken else ''} · price {_fib_where(f, pl)}, {FIB_PLACE_NAMES[pl.place]} · {ahead}"
+    if not p.get(pl.place):
+        return False, detail + " - not ticked"
+    if room > 0:
+        if gap_r is None:
+            return None, detail + " - no stop distance to measure the room in"
+        if gap_r < room:
+            return False, f"{detail} - needs {room:g}R"
+    return True, detail
+
+
+def _fib_label(p: dict, where: str) -> str:
+    """How a "Fibonacci zone" rule reads in the log: "Auto Fibonacci: a buy opens in a pullback · at the swing ...,
+    with 0.5R+ before the target zone"."""
+    on = [FIB_PLACE_NAMES[k] for k in FIB_PLACES if p.get(k)]
+    room = float(p.get("room") or 0)
+    trade = "a buy" if where == "long" else "a sell"
+    return (f"Auto Fibonacci: {trade} opens {' · '.join(on) if on else 'nowhere (nothing ticked)'}"
+            + (f", with {room:g}R+ before the target zone" if room > 0 else ""))
 
 
 def _ticked(p: dict) -> list[str]:
@@ -930,6 +1024,15 @@ CATALOG: dict[str, Spec] = {s.type: s for s in (
          "{bars} candle(s) in a row closed against the trade",
          (Param("bars", "candles", 1, 1, 10),), _c_candles,
          "The bars themselves agreeing."),
+    Spec("dont_chase", "Price action", "entry",
+         "Not chasing: at most {max} close(s) in a row higher before the entry",
+         "Not chasing: at most {max} close(s) in a row lower before the entry", "",
+         (Param("max", "closes", 1, 0, 10),), _c_dont_chase,
+         "Waits for the next push instead of running after one that already went: counts the closes in a row that "
+         "already moved the trade's way (each past the close before it). 1 = enter on the first close back our way "
+         "after a pullback; 0 = only right after a close against us. Strategy 1's real trades (2026-11-12): entered "
+         "on at most 1 such close, 58% won (+$889 over 88 trades); after 2 or more, 43% (-$731 over 133).",
+         default_tf="1m"),
     Spec("clean_candle", "Price action", "both",
          "The last {bars} candle(s) closed green with a real body (at least {body}% of its range) and an upper "
          "wick no longer than {wick}x the body - no doji, spinning top or shooting star",
@@ -977,6 +1080,29 @@ CATALOG: dict[str, Spec] = {s.type: s for s in (
          "and a sell out of demand. The zones are the chart's order blocks with their 0-100 strength; every "
          "zone at that strength counts, not only the 8 strongest the chart draws. Room 0 = only when inside one.",
          suggested=True, tfs=("5m", "15m", "30m", "1h", "4h", "1d"), default_tf="1h"),
+    Spec("fib_zone", "Levels & zones", "entry",
+         "Where a buy may open on the auto Fibonacci: {pull}{near}{past}{zone}{beyond}{against} · and at least {room}R "
+         "before the target zone (0 = no minimum)",
+         "Where a sell may open on the auto Fibonacci: {pull}{near}{past}{zone}{beyond}{against} · and at least {room}R "
+         "before the target zone (0 = no minimum)",
+         "",
+         (Param("pull", "pullback", 1, 0, 1, 1, "pick"), Param("near", "at the swing", 1, 0, 1, 1, "pick"),
+          Param("past", "past the swing", 1, 0, 1, 1, "pick"), Param("zone", "in the target zone", 0, 0, 1, 1, "pick"),
+          Param("beyond", "past 1.618", 0, 0, 1, 1, "pick"), Param("against", "no target ahead", 1, 0, 1, 1, "pick"),
+          Param("room", "R", 0.5, 0, 10, 0.1)), _c_fib_zone,
+         "The chart's Auto Fibonacci on this timeframe (Indicators → Auto Fibonacci): the trend's latest finished "
+         "leg, its pullback zones and its targets, ext 1.272-1.618 beyond the swing it ended on. Tick where a trade "
+         "may open, read its way: in a PULLBACK (back inside the leg, past 0.382: the shallow, golden and deep "
+         "zones), AT THE SWING (within 0.382 of the leg's end), PAST THE SWING (on the way to the targets), IN THE "
+         "TARGET ZONE, PAST 1.618 (both targets hit), or with NO TARGET AHEAD (the leg runs against the trade, or "
+         "the trade's own leg failed). After a leg broke the trade's way, its break zone - 1.272-1.618 beyond the "
+         "1, rose on the chart - is the target. Room: before the target zone, at least this much R left - your "
+         "target or more, so the take-profit comes first. Unticking the target zone and past 1.618 = wait for the "
+         "pullback once the move reached its targets. Strategy 1's 256 real trades (2026-11-15) did NOT back that "
+         "up: on 15m the entries in or past the target zone won 65% (+33R with stop and target only) and the rest "
+         "49% (-9R); on 1h the same way, weaker; on 1m / 3m / 5m where price stood made no difference. Not "
+         "backtested as a rule.",
+         tfs=("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"), default_tf="5m"),
     Spec("atr", "Filters", "entry",
          "ATR {period} is at least {mult}x its {avg}-bar average on each of the last {bars} bar(s)",
          "ATR {period} is at least {mult}x its {avg}-bar average on each of the last {bars} bar(s)", "",
@@ -1045,6 +1171,8 @@ def label(cond: dict, where: str) -> str:
     p = clean_params(spec, cond.get("params"))
     if spec.multi_tf:
         return _align_label(p, where)
+    if spec.type == "fib_zone":
+        return f"{_fib_label(p, where)} · {cond.get('tf', '?')}"
     text = getattr(spec, where) or spec.long
     shown = {k: ("on" if v == 1 else "off") if any(q.key == k and q.kind == "bool" for q in spec.params) else v
              for k, v in p.items()}
@@ -1364,6 +1492,47 @@ def _cooldown_left(session: Session, cfg: StrategyConfig, symbol: str, now: date
     return math.ceil(left / 60) if left > 0 else 0
 
 
+# After an order that was not filled the pair waits before it tries again (2026-11-11): a margin refusal
+# (the account can't carry it - it lasts until a trade closes) for longer than any other (a requote, a price
+# that moved - over in a bar or two).
+NOT_FILLED_MARGIN_WAIT_MIN = 15
+NOT_FILLED_WAIT_MIN = 2
+
+
+def _is_margin(reason: str | None) -> bool:
+    text = (reason or "").lower()
+    return "margin" in text or "money" in text
+
+
+def _retry_left(st: dict, now: datetime) -> int:
+    """Minutes left before a pair whose last order was not filled tries again (0 = free)."""
+    try:
+        until = datetime.fromisoformat(st["retry_at"]) if st.get("retry_at") else None
+    except (TypeError, ValueError):
+        return 0
+    if until is None:
+        return 0
+    left = (_utc(until) - now).total_seconds()
+    return math.ceil(left / 60) if left > 0 else 0
+
+
+def loss_pause_until(session: Session, cfg: StrategyConfig, symbol: str, side: str) -> datetime | None:
+    """When the loss pause on ``side`` ends on the pair - the Risk Manager's loss-aware cooldown, with the
+    strategy's own minutes (``strategy_cooldowns``): the last closed trade on the pair in that direction
+    lost. None = it won, or there was none."""
+    from app.risk.service import last_dir_loss_at, strategy_cooldowns
+
+    wait = strategy_cooldowns(cfg.cooldown_minutes, cfg.loss_cooldown_minutes)["override_loss_cooldown_minutes"]
+    last = last_dir_loss_at(session, symbol, side) if wait else None
+    return last + timedelta(minutes=wait) if last else None
+
+
+def _loss_pause_left(session: Session, cfg: StrategyConfig, symbol: str, side: str, now: datetime) -> int:
+    until = loss_pause_until(session, cfg, symbol, side)
+    left = (until - now).total_seconds() if until else 0
+    return math.ceil(left / 60) if left > 0 else 0
+
+
 def cooldown_until(session: Session, cfg: StrategyConfig, symbol: str) -> datetime | None:
     """When that re-entry wait ends on the pair (``_cooldown_left``), in the past once it has; None =
     no wait set, or no trade on the pair has closed yet. The board and the widget show it, so a pair
@@ -1397,6 +1566,8 @@ def hours_now(hours: dict | None, now: datetime) -> dict | None:
     trading sessions picked (``_sessions_now``). None = no hours: around the clock."""
     if not hours:
         return None
+    if "hours_utc" in hours:
+        return _hour_picks_now(hours, now)
     if "sessions" in hours:
         return _sessions_now(hours, now)
     if not hours.get("start") or not hours.get("end"):
@@ -1422,14 +1593,34 @@ def _sessions_now(hours: dict, now: datetime) -> dict | None:
     is 08-21 UTC) - written on the strategy's clock; ``opens``: the session that stretch starts with; ``session``:
     the one it is now. Every session picked is every hour: None. None it knows of: it never opens."""
     picked = set(hours.get("sessions") or ())
-    on = [session_at(h) in picked for h in range(24)]
+    out = _hour_set_now([session_at(h) in picked for h in range(24)], hours, now)
+    if out is not None:
+        out["sessions"] = [k for k in SESSION_KEYS if k in picked]
+    return out
+
+
+def _hour_picks_now(hours: dict, now: datetime) -> dict | None:
+    """``hours_now`` for hours picked one by one (asked 2026-11-11: "turn on / off the hours which made bad trades
+    for our strategy"): it may open a trade only while the UTC hour is one of ``hours_utc`` - the hours the
+    Journal's "By the hour it opened" strip counts its trades in. All 24: None (every hour)."""
+    picked = {int(h) for h in hours.get("hours_utc") or () if str(h).lstrip("-").isdigit()}
+    out = _hour_set_now([h in picked for h in range(24)], hours, now)
+    if out is not None:
+        out["hours_utc"] = sorted(h for h in picked if 0 <= h <= 23)
+    return out
+
+
+def _hour_set_now(on: list[bool], hours: dict, now: datetime) -> dict | None:
+    """Where ``now`` falls in a set of UTC hours (``on``, one flag per hour): open or not, the stretch it is in or
+    the next one (hours back to back run as one) written on the strategy's clock, the session each of those
+    belongs to, and the seconds until that changes. Every hour on: None. None on: it never opens."""
     if all(on):
         return None
     zone = _hours_zone(hours)
     utc = _utc(now).astimezone(timezone.utc).replace(microsecond=0)
     local = utc.astimezone(zone)
     h0 = utc.hour
-    out = {"open": on[h0], "sessions": [k for k in SESSION_KEYS if k in picked], "session": session_at(h0),
+    out = {"open": on[h0], "session": session_at(h0),
            "tz": hours.get("tz") or local.tzname(), "now": local.strftime("%H:%M")}
     if not any(on):
         return {**out, "start": "", "end": "", "opens": None, "next_s": 0}
@@ -1451,6 +1642,8 @@ def _sessions_now(hours: dict, now: datetime) -> dict | None:
 def off_hours_note(hrs: dict) -> str:
     """Why a strategy outside its trading hours opens no new trade, and until when (the board's note)."""
     if "sessions" not in hrs:
+        if "hours_utc" in hrs and not hrs.get("start"):
+            return "no trading hour picked - no new trades"
         return f"outside its hours - no new trades until {hrs['start']}"
     if not hrs.get("opens"):
         return "no trading session picked - no new trades"
@@ -1525,7 +1718,7 @@ def _open(session: Session, cfg: StrategyConfig, symbol: str, ac: str, side: str
     session.commit()
     session.refresh(record)
     try:
-        execute_proposal(session, record)    # kill-switch, drift guard, news gate, final risk check
+        result = execute_proposal(session, record)    # kill-switch, drift guard, news gate, final risk check
     except ExecutionBlocked as exc:
         # Expired, not pending: a robot's order that could not go out is not one for the user to
         # approve later at a price it was never sized for.
@@ -1535,13 +1728,20 @@ def _open(session: Session, cfg: StrategyConfig, symbol: str, ac: str, side: str
         return {"symbol": symbol, "blocked": str(exc)}
     session.refresh(record)
     if record.status != ProposalStatus.EXECUTED.value:
-        record.status = ProposalStatus.EXPIRED.value
-        _log(session, cfg, symbol, "not_filled", side=side, status=record.status, rules=why)
+        # The broker's (or the funds check's) own words: the feed said only "expired", 86 times (2026-11-10).
+        reason = str(getattr(result, "error", None) or getattr(getattr(result, "status", None), "value", None)
+                     or "no fill")
+        record.status, record.risk_reason = ProposalStatus.EXPIRED.value, f"not filled: {reason}"
+        _log(session, cfg, symbol, "not_filled", side=side, status=record.status, reason=reason, rules=why)
         session.commit()
-        return {"symbol": symbol, "skipped": f"order not filled ({record.status})"}
+        return {"symbol": symbol, "skipped": f"order not filled ({reason})", "not_filled": reason}
+    # What the market looked like at the entry, for the strategy's own study of its trades (learning.py, 2026-11-13).
+    from app.agents.learning import entry_fingerprint
+
+    fp = entry_fingerprint(broker, symbol, s, data, float(record.entry), ctx) if record.entry else None
     _log(session, cfg, symbol, "opened", side=side, lots=record.approved_qty, entry=record.entry,
          stop=record.stop_loss, target=record.take_profit, rules=why,
-         **({"stop_on": f"{rules.stop.get('tf')} SuperTrend"} if rules.stop else {}))
+         **({"stop_on": f"{rules.stop.get('tf')} SuperTrend"} if rules.stop else {}), **({"fp": fp} if fp else {}))
     session.commit()
     log.warning("strategy opened a trade", extra={"strategy": cfg.id, "symbol": symbol, "side": side})
     return {"symbol": symbol, "opened": side, "lots": record.approved_qty}
@@ -1756,9 +1956,20 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
     left = _cooldown_left(session, cfg, symbol, now)
     if left:
         return _note(state, symbol, f"cooldown after the last close on this pair - {left} min left", now)
+    retry = _retry_left(st, now)
+    if retry:
+        return _note(state, symbol, f"its last order was not filled ({st.get('retry_why')}) - "
+                                    f"tries again in {retry} min", now)
+    paused: list[str] = []
     for side, s, groups, off in (("long", 1, rules.buy_rules(), rules.buy_off()),
                                  ("short", -1, rules.sell_rules(), rules.sell_off())):
         if cfg.sides not in ("both", side) or not groups:
+            continue
+        # The loss pause, kept here as the Risk Manager keeps it (2026-11-11): it refused these orders on
+        # every bar the rules held - ~40 "loss cooldown" rows since 2026-11-10 - while the board read GO.
+        lost = _loss_pause_left(session, cfg, symbol, side, now)
+        if lost:
+            paused.append(f"{'buys' if side == 'long' else 'sells'} paused after a losing {side} - {lost} min left")
             continue
         # With a SuperTrend stop each side has its own R: to the line on its side of the price.
         side_ctx = replace(ctx, risk=_side_risk(session, rules, data, q, s)) if rules.stop else ctx
@@ -1773,7 +1984,14 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
             st["note"] = (f"opened {side}" if res.get("opened")
                           else f"{side} signal refused: {res.get('refused') or res.get('blocked') or res.get('skipped')}")
             st["at"] = now.isoformat()
+            if res.get("not_filled"):
+                # Not again on the next bar: it tried every 30 s for 3.5 h on 2026-11-10.
+                wait = NOT_FILLED_MARGIN_WAIT_MIN if _is_margin(res["not_filled"]) else NOT_FILLED_WAIT_MIN
+                st["retry_at"] = (now + timedelta(minutes=wait)).isoformat()
+                st["retry_why"] = res["not_filled"]
             return res
+    if paused:
+        return _note(state, symbol, "; ".join(paused), now)
     return _note(state, symbol, "watching - no entry rule holds", now)
 
 

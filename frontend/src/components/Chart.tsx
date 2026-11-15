@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   CandlestickData,
   ColorType,
@@ -274,10 +275,18 @@ function PanelGrip({ resize }: { resize: Record<string, unknown> }) {
 // A series forces every point onto a candle, which is why lines landed next to where they were
 // drawn instead of on it. On the canvas a point is kept as (time, price) and converted back to
 // pixels each frame: it sits exactly where you put it, tracks pan/zoom, and can curve freely.
+//
+// `tf` is the timeframe it was drawn on and `only` keeps it to that one (TradingView's "visibility on
+// intervals"): a pen note around three 5m candles is a sliver on the 1h. Drawings saved before 2026-11-15 have
+// neither and show everywhere. "r" is a rectangle (a zone): two corners, each time + price.
+type DrawBase = { id: string; color: string; tf?: string; only?: boolean };
 type Drawing =
-  | { id: string; kind: "h"; price: number; color: string }
-  | { id: string; kind: "t"; t1: number; p1: number; t2: number; p2: number; color: string }
-  | { id: string; kind: "f"; pts: { t: number; p: number }[]; color: string };
+  | (DrawBase & { kind: "h"; price: number })
+  | (DrawBase & { kind: "t"; t1: number; p1: number; t2: number; p2: number })
+  | (DrawBase & { kind: "r"; t1: number; p1: number; t2: number; p2: number })
+  | (DrawBase & { kind: "f"; pts: { t: number; p: number }[] });
+const shownOn = (d: Drawing, tf: string) => !d.only || !d.tf || d.tf === tf;
+const drawTimes = (d: Drawing): number[] => (d.kind === "h" ? [] : d.kind === "f" ? d.pts.map((p) => p.t) : [d.t1, d.t2]);
 
 // Cycled so consecutive drawings are visually separable when several sit close together.
 const DRAW_COLORS = ["#38bdf8", "#f59e0b", "#a78bfa", "#22c55e", "#ef4444"];
@@ -291,6 +300,21 @@ function readDrawings(key: string): Drawing[] {
   } catch {
     return [];
   }
+}
+
+// How many candles to load: 400, or enough to reach back to the oldest drawing shown on this timeframe (up
+// to the API's 1000). 400 one-minute candles are under 7 hours, so a trend line drawn on the 5m yesterday
+// had its far end outside the 1m data, placed by guesswork. Not the seconds charts: those are built from ticks.
+function histLimit(symbol: string, timeframe: string): number {
+  const tfs = TF_SECONDS[timeframe] ?? 0;
+  if (!tfs || isSecondsTf(timeframe)) return 400;
+  let oldest = Infinity;
+  for (const d of readDrawings(drawKey(symbol))) {
+    if (!shownOn(d, timeframe)) continue;
+    for (const t of drawTimes(d)) if (t < oldest) oldest = t;
+  }
+  if (!Number.isFinite(oldest)) return 400;
+  return Math.max(400, Math.min(1000, Math.ceil((Date.now() / 1000 - oldest) / tfs) + 30));
 }
 
 // Deliberately NOT usePersisted(): that hook's key is fixed, and useState's initialiser runs once —
@@ -1044,11 +1068,62 @@ function LineSwatch({ dash }: { dash: string }) {
 // actions (Read, Arm, Trade) onto a second row; folded into three menus they read as a menu bar,
 // and the count on each one still says at a glance what's switched on.
 function ToolMenu({
-  label, count, open, onToggle, children, width = "w-56",
+  label, count, open, onToggle, children, width = "w-56", icon,
 }: {
   label: string; count: number; open: boolean; onToggle: () => void;
   children: React.ReactNode; width?: string;
+  /** In the left tool strip: an icon button, and the menu opens to its right. */
+  icon?: React.ReactNode;
 }) {
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [at, setAt] = useState<{ left: number; top: number; maxH: number } | null>(null);
+  const inStrip = !!icon;
+  // Fixed to the window, through a portal: the strip scrolls on a short window, and a menu inside it would
+  // be clipped by it. Placed beside its button, kept on screen; a page scroll closes it (it would float off).
+  useLayoutEffect(() => {
+    if (!open || !inStrip) return;
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const top = Math.max(8, r.top);
+    setAt({ left: r.right + 6, top, maxH: Math.max(200, window.innerHeight - top - 12) });
+    // Only a scroll that moves the button (the page, the strip) closes it - not a list elsewhere scrolling.
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (t === document || t === document.scrollingElement || (t instanceof Node && btnRef.current && t.contains(btnRef.current))) onToggle();
+    };
+    window.addEventListener("scroll", onScroll, true);
+    return () => window.removeEventListener("scroll", onScroll, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, inStrip]);
+  // Drawn: lift it so all of it fits under the window's bottom edge (or as much as the window holds).
+  useLayoutEffect(() => {
+    const m = menuRef.current;
+    if (!open || !inStrip || !m || !at) return;
+    const top = Math.max(8, Math.min(at.top, window.innerHeight - 12 - m.scrollHeight));
+    if (Math.abs(top - at.top) > 1) setAt({ ...at, top, maxH: window.innerHeight - top - 12 });
+  }, [open, inStrip, at]);
+  if (inStrip) {
+    return (
+      <>
+        <StripBtn btnRef={btnRef} on={open} badge={count || undefined} title={`${label}${count ? ` - ${count} on` : ""}`} onClick={onToggle}>
+          {icon}
+        </StripBtn>
+        {open && at && createPortal(
+          <div
+            ref={menuRef}
+            data-toolmenu
+            className={`fixed z-[60] ${width} overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-1.5 text-xs shadow-xl backdrop-blur-sm`}
+            style={{ left: at.left, top: at.top, maxHeight: at.maxH }}
+          >
+            <div className="px-1.5 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">{label}</div>
+            {children}
+          </div>,
+          document.body,
+        )}
+      </>
+    );
+  }
   return (
     <span className="relative">
       <button
@@ -1065,6 +1140,88 @@ function ToolMenu({
         </div>
       )}
     </span>
+  );
+}
+
+// One button of the chart's left tool strip (TradingView's drawing bar): an icon, its name and what it does
+// in the tooltip, lit while its tool is armed or its panel open. The two that open trades carry their name
+// under the icon - a click on them is never a guess.
+const STRIP_ON: Record<string, string> = {
+  neutral: "bg-neutral-700/80 text-white",
+  sky: "bg-sky-600 text-white",
+  amber: "bg-amber-500 text-neutral-950",
+  emerald: "bg-emerald-600 text-white",
+  violet: "bg-violet-600 text-white",
+};
+const STRIP_IDLE: Record<string, string> = {
+  neutral: "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100",
+  sky: "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100",
+  amber: "text-amber-300/90 hover:bg-amber-500/15 hover:text-amber-200",
+  emerald: "text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200",
+  violet: "text-violet-300/90 hover:bg-violet-500/15 hover:text-violet-200",
+};
+function StripBtn({
+  on = false, title, onClick, children, badge, tone = "sky", label, disabled = false, btnRef,
+}: {
+  on?: boolean; title: string; onClick: () => void; children: React.ReactNode; badge?: number;
+  tone?: "neutral" | "sky" | "amber" | "emerald" | "violet"; label?: string; disabled?: boolean;
+  btnRef?: React.Ref<HTMLButtonElement>;
+}) {
+  return (
+    <button
+      ref={btnRef}
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={title.split(/[:\-]/)[0].trim()}
+      aria-pressed={on}
+      disabled={disabled}
+      className={`relative flex w-8 shrink-0 flex-col items-center justify-center rounded-md transition disabled:cursor-default disabled:opacity-35 ${
+        label ? "h-9" : "h-7"
+      } ${on ? STRIP_ON[tone] : STRIP_IDLE[tone]}`}
+    >
+      {children}
+      {label && <span className="mt-0.5 text-[8px] font-bold uppercase leading-none tracking-wide">{label}</span>}
+      {badge != null && badge > 0 && (
+        <span className="absolute -right-0.5 -top-0.5 min-w-[14px] rounded-full bg-sky-500 px-[3px] text-center text-[9px] font-bold leading-[14px] text-neutral-950 tabular-nums">
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function StripSep() {
+  return <div className="my-0.5 h-px w-6 shrink-0 bg-neutral-800" aria-hidden="true" />;
+}
+
+// The strip's line icons (24-unit grid, stroked in the button's colour).
+const ICONS: Record<string, React.ReactNode> = {
+  cursor: <><path d="M12 3v6M12 15v6M3 12h6M15 12h6" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /></>,
+  trend: <><path d="M6 18L18 6" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="5" r="2" /></>,
+  hline: <><path d="M3 12h7M14 12h7" /><circle cx="12" cy="12" r="2" /></>,
+  rect: <><rect x="4.5" y="6.5" width="15" height="11" rx="1" /><circle cx="4.5" cy="6.5" r="1.4" fill="currentColor" /><circle cx="19.5" cy="17.5" r="1.4" fill="currentColor" /></>,
+  pen: <><path d="M4 20l1-4L16 5l3 3L8 19l-4 1z" /><path d="M14 7l3 3" /></>,
+  magnet: <><path d="M6 4v7a6 6 0 0 0 12 0V4h-4v7a2 2 0 0 1-4 0V4H6z" /><path d="M6 8h4M14 8h4" /></>,
+  eye: <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></>,
+  eyeOff: <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /><path d="M4 4l16 16" /></>,
+  layers: <><path d="M12 3l9 5-9 5-9-5 9-5z" /><path d="M3 13l9 5 9-5" /></>,
+  bolt: <path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" />,
+  play: <path d="M7 4l13 8-13 8V4z" />,
+  ema: <path d="M3 17c2.5-5 4.5-5 7-1s4.5 4 7-1 3-5 4-6" />,
+  bars: <><path d="M5 20v-6M10 20V9M15 20v-4M20 20V6" /><path d="M3 10l5-4 4 3 8-6" /></>,
+  levels: <><path d="M3 6h18M3 12h11M3 18h15" /><circle cx="18" cy="12" r="1.5" fill="currentColor" /></>,
+  map: <><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" /><path d="M9 4v14M15 6v14" /></>,
+  sparkle: <><path d="M11 3l1.8 4.7 4.7 1.8-4.7 1.8L11 16l-1.8-4.7L4.5 9.5l4.7-1.8L11 3z" /><path d="M18.5 14.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8.8-2z" /></>,
+  pawn: <><circle cx="12" cy="6" r="2.5" /><path d="M9.5 10.5h5l1 5.5h-7l1-5.5zM7 20h10l-1-4H8l-1 4z" /></>,
+  recenter: <><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /><circle cx="12" cy="12" r="2" /></>,
+};
+function Icon({ name, size = 17 }: { name: string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6}
+         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {ICONS[name]}
+    </svg>
   );
 }
 
@@ -1329,7 +1486,17 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   // Hand drawing: the saved set, the stroke in progress, and the canvas it's painted on.
   const [drawings, saveDrawings] = useDrawings(symbol);
-  const [drawMode, setDrawMode] = useState<"off" | "f" | "t" | "h" | "arm" | "trade" | "alert">("off");
+  const [drawMode, setDrawMode] = useState<"off" | "f" | "t" | "h" | "r" | "arm" | "trade" | "alert">("off");
+  // The magnet: a trend line's / rectangle's / level's point snaps to the nearest open, high, low or close of
+  // the candle under the cursor (within 30 px), so a line drawn on the wicks touches them exactly.
+  const [magnet, setMagnet] = usePersisted("chart.magnet", false);
+  // Every hand drawing hidden at once (they stay saved).
+  const [drawHidden, setDrawHidden] = usePersisted("chart.drawHidden", false);
+  // The drawing picked on the chart (clicked with no tool armed): painted with its handles; drag it to move
+  // it, or a handle to move that end / corner; Delete removes it, Esc lets go.
+  const [selId, setSelId] = useState<string | null>(null);
+  const selIdRef = useRef<string | null>(null);
+  selIdRef.current = selId;
   // Quick market trade. The clicked price is the STOP, not the entry — the entry is wherever the
   // market is when you press the button, and the stop is the only number you actually get to choose.
   // It is also the number the Risk Manager sizes from, so choosing it IS choosing your risk.
@@ -1366,7 +1533,18 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const draftRef = useRef<Drawing | null>(null);            // the line/stroke under the cursor
   const lastPxRef = useRef<{ x: number; y: number } | null>(null);
   const drawLinesRef = useRef<IPriceLine[]>([]);            // horizontal levels (real price lines)
+  const drawLineByIdRef = useRef<Map<string, IPriceLine>>(new Map());   // the same, by drawing (for a drag)
+  type DrawHit = { id: string; kind: Drawing["kind"]; part: "body" | "a" | "b" | "c" | "d" };
+  type DrawDrag = { id: string; part: DrawHit["part"]; orig: Drawing; x0: number; y0: number; moved: boolean };
+  const liveEditRef = useRef<Drawing | null>(null);         // the drawing being dragged, as it is now
+  const drawDragRef = useRef<DrawDrag | null>(null);
+  // Re-pointed every render (they read the chart through refs): the once-attached mouse handlers call them.
+  const drawHitRef = useRef<(x: number, y: number) => DrawHit | null>(() => null);
+  const drawDragMoveRef = useRef<(dd: DrawDrag, x: number, y: number) => void>(() => {});
+  const saveDrawingsRef = useRef(saveDrawings);
+  saveDrawingsRef.current = saveDrawings;
   const barTimesRef = useRef<number[]>([]);                 // candle times, for pixel↔time mapping
+  const barSecsRef = useRef(60);                            // their timeframe's bar length, set with them
   const dirtyRef = useRef(0);                               // bumped to force a repaint
   // Bumped when a new candle set lands, so drawings re-render against the new bar times.
   const [dataV, setDataV] = useState(0);
@@ -1434,6 +1612,20 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   // the chips they replaced).
   const [menu, setMenu] = useState<null | "ema" | "ind" | "lv">(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const [stripMore, setStripMore] = useState(false);
+  const checkStrip = () => {
+    const el = toolbarRef.current;
+    setStripMore(!!el && el.scrollHeight - el.scrollTop - el.clientHeight > 2);
+  };
+  useEffect(() => {
+    const el = toolbarRef.current;
+    if (!el) return;
+    checkStrip();
+    const ro = new ResizeObserver(checkStrip);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Set synchronously so every conversion below this line — candles, markers, drawings, countdown,
   // separators — uses one clock within a single render. A useEffect would leave the first paint on
   // the previous mode.
@@ -1901,7 +2093,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   useEffect(() => {
     let cancelled = false;
     api
-      .ohlcv(symbol, assetClass, timeframe, 400)
+      .ohlcv(symbol, assetClass, timeframe, histLimit(symbol, timeframe))
       .then((series) => {
         if (cancelled || !seriesRef.current || !volumeRef.current) return;
         // What was in view before this load - a switch to another timeframe or pair keeps the zoom.
@@ -1910,6 +2102,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         candlesKeyRef.current = `${symbol}|${timeframe}`;   // what candlesRef actually holds
         // Drawings map pixels↔time through the bar times, so refresh that lookup with the data.
         barTimesRef.current = series.candles.map((c) => toTime(c) as number);
+        barSecsRef.current = TF_SECONDS[timeframe] || 60;
         setDataV((v) => v + 1);
         const candleData: CandlestickData[] = series.candles.map((c) => ({
           time: toTime(c), open: c.open, high: c.high, low: c.low, close: c.close,
@@ -3380,34 +3573,66 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   // --- pixel ↔ (time, price) -------------------------------------------------------------------
   // The vertical axis is exact: the series converts price↔y directly. The horizontal one is not —
-  // lightweight-charts only maps times that ARE bars. So we go through the "logical" axis (a
-  // fractional bar index, which accepts values between bars and past the last one) and interpolate
-  // against the bar times. That's what buys sub-candle precision: a point lands mid-candle if
-  // that's where you drew it, instead of jumping to the nearest bar.
+  // lightweight-charts only maps times that ARE bars, and in v4 its "logical" axis takes WHOLE bars only:
+  // logicalToCoordinate(340.5) returns 0 (the chart's left edge) and coordinateToLogical rounds x up to a
+  // bar. Drawings went through it, so every point that was not exactly on a bar was painted at x = 0. On
+  // the timeframe a line was drawn on its points WERE on bars (each click had been rounded to one), so it
+  // looked right — switch timeframe and almost none were, and lines and pen strokes shot off to the left
+  // edge (2026-11-15). Positions between bars are worked out here instead: the axis is linear, one bar is
+  // barSpacing pixels, and two whole bars give it exactly.
+  //
+  // Time ↔ bars: a candle COVERS its bar of time (open → open + the bar length) and is drawn centred on its
+  // logical index i, so that span is i − 0.5 … i + 0.5. A point inside a 5m candle lands inside the 1h
+  // candle holding it, at the same fraction of the hour — and back. Time the market was shut (after one
+  // bar's end, before the next bar) sits on the edge between the two candles.
+  const xOfLogical = (l: number): number | null => {
+    const ts = chartRef.current?.timeScale();
+    if (!ts || !Number.isFinite(l)) return null;
+    const i = Math.floor(l);
+    const a = ts.logicalToCoordinate(i as Logical);
+    const b = ts.logicalToCoordinate((i + 1) as Logical);
+    if (a == null || b == null) return null;
+    return Number(a) + (l - i) * (Number(b) - Number(a));
+  };
+
+  const logicalOfX = (x: number): number | null => {
+    const ts = chartRef.current?.timeScale();
+    if (!ts) return null;
+    const a = ts.logicalToCoordinate(0 as Logical);
+    const b = ts.logicalToCoordinate(1 as Logical);
+    if (a == null || b == null || !(Number(b) > Number(a))) return null;
+    return (x - Number(a)) / (Number(b) - Number(a));
+  };
+
   const logicalOfTime = (t: number): number | null => {
     const ts = barTimesRef.current;
     const n = ts.length;
     if (n < 2) return null;
-    if (t <= ts[0]) return (t - ts[0]) / Math.max(1, ts[1] - ts[0]);
-    if (t >= ts[n - 1]) return n - 1 + (t - ts[n - 1]) / Math.max(1, ts[n - 1] - ts[n - 2]);
-    let lo = 0;
-    let hi = n - 1;
-    while (hi - lo > 1) {
-      const mid = (lo + hi) >> 1;
-      if (ts[mid] <= t) lo = mid;
-      else hi = mid;
+    const dur = Math.max(1, barSecsRef.current);
+    if (t < ts[0]) return -0.5 + (t - ts[0]) / dur;
+    let lo = n - 1;
+    if (t < ts[n - 1]) {
+      lo = 0;
+      let hi = n - 1;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (ts[mid] <= t) lo = mid;
+        else hi = mid;
+      }
     }
-    return lo + (t - ts[lo]) / Math.max(1, ts[hi] - ts[lo]);
+    const into = (t - ts[lo]) / dur;
+    // Past the newest bar, time runs on at one bar per bar length (the space right of the last candle).
+    return lo - 0.5 + (lo === n - 1 ? into : Math.min(1, into));
   };
 
   const timeOfLogical = (l: number): number | null => {
     const ts = barTimesRef.current;
     const n = ts.length;
     if (n < 2) return null;
-    if (l <= 0) return Math.round(ts[0] + l * Math.max(1, ts[1] - ts[0]));
-    if (l >= n - 1) return Math.round(ts[n - 1] + (l - (n - 1)) * Math.max(1, ts[n - 1] - ts[n - 2]));
-    const i = Math.floor(l);
-    return Math.round(ts[i] + (l - i) * Math.max(1, ts[i + 1] - ts[i]));
+    const dur = Math.max(1, barSecsRef.current);
+    if (l < -0.5) return ts[0] + (l + 0.5) * dur;
+    const i = Math.min(n - 1, Math.floor(l + 0.5));
+    return ts[i] + (l - (i - 0.5)) * dur;
   };
 
   // Drawings are STORED in true UTC and converted at the boundary. Storing display time would peg
@@ -3415,16 +3640,140 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   // daylight-saving change, or land on the wrong bar entirely if the machine's timezone changed.
   const xOfTime = (utcSec: number): number | null => {
     const l = logicalOfTime(utcToDisp(utcSec));
-    if (l == null) return null;
-    const x = chartRef.current?.timeScale().logicalToCoordinate(l as Logical);
-    return x == null ? null : Number(x);
+    return l == null ? null : xOfLogical(l);
   };
 
   const timeOfX = (x: number): number | null => {
-    const l = chartRef.current?.timeScale().coordinateToLogical(x);
+    const l = logicalOfX(x);
     if (l == null) return null;
-    const disp = timeOfLogical(Number(l));
+    const disp = timeOfLogical(l);
     return disp == null ? null : dispToUtc(disp);
+  };
+
+  // The magnet: the candle under x, and whichever of its open / high / low / close is nearest y, if within
+  // 30 px. The point goes to that price at the candle's middle.
+  const snapToBar = (x: number, y: number): { x: number; y: number; t: number; p: number } | null => {
+    const series = seriesRef.current;
+    const c = candlesRef.current;
+    const l = logicalOfX(x);
+    if (!series || l == null || !c.length || c.length !== barTimesRef.current.length) return null;
+    const i = Math.round(l);
+    if (i < 0 || i >= c.length) return null;
+    let best: { y: number; p: number } | null = null;
+    for (const p of [c[i].open, c[i].high, c[i].low, c[i].close]) {
+      const py = series.priceToCoordinate(p);
+      if (py == null) continue;
+      const d = Math.abs(Number(py) - y);
+      if (d <= 30 && (!best || d < Math.abs(best.y - y))) best = { y: Number(py), p };
+    }
+    const bx = xOfLogical(i);
+    const disp = timeOfLogical(i);
+    if (!best || bx == null || disp == null) return null;
+    return { x: bx, y: best.y, t: dispToUtc(disp), p: best.p };
+  };
+
+  // --- picking and moving a drawing (no tool armed) ---------------------------------------------------------
+  // The hit test, nearest-on-top: a line or pen stroke within 6 px, a rectangle's inside, a level's line;
+  // a line's ends and a rectangle's corners within 8 px are handles that reshape it.
+  drawHitRef.current = (x: number, y: number) => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    const cont = containerRef.current;
+    if (drawHidden || !chart || !series || !cont) return null;
+    const plotW = cont.clientWidth - (chart.priceScale("right").width() || 0);
+    const plotH = cont.clientHeight - (chart.timeScale().height() || 0);
+    if (x < 0 || y < 0 || x > plotW || y > plotH) return null;
+    const yOf = (p: number) => {
+      const v = series.priceToCoordinate(p);
+      return v == null ? null : Number(v);
+    };
+    const seg = (ax: number, ay: number, bx: number, by: number) => {
+      const dx = bx - ax;
+      const dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      const u = len2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / len2)) : 0;
+      return Math.hypot(x - (ax + u * dx), y - (ay + u * dy));
+    };
+    const near = (px: number, py: number) => Math.hypot(px - x, py - y) <= 8;
+    const list = drawingsRef.current.filter((d) => shownOn(d, timeframe));
+    for (let k = list.length - 1; k >= 0; k--) {
+      const d = list[k];
+      if (d.kind === "h") {
+        const py = yOf(d.price);
+        if (py != null && Math.abs(py - y) <= 6) return { id: d.id, kind: d.kind, part: "body" };
+        continue;
+      }
+      if (d.kind === "f") {
+        let prev: { x: number; y: number } | null = null;
+        for (const pt of d.pts) {
+          const px = xOfTime(pt.t);
+          const py = yOf(pt.p);
+          if (px == null || py == null) continue;
+          if (prev && seg(prev.x, prev.y, px, py) <= 6) return { id: d.id, kind: d.kind, part: "body" };
+          prev = { x: px, y: py };
+        }
+        continue;
+      }
+      const x1 = xOfTime(d.t1);
+      const x2 = xOfTime(d.t2);
+      const y1 = yOf(d.p1);
+      const y2 = yOf(d.p2);
+      if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
+      if (near(x1, y1)) return { id: d.id, kind: d.kind, part: "a" };
+      if (near(x2, y2)) return { id: d.id, kind: d.kind, part: "b" };
+      if (d.kind === "r") {
+        if (near(x1, y2)) return { id: d.id, kind: d.kind, part: "c" };
+        if (near(x2, y1)) return { id: d.id, kind: d.kind, part: "d" };
+        if (x >= Math.min(x1, x2) - 4 && x <= Math.max(x1, x2) + 4 && y >= Math.min(y1, y2) - 4 && y <= Math.max(y1, y2) + 4) {
+          return { id: d.id, kind: d.kind, part: "body" };
+        }
+        continue;
+      }
+      if (seg(x1, y1, x2, y2) <= 6) return { id: d.id, kind: d.kind, part: "body" };
+    }
+    return null;
+  };
+
+  // A drag in progress: the body moves by the pointer's travel in pixels (so its shape holds on this
+  // chart); a handle goes where the pointer is — onto a candle's open/high/low/close with the magnet on.
+  drawDragMoveRef.current = (dd: DrawDrag, x: number, y: number) => {
+    const series = seriesRef.current;
+    if (!series) return;
+    if (!dd.moved && Math.hypot(x - dd.x0, y - dd.y0) < 3) return;   // a click so far, not a drag
+    dd.moved = true;
+    const dx = x - dd.x0;
+    const dy = y - dd.y0;
+    const pAt = (py: number) => {
+      const v = series.coordinateToPrice(py);
+      return v == null ? null : Number(v);
+    };
+    const shiftT = (t: number) => {
+      const px = xOfTime(t);
+      return (px == null ? null : timeOfX(px + dx)) ?? t;
+    };
+    const shiftP = (p: number) => {
+      const py = series.priceToCoordinate(p);
+      return (py == null ? null : pAt(Number(py) + dy)) ?? p;
+    };
+    const o = dd.orig;
+    let next: Drawing = o;
+    if (dd.part === "body") {
+      if (o.kind === "h") next = { ...o, price: shiftP(o.price) };
+      else if (o.kind === "f") next = { ...o, pts: o.pts.map((pt) => ({ t: shiftT(pt.t), p: shiftP(pt.p) })) };
+      else next = { ...o, t1: shiftT(o.t1), p1: shiftP(o.p1), t2: shiftT(o.t2), p2: shiftP(o.p2) };
+    } else if (o.kind === "t" || o.kind === "r") {
+      const snap = magnet ? snapToBar(x, y) : null;
+      const t = snap ? snap.t : timeOfX(x);
+      const p = snap ? snap.p : pAt(y);
+      if (t == null || p == null) return;
+      if (dd.part === "a") next = { ...o, t1: t, p1: p };
+      else if (dd.part === "b") next = { ...o, t2: t, p2: p };
+      else if (dd.part === "c") next = { ...o, t1: t, p2: p };
+      else next = { ...o, t2: t, p1: p };
+    }
+    liveEditRef.current = next;
+    if (next.kind === "h") drawLineByIdRef.current.get(next.id)?.applyOptions({ price: next.price });
+    dirtyRef.current += 1;
   };
 
   // Session bands + risk/reward zones, painted on the canvas UNDER the candles.
@@ -3481,7 +3830,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         const d = new Date(dispToUtc(times[i]) * 1000);
         const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
         if (i > 0 && key !== prevKey) {
-          const x = xOfTime(dispToUtc(times[i]));
+          const x = xOfLogical(i - 0.5);   // the edge between the two days' candles
           if (x != null && x >= 0 && x <= plotW) bounds.push({ px: Math.round(x) + 0.5, date: d, bars: 0 });
         }
         if (bounds.length) bounds[bounds.length - 1].bars++;
@@ -3553,7 +3902,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         const sess = sessionAtHour(hour);
         const band = sess.band != null ? `rgba(${sess.rgb},${sess.band})` : null;
         if (!band) continue;
-        const x = xOfTime(dispToUtc(times[i]));
+        const x = xOfLogical(i);   // the bar's centre
         if (x == null || x < -bs || x > plotW + bs) continue;
         g.fillStyle = band;
         g.fillRect(x - bs / 2, 0, bs + 1, plotH);
@@ -3634,11 +3983,16 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       return y == null ? null : Number(y);
     };
 
-    const items = draftRef.current ? [...drawingsRef.current, draftRef.current] : drawingsRef.current;
+    const sel = selIdRef.current;
+    const live = liveEditRef.current;
+    const saved = drawHidden ? [] : drawingsRef.current.filter((d) => shownOn(d, timeframe));
+    const items = (draftRef.current ? [...saved, draftRef.current] : saved).map((d) => (live && live.id === d.id ? live : d));
+    const dots: { x: number; y: number; color: string }[] = [];
     for (const d of items) {
       if (d.kind === "h") continue;   // drawn as a real price line so it gets an axis label
+      const picked = d.id === sel;
       g.strokeStyle = d.color;
-      g.lineWidth = 2;
+      g.lineWidth = picked ? 3 : 2;
 
       if (d.kind === "f") {
         const pts: { x: number; y: number }[] = [];
@@ -3665,6 +4019,18 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         }
         g.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
         g.stroke();
+        if (picked) {
+          // A pen stroke has no ends to grab: a dashed box around it says it is the one picked.
+          const xs = pts.map((p) => p.x);
+          const ys = pts.map((p) => p.y);
+          const bx = Math.min(...xs);
+          const by = Math.min(...ys);
+          g.save();
+          g.setLineDash([4, 3]);
+          g.lineWidth = 1;
+          g.strokeRect(bx - 5, by - 5, Math.max(...xs) - bx + 10, Math.max(...ys) - by + 10);
+          g.restore();
+        }
         continue;
       }
 
@@ -3673,6 +4039,27 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       const y1 = yOf(d.p1);
       const y2 = yOf(d.p2);
       if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
+
+      if (d.kind === "r") {
+        // A zone: filled faintly so the candles inside stay readable, outlined in its colour.
+        const rx = Math.min(x1, x2);
+        const ry = Math.min(y1, y2);
+        const rw = Math.abs(x2 - x1);
+        const rh = Math.abs(y2 - y1);
+        g.save();
+        g.globalAlpha = picked ? 0.2 : 0.13;
+        g.fillStyle = d.color;
+        g.fillRect(rx, ry, rw, rh);
+        g.restore();
+        g.lineWidth = picked ? 2 : 1.25;
+        g.strokeRect(rx, ry, rw, rh);
+        if (picked) {
+          dots.push({ x: x1, y: y1, color: d.color }, { x: x2, y: y2, color: d.color },
+                    { x: x1, y: y2, color: d.color }, { x: x2, y: y1, color: d.color });
+        }
+        continue;
+      }
+
       g.beginPath();
       g.moveTo(x1, y1);
       g.lineTo(x2, y2);
@@ -3684,12 +4071,24 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         g.save();
         g.setLineDash([5, 4]);
         g.globalAlpha = 0.7;
+        g.lineWidth = 2;
         g.beginPath();
         g.moveTo(x2, y2);
         g.lineTo(plotW, y2 + slope * (plotW - x2));
         g.stroke();
         g.restore();
       }
+      if (picked) dots.push({ x: x1, y: y1, color: d.color }, { x: x2, y: y2, color: d.color });
+    }
+    // The picked drawing's handles: the dots TradingView puts on a line's ends and a box's corners.
+    for (const p of dots) {
+      g.beginPath();
+      g.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
+      g.fillStyle = "#0a0a0a";
+      g.fill();
+      g.lineWidth = 2;
+      g.strokeStyle = p.color;
+      g.stroke();
     }
     g.restore();
   };
@@ -3700,15 +4099,18 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     const series = seriesRef.current;
     if (!series) return;
     drawLinesRef.current.forEach((l) => series.removePriceLine(l));
-    drawLinesRef.current = drawings
-      .filter((d): d is Extract<Drawing, { kind: "h" }> => d.kind === "h")
-      .map((d) =>
-        series.createPriceLine({
-          price: d.price, color: d.color, lineWidth: 2, lineStyle: LineStyle.Solid,
+    drawLineByIdRef.current = new Map();
+    drawLinesRef.current = (drawHidden ? [] : drawings)
+      .filter((d): d is Extract<Drawing, { kind: "h" }> => d.kind === "h" && shownOn(d, timeframe))
+      .map((d) => {
+        const line = series.createPriceLine({
+          price: d.price, color: d.color, lineWidth: d.id === selId ? 3 : 2, lineStyle: LineStyle.Solid,
           axisLabelVisible: true, title: "✏️",
-        }),
-      );
-  }, [drawings, symbol, timeframe, dataV]);
+        });
+        drawLineByIdRef.current.set(d.id, line);
+        return line;
+      });
+  }, [drawings, symbol, timeframe, dataV, drawHidden, selId]);
 
   // The loop below is mounted once, so calling the painters directly would freeze them at their
   // first-render closures — `ovl`, `timeframe`, `positions` and the rest as they were at mount.
@@ -3754,14 +4156,16 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   useEffect(() => {
     dirtyRef.current += 1;   // saved set / overlays changed — repaint even if the view is still
-  }, [drawings, dataV, symbol, timeframe, ovl, positions, proposal, armed]);
+  }, [drawings, dataV, symbol, timeframe, ovl, positions, proposal, armed, drawHidden, selId]);
 
   // Close an open toolbar menu on any outside click. Without this the dropdown stays up while you
   // work on the chart, which is exactly the clutter the menus were meant to remove.
   useEffect(() => {
     if (!menu) return;
     const onDown = (e: MouseEvent) => {
-      if (!toolbarRef.current?.contains(e.target as Node)) setMenu(null);
+      // The strip's menus open in a portal (ToolMenu), outside the strip: a click in one is not "outside".
+      const t = e.target as Element;
+      if (!toolbarRef.current?.contains(t) && !t.closest?.("[data-toolmenu]")) setMenu(null);
     };
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
@@ -3787,6 +4191,28 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [drawMode]);
+
+  // The picked drawing: Delete / Backspace removes it, Esc lets go of it. Not while typing in a box, and not
+  // a key something else already took (scalp mode's Delete / Esc drop a staged pre-order first).
+  useEffect(() => {
+    if (!selId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return;
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        saveDrawings((prev) => prev.filter((d) => d.id !== selId));
+        setSelId(null);
+      } else if (e.key === "Escape") {
+        setSelId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selId, saveDrawings]);
+  // Another pair: nothing of its is picked.
+  useEffect(() => setSelId(null), [symbol]);
 
   // Drag the SL/TP line directly on the chart to adjust it, committing to the broker on drop. The
   // handlers read live state from refs, so they're attached once. While dragging we turn off chart
@@ -3820,11 +4246,22 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     };
 
     const onMove = (e: MouseEvent) => {
+      const dd = drawDragRef.current;
+      if (dd) {
+        const r = container.getBoundingClientRect();
+        drawDragMoveRef.current(dd, e.clientX - r.left, e.clientY - r.top);
+        return;
+      }
       const drag = dragRef.current;
       if (!drag) {
         // While a drawing tool is armed the cursor is a crosshair and lines aren't grabbable —
         // otherwise clicking to place a point next to an SL would drag the SL instead.
-        container.style.cursor = drawModeRef.current !== "off" ? "crosshair" : handleAt(e) ? "ns-resize" : "";
+        if (drawModeRef.current !== "off") { container.style.cursor = "crosshair"; return; }
+        if (handleAt(e)) { container.style.cursor = "ns-resize"; return; }
+        const r = container.getBoundingClientRect();
+        const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+        const hit = inside ? drawHitRef.current(e.clientX - r.left, e.clientY - r.top) : null;
+        container.style.cursor = hit ? (hit.kind === "h" ? "ns-resize" : "move") : "";
         return;
       }
       const price = yToPrice(e);
@@ -3838,7 +4275,25 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     const onDown = (e: MouseEvent) => {
       if (drawModeRef.current !== "off") return;
       const handle = handleAt(e);
-      if (!handle) return;
+      if (!handle) {
+        // Not an order line: a drawing? Picked, and held for a drag; anywhere else lets go of the picked one.
+        if (e.button !== 0) return;
+        const r = container.getBoundingClientRect();
+        const x = e.clientX - r.left;
+        const y = e.clientY - r.top;
+        const hit = drawHitRef.current(x, y);
+        if (!hit) {
+          if (selIdRef.current) setSelId(null);
+          return;
+        }
+        setSelId(hit.id);
+        const orig = drawingsRef.current.find((d) => d.id === hit.id);
+        if (!orig) return;
+        drawDragRef.current = { id: hit.id, part: hit.part, orig: JSON.parse(JSON.stringify(orig)) as Drawing, x0: x, y0: y, moved: false };
+        chartRef.current?.applyOptions({ handleScroll: false, handleScale: false });
+        e.preventDefault();
+        return;
+      }
       clearPendingRef.current();   // a new drag replaces a proposal still waiting
       dragRef.current = handle;
       dragPriceRef.current = null;
@@ -3847,6 +4302,16 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     };
 
     const onUp = () => {
+      const dd = drawDragRef.current;
+      if (dd) {
+        drawDragRef.current = null;
+        chartRef.current?.applyOptions({ handleScroll: true, handleScale: true });
+        const edited = liveEditRef.current;
+        liveEditRef.current = null;
+        dirtyRef.current += 1;
+        if (dd.moved && edited) saveDrawingsRef.current((prev) => prev.map((d) => (d.id === edited.id ? edited : d)));
+        return;
+      }
       const drag = dragRef.current;
       if (!drag) return;
       dragRef.current = null;
@@ -3903,10 +4368,14 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   // --- drawing gestures ------------------------------------------------------------------------
   // Press–drag–release for both tools. The earlier click-then-click trendline gave no feedback
   // between the two clicks; dragging shows the line following the cursor the whole way.
-  const atPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const atPointer = (e: React.PointerEvent<HTMLCanvasElement>, snap = false) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+    if (snap) {
+      const s = snapToBar(x, y);
+      if (s) return s;
+    }
     const price = seriesRef.current?.coordinateToPrice(y);
     const t = timeOfX(x);
     if (price == null || t == null) return null;
@@ -3915,7 +4384,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (drawMode === "off") return;
-    const at = atPointer(e);
+    const at = atPointer(e, magnet && (drawMode === "t" || drawMode === "r" || drawMode === "h"));
     if (!at) return;
     if (drawMode === "trade") {
       const dec = inferDecimals(candlesRef.current);
@@ -3955,14 +4424,18 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     e.currentTarget.setPointerCapture(e.pointerId);
     const color = DRAW_COLORS[drawings.length % DRAW_COLORS.length];
     if (drawMode === "h") {
-      saveDrawings((prev) => [...prev, { id: newDrawId(), kind: "h", price: at.p, color }]);
+      const id = newDrawId();
+      saveDrawings((prev) => [...prev, { id, kind: "h", price: at.p, color, tf: timeframe }]);
+      setSelId(id);
       setDrawMode("off");
       return;
     }
     draftRef.current =
       drawMode === "f"
-        ? { id: newDrawId(), kind: "f", pts: [{ t: at.t, p: at.p }], color }
-        : { id: newDrawId(), kind: "t", t1: at.t, p1: at.p, t2: at.t, p2: at.p, color };
+        ? { id: newDrawId(), kind: "f", pts: [{ t: at.t, p: at.p }], color, tf: timeframe }
+        : drawMode === "r"
+          ? { id: newDrawId(), kind: "r", t1: at.t, p1: at.p, t2: at.t, p2: at.p, color, tf: timeframe }
+          : { id: newDrawId(), kind: "t", t1: at.t, p1: at.p, t2: at.t, p2: at.p, color, tf: timeframe };
     lastPxRef.current = { x: at.x, y: at.y };
     paintOverlay();
   };
@@ -3970,7 +4443,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const d = draftRef.current;
     if (!d) return;
-    const at = atPointer(e);
+    const at = atPointer(e, magnet && d.kind !== "f");
     if (!at) return;
     if (d.kind === "f") {
       // Drop samples under 2px apart: the pointer fires far faster than the hand moves, and the
@@ -3979,7 +4452,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       if (last && Math.hypot(at.x - last.x, at.y - last.y) < 2) return;
       lastPxRef.current = { x: at.x, y: at.y };
       d.pts.push({ t: at.t, p: at.p });
-    } else if (d.kind === "t") {
+    } else if (d.kind === "t" || d.kind === "r") {
       d.t2 = at.t;
       d.p2 = at.p;
     }
@@ -3992,15 +4465,23 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     lastPxRef.current = null;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     if (!d) return;
-    // A stray click that never became a line is a mis-click, not a drawing.
+    // A stray click that never became a line is a mis-click, not a drawing (under 4 px end to end).
+    const span = (a: number, b: number, pa: number, pb: number) => {
+      const xa = xOfTime(a);
+      const xb = xOfTime(b);
+      const ya = seriesRef.current?.priceToCoordinate(pa);
+      const yb = seriesRef.current?.priceToCoordinate(pb);
+      return xa == null || xb == null || ya == null || yb == null ? 0 : Math.hypot(xb - xa, Number(yb) - Number(ya));
+    };
     const tooSmall =
-      (d.kind === "f" && d.pts.length < 2) || (d.kind === "t" && d.t1 === d.t2 && d.p1 === d.p2);
+      (d.kind === "f" && d.pts.length < 2) || ((d.kind === "t" || d.kind === "r") && span(d.t1, d.t2, d.p1, d.p2) < 4);
     dirtyRef.current += 1;
     if (tooSmall) {
       paintOverlay();
       return;
     }
     saveDrawings((prev) => [...prev, d]);
+    setSelId(d.id);
     setDrawMode("off");
   };
 
@@ -4149,451 +4630,6 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   return (
     <div ref={rootRef} className={`relative${fills ? " flex min-h-0 flex-1 flex-col" : ""}`}>
-      <div ref={toolbarRef} className={`${scalp ? "mb-1 p-1" : "mb-2 p-1.5"} flex flex-wrap items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-900/40`}>
-        {/* Three menus instead of fifteen chips. The counts keep "what is on" visible without
-            every option being permanently on screen. */}
-        <ToolMenu label="📈 EMA" count={EMA_CONFIG.filter(({ period }) => showEma[period]).length}
-                  open={menu === "ema"} onToggle={() => setMenu((m) => (m === "ema" ? null : "ema"))} width="w-60">
-          {EMA_CONFIG.map(({ period, color }) => (
-            <MenuItem key={period} on={!!showEma[period]} dot={color}
-                      onClick={() => setShowEma((x) => ({ ...x, [period]: !x[period] }))}>
-              EMA {period}
-            </MenuItem>
-          ))}
-          <div className="mt-1 border-t border-neutral-800 px-1.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-            EMA 10 × 20
-          </div>
-          <MenuItem on={!!ovl.emaRibbon} dot="#22c55e" onClick={() => setOvl((x) => ({ ...x, emaRibbon: !x.emaRibbon }))}
-                    tip="Tints the space between EMA 10 and EMA 20: green while 10 is above 20, red while it is below. The colour flips exactly where they cross. Needs both EMAs on.">
-            Ribbon: green above, red below
-          </MenuItem>
-          <MenuItem on={!!ovl.emaCross} dot="#f43f5e" onClick={() => setOvl((x) => ({ ...x, emaCross: !x.emaCross }))}
-                    tip="Marks each TRUE cross with an arrow on the candle it happened on: crossed on a closed candle, did not cross straight back, and within 3 closed candles the lines separated and the close confirmed the new side. A cross that whips back is not marked. Needs both EMAs on.">
-            Mark true crosses
-          </MenuItem>
-        </ToolMenu>
-
-        <ToolMenu label="📊 Indicators"
-                  count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel, showFib].filter(Boolean).length}
-                  open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))}>
-          <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI {RSI_P}</MenuItem>
-          <div
-            className="flex items-center gap-1 px-1.5 pb-1 pl-8 text-xs text-neutral-400"
-            title={`The RSI's period: fewer bars reacts sooner and swings more. ${scalp ? "7 is scalp mode's default" : "14 is the classic"}; kept for ${scalp ? "scalp mode" : "the normal chart"}.`}
-          >
-            period
-            <input
-              type="number"
-              min={2}
-              max={50}
-              value={RSI_P}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                if (Number.isFinite(v) && v >= 2 && v <= 50) setRsiPick(Math.round(v));
-              }}
-              aria-label="RSI period"
-              className="w-12 rounded border border-neutral-700 bg-neutral-900 px-1 text-center tabular-nums text-purple-200"
-            />
-            {[7, 9, 14, 21].map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => setRsiPick(p)}
-                className={`rounded px-1.5 ${RSI_P === p ? "bg-purple-500/30 font-semibold text-purple-100" : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"}`}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-          <MenuItem on={rsiIn} onClick={() => setRsiIn((v) => !v)} dot="#a78bfa"
-                    tip="Draw the RSI (and the Stochastic) in a band at the bottom of the price chart, under the volume, instead of in a pane of its own: one time axis, no gap, and the height goes to the candles. Off: the RSI gets its own resizable pane.">
-            … inside the price chart
-          </MenuItem>
-          <MenuItem on={showStoch} onClick={() => setShowStoch((v) => !v)} dot="#22d3ee"
-                    tip="Stochastic 5,3,3 with the RSI: %K (cyan) and its average %D (orange, dashed). Where the close sits in the last 5 bars' range - over 80 it closes near the highs, under 20 near the lows. It turns before the RSI does, so it is the quicker of the two and the noisier.">
-            Stochastic 5,3,3{!showRsi && " (needs the RSI)"}
-          </MenuItem>
-          <MenuItem on={showMacd} onClick={() => setShowMacd((v) => !v)} dot="#3b82f6">MACD pane</MenuItem>
-          <MenuItem on={showFlow} onClick={() => setShowFlow((v) => !v)} dot="#38bdf8"
-                    tip="Who pushed the price, buyers or sellers: each tick that lifted the price counts as buying, each that dropped it as selling. Exness sends no real volume, so this is an estimate from the ticks. Bars for each candle, buyers' share over the last N candles, and a quick check of whether a strong share was followed by price going the same way.">
-            Order flow pane (buyers vs sellers)
-          </MenuItem>
-          <MenuItem on={showSt} onClick={() => setShowSt((v) => !v)} dot="#26a69a"
-                    tip="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red = downtrend (resistance)">
-            SuperTrend
-          </MenuItem>
-          <MenuItem on={showPb} onClick={() => setShowPb((v) => !v)} dot="#f59e0b"
-                    tip="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70.">
-            Pullback signals
-          </MenuItem>
-          <MenuItem on={showStructure} onClick={() => setShowStructure((v) => !v)} dot="#38bdf8"
-                    tip="Market structure: labels swing pivots HH / HL (bullish) and LH / LL (bearish) — the same swing map the engine reads. Only the most recent swings are labelled, so older ones don't carpet the chart.">
-            Structure (HH/HL)
-          </MenuItem>
-          <MenuItem on={showChannel} onClick={() => setShowChannel((v) => !v)} dot="#a78bfa"
-                    tip="Regression channel: the algorithmic trend line (mid) + dynamic resistance/support bands. Shown for your read; tested and NOT used to gate trades.">
-            Regression channel
-          </MenuItem>
-          <MenuItem on={showFib} onClick={() => setShowFib((v) => !v)} dot="#34d399"
-                    tip="Finds the trend on THIS timeframe and draws the Fibonacci on the swing that matters - on any timeframe. Uptrend (higher highs and lows): from the swing low of the latest push up to its high. Downtrend: from the swing high of the latest drop to its low. A squeeze: the move price is still inside. 0.236 to 0.786 are where a pullback often stalls (0.618 thick); ext 1.272 / 1.618 beyond the swing are targets. Drawn on the last FINISHED swing, so its levels and targets stay put while price runs to them; it moves to the next swing once that one is finished (price turned 3 x ATR off it). Past the 1 the swing is broken: 1.272 / 1.618 beyond the 1 show where a break runs. Shown for your read; not used to gate trades.">
-            Auto Fibonacci
-          </MenuItem>
-        </ToolMenu>
-
-        <ToolMenu label="📍 Levels"
-                  count={(["1h", "4h", "1d"] as const).filter((tf) => showSR[tf]).length
-                         + (showBand ? 1 : 0)
-                         + Object.entries(ovl).filter(([k, v]) => v && k !== "emaRibbon" && k !== "emaCross").length}
-                  open={menu === "lv"} onToggle={() => setMenu((m) => (m === "lv" ? null : "lv"))} width="w-72">
-          <div className="px-1.5 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-            Support / resistance
-          </div>
-          {(["1h", "4h", "1d"] as const).map((tf) => (
-            <MenuItem key={tf} on={!!showSR[tf]} onClick={() => setShowSR((x) => ({ ...x, [tf]: !x[tf] }))}
-                      dot={{ "1h": "#94a3b8", "4h": "#f59e0b", "1d": "#f87171" }[tf]}
-                      tip={`Swing levels from the ${tf} chart. R = resistance, S = support.`}>
-              {tf.toUpperCase()} support / resistance
-            </MenuItem>
-          ))}
-          <MenuItem on={showBand} onClick={() => setShowBand((v) => !v)} dot="#22d3ee"
-                    tip="EMA20 of highs / lows = a band around price. The SuperTrend Strategy enters on a close BEYOND this band.">
-            EMA20 high/low band
-          </MenuItem>
-          <div className="mt-1 border-t border-neutral-800 px-1.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-            Overlays
-          </div>
-          {([
-            ["days", "Day separators", "A dotted line + date at each TRADING day start (00:00 UTC) — the same boundary the daily candle, PDH/PDL and the engine use. On the 1h chart that block is one day of candles."],
-            ["pd", "Prior day high / low", "PDH & PDL — yesterday's range. The engine's htf_level filter already scores against these."],
-            ["pw", "Prior week high / low", "PWH & PWL — last completed week's range."],
-            ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
-            ["vwap", "Session VWAP", "Volume-weighted average price, reset each trading day — the level institutions execute against, and the same one the rejection score uses for its location points."],
-            ["vwapb", "VWAP bands (±1σ, ±2σ)", "One and two volume-weighted standard deviations either side of the session VWAP. Inside ±1σ is where the session trades most; out at ±2σ price is stretched, and a scalp entered there chases the move."],
-            ["pivots", "Daily pivots (P, R1-R2, S1-S2)", "Floor pivots from yesterday's high, low and close: P = (H + L + C) / 3, R1 = 2P - L, S1 = 2P - H, R2 / S2 = P ± (H - L). Levels many intraday traders watch, so price often pauses at them."],
-            ["bb", "Bollinger bands (20, 2)", "A 20-bar average with bands two standard deviations either side. Narrow bands = a quiet market coiling; price riding a band = a strong push; a close back inside after a band poke = the push fading."],
-            ["sessions", "Session shading", "Asia / Middle East / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
-            ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
-            ["hist", "Trade history (MT5 style)", "Your past trades on this pair, drawn the way MetaTrader does: each deal is an arrow with its tip on the price - a buy blue and pointing up, a sell red and pointing down - so a buy opens on a blue arrow and closes on a red one. A dotted line joins each entry to its exit (blue = a buy, red = a sell), with the result at the exit. Point at an arrow for the details: lots, times, prices, who opened it and why it closed (stop, target, the app, MT5). From the broker's own deal history, every trade on the account - the terminal's and the phone's too."],
-            ["sig", "Watch signals (👁)", "Each BUY / SELL signal of a strategy group on watch - the trade it would have taken - on the candle it fired in, in the signals' own fuchsia: 👁 BUY under the bar, 👁 SELL over it. Point at one for what price did after it: its best and worst move in the hour after, and where price is now against it. From the strategies' activity feed (its last 200 events - a few days)."],
-            ["rr", "Risk / reward bands", "Full-width bands entry→stop (red) and entry→target (green). With Trade zones on, only armed setups get these; otherwise positions and proposals too."],
-            ["ob", "Order blocks", "Supply and demand zones: the candle an impulsive move departed from, where that move also BROKE a swing. Cyan = demand (below price), amber = supply (above). Brighter means stronger; a hollow, dashed box has already been traded into, and the first return to a zone is the clean one. The tag reads side · strength · FVG (an imbalance was left on the way out) · how many times it has been tested."],
-            ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
-            ["choch", "Change of character", "Marks where the swing sequence first contradicts the trend it was in."],
-          ] as const).map(([k, lbl, tip]) => (
-            <MenuItem key={k} on={!!ovl[k]} onClick={() => setOvl((x) => ({ ...x, [k]: !x[k] }))} tip={tip}>
-              {lbl}
-            </MenuItem>
-          ))}
-        </ToolMenu>
-
-        {showFib && (() => {
-          // Where price is on the leg NOW (a live bar past the 1 breaks it at once, as the drawing shows).
-          const lb = lastBarRef.current;
-          const ts = barTimesRef.current;
-          const live = lb && ts.length
-            ? { index: ts.length - 1 + ((lb.time as number) > ts[ts.length - 1] ? 1 : 0), high: lb.high, low: lb.low }
-            : null;
-          const f = fib ? liveFib(fib, live) : null;
-          const at = f && lb ? fibPosition(f, lb.close) : null;
-          const st = f ? fibStatus(f, at) : null;
-          const zone = st?.zone ?? null;
-          const fmt = (v: number) => fmtPrice(v, priceDec);
-          return (
-            <span
-              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${
-                !f ? "bg-neutral-800 text-neutral-400" : f.broken ? "bg-amber-500/15 text-amber-300" : f.trend === "up" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
-              }`}
-              title={f ? fibExplain(f, at, fmt)
-                       : "Auto Fibonacci: no finished swing on this chart yet (price has to turn 3 x ATR off a high or a low). It draws as soon as one is finished."}
-            >
-              <span>
-                📐 Fib {f ? (f.trend === "up" ? "▲ up" : "▼ down") : "· no clear swing yet"}
-                {st?.text}
-              </span>
-              {zone && (
-                <span className="rounded-full px-1.5 font-bold text-neutral-950" style={{ backgroundColor: zone.color }}>
-                  {zone.label.toLowerCase()}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => setShowFib(false)}
-                title="Clear the Fibonacci from the chart (📊 Indicators → Auto Fibonacci brings it back)"
-                aria-label="Clear the Fibonacci"
-                className="rounded px-0.5 leading-none text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100"
-              >
-                ✕
-              </button>
-            </span>
-          );
-        })()}
-
-        {ovl.ob && obStatus && (
-          <span
-            className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
-              obStatus.kind === "error"
-                ? "bg-bear/20 text-bear"
-                : obStatus.kind === "loading"
-                  ? "bg-neutral-800 text-neutral-400"
-                  : "bg-cyan-500/15 text-cyan-300"
-            }`}
-            title={obStatus.text}
-          >
-            {obStatus.text}
-          </span>
-        )}
-
-        {/* Rejection score, on the chart rather than buried in the map panel. A score you have to
-            go looking for is a score you don't use. Click it to open the full breakdown. */}
-        {ctx?.rejection && ctx.rejection.band !== "none" && (
-          <button
-            onClick={() => setCtxOpen(true)}
-            className={`rounded px-1.5 py-0.5 text-[11px] font-semibold tabular-nums transition ${
-              ctx.rejection.band === "high"
-                ? "animate-pulse bg-amber-500/25 text-amber-300"
-                : ctx.rejection.band === "valid"
-                  ? "bg-sky-500/20 text-sky-300"
-                  : "bg-neutral-800 text-neutral-400"
-            }`}
-            title={`${ctx.rejection.verdict}
-
-Scored ${ctx.rejection.score} of ${ctx.rejection.max}: ` +
-                   Object.entries(ctx.rejection.groups).map(([g, v]) => `${g} ${v.got}/${v.max}`).join(", ") +
-                   `.
-Click for the full breakdown. Info only — it gates nothing.`}
-          >
-            {ctx.rejection.direction === "short" ? "▼" : "▲"} Rejection {ctx.rejection.score}/{ctx.rejection.max}
-          </button>
-        )}
-
-        {/* Economic calendar. The headline is the NEXT high-impact release and how long until it —
-            "in 34m" is what changes a decision; "there is news today" doesn't. */}
-        {events && (() => {
-          // Minutes are recomputed from the timestamp on every render, NOT read from the
-          // server's `minutes_away`. That field is a snapshot from fetch time and the calendar is
-          // only re-pulled every 10 minutes, so trusting it left the countdown up to ten minutes
-          // wrong — and showed an event that had already fired as still ahead. The 1-second bar
-          // timer re-renders this component, so a locally derived figure stays live for free.
-          const mins = (e: MarketEvent) => Math.round((Date.parse(e.when) - Date.now()) / 60000);
-          const upcoming = events.filter((e) => mins(e) >= 0);
-          const highs = upcoming.filter((e) => e.importance.toLowerCase() === "high");
-          const next = highs[0];
-          const imminent = next != null && mins(next) <= 60;
-          const soon = next != null && mins(next) <= 240;
-          const label = next
-            ? `${next.label.replace(/^[A-Z]{2}:\s*/, "").slice(0, 22)} ${mins(next) < 60 ? `${mins(next)}m` : `${Math.round(mins(next) / 60)}h`}`
-            : upcoming.length
-              ? `${upcoming.length} minor`
-              : "clear";
-          return (
-            <span className="relative">
-              <button
-                onClick={() => setEvOpen((v) => !v)}
-                className={`rounded px-1.5 py-0.5 text-[11px] transition ${
-                  imminent
-                    ? "animate-pulse bg-bear/25 text-bear"
-                    : soon
-                      ? "bg-warn/20 text-warn"
-                      : next
-                        ? "bg-neutral-800 text-neutral-300"
-                        : "text-neutral-600 hover:bg-neutral-800"
-                }`}
-                title={
-                  next
-                    ? `Next high-impact release for ${symbol}: ${next.label} in ${mins(next)} min. Spreads widen and stops get run around these — the engine already stands aside, and so should a manual entry.`
-                    : `No high-impact releases ahead today for ${symbol}. ${upcoming.length} lower-impact items.`
-                }
-              >
-                📅 {label}
-              </button>
-              {evOpen && (
-                <div className="absolute left-0 top-7 z-40 max-h-80 w-[21rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-2 text-xs shadow-xl">
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="font-semibold text-sky-300">📅 Today — {symbol}</span>
-                    <button onClick={() => setEvOpen(false)} className="text-neutral-500 hover:text-neutral-200">✕</button>
-                  </div>
-                  {events.length === 0 && <div className="py-2 text-neutral-500">Nothing scheduled for this instrument.</div>}
-                  {events.map((e, i) => {
-                    const away = mins(e);
-                    const past = away < 0;
-                    const high = e.importance.toLowerCase() === "high";
-                    return (
-                      <div key={i} className={`flex items-baseline gap-2 rounded px-1 py-1 ${past ? "opacity-50" : ""}`}>
-                        <span className="w-12 shrink-0 tabular-nums text-neutral-400">
-                          {new Date(e.when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                        </span>
-                        <span className={`w-8 shrink-0 text-[10px] font-semibold ${high ? "text-bear" : "text-neutral-500"}`}>
-                          {high ? "HIGH" : "med"}
-                        </span>
-                        <span className="min-w-0 flex-1 text-neutral-300">
-                          {e.label}
-                          {/* Forecast vs previous is the whole point: the SURPRISE moves price,
-                              not the number itself. */}
-                          {(e.forecast != null || e.previous != null) && (
-                            <span className="ml-1 text-neutral-500">
-                              {e.actual != null ? `actual ${e.actual} · ` : ""}
-                              {e.forecast != null ? `f/c ${e.forecast}` : ""}
-                              {e.previous != null ? ` · prev ${e.previous}` : ""}
-                            </span>
-                          )}
-                        </span>
-                        <span className="shrink-0 tabular-nums text-neutral-600">
-                          {past ? "done" : away < 60 ? `${away}m` : `${Math.round(away / 60)}h`}
-                        </span>
-                      </div>
-                    );
-                  })}
-                  <p className="mt-1 border-t border-neutral-800 pt-1 text-[10px] leading-snug text-neutral-500">
-                    Times in your clock. The engine already stands aside around HIGH-impact releases —
-                    this is so a manual entry doesn't walk into one.
-                  </p>
-                </div>
-              )}
-            </span>
-          );
-        })()}
-
-        {/* States the clock the axis is in. Without it, "is 14:00 my time or the broker's?" is a
-            question you can only answer by counting candles back from now. */}
-        <button
-          onClick={() => setTzMode((m) => (m === "local" ? "utc" : "local"))}
-          className={`ml-auto rounded px-1.5 py-0.5 text-[10px] transition hover:bg-neutral-800 ${
-            tzMode === "utc" ? "text-sky-400" : "text-neutral-600 hover:text-neutral-300"
-          }`}
-          title={
-            tzMode === "utc"
-              ? "Axis is in UTC / broker time — day separators fall on 00:00, matching what other traders see. Click to switch back to your own clock."
-              : `Axis is in ${tzLabel("local")} — your computer's clock. Price levels are UNAFFECTED: PDH/PDL and every other level are measured over the 00:00 UTC trading day either way, so they match every other trader. Click to show the axis in UTC instead.`
-          }
-        >
-          🕐 {tzShort(tzMode)}
-        </button>
-        {/* Candle-close countdown. "Wait for the close, not the wick" is only actionable if you know
-            how long that is — so this reads as a traffic light rather than a number you have to
-            interpret. Graded on the FRACTION of the bar left, not raw seconds: 30s is nearly a whole
-            5m bar's decision window but a rounding error on the 4h.
-              green  — over half the bar left, nothing to do yet
-              amber  — final quarter, get ready
-              red    — final tenth, this is the decision moment (pulses inside 10 seconds)
-            The filling underline shows the same thing without reading any digits. */}
-        {barLeft && (() => {
-          const tone =
-            barLeft.frac > 0.5
-              ? { cls: "border-emerald-700/50 bg-emerald-900/25 text-emerald-300", icon: "⏱" }
-              : barLeft.frac > 0.25
-                ? { cls: "border-sky-700/50 bg-sky-900/25 text-sky-300", icon: "⏱" }
-                : barLeft.frac > 0.1
-                  ? { cls: "border-amber-600/60 bg-amber-900/30 text-amber-300", icon: "⏳" }
-                  : { cls: "border-rose-600/70 bg-rose-900/40 text-rose-300", icon: "🔔" };
-          return (
-            <span
-              className={`relative flex items-center gap-1 overflow-hidden rounded border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${tone.cls}${
-                barLeft.left <= 10 ? " animate-pulse" : ""
-              }`}
-              title={`${barLeft.text} until the current ${timeframe} candle closes. A wick through a level is not a break — the close is what counts.`}
-            >
-              {tone.icon} {barLeft.text}
-              <span
-                className="absolute bottom-0 left-0 h-[2px] bg-current opacity-80 transition-all duration-1000 ease-linear"
-                style={{ width: `${Math.round((1 - barLeft.frac) * 100)}%` }}
-              />
-            </span>
-          );
-        })()}
-        <button
-          onClick={() => { setCtxOpen((v) => !v); if (!ctx) void loadContext(); }}
-          disabled={ctxBusy}
-          className={`rounded px-2 py-0.5 text-xs disabled:opacity-50 ${ctxOpen ? "bg-neutral-700 text-white" : "bg-neutral-800/50 text-sky-300 hover:bg-neutral-700 hover:text-white"}`}
-          title="Read: plain-language 'where is price on the map (S/R, channel, structure) + do RSI/volume/ATR confirm?' analysis for this pair. Info only — it does NOT change the engine's decision; it's for your Mode-A call."
-        >
-          {ctxBusy ? "…" : "🗺️ Read"}
-        </button>
-        {/* Only appears once the map has drawn levels — the way to clear them after you've closed
-            the panel to look at the chart. */}
-        {ctxLevels && (
-          <button
-            onClick={() => setCtxLevels(null)}
-            className="rounded bg-sky-950/60 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white"
-            title="Hide the price map's support/resistance levels"
-          >
-            📍 Levels ✕
-          </button>
-        )}
-        {ctxPlans.length > 0 && (
-          <button
-            onClick={() => setCtxPlans([])}
-            className="rounded bg-sky-950/60 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white"
-            title="Hide the break plan lines (trigger / target / stop)"
-          >
-            🎯 Plan ✕
-          </button>
-        )}
-        <button
-          // Explicitly force=false. Passing loadScenarios directly would hand it the click event,
-          // which is truthy — every press of this button would then bypass the cache and pay for a
-          // fresh run.
-          onClick={() => void loadScenarios(false)}
-          disabled={scenBusy}
-          className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-violet-300 hover:bg-neutral-700 hover:text-white disabled:opacity-50"
-          title="AI scenarios: the AI reasons out TWO ranked, scored forward scenarios (anchored to the real S/R + structure) and explains why the chosen one is more likely. Reuses a cached read for up to 15 minutes. Info only — it does NOT change the engine's decision."
-        >
-          {scenBusy ? "…" : "🤖 Scenarios"}
-        </button>
-        {fills && strategies && (
-          <button
-            onClick={() => setStratOpen((v) => !v)}
-            aria-pressed={stratOpen}
-            className={`rounded px-2 py-0.5 text-xs ${stratOpen ? "bg-amber-500/25 text-amber-200" : "bg-neutral-800/50 text-amber-300 hover:bg-neutral-700 hover:text-white"}`}
-            title="Your strategies, live: what each pair's rules read now, the trades they hold, today's result - in a panel you can move and resize"
-          >
-            ♟ Strategies
-          </button>
-        )}
-        <button
-          onClick={recenter}
-          className="rounded bg-neutral-800/50 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700 hover:text-white"
-          title="Recenter — reset to the recent bars with the price axis auto-fitted"
-        >
-          ⊹ Recenter
-        </button>
-
-        {/* Hand-drawn lines: arm a tool, click the chart. Saved per pair and kept until deleted.
-            The three drawing tools are icons (the name is in the tooltip) so the toolbar fits one row;
-            Arm and Trade open trades, so they keep their names - a click on them is never a guess.
-            The price alert is its own labelled button on the chart, by Full screen (2026-11-08). */}
-        <span className="ml-1 flex items-center gap-1 border-l border-neutral-800 pl-2">
-          {([
-            ["f", "🖊", "Pen", "Free hand — press and drag to draw any shape, exactly like a pen on paper."],
-            ["t", "╱", "Trend line", "Press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
-            ["h", "─", "Level", "One click puts a horizontal line across the whole chart, with its price on the axis."],
-            ["arm", "⚡", "Arm", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
-            ["trade", "▶", "Trade", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance and the risk you pick on the ticket (never above your per-trade cap)."],
-          ] as const).map(([mode, icon, name, tip]) => {
-            const named = mode === "arm" || mode === "trade";
-            return (
-              <button
-                key={mode}
-                onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode((m) => (m === mode ? "off" : mode)); }}
-                className={`rounded py-0.5 text-xs transition ${named ? "px-2" : "w-7 text-center"} ${drawMode === mode ? "bg-sky-600 text-white" : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"}`}
-                title={`${name}: ${tip}`}
-                aria-label={name}
-              >
-                {named ? `${icon} ${name}` : icon}
-              </button>
-            );
-          })}
-          {drawings.length > 0 && (
-            <button
-              onClick={() => setDrawList((v) => !v)}
-              className={`rounded px-2 py-0.5 text-xs transition ${drawList ? "bg-neutral-700 text-white" : "bg-neutral-800/50 text-neutral-300 hover:bg-neutral-700 hover:text-white"}`}
-              title={`${drawings.length} saved drawing${drawings.length === 1 ? "" : "s"} on ${symbol} — open to review or delete`}
-            >
-              📐 {drawings.length}
-            </button>
-          )}
-        </span>
-      </div>
-
       {ctx && ctxOpen && (
         <div
           data-panel
@@ -4890,7 +4926,7 @@ Click for the full breakdown. Info only — it gates nothing.`}
         <div
           data-panel
           style={scenDrag.style}
-          className="absolute left-2 top-10 z-30 flex max-h-[580px] w-[23rem] flex-col overflow-y-auto rounded-lg border border-violet-800/60 bg-neutral-900/95 p-3 shadow-xl"
+          className="absolute left-11 top-10 z-30 flex max-h-[580px] w-[23rem] flex-col overflow-y-auto rounded-lg border border-violet-800/60 bg-neutral-900/95 p-3 shadow-xl"
         >
           {/* The close ✕ used to float over the card's own title; a real header bar gives it a home
               AND gives the panel something to be dragged by. */}
@@ -4988,23 +5024,34 @@ Click for the full breakdown. Info only — it gates nothing.`}
       {/* Review + delete. Every drawing is listed with what it is and where, so you can remove one
           precisely — a chart you can only clear wholesale is one you stop annotating. */}
       {drawList && drawings.length > 0 && (
-        <div className="absolute right-2 top-10 z-40 max-h-[420px] w-[19rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 text-xs shadow-xl">
+        <div className="absolute left-11 top-10 z-40 max-h-[420px] w-[22rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-3 text-xs shadow-xl">
           <div className="mb-2 flex items-center justify-between">
             <span className="font-semibold text-sky-300">📐 My drawings — {symbol}</span>
             <button onClick={() => setDrawList(false)} className="text-neutral-500 hover:text-neutral-200" title="Close">✕</button>
           </div>
           <ul className="space-y-1">
             {drawings.map((d) => (
-              <li key={d.id} className="flex items-center gap-2 rounded bg-neutral-800/50 px-2 py-1">
+              <li key={d.id} className={`flex items-center gap-2 rounded px-2 py-1 ${d.id === selId ? "bg-sky-500/15 ring-1 ring-sky-600/60" : "bg-neutral-800/50"}`}>
                 <span className="h-0.5 w-4 shrink-0 rounded" style={{ backgroundColor: d.color }} />
-                <span className="min-w-0 flex-1 truncate text-neutral-300">
+                <button
+                  type="button"
+                  onClick={() => setSelId((v) => (v === d.id ? null : d.id))}
+                  className="min-w-0 flex-1 truncate text-left text-neutral-300 hover:text-white"
+                  title="Pick it on the chart (drag to move, Delete removes it)"
+                >
                   {d.kind === "h" ? (
-                    <>Level <span className="tabular-nums text-neutral-100">{fmtPrice(d.price)}</span></>
+                    <>Level <span className="tabular-nums text-neutral-100">{fmtPrice(d.price, priceDec)}</span></>
                   ) : d.kind === "t" ? (
                     <>
                       Trend{" "}
-                      <span className="tabular-nums text-neutral-100">{fmtPrice(d.p1)} → {fmtPrice(d.p2)}</span>
+                      <span className="tabular-nums text-neutral-100">{fmtPrice(d.p1, priceDec)} → {fmtPrice(d.p2, priceDec)}</span>
                       <span className="ml-1 text-neutral-500">{new Date(d.t1 * 1000).toLocaleDateString()}</span>
+                    </>
+                  ) : d.kind === "r" ? (
+                    <>
+                      Zone{" "}
+                      <span className="tabular-nums text-neutral-100">{fmtPrice(Math.min(d.p1, d.p2), priceDec)} – {fmtPrice(Math.max(d.p1, d.p2), priceDec)}</span>
+                      <span className="ml-1 text-neutral-500">{new Date(Math.min(d.t1, d.t2) * 1000).toLocaleDateString()}</span>
                     </>
                   ) : (
                     <>
@@ -5015,7 +5062,19 @@ Click for the full breakdown. Info only — it gates nothing.`}
                       </span>
                     </>
                   )}
-                </span>
+                </button>
+                {d.tf && (
+                  <button
+                    type="button"
+                    onClick={() => saveDrawings((prev) => prev.map((x) => (x.id === d.id ? { ...x, only: !x.only } : x)))}
+                    className={`shrink-0 rounded px-1 text-[10px] tabular-nums ${d.only ? "bg-sky-500/20 text-sky-300" : "text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"}`}
+                    title={d.only
+                      ? `Shown on the ${d.tf} chart only - click to show it on every timeframe`
+                      : `Drawn on the ${d.tf}, shown on every timeframe - click to keep it to the ${d.tf}`}
+                  >
+                    {d.only ? `${d.tf} only` : `all · ${d.tf}`}
+                  </button>
+                )}
                 <button
                   onClick={() => saveDrawings((prev) => prev.filter((x) => x.id !== d.id))}
                   className="shrink-0 rounded px-1 text-neutral-500 hover:bg-bear/20 hover:text-bear"
@@ -5027,24 +5086,265 @@ Click for the full breakdown. Info only — it gates nothing.`}
             ))}
           </ul>
           <button
-            onClick={() => { saveDrawings(() => []); setDrawList(false); }}
+            onClick={() => { saveDrawings(() => []); setDrawList(false); setSelId(null); }}
             className="mt-2 w-full rounded border border-neutral-700 py-1 text-neutral-400 hover:border-bear/60 hover:text-bear"
           >
             Delete all {drawings.length}
           </button>
           <p className="mt-2 text-[10px] leading-snug text-neutral-500">
-            Saved on this device for {symbol}, on every timeframe, until you delete them.
+            Saved on this device for {symbol}, until you delete them. Each sits on the same time and price on every
+            timeframe ("all"), or only on the one it was drawn on. Click one on the chart to pick it: drag it to move
+            it, drag a dot to reshape it, Delete removes it.
           </p>
         </div>
       )}
 
+      <div className={`flex${fills ? " min-h-0 flex-1" : ""}`}>
+      {/* The tool strip down the chart's left side — TradingView's drawing bar (asked 2026-11-15). It took
+          over the toolbar row that sat above the chart, and that row's height went to the candles. Names and
+          what each does are in the tooltips. Positioned inside a fixed-width column so a tall strip scrolls
+          instead of stretching the chart's row; its menus open beside it (ToolMenu). */}
+      <div className="relative mr-1 w-9 shrink-0">
+        {stripMore && (
+          <button
+            type="button"
+            onClick={() => toolbarRef.current?.scrollBy({ top: 140, behavior: "smooth" })}
+            className="absolute inset-x-0 bottom-0 z-10 mr-0.5 flex h-5 items-center justify-center bg-gradient-to-t from-neutral-950 to-transparent text-[11px] text-neutral-400 hover:text-white"
+            title="More tools below"
+            aria-label="More tools below"
+          >
+            ⌄
+          </button>
+        )}
+        <div
+          ref={toolbarRef}
+          onScroll={checkStrip}
+          role="toolbar"
+          aria-orientation="vertical"
+          aria-label="Chart tools"
+          className="absolute inset-0 flex flex-col items-center gap-0.5 overflow-y-auto overflow-x-hidden border-r border-neutral-800/80 pr-0.5 pt-0.5"
+          style={{ scrollbarWidth: "none" }}
+        >
+          <StripBtn
+            on={drawMode === "off"}
+            tone="neutral"
+            title="Cursor: point, pan and zoom. Click a drawing to pick it - drag it to move it, a dot to reshape it, Delete removes it."
+            onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode("off"); }}
+          >
+            <Icon name="cursor" />
+          </StripBtn>
+          {([
+            ["t", "trend", "Trend line", "Press at the start, drag to the end, release. It carries on dashed to the right edge so you can see where price will meet it."],
+            ["h", "hline", "Level", "One click puts a horizontal line across the whole chart, with its price on the axis."],
+            ["r", "rect", "Rectangle", "A zone: press at one corner, drag to the opposite one. Filled faintly, so the candles inside stay readable."],
+            ["f", "pen", "Pen", "Free hand - press and drag to draw any shape, exactly like a pen on paper."],
+          ] as const).map(([mode, icon, name, tip]) => (
+            <StripBtn
+              key={mode}
+              on={drawMode === mode}
+              title={`${name}: ${tip}${mode !== "f" && magnet ? " (magnet on)" : ""}`}
+              onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode((m) => (m === mode ? "off" : mode)); }}
+            >
+              <Icon name={icon} />
+            </StripBtn>
+          ))}
+          <StripSep />
+          <StripBtn
+            on={magnet}
+            title={`Magnet ${magnet ? "ON" : "off"}: a trend line's, rectangle's or level's point snaps to the nearest open, high, low or close of the candle under the cursor (within 30 px), so a line drawn on the wicks touches them exactly.`}
+            onClick={() => setMagnet((v) => !v)}
+          >
+            <Icon name="magnet" />
+          </StripBtn>
+          <StripBtn
+            on={drawHidden}
+            tone="amber"
+            title={drawHidden ? `Your drawings are hidden (${drawings.length} saved) - click to show them` : "Hide your drawings - they stay saved"}
+            onClick={() => setDrawHidden((v) => !v)}
+          >
+            <Icon name={drawHidden ? "eyeOff" : "eye"} />
+          </StripBtn>
+          <StripBtn
+            on={drawList}
+            badge={drawings.length}
+            disabled={drawings.length === 0}
+            title={drawings.length
+              ? `My drawings: ${drawings.length} on ${symbol} - review, keep one to its timeframe, or delete`
+              : `My drawings: none on ${symbol} yet`}
+            onClick={() => setDrawList((v) => !v)}
+          >
+            <Icon name="layers" />
+          </StripBtn>
+          <StripSep />
+          {([
+            ["arm", "bolt", "Arm", "amber", "Quick arm — click a price to set an arming line. When a candle CLOSES beyond it the trade opens automatically, sized and gated by the Risk Manager exactly like any other trade."],
+            ["trade", "play", "Trade", "emerald", "Quick trade — click where your STOP goes and it opens at market straight away. The side is derived from the stop (below price = long, above = short) and the size comes from the stop distance and the risk you pick on the ticket (never above your per-trade cap)."],
+          ] as const).map(([mode, icon, name, tone, tip]) => (
+            <StripBtn
+              key={mode}
+              on={drawMode === mode}
+              tone={tone}
+              label={name}
+              title={`${name}: ${tip}`}
+              onClick={() => { draftRef.current = null; dirtyRef.current += 1; setDrawMode((m) => (m === mode ? "off" : mode)); }}
+            >
+              <Icon name={icon} size={15} />
+            </StripBtn>
+          ))}
+          <StripSep />
+          <ToolMenu icon={<Icon name="ema" />} label="EMA lines" count={EMA_CONFIG.filter(({ period }) => showEma[period]).length}
+                    open={menu === "ema"} onToggle={() => setMenu((m) => (m === "ema" ? null : "ema"))} width="w-60">
+            {EMA_CONFIG.map(({ period, color }) => (
+              <MenuItem key={period} on={!!showEma[period]} dot={color}
+                        onClick={() => setShowEma((x) => ({ ...x, [period]: !x[period] }))}>
+                EMA {period}
+              </MenuItem>
+            ))}
+            <div className="mt-1 border-t border-neutral-800 px-1.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+              EMA 10 × 20
+            </div>
+            <MenuItem on={!!ovl.emaRibbon} dot="#22c55e" onClick={() => setOvl((x) => ({ ...x, emaRibbon: !x.emaRibbon }))}
+                      tip="Tints the space between EMA 10 and EMA 20: green while 10 is above 20, red while it is below. The colour flips exactly where they cross. Needs both EMAs on.">
+              Ribbon: green above, red below
+            </MenuItem>
+            <MenuItem on={!!ovl.emaCross} dot="#f43f5e" onClick={() => setOvl((x) => ({ ...x, emaCross: !x.emaCross }))}
+                      tip="Marks each TRUE cross with an arrow on the candle it happened on: crossed on a closed candle, did not cross straight back, and within 3 closed candles the lines separated and the close confirmed the new side. A cross that whips back is not marked. Needs both EMAs on.">
+              Mark true crosses
+            </MenuItem>
+          </ToolMenu>
+
+          <ToolMenu icon={<Icon name="bars" />} label="Indicators"
+                    count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel, showFib].filter(Boolean).length}
+                    open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))} width="w-72">
+            <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI {RSI_P}</MenuItem>
+            <div
+              className="flex items-center gap-1 px-1.5 pb-1 pl-8 text-xs text-neutral-400"
+              title={`The RSI's period: fewer bars reacts sooner and swings more. ${scalp ? "7 is scalp mode's default" : "14 is the classic"}; kept for ${scalp ? "scalp mode" : "the normal chart"}.`}
+            >
+              period
+              <input
+                type="number"
+                min={2}
+                max={50}
+                value={RSI_P}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v) && v >= 2 && v <= 50) setRsiPick(Math.round(v));
+                }}
+                aria-label="RSI period"
+                className="w-12 rounded border border-neutral-700 bg-neutral-900 px-1 text-center tabular-nums text-purple-200"
+              />
+              {[7, 9, 14, 21].map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setRsiPick(p)}
+                  className={`rounded px-1.5 ${RSI_P === p ? "bg-purple-500/30 font-semibold text-purple-100" : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"}`}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+            <MenuItem on={rsiIn} onClick={() => setRsiIn((v) => !v)} dot="#a78bfa"
+                      tip="Draw the RSI (and the Stochastic) in a band at the bottom of the price chart, under the volume, instead of in a pane of its own: one time axis, no gap, and the height goes to the candles. Off: the RSI gets its own resizable pane.">
+              … inside the price chart
+            </MenuItem>
+            <MenuItem on={showStoch} onClick={() => setShowStoch((v) => !v)} dot="#22d3ee"
+                      tip="Stochastic 5,3,3 with the RSI: %K (cyan) and its average %D (orange, dashed). Where the close sits in the last 5 bars' range - over 80 it closes near the highs, under 20 near the lows. It turns before the RSI does, so it is the quicker of the two and the noisier.">
+              Stochastic 5,3,3{!showRsi && " (needs the RSI)"}
+            </MenuItem>
+            <MenuItem on={showMacd} onClick={() => setShowMacd((v) => !v)} dot="#3b82f6">MACD pane</MenuItem>
+            <MenuItem on={showFlow} onClick={() => setShowFlow((v) => !v)} dot="#38bdf8"
+                      tip="Who pushed the price, buyers or sellers: each tick that lifted the price counts as buying, each that dropped it as selling. Exness sends no real volume, so this is an estimate from the ticks. Bars for each candle, buyers' share over the last N candles, and a quick check of whether a strong share was followed by price going the same way.">
+              Order flow pane (buyers vs sellers)
+            </MenuItem>
+            <MenuItem on={showSt} onClick={() => setShowSt((v) => !v)} dot="#26a69a"
+                      tip="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red = downtrend (resistance)">
+              SuperTrend
+            </MenuItem>
+            <MenuItem on={showPb} onClick={() => setShowPb((v) => !v)} dot="#f59e0b"
+                      tip="Pullback score (0-100) on top of SuperTrend: ▲ buy-the-dip in an uptrend / ▼ sell-the-rally in a downtrend. Marks the bar when confidence >= 70.">
+              Pullback signals
+            </MenuItem>
+            <MenuItem on={showStructure} onClick={() => setShowStructure((v) => !v)} dot="#38bdf8"
+                      tip="Market structure: labels swing pivots HH / HL (bullish) and LH / LL (bearish) — the same swing map the engine reads. Only the most recent swings are labelled, so older ones don't carpet the chart.">
+              Structure (HH/HL)
+            </MenuItem>
+            <MenuItem on={showChannel} onClick={() => setShowChannel((v) => !v)} dot="#a78bfa"
+                      tip="Regression channel: the algorithmic trend line (mid) + dynamic resistance/support bands. Shown for your read; tested and NOT used to gate trades.">
+              Regression channel
+            </MenuItem>
+            <MenuItem on={showFib} onClick={() => setShowFib((v) => !v)} dot="#34d399"
+                      tip="Finds the trend on THIS timeframe and draws the Fibonacci on the swing that matters - on any timeframe. Uptrend (higher highs and lows): from the swing low of the latest push up to its high. Downtrend: from the swing high of the latest drop to its low. A squeeze: the move price is still inside. 0.236 to 0.786 are where a pullback often stalls (0.618 thick); ext 1.272 / 1.618 beyond the swing are targets. Drawn on the last FINISHED swing, so its levels and targets stay put while price runs to them; it moves to the next swing once that one is finished (price turned 3 x ATR off it). Past the 1 the swing is broken: 1.272 / 1.618 beyond the 1 show where a break runs. Shown for your read; not used to gate trades.">
+              Auto Fibonacci
+            </MenuItem>
+          </ToolMenu>
+
+          <ToolMenu icon={<Icon name="levels" />} label="Levels and overlays"
+                    count={(["1h", "4h", "1d"] as const).filter((tf) => showSR[tf]).length
+                           + (showBand ? 1 : 0)
+                           + Object.entries(ovl).filter(([k, v]) => v && k !== "emaRibbon" && k !== "emaCross").length}
+                    open={menu === "lv"} onToggle={() => setMenu((m) => (m === "lv" ? null : "lv"))} width="w-80">
+            <div className="px-1.5 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+              Support / resistance
+            </div>
+            {(["1h", "4h", "1d"] as const).map((tf) => (
+              <MenuItem key={tf} on={!!showSR[tf]} onClick={() => setShowSR((x) => ({ ...x, [tf]: !x[tf] }))}
+                        dot={{ "1h": "#94a3b8", "4h": "#f59e0b", "1d": "#f87171" }[tf]}
+                        tip={`Swing levels from the ${tf} chart. R = resistance, S = support.`}>
+                {tf.toUpperCase()} support / resistance
+              </MenuItem>
+            ))}
+            <MenuItem on={showBand} onClick={() => setShowBand((v) => !v)} dot="#22d3ee"
+                      tip="EMA20 of highs / lows = a band around price. The SuperTrend Strategy enters on a close BEYOND this band.">
+              EMA20 high/low band
+            </MenuItem>
+            <div className="mt-1 border-t border-neutral-800 px-1.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+              Overlays
+            </div>
+            {([
+              ["days", "Day separators", "A dotted line + date at each TRADING day start (00:00 UTC) — the same boundary the daily candle, PDH/PDL and the engine use. On the 1h chart that block is one day of candles."],
+              ["pd", "Prior day high / low", "PDH & PDL — yesterday's range. The engine's htf_level filter already scores against these."],
+              ["pw", "Prior week high / low", "PWH & PWL — last completed week's range."],
+              ["open", "Today's open / prev close", "Above today's open = buyers in control so far; below = sellers."],
+              ["vwap", "Session VWAP", "Volume-weighted average price, reset each trading day — the level institutions execute against, and the same one the rejection score uses for its location points."],
+              ["vwapb", "VWAP bands (±1σ, ±2σ)", "One and two volume-weighted standard deviations either side of the session VWAP. Inside ±1σ is where the session trades most; out at ±2σ price is stretched, and a scalp entered there chases the move."],
+              ["pivots", "Daily pivots (P, R1-R2, S1-S2)", "Floor pivots from yesterday's high, low and close: P = (H + L + C) / 3, R1 = 2P - L, S1 = 2P - H, R2 / S2 = P ± (H - L). Levels many intraday traders watch, so price often pauses at them."],
+              ["bb", "Bollinger bands (20, 2)", "A 20-bar average with bands two standard deviations either side. Narrow bands = a quiet market coiling; price riding a band = a strong push; a close back inside after a band poke = the push fading."],
+              ["sessions", "Session shading", "Asia / Middle East / London / New York tinted faintly, on the real UTC session clock. Breaks in thin hours fail far more often."],
+              ["zones", "Trade zones (SL / TP boxes)", "TradingView-style boxes: red from entry to stop, green from entry to target, with the $ and R at each level. An open position's box starts at its entry candle and darkens the distance price has travelled; the proposed trade gets a lighter, dashed box. The boxes follow a dragged SL/TP live."],
+              ["hist", "Trade history (MT5 style)", "Your past trades on this pair, drawn the way MetaTrader does: each deal is an arrow with its tip on the price - a buy blue and pointing up, a sell red and pointing down - so a buy opens on a blue arrow and closes on a red one. A dotted line joins each entry to its exit (blue = a buy, red = a sell), with the result at the exit. Point at an arrow for the details: lots, times, prices, who opened it and why it closed (stop, target, the app, MT5). From the broker's own deal history, every trade on the account - the terminal's and the phone's too."],
+              ["sig", "Watch signals (👁)", "Each BUY / SELL signal of a strategy group on watch - the trade it would have taken - on the candle it fired in, in the signals' own fuchsia: 👁 BUY under the bar, 👁 SELL over it. Point at one for what price did after it: its best and worst move in the hour after, and where price is now against it. From the strategies' activity feed (its last 200 events - a few days)."],
+              ["rr", "Risk / reward bands", "Full-width bands entry→stop (red) and entry→target (green). With Trade zones on, only armed setups get these; otherwise positions and proposals too."],
+              ["ob", "Order blocks", "Supply and demand zones: the candle an impulsive move departed from, where that move also BROKE a swing. Cyan = demand (below price), amber = supply (above). Brighter means stronger; a hollow, dashed box has already been traded into, and the first return to a zone is the clean one. The tag reads side · strength · FVG (an imbalance was left on the way out) · how many times it has been tested."],
+              ["div", "MACD divergence", "Marks the two swings where price and MACD disagree — the earliest warning a move is tiring."],
+              ["choch", "Change of character", "Marks where the swing sequence first contradicts the trend it was in."],
+            ] as const).map(([k, lbl, tip]) => (
+              <MenuItem key={k} on={!!ovl[k]} onClick={() => setOvl((x) => ({ ...x, [k]: !x[k] }))} tip={tip}>
+                {lbl}
+              </MenuItem>
+            ))}
+          </ToolMenu>
+
+          <div className="min-h-[8px] flex-1" />
+          <StripBtn title="Recenter: back to the recent bars with the price axis auto-fitted" onClick={recenter}>
+            <Icon name="recenter" />
+          </StripBtn>
+        </div>
+      </div>
+      <div className={`flex min-w-0 flex-1 flex-col${fills ? " min-h-0" : ""}`}>
       {/* The OHLC readout, the drag hint and the full-screen button are anchored to the CHART, not
           to the component. Anchoring them to the component meant guessing the toolbar's height —
           and the moment the toolbar wrapped to a second row, that row landed on top of the OHLC
           numbers. A wrapping toolbar now just pushes the chart (and everything on it) down. */}
       <div className={`relative${fills ? " min-h-0 flex-1" : ""}`}>
-        {legend && (
-          <div ref={legendRef} className="pointer-events-none absolute left-2 top-2 z-10 flex gap-2 text-xs tabular-nums">
+        {/* The chart's top line: the OHLC readout, then the live readouts that sat in the toolbar row above the
+            chart until 2026-11-15 (Fib, order blocks, rejection, news, the map's levels / plan, the candle
+            countdown, the clock) — and under it scalp mode's key line. Kept clear of Alert / Full screen. */}
+        <div className="pointer-events-none absolute left-2 top-2 z-20 flex max-w-[calc(100%-470px)] flex-col items-start gap-1">
+          <div ref={legendRef} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums">
+            {legend && (
+              <>
             <span className="text-neutral-400">O<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.open, priceDec)}</span></span>
             <span className="text-neutral-400">H<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.high, priceDec)}</span></span>
             <span className="text-neutral-400">L<span className="ml-0.5 text-neutral-200">{fmtPrice(legend.low, priceDec)}</span></span>
@@ -5067,8 +5367,277 @@ Click for the full breakdown. Info only — it gates nothing.`}
                   : emaCross.ago === 0 ? " · on the last candle" : ` · ${emaCross.ago} candle${emaCross.ago === 1 ? "" : "s"} ago`}
               </span>
             )}
+              </>
+            )}
+            <span className="pointer-events-auto flex flex-wrap items-center gap-1 rounded-md bg-neutral-950/55 px-0.5 backdrop-blur-[2px]">
+        {showFib && (() => {
+          // Where price is on the leg NOW (a live bar past the 1 breaks it at once, as the drawing shows).
+          const lb = lastBarRef.current;
+          const ts = barTimesRef.current;
+          const live = lb && ts.length
+            ? { index: ts.length - 1 + ((lb.time as number) > ts[ts.length - 1] ? 1 : 0), high: lb.high, low: lb.low }
+            : null;
+          const f = fib ? liveFib(fib, live) : null;
+          const at = f && lb ? fibPosition(f, lb.close) : null;
+          const st = f ? fibStatus(f, at) : null;
+          const zone = st?.zone ?? null;
+          const fmt = (v: number) => fmtPrice(v, priceDec);
+          return (
+            <span
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${
+                !f ? "bg-neutral-800 text-neutral-400" : f.broken ? "bg-amber-500/15 text-amber-300" : f.trend === "up" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+              }`}
+              title={f ? fibExplain(f, at, fmt)
+                       : "Auto Fibonacci: no finished swing on this chart yet (price has to turn 3 x ATR off a high or a low). It draws as soon as one is finished."}
+            >
+              <span>
+                📐 Fib {f ? (f.trend === "up" ? "▲ up" : "▼ down") : "· no clear swing yet"}
+                {st?.text}
+              </span>
+              {zone && (
+                <span className="rounded-full px-1.5 font-bold text-neutral-950" style={{ backgroundColor: zone.color }}>
+                  {zone.label.toLowerCase()}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowFib(false)}
+                title="Clear the Fibonacci from the chart (📊 Indicators → Auto Fibonacci brings it back)"
+                aria-label="Clear the Fibonacci"
+                className="rounded px-0.5 leading-none text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100"
+              >
+                ✕
+              </button>
+            </span>
+          );
+        })()}
+
+        {ovl.ob && obStatus && (
+          <span
+            className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+              obStatus.kind === "error"
+                ? "bg-bear/20 text-bear"
+                : obStatus.kind === "loading"
+                  ? "bg-neutral-800 text-neutral-400"
+                  : "bg-cyan-500/15 text-cyan-300"
+            }`}
+            title={obStatus.text}
+          >
+            {obStatus.text}
+          </span>
+        )}
+
+        {/* Rejection score, on the chart rather than buried in the map panel. A score you have to
+            go looking for is a score you don't use. Click it to open the full breakdown. */}
+        {ctx?.rejection && ctx.rejection.band !== "none" && (
+          <button
+            onClick={() => setCtxOpen(true)}
+            className={`rounded px-1.5 py-0.5 text-[11px] font-semibold tabular-nums transition ${
+              ctx.rejection.band === "high"
+                ? "animate-pulse bg-amber-500/25 text-amber-300"
+                : ctx.rejection.band === "valid"
+                  ? "bg-sky-500/20 text-sky-300"
+                  : "bg-neutral-800 text-neutral-400"
+            }`}
+            title={`${ctx.rejection.verdict}
+
+Scored ${ctx.rejection.score} of ${ctx.rejection.max}: ` +
+                   Object.entries(ctx.rejection.groups).map(([g, v]) => `${g} ${v.got}/${v.max}`).join(", ") +
+                   `.
+Click for the full breakdown. Info only — it gates nothing.`}
+          >
+            {ctx.rejection.direction === "short" ? "▼" : "▲"} Rejection {ctx.rejection.score}/{ctx.rejection.max}
+          </button>
+        )}
+
+        {/* Economic calendar. The headline is the NEXT high-impact release and how long until it —
+            "in 34m" is what changes a decision; "there is news today" doesn't. */}
+        {events && (() => {
+          // Minutes are recomputed from the timestamp on every render, NOT read from the
+          // server's `minutes_away`. That field is a snapshot from fetch time and the calendar is
+          // only re-pulled every 10 minutes, so trusting it left the countdown up to ten minutes
+          // wrong — and showed an event that had already fired as still ahead. The 1-second bar
+          // timer re-renders this component, so a locally derived figure stays live for free.
+          const mins = (e: MarketEvent) => Math.round((Date.parse(e.when) - Date.now()) / 60000);
+          const upcoming = events.filter((e) => mins(e) >= 0);
+          const highs = upcoming.filter((e) => e.importance.toLowerCase() === "high");
+          const next = highs[0];
+          const imminent = next != null && mins(next) <= 60;
+          const soon = next != null && mins(next) <= 240;
+          const label = next
+            ? `${next.label.replace(/^[A-Z]{2}:\s*/, "").slice(0, 22)} ${mins(next) < 60 ? `${mins(next)}m` : `${Math.round(mins(next) / 60)}h`}`
+            : upcoming.length
+              ? `${upcoming.length} minor`
+              : "clear";
+          return (
+            <span className="relative">
+              <button
+                onClick={() => setEvOpen((v) => !v)}
+                className={`rounded px-1.5 py-0.5 text-[11px] transition ${
+                  imminent
+                    ? "animate-pulse bg-bear/25 text-bear"
+                    : soon
+                      ? "bg-warn/20 text-warn"
+                      : next
+                        ? "bg-neutral-800 text-neutral-300"
+                        : "text-neutral-600 hover:bg-neutral-800"
+                }`}
+                title={
+                  next
+                    ? `Next high-impact release for ${symbol}: ${next.label} in ${mins(next)} min. Spreads widen and stops get run around these — the engine already stands aside, and so should a manual entry.`
+                    : `No high-impact releases ahead today for ${symbol}. ${upcoming.length} lower-impact items.`
+                }
+              >
+                📅 {label}
+              </button>
+              {evOpen && (
+                <div className="absolute left-0 top-7 z-40 max-h-80 w-[21rem] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-2 text-xs shadow-xl">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="font-semibold text-sky-300">📅 Today — {symbol}</span>
+                    <button onClick={() => setEvOpen(false)} className="text-neutral-500 hover:text-neutral-200">✕</button>
+                  </div>
+                  {events.length === 0 && <div className="py-2 text-neutral-500">Nothing scheduled for this instrument.</div>}
+                  {events.map((e, i) => {
+                    const away = mins(e);
+                    const past = away < 0;
+                    const high = e.importance.toLowerCase() === "high";
+                    return (
+                      <div key={i} className={`flex items-baseline gap-2 rounded px-1 py-1 ${past ? "opacity-50" : ""}`}>
+                        <span className="w-12 shrink-0 tabular-nums text-neutral-400">
+                          {new Date(e.when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                        <span className={`w-8 shrink-0 text-[10px] font-semibold ${high ? "text-bear" : "text-neutral-500"}`}>
+                          {high ? "HIGH" : "med"}
+                        </span>
+                        <span className="min-w-0 flex-1 text-neutral-300">
+                          {e.label}
+                          {/* Forecast vs previous is the whole point: the SURPRISE moves price,
+                              not the number itself. */}
+                          {(e.forecast != null || e.previous != null) && (
+                            <span className="ml-1 text-neutral-500">
+                              {e.actual != null ? `actual ${e.actual} · ` : ""}
+                              {e.forecast != null ? `f/c ${e.forecast}` : ""}
+                              {e.previous != null ? ` · prev ${e.previous}` : ""}
+                            </span>
+                          )}
+                        </span>
+                        <span className="shrink-0 tabular-nums text-neutral-600">
+                          {past ? "done" : away < 60 ? `${away}m` : `${Math.round(away / 60)}h`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <p className="mt-1 border-t border-neutral-800 pt-1 text-[10px] leading-snug text-neutral-500">
+                    Times in your clock. The engine already stands aside around HIGH-impact releases —
+                    this is so a manual entry doesn't walk into one.
+                  </p>
+                </div>
+              )}
+            </span>
+          );
+        })()}
+
+        {/* Only appears once the map has drawn levels — the way to clear them after you've closed
+            the panel to look at the chart. */}
+        {ctxLevels && (
+          <button
+            onClick={() => setCtxLevels(null)}
+            className="rounded bg-sky-950/60 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white"
+            title="Hide the price map's support/resistance levels"
+          >
+            📍 Levels ✕
+          </button>
+        )}
+        {ctxPlans.length > 0 && (
+          <button
+            onClick={() => setCtxPlans([])}
+            className="rounded bg-sky-950/60 px-2 py-0.5 text-xs text-sky-300 hover:bg-neutral-700 hover:text-white"
+            title="Hide the break plan lines (trigger / target / stop)"
+          >
+            🎯 Plan ✕
+          </button>
+        )}
+        {/* Candle-close countdown. "Wait for the close, not the wick" is only actionable if you know
+            how long that is — so this reads as a traffic light rather than a number you have to
+            interpret. Graded on the FRACTION of the bar left, not raw seconds: 30s is nearly a whole
+            5m bar's decision window but a rounding error on the 4h.
+              green  — over half the bar left, nothing to do yet
+              amber  — final quarter, get ready
+              red    — final tenth, this is the decision moment (pulses inside 10 seconds)
+            The filling underline shows the same thing without reading any digits. */}
+        {barLeft && (() => {
+          const tone =
+            barLeft.frac > 0.5
+              ? { cls: "border-emerald-700/50 bg-emerald-900/25 text-emerald-300", icon: "⏱" }
+              : barLeft.frac > 0.25
+                ? { cls: "border-sky-700/50 bg-sky-900/25 text-sky-300", icon: "⏱" }
+                : barLeft.frac > 0.1
+                  ? { cls: "border-amber-600/60 bg-amber-900/30 text-amber-300", icon: "⏳" }
+                  : { cls: "border-rose-600/70 bg-rose-900/40 text-rose-300", icon: "🔔" };
+          return (
+            <span
+              className={`relative flex items-center gap-1 overflow-hidden rounded border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${tone.cls}${
+                barLeft.left <= 10 ? " animate-pulse" : ""
+              }`}
+              title={`${barLeft.text} until the current ${timeframe} candle closes. A wick through a level is not a break — the close is what counts.`}
+            >
+              {tone.icon} {barLeft.text}
+              <span
+                className="absolute bottom-0 left-0 h-[2px] bg-current opacity-80 transition-all duration-1000 ease-linear"
+                style={{ width: `${Math.round((1 - barLeft.frac) * 100)}%` }}
+              />
+            </span>
+          );
+        })()}
+        {/* States the clock the axis is in. Without it, "is 14:00 my time or the broker's?" is a
+            question you can only answer by counting candles back from now. */}
+        <button
+          onClick={() => setTzMode((m) => (m === "local" ? "utc" : "local"))}
+          className={`rounded px-1.5 py-0.5 text-[10px] transition hover:bg-neutral-800 ${
+            tzMode === "utc" ? "text-sky-400" : "text-neutral-600 hover:text-neutral-300"
+          }`}
+          title={
+            tzMode === "utc"
+              ? "Axis is in UTC / broker time — day separators fall on 00:00, matching what other traders see. Click to switch back to your own clock."
+              : `Axis is in ${tzLabel("local")} — your computer's clock. Price levels are UNAFFECTED: PDH/PDL and every other level are measured over the 00:00 UTC trading day either way, so they match every other trader. Click to show the axis in UTC instead.`
+          }
+        >
+          🕐 {tzShort(tzMode)}
+        </button>
+            </span>
+          </div>
+        {/* Scalp mode: what the next key does. On the left, under the price legend: the right is where
+            the newest candles and the staged order's own tags are. Out of the way while a line is
+            being dragged or a drop was refused (those readouts need the attention then). */}
+        {scalp && hud && !dragHint && !dragErr && hud.tone === "idle" && (
+          // Nothing staged, no trade: just the keys, one quiet line (the box covered the candles).
+          <div className="pointer-events-none flex items-baseline gap-2 rounded-md border border-neutral-800 bg-neutral-950/75 px-2 py-0.5 text-[11px] text-neutral-400 backdrop-blur-sm">
+            <span className="font-semibold text-neutral-300">{hud.title}</span>
+            {hud.detail && <span className="text-neutral-500">{hud.detail}</span>}
           </div>
         )}
+        {scalp && hud && !dragHint && !dragErr && hud.tone !== "idle" && (
+          <div
+            className={`pointer-events-none flex max-w-[34rem] items-center gap-3 rounded-lg border bg-neutral-950/85 px-3 py-1 shadow-lg backdrop-blur-sm ${
+              hud.tone === "long" || hud.tone === "win"
+                ? "border-bull/70 text-bull shadow-[0_0_22px_-6px_rgba(38,166,154,0.8)]"
+                : hud.tone === "short" || hud.tone === "loss"
+                  ? "border-bear/70 text-bear shadow-[0_0_22px_-6px_rgba(239,83,80,0.8)]"
+                  : hud.tone === "close"
+                    ? "border-sky-500/70 text-sky-300"
+                    : "border-neutral-700 text-neutral-400"
+            }`}
+          >
+            {/* In a trade: the money, big enough to read from the corner of an eye. */}
+            {hud.big && <div className="text-2xl font-black tabular-nums leading-none">{hud.big}</div>}
+            <div className="min-w-0">
+              <div className="text-sm font-black italic tracking-wide tabular-nums">{hud.title}</div>
+              {hud.detail && <div className="text-[11px] tabular-nums text-neutral-300">{hud.detail}</div>}
+            </div>
+          </div>
+        )}
+
+        </div>
 
         {/* The RSI band: a divider across the pane with the band's name, and over the price axis
             beside it (still printing prices down there) the band's own 0-100 scale. */}
@@ -5275,37 +5844,6 @@ Click for the full breakdown. Info only — it gates nothing.`}
           </div>
         )}
 
-        {/* Scalp mode: what the next key does. On the left, under the price legend: the right is where
-            the newest candles and the staged order's own tags are. Out of the way while a line is
-            being dragged or a drop was refused (those readouts need the attention then). */}
-        {scalp && hud && !dragHint && !dragErr && hud.tone === "idle" && (
-          // Nothing staged, no trade: just the keys, one quiet line (the box covered the candles).
-          <div className="pointer-events-none absolute left-2 top-7 z-20 flex items-baseline gap-2 rounded-md border border-neutral-800 bg-neutral-950/75 px-2 py-0.5 text-[11px] text-neutral-400 backdrop-blur-sm">
-            <span className="font-semibold text-neutral-300">{hud.title}</span>
-            {hud.detail && <span className="text-neutral-500">{hud.detail}</span>}
-          </div>
-        )}
-        {scalp && hud && !dragHint && !dragErr && hud.tone !== "idle" && (
-          <div
-            className={`pointer-events-none absolute left-2 top-7 z-20 flex max-w-[34rem] items-center gap-3 rounded-lg border bg-neutral-950/85 px-3 py-1 shadow-lg backdrop-blur-sm ${
-              hud.tone === "long" || hud.tone === "win"
-                ? "border-bull/70 text-bull shadow-[0_0_22px_-6px_rgba(38,166,154,0.8)]"
-                : hud.tone === "short" || hud.tone === "loss"
-                  ? "border-bear/70 text-bear shadow-[0_0_22px_-6px_rgba(239,83,80,0.8)]"
-                  : hud.tone === "close"
-                    ? "border-sky-500/70 text-sky-300"
-                    : "border-neutral-700 text-neutral-400"
-            }`}
-          >
-            {/* In a trade: the money, big enough to read from the corner of an eye. */}
-            {hud.big && <div className="text-2xl font-black tabular-nums leading-none">{hud.big}</div>}
-            <div className="min-w-0">
-              <div className="text-sm font-black italic tracking-wide tabular-nums">{hud.title}</div>
-              {hud.detail && <div className="text-[11px] tabular-nums text-neutral-300">{hud.detail}</div>}
-            </div>
-          </div>
-        )}
-
         {/* Says exactly which click comes next — a tool that's armed but silent gets forgotten,
             and the next click on the chart then becomes a surprise. */}
         {drawMode !== "off" && (
@@ -5320,7 +5858,12 @@ Click for the full breakdown. Info only — it gates nothing.`}
                   ? "Click the price for your alert — you are told when price reaches it (no order)"
                 : drawMode === "f"
                   ? "Press and drag to draw"
+                : drawMode === "r"
+                  ? "Press at one corner, drag to the opposite corner, release"
                   : "Press at the start, drag to the end, release"}
+            {magnet && (drawMode === "t" || drawMode === "r" || drawMode === "h") && (
+              <span className="ml-2 font-normal text-sky-100/80">magnet on</span>
+            )}
             <span className="ml-2 font-normal text-sky-100/80">Esc to cancel</span>
           </div>
         )}
@@ -5565,6 +6108,39 @@ Click for the full breakdown. Info only — it gates nothing.`}
         {/* Sit over the chart's top-right corner (clear of the ~72px price axis) rather than at
             the end of the toolbar, where each was one more chip competing for a row that wraps. */}
         <div className="absolute right-[78px] top-1.5 z-20 flex items-center gap-1.5">
+          {/* Panels about the chart, beside Alert and Full screen (from the old toolbar row, 2026-11-15). */}
+          <button
+            onClick={() => { setCtxOpen((v) => !v); if (!ctx) void loadContext(); }}
+            disabled={ctxBusy}
+            aria-pressed={ctxOpen}
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-xs shadow backdrop-blur-sm transition disabled:opacity-50 ${
+              ctxOpen ? "border-sky-500 bg-sky-600 text-white" : "border-neutral-700 bg-neutral-900/80 text-sky-300 hover:border-sky-600 hover:bg-neutral-800 hover:text-white"}`}
+            title="Read: plain-language 'where is price on the map (S/R, channel, structure) + do RSI/volume/ATR confirm?' analysis for this pair. Info only — it does NOT change the engine's decision; it's for your Mode-A call."
+          >
+            {ctxBusy ? "…" : <Icon name="map" size={14} />} Read
+          </button>
+          <button
+            // force=false: passing loadScenarios directly would hand it the click event (truthy) and skip the cache.
+            onClick={() => (scen != null ? setScen(null) : void loadScenarios(false))}
+            disabled={scenBusy}
+            aria-pressed={scen != null}
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-xs shadow backdrop-blur-sm transition disabled:opacity-50 ${
+              scen != null ? "border-violet-500 bg-violet-600 text-white" : "border-neutral-700 bg-neutral-900/80 text-violet-300 hover:border-violet-500 hover:bg-neutral-800 hover:text-white"}`}
+            title="AI scenarios: the AI reasons out TWO ranked, scored forward scenarios (anchored to the real S/R + structure) and explains why the chosen one is more likely. Reuses a cached read for up to 15 minutes. Info only — it does NOT change the engine's decision."
+          >
+            {scenBusy ? "…" : <Icon name="sparkle" size={14} />} Scenarios
+          </button>
+          {fills && strategies && (
+            <button
+              onClick={() => setStratOpen((v) => !v)}
+              aria-pressed={stratOpen}
+              className={`flex items-center gap-1 rounded border px-2 py-1 text-xs shadow backdrop-blur-sm transition ${
+                stratOpen ? "border-amber-500 bg-amber-500/90 text-neutral-950" : "border-neutral-700 bg-neutral-900/80 text-amber-300 hover:border-amber-500 hover:bg-neutral-800 hover:text-amber-200"}`}
+              title="Your strategies, live: what each pair's rules read now, the trades they hold, today's result - in a panel you can move and resize"
+            >
+              <Icon name="pawn" size={14} /> Strategies
+            </button>
+          )}
           {/* The price alert: click it, then click the price. On the chart, where the price is, rather
               than at the bottom of the sidebar (asked 2026-11-08); its count is this pair's alerts. */}
           {(() => {
@@ -5700,6 +6276,8 @@ Click for the full breakdown. Info only — it gates nothing.`}
           </div>
         </>
       )}
+      </div>
+      </div>
     </div>
   );
 }

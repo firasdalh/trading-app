@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { displaySymbol, fmtPrice } from "../format";
 import { usePolling } from "../hooks/usePolling";
 import type { SignalReview, SignalReviewEdit, SignalReviewSignal } from "../types";
+import { FoldButton, useFold } from "./JournalFold";
 
 /**
  * 👁 SIGNAL REVIEW (asked 2026-11-08: "keep track in a separate place in the journal ... the result of those
@@ -169,6 +170,7 @@ function Row({ s }: { s: SignalReviewSignal }) {
 }
 
 export function SignalReviewCard() {
+  const fold = useFold();
   const [days, setDays] = useState(30);
   const [side, setSide] = useState<"all" | "long" | "short">("all");
   const { data, error } = usePolling<SignalReview>(() => api.signalReview(days), POLL_MS, [days]);
@@ -179,7 +181,10 @@ export function SignalReviewCard() {
   return (
     <div className="card border-fuchsia-500/30">
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="text-sm font-semibold"><span className="text-fuchsia-300">👁 Signal review</span> — what each watch signal would have done if traded</span>
+        <span className="flex items-center gap-1 text-sm font-semibold">
+          <FoldButton name="Signal review" />
+          <span><span className="text-fuchsia-300">👁 Signal review</span> — what each watch signal would have done if traded</span>
+        </span>
         <span
           className="cursor-help text-[11px] text-neutral-500 underline decoration-dotted"
           title={`Each signal a strategy group on watch logged, replayed as the trade: in at its price (the ask for a buy, the bid for a sell), out at the strategy's own stop or target - whichever price reached first in the broker's history (a sell leaves on the ask). Both inside one candle counts as the stop. Still open ${data?.horizon_h ?? 24} h later: judged where price was then (⏱). The strategy's close rules are not replayed - a real trade could have left earlier. Signals logged before 2026-11-08 have their levels estimated (≈) from the strategy's current stop and target settings.`}
@@ -207,6 +212,7 @@ export function SignalReviewCard() {
         </span>
       </div>
 
+      {!fold?.folded && (<>
       {error && !data && <div className="text-xs text-amber-300">Can't read the signals: {error}</div>}
       {!data && !error && <div className="text-xs text-neutral-500">Replaying the signals on the broker's history…</div>}
       {data && (
@@ -261,6 +267,7 @@ export function SignalReviewCard() {
           )}
         </>
       )}
+      </>)}
     </div>
   );
 }

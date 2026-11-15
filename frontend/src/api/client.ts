@@ -442,12 +442,14 @@ export const api = {
     request<{ journal_reset_at: string | null }>("/api/journal/reset", { method: "DELETE" }),
   reflect: () => request<ReflectionReport>("/api/journal/reflect", { method: "POST" }),
   backfillJournal: () =>
-    request<{ sources_labelled: number; pnl_recovered: number }>("/api/journal/backfill", {
+    request<{ sources_labelled: number; pnl_recovered: number; pnl_corrected?: number }>("/api/journal/backfill", {
       method: "POST",
     }),
   reflectionLatest: () => request<ReflectionReport | null>("/api/journal/reflection/latest"),
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
   journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
+  // Every closed trade, oldest first, in a few fields - the Journal's performance charts (2026-11-11).
+  journalEquity: () => request<import("../types").EquityTrade[]>("/api/journal/equity"),
   journalBreakdown: () => request<import("../types").JournalBreakdown>("/api/journal/breakdown"),
   journalSessions: () => request<import("../types").SessionsView>("/api/journal/sessions"),
   // Today's trades with your own reasons + avg R per tag (daily review).
@@ -533,6 +535,11 @@ export const api = {
       body: JSON.stringify({ config, symbol, asset_class: assetClass }),
     }),
   strategyActivity: (id: number) => request<import("../types").StrategyActivity[]>(`/api/strategies/${id}/activity`),
+  // What it learned from its own closed trades, and the user's answer to one lesson (apply / ignore / undo).
+  strategyLearning: (id: number) => request<import("../types").StrategyLearning>(`/api/strategies/${id}/learning`),
+  strategyLearningAct: (id: number, key: string, action: "apply" | "ignore" | "unignore" | "undo") =>
+    request<{ ok: boolean; strategy: import("../types").StrategyView; learning: import("../types").StrategyLearning }>(
+      `/api/strategies/${id}/learning/act`, { method: "POST", body: JSON.stringify({ key, action }) }),
   // Every strategy's, newest first (the desk's feed).
   // The watch signals, each judged as the trade it would have been, and the strategy edits between them.
   signalReview: (days = 30) =>

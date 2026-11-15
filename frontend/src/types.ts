@@ -710,6 +710,18 @@ export interface CalibrationBucket {
   avg_r: number | null;       // mean realized R
 }
 
+// One closed trade of the journal, for the Performance charts (GET /api/journal/equity, oldest first): the broker's $,
+// the source MT5 recorded, R where the app recorded the risk taken.
+export interface EquityTrade {
+  closed_at: string;
+  opened_at: string | null;
+  pnl: number;
+  source: string;
+  symbol: string;
+  direction: string;
+  r: number | null;
+}
+
 export interface JournalStats {
   trades: number;
   wins: number;
@@ -746,6 +758,8 @@ export interface PeriodBreakdown {
 export interface JournalBreakdown {
   by_source: GroupStat[];
   by_pair: GroupStat[];
+  // The same per pair, for each source's trades alone (2026-11-11); an older backend doesn't send it.
+  by_pair_source?: Record<string, GroupStat[]>;
   daily: PeriodBreakdown[];
   weekly: PeriodBreakdown[];
   monthly: PeriodBreakdown[];
@@ -1168,7 +1182,8 @@ export interface StrategyParamSpec {
   min: number;
   max: number;
   step: number;
-  kind: "num" | "bool" | "tf";   // tf: 1 = this timeframe ticked (key = the timeframe) for a rule over several
+  kind: "num" | "bool" | "tf" | "pick";   // tf: 1 = this timeframe ticked (key = the timeframe) for a rule over several;
+                                          // pick: 1 = this choice ticked, drawn as a chip (Fibonacci zone's places)
 }
 export interface StrategyConditionSpec {
   type: string;
@@ -1190,6 +1205,7 @@ export interface StrategyCatalog {
   max_groups: number;
   max_conditions: number;
   max_pairs?: number;            // pairs one strategy reads (an older backend doesn't say: 10)
+  hour_picks?: boolean;          // its hours can be picked one by one (an older backend doesn't say: not offered)
   sessions?: string[];           // the sessions its hours can be kept as (an older backend doesn't say: none)
 }
 export interface StrategyDraft {
@@ -1243,7 +1259,7 @@ export interface StrategyStopNow {
 //  - `sessions` (asked 2026-11-11: "add also the option to open in specific sessions ... between sessions and
 //    London, and maybe New York"): only in the trading sessions picked - the journal's session hours on the UTC
 //    clock (sessions.ts); `tz` then only writes their times out.
-export type StrategyHours = StrategyWindowHours | StrategySessionHours;
+export type StrategyHours = StrategyWindowHours | StrategySessionHours | StrategyHourPicks;
 interface StrategyHoursBase {
   tz: string | null;
   // Its crypto pairs keep no hours: they open at any hour, day and night, while the others keep the window
@@ -1253,6 +1269,11 @@ interface StrategyHoursBase {
 export interface StrategyWindowHours extends StrategyHoursBase {
   start: string;
   end: string;
+}
+// Picked one by one (2026-11-11: "turn on / off the hours which made bad trades for our strategy"): the UTC hours
+// 0-23 it may open in - the hours the Journal's "By the hour it opened" strip counts its trades in. All 24 = every hour.
+export interface StrategyHourPicks extends StrategyHoursBase {
+  hours_utc: number[];
 }
 export interface StrategySessionHours extends StrategyHoursBase {
   sessions: string[];   // sessions.ts keys, in the day's order; at least one - all five = every hour
@@ -1270,6 +1291,7 @@ export interface StrategyHoursNow {
   sessions?: string[];
   session?: string;          // the session it is now
   opens?: string | null;     // null: no session it knows of picked - it never opens
+  hours_utc?: number[];      // picked one by one: those hours
 }
 export interface StrategyView extends StrategyDraft {
   id: number;
@@ -1359,6 +1381,85 @@ export interface SignalReview {
   horizon_h: number;
   days: number;
   now: string;
+}
+
+// What the strategy learned from its own closed trades (GET /api/strategies/{id}/learning, 2026-11-13).
+export interface LearningSummary {
+  n: number;
+  won: number | null;
+  r_sum: number;
+  avg_r?: number | null;
+  pnl?: number | null;
+}
+export interface LearningAction {
+  op: string;
+  text: string;
+  /** The strategy already does it. */
+  done: boolean;
+}
+export interface LearningPart extends LearningSummary {
+  key: string;
+  feature: string;
+  feature_name: string;
+  bucket: string;
+  label: string;
+  /** weak: clearly worse and losing in both halves; sweet: clearly better and winning in both; whatif: another target / stop. */
+  kind: "weak" | "sweet" | "whatif" | null;
+  strength: "strong" | "watching" | null;
+  t: number;
+  halves: number[];
+  rest?: LearningSummary;
+}
+export interface LearningLesson extends LearningPart {
+  title: string;
+  action: LearningAction | null;
+  status: "applied" | "ignored" | null;
+  first_seen: string | null;
+}
+export interface WhatIfCell {
+  r: number;
+  n: number;
+  won: number | null;
+  hold_min: number | null;
+}
+export interface WhatIfTable {
+  n: number;
+  targets: number[];
+  stops: number[];
+  /** "t0.9|s1" -> that target and stop, the entries taken in order with the strategy's waits and the open-trades cap. */
+  cells: Record<string, WhatIfCell>;
+  current: string | null;
+  best: string;
+  actual_r: number;
+  rules: { cooldown_min: number; loss_cooldown_min: number; max_open: number };
+  gain: { r: number; t: number; halves: number[] } | null;
+}
+export interface LearningApplied {
+  key: string;
+  title: string | null;
+  at: string;
+  changes: string[] | null;
+  since: { n: number; avg_r: number | null; r_sum: number };
+  before: { n: number; avg_r: number | null };
+}
+export interface StrategyLearning {
+  strategy_id: number;
+  now: string;
+  trades: number;
+  with_r: number;
+  with_fp: number;
+  with_whatif: number;
+  since: string | null;
+  total: LearningSummary | null;
+  min_total: number;
+  min_trades: number;
+  strong_t: number;
+  version: { since: string | null; trades: number; r_sum: number; pnl: number; won: number | null; fair_after: number };
+  lessons: LearningLesson[];
+  ignored: LearningLesson[];
+  parts: LearningPart[];
+  whatif: WhatIfTable | null;
+  applied: LearningApplied[];
 }
 
 export interface StrategyActivity {

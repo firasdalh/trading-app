@@ -568,13 +568,15 @@ def test_fill_realized_pnl_matches_by_symbol_dir_entry(db_session, monkeypatch):
 
     p = Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
                  entry_price=2000.0, status=PositionStatus.CLOSED.value, last_price=2000.0,
-                 realized_pnl=None, risk_amount=50.0,
+                 realized_pnl=None, risk_amount=50.0, source="hybrid",
+                 opened_at=datetime(2026, 7, 10, 11, 30, tzinfo=timezone.utc),
                  closed_at=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc))
     db_session.add(p)
     db_session.commit()
 
     bt = _closed_bt("XAUUSDm", "short", 2000.3, 1990.0, 42.5,
                     datetime(2026, 7, 10, 12, 1, tzinfo=timezone.utc))  # entry within 0.5%
+    bt.opened_at, bt.source = datetime(2026, 7, 10, 11, 30, 2, tzinfo=timezone.utc), "hybrid"
     monkeypatch.setattr(risk_service, "broker_closed_trades", lambda s: [bt])
 
     assert monitor_mod.fill_realized_pnl_from_broker(db_session, [p]) == 1
@@ -590,7 +592,7 @@ def test_fill_realized_pnl_skips_wrong_side_or_far_entry(db_session, monkeypatch
 
     p = Position(symbol="XAUUSDm", asset_class="metal", direction="short", qty=0.01,
                  entry_price=2000.0, status=PositionStatus.CLOSED.value, last_price=2000.0,
-                 realized_pnl=None, risk_amount=50.0,
+                 realized_pnl=None, risk_amount=50.0, source="hybrid",
                  closed_at=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc))
     db_session.add(p)
     db_session.commit()
@@ -604,6 +606,79 @@ def test_fill_realized_pnl_skips_wrong_side_or_far_entry(db_session, monkeypatch
     assert monitor_mod.fill_realized_pnl_from_broker(db_session, [p]) == 0
     db_session.refresh(p)
     assert p.realized_pnl is None
+
+
+def test_fill_realized_pnl_takes_the_rows_own_trade_not_the_closest_price(db_session, monkeypatch):
+    """Full check 2026-11-11: row 255 (JP225m) held +$1.02 - another JP225m trade's - where its own made +$23.64.
+    The closest entry price at any time apart won; now only the trade OPENED with the row (within 3 min), from the
+    source MT5 tagged it with, can give it its result."""
+    import app.risk.service as risk_service
+    from app.execution import monitor as monitor_mod
+
+    t0 = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
+    p = Position(symbol="JP225m", asset_class="index", direction="long", qty=1.0, entry_price=50000.0,
+                 status=PositionStatus.CLOSED.value, last_price=50000.0, realized_pnl=None, risk_amount=20.0,
+                 source="strategy:1", opened_at=t0, closed_at=t0 + timedelta(minutes=30))
+    db_session.add(p)
+    db_session.commit()
+    older = _closed_bt("JP225m", "long", 50000.0, 50001.0, 1.02, t0 - timedelta(hours=3))   # same price, 3 h before
+    older.opened_at, older.source = t0 - timedelta(hours=3, minutes=20), "strategy:1"
+    phone = _closed_bt("JP225m", "long", 50000.5, 49990.0, -9.0, t0 + timedelta(minutes=29))  # opened by hand
+    phone.opened_at, phone.source = t0 + timedelta(seconds=20), "manual"
+    own = _closed_bt("JP225m", "long", 50020.0, 50060.0, 23.64, t0 + timedelta(minutes=30))   # 0.04% away: still it
+    own.opened_at, own.source = t0 + timedelta(seconds=1), "strategy:1"
+    monkeypatch.setattr(risk_service, "broker_closed_trades", lambda s: [older, phone, own])
+
+    assert monitor_mod.fill_realized_pnl_from_broker(db_session, [p]) == 1
+    db_session.commit()
+    db_session.refresh(p)
+    assert p.realized_pnl == 23.64 and p.last_price == 50060.0
+
+
+def test_fill_realized_pnl_leaves_a_row_it_cannot_place_empty(db_session, monkeypatch):
+    import app.risk.service as risk_service
+    from app.execution import monitor as monitor_mod
+
+    t0 = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
+    p = Position(symbol="HK50m", asset_class="index", direction="long", qty=1.0, entry_price=26000.0,
+                 status=PositionStatus.CLOSED.value, last_price=25990.0, realized_pnl=None, risk_amount=20.0,
+                 source="strategy:1", opened_at=t0, closed_at=t0 + timedelta(minutes=30))
+    db_session.add(p)
+    db_session.commit()
+    other = _closed_bt("HK50m", "long", 26000.0, 26010.0, 0.93, t0 + timedelta(hours=2))
+    other.opened_at, other.source = t0 + timedelta(hours=1, minutes=50), "strategy:1"     # another trade, later
+    monkeypatch.setattr(risk_service, "broker_closed_trades", lambda s: [other])
+
+    assert monitor_mod.fill_realized_pnl_from_broker(db_session, [p]) == 0
+    db_session.refresh(p)
+    assert p.realized_pnl is None     # no "+$0.93 win": the loss check reads its exit vs its entry instead
+
+
+def test_journal_repair_corrects_a_result_that_is_not_the_rows_own(db_session, monkeypatch):
+    import app.risk.service as risk_service
+    from app.api.journal_routes import backfill
+
+    t0 = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
+    wrong = Position(symbol="JP225m", asset_class="index", direction="long", qty=1.0, entry_price=50000.0,
+                     status=PositionStatus.CLOSED.value, last_price=50001.0, realized_pnl=1.02, risk_amount=20.0,
+                     source="strategy:1", opened_at=t0, closed_at=t0 + timedelta(minutes=30))
+    right = Position(symbol="JP225m", asset_class="index", direction="long", qty=1.0, entry_price=50000.0,
+                     status=PositionStatus.CLOSED.value, last_price=50060.0, realized_pnl=7.5, risk_amount=20.0,
+                     source="strategy:1", opened_at=t0 + timedelta(hours=5), closed_at=t0 + timedelta(hours=6))
+    db_session.add_all([wrong, right])
+    db_session.commit()
+    own = _closed_bt("JP225m", "long", 50000.0, 50060.0, 23.64, t0 + timedelta(minutes=30))
+    own.opened_at, own.source = t0 + timedelta(seconds=1), "strategy:1"
+    same = _closed_bt("JP225m", "long", 50000.0, 50060.0, 7.5, t0 + timedelta(hours=6))
+    same.opened_at, same.source = t0 + timedelta(hours=5, seconds=2), "strategy:1"
+    monkeypatch.setattr(risk_service, "broker_closed_trades", lambda s: [same, own])
+
+    out = backfill(session=db_session)
+    assert out.pnl_corrected == 1 and out.pnl_recovered == 0
+    db_session.refresh(wrong)
+    db_session.refresh(right)
+    assert wrong.realized_pnl == 23.64 and wrong.last_price == 50060.0 and right.realized_pnl == 7.5
+    assert backfill(session=db_session).pnl_corrected == 0          # a second run changes nothing
 
 
 def test_attribute_sources_tags_broker_trades_from_app_rows(db_session):
@@ -624,6 +699,74 @@ def test_attribute_sources_tags_broker_trades_from_app_rows(db_session):
     _attribute_sources(db_session, [matched, external])
     assert matched.source == "manual"      # tagged from the app row
     assert external.source is None          # no app row -> genuinely external, stays Unknown
+
+
+def _tagged(symbol, direction, entry, pnl, opened, source):
+    """A broker trade as the MT5 adapter reads it: `source` from its entry deal's comment, `opened` its entry time."""
+    from datetime import timedelta
+
+    from app.models.schemas import PositionView
+    return PositionView(id=abs(hash((symbol, opened))) % 10**6, symbol=symbol, asset_class="crypto", direction=direction,
+                        qty=0.1, entry_price=entry, status="closed", last_price=entry, unrealized_pnl=0.0,
+                        realized_pnl=pnl, opened_at=opened, closed_at=opened + timedelta(minutes=20), source=source)
+
+
+def _app_row(db_session, source, entry, opened, direction="short", symbol="BTCUSDm"):
+    from datetime import timedelta
+    p = Position(symbol=symbol, asset_class="crypto", direction=direction, qty=0.1, entry_price=entry,
+                 status=PositionStatus.CLOSED.value, last_price=entry, realized_pnl=1.0, source=source,
+                 opened_at=opened, closed_at=opened + timedelta(minutes=20))
+    db_session.add(p)
+    db_session.commit()
+    return p
+
+
+def test_a_phone_trade_is_never_the_strategys(db_session):
+    """2026-11-11, the user: "most of the loss was from my mobile". 40 untagged phone trades (-$1,602) read as
+    strategy:1: a strategy row at a similar price, hours or days away (the demo account's too), won over MT5's tag."""
+    from app.api.journal_routes import _attribute_sources
+
+    t0 = datetime(2026, 11, 10, 14, 24, 3, tzinfo=timezone.utc)
+    _app_row(db_session, "strategy:1", 73616.5, t0)                         # the strategy's own short at 14:24
+    phone = _tagged("BTCUSDm", "short", 73617.5, 50.99, t0 + timedelta(minutes=71), "manual")   # untagged, 15:35
+    twin = _tagged("BTCUSDm", "short", 73616.5, -5.0, t0 + timedelta(seconds=1), "manual")    # even at the same second
+    _attribute_sources(db_session, [phone, twin])
+    assert phone.source == "manual" and twin.source == "manual"
+
+
+def test_the_strategys_tag_is_kept_over_an_app_row(db_session):
+    from app.api.journal_routes import _attribute_sources
+
+    t0 = datetime(2026, 11, 9, 7, 28, tzinfo=timezone.utc)
+    _app_row(db_session, "manual", 73882.2, t0)
+    mine = _tagged("BTCUSDm", "short", 73882.0, 12.0, t0 + timedelta(seconds=2), "strategy:1")
+    _attribute_sources(db_session, [mine])
+    assert mine.source == "strategy:1"
+
+
+def test_a_bare_app_tag_takes_the_row_opened_with_it_only(db_session):
+    """A trade from before the comment carried the source ('app') still finds its own row - opened with it - but
+    not a row at the same price from hours away."""
+    from app.api.journal_routes import _attribute_sources
+
+    t0 = datetime(2026, 10, 23, 14, 5, 58, tzinfo=timezone.utc)
+    _app_row(db_session, "hybrid", 155.20, t0, symbol="USDJPYm")
+    _app_row(db_session, "strategy:1", 155.21, t0 + timedelta(hours=5), symbol="USDJPYm")
+    own = _tagged("USDJPYm", "short", 155.21, 0.45, t0 + timedelta(seconds=1), "app")
+    later = _tagged("USDJPYm", "short", 155.20, 3.0, t0 + timedelta(hours=9), "app")     # no row within 3 min
+    _attribute_sources(db_session, [own, later])
+    assert own.source == "hybrid" and later.source == "app"
+
+
+def test_one_app_row_per_broker_trade(db_session):
+    from app.api.journal_routes import _attribute_sources
+
+    t0 = datetime(2026, 11, 4, 3, 40, 3, tzinfo=timezone.utc)
+    _app_row(db_session, "strategy:1", 76116.1, t0)
+    a = _tagged("BTCUSDm", "short", 76116.1, 1.0, t0 + timedelta(seconds=1), "app")
+    b = _tagged("BTCUSDm", "short", 76116.3, 2.0, t0 + timedelta(seconds=40), "app")
+    _attribute_sources(db_session, [b, a])
+    assert (a.source, b.source) == ("strategy:1", "app")         # the nearer in time gets it, once
 
 
 def test_journal_backfill_labels_legacy_source(db_session, monkeypatch):
@@ -997,3 +1140,83 @@ def test_tradingview_calendar_unreachable_since_start_reads_as_unavailable(monke
     cal = TradingViewCalendarProvider()
     assert cal.get_events("EURUSD", asset_class="forex") == []
     assert cal.unavailable("EURUSD", "forex") is True      # "no events" is unknown, not none
+
+
+# ----------------------------------------------------------------- fresh closes get the broker's $ (2026-11-11)
+
+def test_a_fresh_app_close_gets_its_own_broker_trades_result(db_session, monkeypatch):
+    """Row 503 UKOIL was booked -12.08 (the app's estimate); the broker booked -13.44."""
+    from app.execution import monitor
+    from app.models.schemas import PositionView
+
+    now = datetime.now(timezone.utc)
+    opened = now - timedelta(minutes=50)
+    fresh = Position(symbol="UKOILm", asset_class="energy", direction="long", qty=0.16, entry_price=92.117,
+                     status=PositionStatus.CLOSED.value, realized_pnl=-12.08, last_price=92.0415,
+                     source="strategy:1", opened_at=opened, closed_at=now - timedelta(minutes=2))
+    old = Position(symbol="UKOILm", asset_class="energy", direction="long", qty=0.16, entry_price=91.0,
+                   status=PositionStatus.CLOSED.value, realized_pnl=5.0, last_price=91.3,
+                   source="strategy:1", opened_at=now - timedelta(days=2), closed_at=now - timedelta(days=2, minutes=-30))
+    db_session.add_all([fresh, old])
+    db_session.commit()
+    book = [
+        PositionView(id=1, symbol="UKOILm", asset_class="energy", direction="long", qty=0.16, entry_price=92.117,
+                     status="closed", last_price=92.033, realized_pnl=-13.44, source="strategy:1",
+                     opened_at=opened + timedelta(seconds=1), closed_at=now - timedelta(minutes=2)),
+        PositionView(id=2, symbol="UKOILm", asset_class="energy", direction="long", qty=0.16, entry_price=91.0,
+                     status="closed", last_price=91.4, realized_pnl=6.5, source="strategy:1",
+                     opened_at=now - timedelta(days=2), closed_at=now - timedelta(days=2, minutes=-30)),
+    ]
+    reads = []
+    monkeypatch.setattr("app.risk.service.broker_closed_trades", lambda s: reads.append(1) or book)
+    monkeypatch.setattr(monitor, "_TRUED", set())
+    monkeypatch.setattr(monitor, "_TRUE_UP_LAST", [float("-inf")])
+
+    assert monitor.true_up_recent_closes(db_session, now) == 1
+    db_session.commit()
+    assert fresh.realized_pnl == -13.44 and fresh.last_price == 92.033
+    assert old.realized_pnl == 5.0                       # older than the window: only the Repair changes it
+    # matched: the deal history is not read again for it
+    monitor._TRUE_UP_LAST[0] = float("-inf")
+    assert monitor.true_up_recent_closes(db_session, now) == 0 and len(reads) == 1
+
+
+def test_the_true_up_waits_between_reads_while_a_close_is_not_in_the_history_yet(db_session, monkeypatch):
+    from app.execution import monitor
+
+    now = datetime.now(timezone.utc)
+    db_session.add(Position(symbol="JP225m", asset_class="index", direction="long", qty=1.0, entry_price=100.0,
+                            status=PositionStatus.CLOSED.value, realized_pnl=-1.0, source="strategy:1",
+                            opened_at=now - timedelta(minutes=5), closed_at=now - timedelta(minutes=1)))
+    db_session.commit()
+    reads = []
+    monkeypatch.setattr("app.risk.service.broker_closed_trades", lambda s: reads.append(1) or [])
+    monkeypatch.setattr(monitor, "_TRUED", set())
+    monkeypatch.setattr(monitor, "_TRUE_UP_LAST", [float("-inf")])
+    assert monitor.true_up_recent_closes(db_session, now) == 0
+    assert monitor.true_up_recent_closes(db_session, now) == 0       # within TRUE_UP_EVERY_S: no second read
+    assert len(reads) == 1
+
+
+def test_the_hot_spots_sampler_reads_the_threads_and_changes_nothing():
+    import threading
+    import time as _t
+
+    from app.api.settings_routes import diagnostics_hot
+
+    stop = threading.Event()
+
+    def busy():
+        while not stop.is_set():
+            sum(i * i for i in range(2000))
+
+    t = threading.Thread(target=busy, name="busy-test", daemon=True)
+    t.start()
+    try:
+        out = diagnostics_hot(seconds=1.0, every_ms=5.0)
+    finally:
+        stop.set()
+        t.join(2)
+    assert out["samples"] > 20
+    assert any(name == "busy-test" for name, _ in out["busy_threads"])
+    assert out["stacks"] and out["app_lines"]

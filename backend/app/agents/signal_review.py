@@ -281,6 +281,22 @@ def _num(v) -> str:
     return "none" if v is None else f"{float(v):g}"
 
 
+def _hour_runs(hours: list) -> str:
+    """[8, 9, 10, 16] -> "08:00-11:00, 16:00-17:00": UTC hours picked one by one, as runs."""
+    hs = sorted({int(h) for h in hours})
+    if not hs:
+        return "none"
+    runs, start, prev = [], hs[0], hs[0]
+    for h in hs[1:] + [None]:
+        if h is not None and h == prev + 1:
+            prev = h
+            continue
+        runs.append(f"{start:02d}:00-{(prev + 1) % 24:02d}:00")
+        if h is not None:
+            start = prev = h
+    return ", ".join(runs)
+
+
 def describe_changes(before: dict, after: dict) -> list[str]:
     """What changed between two snapshots, one short line each - the rules group by group, by the conditions'
     own labels (strategy.label), then the settings. Empty when nothing did."""
@@ -342,7 +358,9 @@ def describe_changes(before: dict, after: dict) -> list[str]:
         def hours_text(h) -> str:
             if not h:
                 return "around the clock"
-            if "sessions" in h:
+            if "hours_utc" in h:
+                text = f"hours {_hour_runs(h.get('hours_utc') or [])} UTC"
+            elif "sessions" in h:
                 text = f"sessions: {' + '.join(session_name(k) for k in h.get('sessions') or []) or 'none'}"
             else:
                 text = f"{h.get('start')}-{h.get('end')} {h.get('tz') or ''}".strip()
