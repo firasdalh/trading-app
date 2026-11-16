@@ -48,7 +48,7 @@ function utc(iso: string): string {
  * last hour before a close and red inside the last 15 minutes - the moment a new trade would be
  * carried into a break or the weekend.
  */
-export function MarketHoursChip({ symbol, assetClass }: { symbol: string; assetClass: string }) {
+export function MarketHoursChip({ symbol, assetClass, compact = false }: { symbol: string; assetClass: string; compact?: boolean }) {
   const { data } = usePolling(() => api.marketHours(symbol, assetClass), POLL_MS, [symbol, assetClass]);
   const [now, setNow] = useState(() => Date.now());
 
@@ -82,7 +82,8 @@ export function MarketHoursChip({ symbol, assetClass }: { symbol: string; assetC
         ? "bg-warn/15 text-warn ring-1 ring-inset ring-warn/30"
         : "bg-bull/10 text-bull";
     dot = urgent ? "bg-bear animate-pulse" : soon ? "bg-warn" : "bg-bull";
-    text = left < 60_000 ? "Open · closing now" : `Open · closes ${at(h.closes_at, now)} · in ${span(left)}`;
+    text = left < 60_000 ? "Open · closing now"
+      : compact ? `Open · closes in ${span(left)}` : `Open · closes ${at(h.closes_at, now)} · in ${span(left)}`;
     tip =
       `Closes ${at(h.closes_at, now)} (${utc(h.closes_at)})` +
       (h.closure ? ` for the ${CLOSURE[h.closure]}` : "") +
@@ -95,7 +96,8 @@ export function MarketHoursChip({ symbol, assetClass }: { symbol: string; assetC
     tip = "Open now (live prices). The next close couldn't be worked out from the price history.";
   } else if (h.opens_at) {
     const left = Date.parse(h.opens_at) - now;
-    text = left < 60_000 ? "Closed · opening now" : `Closed · opens ${at(h.opens_at, now)} · in ${span(left)}`;
+    text = left < 60_000 ? "Closed · opening now"
+      : compact ? `Closed · opens in ${span(left)}` : `Closed · opens ${at(h.opens_at, now)} · in ${span(left)}`;
     tip = `Reopens ${at(h.opens_at, now)} (${utc(h.opens_at)}).\n${BASIS}`;
   } else {
     text = "Closed";
@@ -107,7 +109,7 @@ export function MarketHoursChip({ symbol, assetClass }: { symbol: string; assetC
       ? "\nTrading outside its usual hours right now."
       : "\nClosed although it normally trades at this hour - a holiday or a broker pause.";
   }
-  const tag = !h.always_open && h.closure ? CLOSURE[h.closure] : null;
+  const tag = !compact && !h.always_open && h.closure ? CLOSURE[h.closure] : null;
 
   return (
     <span

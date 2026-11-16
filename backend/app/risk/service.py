@@ -146,6 +146,61 @@ def realized_today(session: Session, *, strict: bool = False) -> float:
     return get_or_create_daily_state(session).realized_pnl
 
 
+def daily_target_state(session: Session, realized: float | None = None, now: datetime | None = None) -> dict | None:
+    """The account's daily profit target today (RiskConfig.daily_profit_target; asked 2026-11-16: "a daily target to
+    win - $500, $600, $700, $1,000 - when I reach it, we stop trading for that day"), or None with no target set:
+    {"target", "realized", "hit", "hit_at", "hit_pnl"}.
+
+    ``realized`` = the account's CLOSED P&L today, the broker's own deal history since 00:00 UTC (every trade on the
+    account, the phone's too, swap and commission in) - read here when not given. The moment it reaches the target
+    is latched in the day's DailyRiskState: reached stays reached for the day, even if a trade still open then closes
+    at a loss; only a target raised past the one reached is judged afresh. It stops NEW trades only (the Risk
+    Manager's veto, daily_target_reason): a trade still open keeps its own stop and target."""
+    rc = get_or_create_risk_config(session)
+    target = rc.daily_profit_target
+    if not target or target <= 0:
+        return None
+    daily = get_or_create_daily_state(session)
+    latched = (daily.target_hit_at is not None and daily.target_hit_target is not None
+               and target <= daily.target_hit_target + 1e-9)
+    if realized is None:
+        try:
+            realized = realized_today(session, strict=True)
+        except Exception as exc:  # noqa: BLE001 - the day can't be read now: what was latched stays latched
+            _log.warning("daily target: broker read failed", extra={"error": str(exc)})
+    if not latched and realized is not None and round(realized, 2) >= target:
+        from app.models.db import AgentRun
+
+        daily.target_hit_at = now or datetime.now(timezone.utc)
+        daily.target_hit_pnl = round(realized, 2)
+        daily.target_hit_target = target
+        session.add(daily)
+        session.add(AgentRun(agent="risk", event="daily_target_reached", level="WARNING",
+                             detail={"target": target, "realized": round(realized, 2)}))
+        session.commit()
+        _log.warning("daily profit target reached - no new trades until the next UTC day",
+                     extra={"target": target, "realized": round(realized, 2)})
+        latched = True
+    hit_at = daily.target_hit_at if latched else None
+    return {"target": target, "realized": None if realized is None else round(realized, 2), "hit": latched,
+            "hit_at": (hit_at if hit_at.tzinfo else hit_at.replace(tzinfo=timezone.utc)) if hit_at else None,
+            "hit_pnl": daily.target_hit_pnl if latched else None}
+
+
+def daily_target_reason(session: Session, realized: float | None = None) -> str | None:
+    """The Risk Manager's veto once the account's daily profit target is reached today (daily_target_state)."""
+    st = daily_target_state(session, realized)
+    if not st or not st["hit"]:
+        return None
+    return (f"daily profit target reached: {_usd_signed(st['hit_pnl'])} closed today, target ${st['target']:,.2f} - "
+            "no new trades until 00:00 UTC (raise or clear the target to trade on)")
+
+
+def _usd_signed(x: float | None) -> str:
+    x = x or 0.0
+    return f"{'+' if x >= 0 else '-'}${abs(x):,.2f}"
+
+
 def current_equity(session: Session) -> float | None:
     """Equity of the live trading account(s). Prefers REAL brokers over the sim fallback so a
     simulator's fake $100k balance never pollutes the real-account baseline. Sums across
@@ -737,13 +792,14 @@ def assess(
     qty_step, min_lot = _lot_specs(broker, proposal.asset_class, proposal.symbol)
     # System-wide entry breakers (trade-count / loss-streak / performance divergence). Global, so
     # compute once per scan when a cache is present; fresh each time on the single-symbol path.
+    # The account's daily profit target, reached today, stops every new entry the same way (2026-11-16).
     if cache is not None:
         if not cache.breaker_checked:
-            cache.breaker_reason = entry_breaker_reason(session)
+            cache.breaker_reason = entry_breaker_reason(session) or daily_target_reason(session)
             cache.breaker_checked = True
         breaker = cache.breaker_reason
     else:
-        breaker = entry_breaker_reason(session)
+        breaker = entry_breaker_reason(session) or daily_target_reason(session)
     return evaluate_proposal(
         proposal,
         account,

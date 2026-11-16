@@ -122,7 +122,23 @@ def read_risk_state(session: Session = Depends(get_session)) -> RiskStateView:
         daily_loss_limit_amount=limit_amount,
         daily_loss_breaker_enabled=risk.daily_loss_breaker_enabled,
         entry_breaker=entry_breaker_reason(session),
+        daily_target=_daily_target_view(session, realized),
     )
+
+
+def _daily_target_view(session: Session, realized: float) -> dict | None:
+    """The header's target cell: the daily profit target today, judged on the same closed P&L this view shows."""
+    from app.risk.service import daily_target_state
+
+    try:
+        st = daily_target_state(session, realized)
+    except Exception as exc:  # noqa: BLE001 - display only; the Risk Manager re-reads it on every order
+        session.rollback()
+        log.warning("risk state: daily target unavailable", extra={"error": str(exc)})
+        return None
+    if not st:
+        return None
+    return {**st, "hit_at": st["hit_at"].isoformat() if st["hit_at"] else None}
 
 
 @router.post("/api/risk/resume", response_model=RiskStateView, tags=["risk"])

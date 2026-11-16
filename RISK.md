@@ -105,6 +105,17 @@ block test trades.
   and turning it on live prompts a confirmation. **Default to ON; turn it back on before trading
   the live account for real.**
 
+### `daily_profit_target` (default: none)
+Added 2026-11-16 at the user's request ("a daily target to win - $500, $600, $700, $1,000 - when I reach it, we
+stop trading for that day"). Set in the header's TARGET cell.
+- Once the account's **closed** P&L today (the broker's own deal history since 00:00 UTC, every trade on the account,
+  phone trades included) reaches the target, the Risk Manager refuses every NEW entry until the next UTC day:
+  desk tickets, armed setups, the advisor, Hybrid and the strategies. Open trades keep their own stop and target.
+- Reached is latched for the day: a trade still open then closing at a loss does not reopen trading. Raising the
+  target past the one reached (or clearing it) lets trading start again that day; the desk asks for a second click.
+- It only ever stops trades, so it adds protection and needs no restatement to set. Phone trades bypass the app and
+  cannot be blocked. A strategy's own `daily_target` (its trades only) still works on its own.
+
 ### `max_total_exposure` (default: 6% of equity at risk across all open trades)
 The sum of all open trades' risk cannot exceed this.
 - Why: it backstops the per-trade and position-count limits so they can't combine into

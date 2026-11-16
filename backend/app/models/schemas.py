@@ -431,6 +431,8 @@ class RiskConfigView(BaseModel):
     # auto-disable is turned on.
     scorecard_min_trades: int = 30
     scorecard_auto_disable: bool = False
+    # The account's daily profit target in $ (2026-11-16): reached = no new trades until the next UTC day. None = none.
+    daily_profit_target: float | None = None
 
 
 class SymbolScoreView(BaseModel):
@@ -508,6 +510,9 @@ class RiskStateView(BaseModel):
     # NEW entries right now, with its reason — None when none is tripped. Independent of the daily-
     # loss pause above.
     entry_breaker: str | None = None
+    # The account's daily profit target today (risk.service.daily_target_state): {"target", "realized" (closed today),
+    # "hit", "hit_at", "hit_pnl"}. None = no target set.
+    daily_target: dict | None = None
 
 
 class AnalyzeRequest(BaseModel):

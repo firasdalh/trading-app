@@ -43,13 +43,13 @@ export function NavTabs({ items }: { items: NavItem[] }) {
             title={t.hint}
             aria-current={viewOn ? "page" : undefined}
             aria-expanded={t.kind === "drawer" ? t.active : undefined}
-            className={`relative flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium transition 2xl:px-2.5
+            className={`relative flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1.5 text-[13px] font-medium transition min-[1500px]:px-1.5 min-[2000px]:px-2.5 min-[2000px]:text-sm
               focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50
               ${viewOn ? "text-white" : drawerOn ? "bg-brand-500/15 text-white ring-1 ring-inset ring-brand-500/50" : "text-neutral-400 hover:bg-neutral-800/70 hover:text-neutral-100"}`}
           >
             {/* The icons only where there is room: below 1800px they squeezed the account numbers
                 out of the header (the words are what is read). */}
-            {t.icon && <span className="hidden min-[1800px]:inline-flex"><Icon name={t.icon} /></span>}
+            {t.icon && <span className="hidden min-[2200px]:inline-flex"><Icon name={t.icon} /></span>}
             <span>{t.label}</span>
             {t.alert ? (
               <span
@@ -68,7 +68,7 @@ export function NavTabs({ items }: { items: NavItem[] }) {
             {t.danger && <span className="h-2 w-2 rounded-full bg-bear ring-2 ring-bear/30" aria-label="needs attention" />}
             {/* The page marker: a short accent under the label of the view you are on. */}
             <span
-              className={`absolute inset-x-2.5 bottom-0 h-0.5 rounded-full transition ${viewOn ? "bg-brand-500" : "bg-transparent"}`}
+              className={`absolute inset-x-1.5 bottom-0 h-0.5 rounded-full transition min-[2000px]:inset-x-2.5 ${viewOn ? "bg-brand-500" : "bg-transparent"}`}
               aria-hidden="true"
             />
           </button>

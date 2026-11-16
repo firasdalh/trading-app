@@ -519,6 +519,30 @@ def _c_dont_chase(p, s, b, ctx) -> Result:
     return k <= n, f"{k} close{'s' if k != 1 else ''} in a row {'higher' if s > 0 else 'lower'} (at most {n})"
 
 
+def _c_max_run(p, s, b, ctx) -> Result:
+    """Not stretched (2026-11-16, the user: "I don't want to change the strategy, I want to stop the bad trades";
+    the learner's strongest lesson on strategy 1's own trades): how far price has ALREADY gone the trade's way since
+    the close ``bars`` bars back, in ATR 14 of this timeframe - at most ``atr``. The live price a trade would fill
+    at (the ask for a buy, the bid for a sell) against that close: on 1m with 15 bars it is the learner's own run15
+    (learning.fingerprint), the same number. Strategy 1, Nov 4-16: after a run of 3.5+ ATR in 15 minutes 41% of 80
+    trades won, -12.9R; the rest 56% of 201, +25.5R - and the 39 trades after the lesson first showed (Nov 13 10:04)
+    went the same way (-2.9R on the 15 it would have skipped, +1.6R on the 24 it keeps)."""
+    n = int(p["bars"])
+    if len(b) < max(n, 15):
+        return None, "not enough bars"
+    price = ctx.ask if s > 0 else ctx.bid
+    if not price:
+        return None, "no quote"
+    atr_s = b.atr(14)
+    a = atr_s[-1] if atr_s else None
+    if not a or a <= 0:
+        return None, "no ATR"
+    run = s * (price - b.c[-n].close) / a
+    cap = float(p["atr"])
+    return run <= cap, (f"{run:+.2f} ATR {'up' if s > 0 else 'down'} since the close {n} bars back "
+                        f"(at most {cap:g})")
+
+
 def _c_clean_candle(p, s, b, ctx) -> Result:
     """The last ``bars`` candles closed the trade's way AND their shape doesn't argue against it: a real
     body (at least ``body``% of the range - not a doji or a spinning top) and no rejection wick against
@@ -1033,6 +1057,16 @@ CATALOG: dict[str, Spec] = {s.type: s for s in (
          "after a pullback; 0 = only right after a close against us. Strategy 1's real trades (2026-11-12): entered "
          "on at most 1 such close, 58% won (+$889 over 88 trades); after 2 or more, 43% (-$731 over 133).",
          default_tf="1m"),
+    Spec("max_run", "Price action", "entry",
+         "Not stretched: price at most {atr} ATR above the close {bars} bars back",
+         "Not stretched: price at most {atr} ATR below the close {bars} bars back", "",
+         (Param("bars", "bars back", 15, 2, 100), Param("atr", "ATR", 3.5, 0.5, 20, 0.1)), _c_max_run,
+         "Skips an entry when price has already run far the trade's way: how far the live price is past the close "
+         "N bars back, in ATR 14 of this timeframe (a fall, for a sell). 15 bars on 1m at 3.5 ATR is the strategy "
+         "learner's own lesson on strategy 1's real trades (2026-11-16): after a run of 3.5+ ATR in 15 minutes 41% "
+         "won (-12.9R over 80 trades), the rest 56% (+25.5R over 201) - and it held on the 39 trades after the "
+         "lesson first showed. Different from 'Not chasing', which counts closes in a row and did not hold.",
+         default_tf="1m"),
     Spec("clean_candle", "Price action", "both",
          "The last {bars} candle(s) closed green with a real body (at least {body}% of its range) and an upper "
          "wick no longer than {wick}x the body - no doji, spinning top or shooting star",
@@ -1463,6 +1497,21 @@ def today_result(session: Session, cfg: StrategyConfig, now: datetime) -> dict:
         if hit is None and cfg.daily_target and round(total, 2) >= cfg.daily_target:
             hit = _utc(p.closed_at)
     return {"pnl": round(total, 2), "trades": len(done), "hit_at": hit}
+
+
+def _account_target(session: Session) -> dict | None:
+    """The ACCOUNT's daily profit target (risk.service.daily_target_state) when it is reached today, from what the
+    position monitor latched - no broker call here; the Risk Manager checks it again on every order. {"target", "pnl"}
+    or None."""
+    from app.core.state import get_or_create_daily_state, get_or_create_risk_config
+
+    target = get_or_create_risk_config(session).daily_profit_target
+    if not target:
+        return None
+    d = get_or_create_daily_state(session)
+    if d.target_hit_at is None or d.target_hit_target is None or target > d.target_hit_target + 1e-9:
+        return None
+    return {"target": target, "pnl": d.target_hit_pnl or 0.0}
 
 
 def _usd(x: float) -> str:
@@ -1941,7 +1990,12 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
         # trades it holds were managed above.
         return _note(state, symbol, "live account - confirm LIVE trading (typed, again after every restart) "
                                     "to let it open trades", now)
-    if day and day["hit_at"]:
+    if day and day.get("account"):
+        # The whole account reached its daily profit target (2026-11-16): nothing new opens anywhere today.
+        a = day["account"]
+        return _note(state, symbol, f"account daily target reached - {_usd(a['pnl'])} closed today, target "
+                                    f"${a['target']:,.2f}: no new trades until 00:00 UTC", now)
+    if day and day.get("hit_at"):
         # Done for the day. As outside its hours, the trades it holds were managed above.
         return _note(state, symbol, f"daily target reached - {_usd(day['pnl'])} today, target ${cfg.daily_target:,.2f}: "
                                     "no new trades until 00:00 UTC", now)
@@ -2004,6 +2058,9 @@ def run_strategy(session: Session, cfg: StrategyConfig, now: datetime | None = N
     day = today_result(session, cfg, now) if cfg.daily_target else None
     if day and day["hit_at"]:
         _log_target(session, cfg, day, now)
+    acct = _account_target(session)
+    if acct:
+        day = {**(day or {"pnl": 0.0, "trades": 0, "hit_at": None}), "account": acct}
     results = []
     for pair in (cfg.pairs or []) if pairs is None else pairs:
         try:

@@ -276,10 +276,8 @@ export function OpenPositionsList({
   }
   if (positions.length === 0) {
     return (
-      <div className="px-3 py-4 text-center text-xs leading-relaxed text-neutral-500">
+      <div className="px-3 py-2 text-center text-xs text-neutral-500" title="Run an analysis or approve a setup to open one.">
         No open positions.
-        <br />
-        Run an analysis or approve a setup to open one.
       </div>
     );
   }

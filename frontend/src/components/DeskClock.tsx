@@ -75,7 +75,7 @@ export function DeskClock({ strip }: { strip?: { readonly current: HTMLElement |
       role="timer"
       aria-label={`${hh}:${mm}:${ss}, ${date}`}
       title={`${date} ${d.getFullYear()} · ${hh}:${mm}:${ss} - ${zone} (${offText})\nUTC, the broker's clock: ${utc}`}
-      className={`hidden shrink-0 select-none flex-col items-center rounded-lg border border-emerald-500/20 bg-neutral-950/80 px-3 py-px shadow-[inset_0_0_14px_rgba(0,0,0,0.65),0_0_14px_-6px_rgba(52,211,153,0.45)] ${room ? "min-[1700px]:flex" : ""}`}
+      className={`hidden shrink-0 select-none flex-col items-center rounded-lg border border-emerald-500/20 bg-neutral-950/80 px-3 py-px shadow-[inset_0_0_14px_rgba(0,0,0,0.65),0_0_14px_-6px_rgba(52,211,153,0.45)] ${room ? "xl:flex" : ""}`}
     >
       <div className="font-mono text-[18px] font-semibold leading-none tracking-wider tabular-nums text-emerald-300 [text-shadow:0_0_8px_rgba(52,211,153,0.6)]">
         {hh}

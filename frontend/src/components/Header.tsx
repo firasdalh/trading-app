@@ -99,7 +99,7 @@ export function Header({ settings, account, risk, positions, nav, automation, on
     // strips below change the stack's height instead of overlapping whatever sits under it.
     <div>
       <header className="border-b border-neutral-800 bg-neutral-900/90 backdrop-blur supports-[backdrop-filter]:bg-neutral-900/75">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 xl:flex-nowrap 2xl:gap-x-4">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 xl:flex-nowrap min-[2000px]:gap-x-4">
           {/* Identity */}
           <div className="flex shrink-0 items-center gap-2">
             {/* 64px source rendered at 24px so it stays sharp on high-DPI screens. The artwork
@@ -129,7 +129,9 @@ export function Header({ settings, account, risk, positions, nav, automation, on
               }`}
               title={modeLabel(mode)}
             >
-              {shortModeLabel(mode)}
+              {/* Below 1800px just the letter (the tooltip names it): the account numbers and the clock need the room. */}
+              <span className="min-[2000px]:hidden">{modeLetter(mode)}</span>
+              <span className="hidden min-[2000px]:inline">{shortModeLabel(mode)}</span>
             </span>
           </div>
 
@@ -148,7 +150,7 @@ export function Header({ settings, account, risk, positions, nav, automation, on
             <NavTabs items={nav} />
           </div>
 
-          <span className="hidden h-7 w-px shrink-0 bg-neutral-800 sm:block" aria-hidden="true" />
+          <span className="hidden h-7 w-px shrink-0 bg-neutral-800 min-[2000px]:block" aria-hidden="true" />
 
           {/* Controls */}
           <div className="flex shrink-0 items-center gap-1">
@@ -176,7 +178,9 @@ export function Header({ settings, account, risk, positions, nav, automation, on
                   ? `Acting on their own right now: ${automation.join(", ")}. Click to see the controls.`
                   : "Nothing is trading or managing positions on its own."}
               >
-                {automation.length ? `Auto: ${automation.join(" · ")}` : "Auto: off"}
+                <span className="min-[2000px]:hidden">⚡ </span>
+                <span className="hidden min-[2000px]:inline">Auto: </span>
+                {automation.length ? automation.join(" · ") : "off"}
               </button>
             )}
             <button onClick={onOpenSettings} className="btn btn-ghost px-2" title="Settings" aria-label="Settings">
@@ -197,7 +201,7 @@ export function Header({ settings, account, risk, positions, nav, automation, on
                     ? "Kill-switch is ENGAGED: no new orders. Click to release it."
                     : "Halt ALL new orders at once (open positions keep being managed)"
               }
-              className={`btn whitespace-nowrap ${
+              className={`btn whitespace-nowrap px-2.5 min-[2000px]:px-3 ${
                 effectiveKill
                   ? "border border-bear bg-bear/20 text-bear"
                   : "border border-neutral-700 text-neutral-200 hover:border-bear/60 hover:bg-bear/10 hover:text-bear"
@@ -299,6 +303,11 @@ function modeLabel(mode: string): string {
     default:
       return mode;
   }
+}
+
+// Below 1800px the chip is the mode's letter alone; the full name is its tooltip.
+function modeLetter(mode: string): string {
+  return mode.startsWith("A_") ? "A" : mode.startsWith("B_") ? "B" : mode.startsWith("C_") ? "C" : mode;
 }
 
 // The header chip is short on purpose; the full name is its tooltip.

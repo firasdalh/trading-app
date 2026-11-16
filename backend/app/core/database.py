@@ -76,6 +76,12 @@ _SQLITE_ADDED_COLUMNS = {
         ("weekend_flatten_hours", "FLOAT DEFAULT 1.0"),
         ("scorecard_min_trades", "INTEGER DEFAULT 30"),
         ("scorecard_auto_disable", "BOOLEAN DEFAULT 0"),
+        ("daily_profit_target", "FLOAT"),
+    ],
+    "daily_risk_state": [
+        ("target_hit_at", "DATETIME"),
+        ("target_hit_pnl", "FLOAT"),
+        ("target_hit_target", "FLOAT"),
     ],
     "auto_trade_config": [
         ("min_rr", "FLOAT DEFAULT 1.2"),

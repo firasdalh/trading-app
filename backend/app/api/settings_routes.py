@@ -90,6 +90,8 @@ class RiskUpdateRequest(BaseModel):
     # Per-symbol scorecard: how many closed trades before judging, and warn-only vs auto-disable.
     scorecard_min_trades: int | None = None
     scorecard_auto_disable: bool | None = None
+    # The account's daily profit target in $ (2026-11-16); 0 clears it.
+    daily_profit_target: float | None = None
 
 
 def _check_phrase(phrase: str | None) -> None:
@@ -251,6 +253,13 @@ def update_risk(req: RiskUpdateRequest, session: Session = Depends(get_session))
             )
         else:
             log.warning("daily-loss circuit breaker re-enabled")
+
+    # The daily profit target ($; 0 clears it). Reached, it stops new trades for the day - it only ever stops trades,
+    # so any amount is allowed. Raising it after it was reached lets trading start again today (the user's choice).
+    if req.daily_profit_target is not None:
+        if not (0 <= req.daily_profit_target <= 1_000_000):
+            raise HTTPException(status_code=400, detail="daily_profit_target must be 0 (no target) to 1,000,000 $")
+        risk.daily_profit_target = round(req.daily_profit_target, 2) or None
 
     # Additional entry breakers (0 / False disables each — these only ADD protection).
     if req.max_trades_per_day is not None:

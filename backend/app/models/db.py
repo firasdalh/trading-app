@@ -176,6 +176,12 @@ class RiskConfig(Base):
     min_expectancy_r: Mapped[float] = mapped_column(Float, default=-0.2)
     expectancy_window: Mapped[int] = mapped_column(Integer, default=10)
 
+    # --- Daily profit target (asked 2026-11-16: "a daily target to win - $500, $600, $700, $1,000 - when I reach
+    # it, we stop trading for that day"). Once the account's CLOSED P&L today - the broker's own deal history since
+    # 00:00 UTC, every trade on it, the phone's too - reaches this many dollars, no new trade opens until the next UTC
+    # day (service.daily_target_state, the Risk Manager's veto). It only ever stops trades. None = no target. ---
+    daily_profit_target: Mapped[float | None] = mapped_column(Float)
+
     # --- Spread gate: refuse an entry whose live bid/ask spread eats too much of its own R. ---
     # The spread is a deterministic tax paid the moment a trade opens: with a spread of 0.012 on a
     # 0.029 stop (natural gas at the 22:30 rollover) the trade starts 41% of the way to its stop and
@@ -344,6 +350,12 @@ class DailyRiskState(Base):
     trades_count: Mapped[int] = mapped_column(Integer, default=0)
     trading_paused: Mapped[bool] = mapped_column(Boolean, default=False)
     pause_reason: Mapped[str | None] = mapped_column(Text)
+    # The daily profit target reached today (RiskConfig.daily_profit_target): when, at what closed P&L, and which
+    # target it was. Reached stays reached for the day, even if a trade still open then closes at a loss; only a
+    # target raised past this one is judged afresh.
+    target_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    target_hit_pnl: Mapped[float | None] = mapped_column(Float)
+    target_hit_target: Mapped[float | None] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

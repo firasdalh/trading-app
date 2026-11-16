@@ -314,6 +314,23 @@ def _chase_cap(cfg: dict) -> int | None:
     return max(caps) if caps else None
 
 
+RUN15_HIGH = 3.5          # where the run15 part "high" starts (FEATURES: _three("run15", (1.5, 3.5), ...))
+
+
+def _run_cap(cfg: dict, bars: int = 15) -> float | None:
+    """The loosest 'Not stretched' cap (``bars`` bars back, on 1m) across the BUY groups that trade (None when one
+    has none)."""
+    caps = []
+    for i in _on_entry_groups(cfg):
+        mine = [float((c.get("params") or {}).get("atr", RUN15_HIGH)) for c in cfg["entry_long"][i]
+                if c.get("type") == "max_run" and c.get("tf") == "1m"
+                and int((c.get("params") or {}).get("bars", 15)) == bars]
+        if not mine:
+            return None
+        caps.append(min(mine))
+    return max(caps) if caps else None
+
+
 def _rule_value(cfg: dict, type_: str, key: str, tf: str = "1m") -> list[float]:
     """``key`` of every ``type_`` condition on ``tf`` in the BUY groups that trade."""
     out = []
@@ -367,6 +384,14 @@ def action_for(lesson: dict, cfg: dict) -> dict | None:
                 "text": f"Add “Not chasing: at most {cap} close{'s' if cap != 1 else ''} in a row our way · 1m” "
                         "to the BUY rules (sells read it mirrored)",
                 "done": have is not None and have <= cap}
+    if feat == "run15" and weak and bucket == "high":
+        if not _on_entry_groups(cfg):
+            return None
+        have = _run_cap(cfg)
+        return {"op": "max_run", "atr": RUN15_HIGH,
+                "text": f"Add “Not stretched: at most {RUN15_HIGH:g} ATR our way over the last 15 bars · 1m” "
+                        "to the BUY rules (sells read it mirrored)",
+                "done": have is not None and have <= RUN15_HIGH}
     if feat == "spread" and weak and bucket in ("mid", "high"):
         if not _on_entry_groups(cfg):
             return None
@@ -406,8 +431,9 @@ def apply_change(cfg: dict, op: dict) -> dict:
             raise ValueError("it would leave the strategy no hour to open trades in")
         h = out.get("hours") or {}
         out["hours"] = {"hours_utc": left, "tz": h.get("tz"), **({"crypto_24h": True} if h.get("crypto_24h") else {})}
-    elif kind in ("dont_chase", "spread_max", "atr_min"):
+    elif kind in ("dont_chase", "spread_max", "atr_min", "max_run"):
         type_, params = {"dont_chase": ("dont_chase", {"max": op.get("max", 1)}),
+                         "max_run": ("max_run", {"bars": 15, "atr": op.get("atr", RUN15_HIGH)}),
                          "spread_max": ("spread", {"max_pct": op.get("pct", 20)}),
                          "atr_min": ("atr", {"period": 14, "mult": op.get("mult", 0.9), "avg": 50, "bars": 1})}[kind]
         groups = _on_entry_groups(out)

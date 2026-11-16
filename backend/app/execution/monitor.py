@@ -523,4 +523,13 @@ def monitor_positions(session: Session) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.warning("daily pause evaluation failed", extra={"error": str(exc)})
 
+    # The account's daily profit target: latched the moment the day's closed P&L reaches it (daily_target_state),
+    # so the desk and the strategies know at once - the Risk Manager re-checks it on every order anyway.
+    try:
+        from app.risk.service import daily_target_state
+        daily_target_state(session)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        log.warning("daily target evaluation failed", extra={"error": str(exc)})
+
     return {"checked": checked, "closed": closed + flattened, "weekend_flattened": flattened}

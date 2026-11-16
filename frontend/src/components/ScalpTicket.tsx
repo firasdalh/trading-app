@@ -515,7 +515,9 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
         <span className="font-black uppercase italic tracking-wider text-amber-300" title="Scalp mode: manual trading on the fast charts. Every order goes with its stop and target, through the Risk Manager.">
           ⚡ Scalp
         </span>
-        <span className={`rounded px-1.5 py-0.5 text-[11px] font-bold tracking-wide tabular-nums ${state.cls}`}>{state.text}</span>
+        <span className={`rounded px-1.5 py-0.5 text-[11px] font-bold tracking-wide tabular-nums ${state.cls}`} title={state.text}>
+          {compact && state.text === "READY · pick a side" ? "READY" : state.text}
+        </span>
         <span className="flex items-center gap-1" role="group" aria-label="Risk preset">
           {(Object.keys(SCALP_PRESETS) as ScalpLevel[]).map((k) => {
             const p = SCALP_PRESETS[k];
@@ -529,7 +531,8 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
                   level === k ? LEVEL_TONE[k] : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
                 }`}
               >
-                {p.label} <span className="font-normal opacity-80">{+(riskOf(k) * 100).toFixed(2)}%</span>
+                {p.label}
+                {!compact && <> <span className="font-normal opacity-80">{+(riskOf(k) * 100).toFixed(2)}%</span></>}
               </button>
             );
           })}
@@ -554,7 +557,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
           />
           %
         </label>
-        <label className={`flex ${compact ? "min-w-[8rem]" : "min-w-[12rem]"} flex-1 items-center gap-2`} title="Leverage: the trade's size against your equity. The size is capped so a stopped-out trade stays inside the preset, so a wider stop means a smaller size.">
+        <label className={`flex ${compact ? "min-w-[6rem]" : "min-w-[12rem]"} flex-1 items-center gap-2`} title="Leverage: the trade's size against your equity. The size is capped so a stopped-out trade stays inside the preset, so a wider stop means a smaller size.">
           <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Lev</span>
           <input
             type="range"

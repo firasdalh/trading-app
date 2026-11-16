@@ -39,7 +39,7 @@ const NAMES: Record<string, string> = {
   stoch_room: "Stochastic with room (our way, not overbought / oversold)", vwap: "VWAP side", volume: "Volume spike",
   bb_break: "Bollinger breakout", candles: "Candle colour", clean_candle: "Candle with us (no doji / star / hammer)", structure: "Structure (HH / HL)", sr_room: "Room to S/R (1h / 4h / 1d)",
   zone_room: "Room to supply / demand", fib_zone: "Fibonacci zone (room to the target)",
-  dont_chase: "Not chasing (a fresh push only)", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter",
+  dont_chase: "Not chasing (a fresh push only)", max_run: "Not stretched (not after a big run)", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter",
   rsi_extreme: "Take profit: RSI stretched", profit_r: "Take profit: at +R", time_stop: "Time stop",
 };
 

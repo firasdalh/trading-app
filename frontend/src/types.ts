@@ -383,6 +383,7 @@ export interface SettingsResponse {
     weekend_block_hours: number;
     weekend_flatten_enabled: boolean;
     weekend_flatten_hours: number;
+    daily_profit_target?: number | null;   // $ - reached, no new trades until 00:00 UTC (2026-11-16)
   };
   env_kill_switch: boolean;
   env_broker_env: string;
@@ -402,6 +403,17 @@ export interface RiskState {
   daily_loss_limit_amount: number | null;
   daily_loss_breaker_enabled: boolean;
   entry_breaker: string | null;
+  daily_target?: DailyTarget | null;      // the account's daily profit target today; null = none set
+}
+
+// The account's daily profit target today (GET /api/risk/state, 2026-11-16). realized = closed P&L today, the broker's
+// own history since 00:00 UTC. Reached is latched for the day: hit_at / hit_pnl say when and at what.
+export interface DailyTarget {
+  target: number;
+  realized: number | null;
+  hit: boolean;
+  hit_at: string | null;
+  hit_pnl: number | null;
 }
 
 export interface BacktestMetrics {

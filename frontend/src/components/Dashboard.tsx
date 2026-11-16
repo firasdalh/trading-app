@@ -676,6 +676,40 @@ export function Dashboard({
     </>
   );
 
+  // Favourites — how you move between the pairs you actually watch. In the toolbar beside the pair picker; in full
+  // screen (no toolbar) in the chart's header, compact with no × : removing a favourite is housekeeping, not
+  // something you do mid-read, and every extra × is a mis-click that silently drops a pair.
+  const favoriteChips = favorites.length > 0 && (
+      <span className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-neutral-500" title="Favourites">★</span>
+        {favorites.map((f) => {
+          const active = f.symbol === symbol && f.assetClass === assetClass;
+          return (
+            <span
+              key={`${f.assetClass}-${f.symbol}`}
+              className={`group flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition ${
+                active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+              }`}
+            >
+              <button onClick={() => openFavorite(f)} title={`Switch the chart to ${f.symbol} · ${f.assetClass}`}>
+                {displaySymbol(f.symbol)}
+              </button>
+              {!chartFull && (
+                <button
+                  onClick={() => removeFavorite(f)}
+                  title="Remove favourite"
+                  aria-label={`Remove ${f.symbol} from favourites`}
+                  className={active ? "text-blue-200 hover:text-white" : "text-neutral-500 hover:text-bear"}
+                >
+                  ×
+                </button>
+              )}
+            </span>
+          );
+        })}
+      </span>
+    );
+
   // In the chart's own header (it travels into full screen with it): the timeframe is the chart's.
   const timeframeSwitch = (
     <TimeframeSwitch value={timeframe} onChange={setTimeframe} options={scalp ? SCALP_TFS : TIMEFRAMES} scalp={scalp} />
@@ -692,14 +726,14 @@ export function Dashboard({
         {/* ───────────── Centre, top: toolbar + chart ───────────── */}
         <div
           ref={chartAreaRef}
-          className="min-w-0 space-y-3 lg:col-start-1 lg:row-start-1"
+          className="min-w-0 space-y-2 lg:col-start-1 lg:row-start-1"
           style={{ scrollMarginTop: "calc(var(--hdr-h, 0px) + 12px)" }}
         >
           {notices}
 
           {/* Toolbar — one line on a desktop window: what you are looking at, how the engine
               decides, and the one action. */}
-          <div className="card flex flex-wrap items-center gap-1.5 px-3 py-2 2xl:gap-2">
+          <div className="card flex flex-wrap items-center gap-1.5 px-2.5 py-1.5 2xl:gap-2">
             <SymbolPicker
               value={symbol}
               symbols={symbols}
@@ -714,7 +748,7 @@ export function Dashboard({
               title="Asset class — picks the broker and the symbol list"
               value={assetClass}
               onChange={(e) => setAssetClass(e.target.value as AssetClass)}
-              className="field py-1.5"
+              className="field"
             >
               {ASSET_CLASSES.map((a) => (
                 <option key={a} value={a}>
@@ -722,6 +756,7 @@ export function Dashboard({
                 </option>
               ))}
             </select>
+            {!chartFull && favoriteChips}
 
             <span className="hidden h-6 w-px bg-neutral-800 2xl:block" aria-hidden="true" />
 
@@ -778,71 +813,43 @@ export function Dashboard({
                   {fmtPrice(liveQuote.price)}
                 </span>
               )}
-              <button onClick={runAnalysis} disabled={analyzing} className="btn btn-primary">
+              <button onClick={runAnalysis} disabled={analyzing} className="btn btn-primary py-1">
                 {analyzing ? "Analyzing…" : "Run analysis"}
               </button>
             </div>
           </div>
 
           {/* Chart card - lit amber in scalp mode, so the mode is never in doubt at a glance. */}
-          <div className={`card p-3${scalp ? " ring-1 ring-amber-500/50 shadow-[0_0_36px_-10px_rgba(245,158,11,0.45)]" : ""}`}>
+          <div className={`card p-2.5${scalp ? " ring-1 ring-amber-500/50 shadow-[0_0_36px_-10px_rgba(245,158,11,0.45)]" : ""}`}>
             {/* Header + position strip + chart all travel together into full screen — see
                 chartWrapRef above. */}
             <div
               ref={chartWrapRef}
               className={chartFull ? "flex h-screen flex-col overflow-hidden bg-neutral-950 p-3" : undefined}
             >
-              <div className="mb-2 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2">
-                <span className="flex min-w-0 items-baseline gap-2">
-                  <span className="text-sm font-semibold">
-                    {displaySymbol(symbol)} · {timeframe}
+              <div className="mb-1.5 flex shrink-0 flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                {/* The pair and timeframe in words only in full screen: on the desk the toolbar above names the pair
+                    and the switch on the right lights the timeframe - the title made this header two lines. */}
+                {chartFull && (
+                  <span className="flex min-w-0 items-baseline gap-2">
+                    <span className="text-sm font-semibold">
+                      {displaySymbol(symbol)} · {timeframe}
+                    </span>
+                    {descriptions[symbol] && (
+                      <span className="hidden truncate text-xs text-neutral-500 md:inline">{descriptions[symbol]}</span>
+                    )}
                   </span>
-                  {descriptions[symbol] && (
-                    <span className="hidden truncate text-xs text-neutral-500 md:inline">{descriptions[symbol]}</span>
-                  )}
-                </span>
+                )}
                 {/* This pair alone in its own tab, on any timeframe - several timeframes at once, or
                     one on another screen. */}
                 <ScalpToggle on={scalp} onToggle={toggleScalp} />
                 <ChartWindowMenu symbol={symbol} assetClass={assetClass} timeframe={timeframe} scalp={scalp} />
                 {/* Open or closed, and when it next closes / reopens - before a trade, not after. */}
-                <MarketHoursChip symbol={symbol} assetClass={assetClass} />
+                <MarketHoursChip symbol={symbol} assetClass={assetClass} compact={!chartFull} />
                 {result?.proposal?.regime && (
                   <RegimeBadge regime={result.proposal.regime} strategy={result.proposal.strategy} />
                 )}
-                {/* Favourites — how you move between the pairs you actually watch. In full screen
-                    they are compact with no × : removing a favourite is housekeeping, not something
-                    you do mid-read, and every extra × is a mis-click that silently drops a pair. */}
-                {favorites.length > 0 && (
-                  <span className="flex flex-wrap items-center gap-1">
-                    <span className="text-xs text-neutral-500" title="Favourites">★</span>
-                    {favorites.map((f) => {
-                      const active = f.symbol === symbol && f.assetClass === assetClass;
-                      return (
-                        <span
-                          key={`${f.assetClass}-${f.symbol}`}
-                          className={`group flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition ${
-                            active ? "bg-brand-600 text-white" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
-                          }`}
-                        >
-                          <button onClick={() => openFavorite(f)} title={`Switch the chart to ${f.symbol} · ${f.assetClass}`}>
-                            {displaySymbol(f.symbol)}
-                          </button>
-                          {!chartFull && (
-                            <button
-                              onClick={() => removeFavorite(f)}
-                              title="Remove favourite"
-                              aria-label={`Remove ${f.symbol} from favourites`}
-                              className={active ? "text-blue-200 hover:text-white" : "text-neutral-500 hover:text-bear"}
-                            >
-                              ×
-                            </button>
-                          )}
-                        </span>
-                      );
-                    })}
-                  </span>
-                )}
+                {chartFull && favoriteChips}
                 {/* Open positions — quick-switch the chart between them. On a wide desk the sidebar
                     does this, so these only show in full screen (sidebar hidden) or on a narrow
                     window (sidebar below the chart). */}
@@ -958,7 +965,7 @@ export function Dashboard({
                 }
               />
             </div>
-            <p className="mt-2 text-[11px] text-neutral-600">
+            <p className="mt-1.5 text-[11px] text-neutral-600">
               Backtest and paper results do not guarantee live results.
             </p>
           </div>

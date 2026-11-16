@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../api/client";
 import { usePolling } from "../hooks/usePolling";
 import { fmtUsd } from "../format";
@@ -94,13 +95,14 @@ export function AccountKpis({ account, risk, settings, positions }: Props) {
           };
 
   return (
-    <div className="flex min-w-0 items-center gap-x-4 gap-y-1 2xl:gap-x-5">
+    <div className="flex min-w-0 items-center gap-x-3 gap-y-1 min-[2000px]:gap-x-5">
       <Stat label="Equity" value={equity != null ? fmtUsd(equity) : "—"} />
       <Stat
         label="Day P&L"
         title={`Today, on the broker's day - from 00:00 UTC (${utcMidnightHere()} your time): closed ${fmtUsd(realized, { sign: true })} + open now ${
           fmtUsd(floating, { sign: true })}. Every trade on the account counts, your phone's too; swap and commission in.${
-          dayBase ? ` The % is of ${fmtUsd(dayBase)}, what the account held when the day began.` : ""}`}
+          dayBase ? ` The % is of ${fmtUsd(dayBase)}, what the account held when the day began.` : ""}${
+          risk?.trades_count != null ? ` ${risk.trades_count} trade${risk.trades_count === 1 ? "" : "s"} opened today.` : ""}`}
         valueClass={pnlClass}
         value={
           equity != null ? (
@@ -114,7 +116,7 @@ export function AccountKpis({ account, risk, settings, positions }: Props) {
               )}
               {/* How busy the day has been, next to its result - the discipline state was invisible. */}
               {risk?.trades_count != null && (
-                <span className="ml-1.5 text-[11px] font-normal text-neutral-500" title="Trades opened today">
+                <span className="ml-1.5 hidden text-[11px] font-normal text-neutral-500 min-[1500px]:inline" title="Trades opened today">
                   · {risk.trades_count} today
                 </span>
               )}
@@ -124,6 +126,7 @@ export function AccountKpis({ account, risk, settings, positions }: Props) {
           )
         }
       />
+      <TargetStat risk={risk} settings={settings} realized={realized} />
       {/* Slots alone overstate the room: with the exposure budget used up, "2 / 5" still read as
           three free slots while nothing new could open. So a full budget marks this full too. */}
       <Stat
@@ -161,6 +164,189 @@ export function AccountKpis({ account, risk, settings, positions }: Props) {
   );
 }
 
+// The amounts the user named (2026-11-16: "$500, $600, $700, $1,000 per day").
+const TARGET_PRESETS = [500, 600, 700, 1000];
+const fmtWhole = (v: number) => `${v < 0 ? "-" : ""}$${Math.abs(Math.round(v)).toLocaleString()}`;
+const hhmm = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "";
+
+/**
+ * The account's DAILY PROFIT TARGET (asked 2026-11-16: "a daily target to win - $500, $600, $700, $1,000 - when I
+ * reach it, we stop trading for that day"). Its cell shows the closed profit today against the target; a click opens
+ * the editor. Reached (the server latches it, risk.daily_target.hit), nothing new opens until 00:00 UTC - the
+ * desk's tickets, armed setups, the advisor and the strategies alike - while open trades keep their stop and target.
+ * Raising or clearing a target already reached asks once more: it is the one way to trade on that day.
+ */
+function TargetStat({ risk, settings, realized }: { risk: RiskState | null; settings: SettingsResponse | null; realized: number }) {
+  const server = risk?.daily_target ?? null;
+  const savedTarget = server?.target ?? settings?.risk.daily_profit_target ?? null;
+  // Just saved: shown at once, until the 5-s polls bring the server's own reading.
+  const [local, setLocal] = useState<{ v: number | null } | null>(null);
+  useEffect(() => {
+    if (local && (savedTarget ?? null) === local.v) setLocal(null);
+  }, [savedTarget, local]);
+  const target = local ? local.v : savedTarget;
+  const hit = !local && !!server?.hit;
+  const closed = server?.realized ?? realized;
+
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [confirm, setConfirm] = useState<number | null | undefined>(undefined);   // a loosening waiting for "yes"
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [at, setAt] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open || !btnRef.current) return;
+    const r = btnRef.current.getBoundingClientRect();
+    setAt({ left: Math.max(8, Math.min(r.left, window.innerWidth - 312)), top: r.bottom + 8 });
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const down = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!popRef.current?.contains(t) && !btnRef.current?.contains(t)) setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("mousedown", down);
+    window.addEventListener("keydown", key);
+    return () => { window.removeEventListener("mousedown", down); window.removeEventListener("keydown", key); };
+  }, [open]);
+
+  const start = () => {
+    setDraft(target != null ? String(target) : "");
+    setConfirm(undefined);
+    setErr(null);
+    setOpen((o) => !o);
+  };
+  const save = async (v: number | null, sure = false) => {
+    // Reached today: a higher target or none at all lets trading start again - asked once more.
+    if (hit && !sure && (v == null || (target != null && v > target))) {
+      setConfirm(v);
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.updateRisk({ daily_profit_target: v ?? 0 });
+      setLocal({ v });
+      setOpen(false);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const typed = Number(draft);
+  const typedOk = draft.trim() !== "" && Number.isFinite(typed) && typed > 0 && typed <= 1_000_000;
+
+  const pct = target && target > 0 ? Math.max(0, Math.min(100, (closed / target) * 100)) : 0;
+  const tip = target == null
+    ? "No daily profit target. Click to set one: once the account's closed profit today reaches it, nothing new opens until the next day."
+    : hit
+      ? `Daily target ${fmtUsd(target)} reached at ${hhmm(server?.hit_at)} with ${fmtUsd(server?.hit_pnl ?? 0, { sign: true })} closed - no new trades until ${utcMidnightHere()} (00:00 UTC). Open trades keep their stop and target. Click to change it.`
+      : `Closed today ${fmtUsd(closed, { sign: true })} of your ${fmtUsd(target)} daily target (${Math.round(pct)}%). Reached, nothing new opens until ${utcMidnightHere()}. Click to change it.`;
+
+  return (
+    <>
+      <Stat
+        label="Target"
+        title={tip}
+        valueClass={hit ? "text-bull" : target == null ? "text-neutral-500" : "text-neutral-200"}
+        value={
+          <button ref={btnRef} type="button" onClick={start} aria-expanded={open} className="rounded hover:text-white">
+            {target == null ? "＋ set" : hit ? `🎯 HIT ${fmtWhole(server?.hit_pnl ?? closed)}` : `${fmtWhole(closed)} / ${fmtWhole(target)}`}
+            {local && <span className="ml-1 text-[11px] font-normal text-neutral-500">…</span>}
+          </button>
+        }
+        extra={target != null && !hit ? (
+          <div className="mt-0.5 h-0.5 w-14 overflow-hidden rounded-full bg-neutral-800">
+            <div className="h-full bg-bull" style={{ width: `${pct}%` }} />
+          </div>
+        ) : undefined}
+      />
+      {open && at && createPortal(
+        <div
+          ref={popRef}
+          role="dialog"
+          aria-label="Daily profit target"
+          className="fixed z-[90] w-[300px] rounded-lg border border-neutral-700 bg-neutral-900 p-3 text-xs text-neutral-300 shadow-2xl"
+          style={{ left: at.left, top: at.top }}
+        >
+          <div className="text-sm font-semibold text-neutral-100">🎯 Daily profit target</div>
+          <p className="mt-1 leading-snug text-neutral-400">
+            Once the account&apos;s <b className="text-neutral-200">closed</b> profit today reaches it, nothing new opens until{" "}
+            {utcMidnightHere()} (00:00 UTC): your tickets, armed setups, the advisor and the strategies. Open trades keep their
+            stop and target. Trades from your phone count, but the app can&apos;t stop those.
+          </p>
+          {hit && (
+            <p className="mt-2 rounded bg-bull/15 px-2 py-1 text-bull">
+              Reached at {hhmm(server?.hit_at)} with {fmtUsd(server?.hit_pnl ?? 0, { sign: true })} closed.
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap gap-1">
+            {TARGET_PRESETS.map((p) => (
+              <button
+                key={p}
+                type="button"
+                disabled={busy}
+                onClick={() => save(p)}
+                className={`rounded border px-2 py-0.5 font-semibold tabular-nums ${
+                  target === p ? "border-bull/60 bg-bull/20 text-bull" : "border-neutral-700 text-neutral-200 hover:border-bull/50 hover:text-bull"
+                }`}
+              >
+                {fmtWhole(p)}
+              </button>
+            ))}
+          </div>
+          <form
+            className="mt-2 flex items-center gap-1"
+            onSubmit={(e) => { e.preventDefault(); if (typedOk) save(Math.round(typed * 100) / 100); }}
+          >
+            <span className="text-neutral-500">$</span>
+            <input
+              type="number"
+              min={1}
+              step={50}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="any amount"
+              aria-label="Daily profit target in dollars"
+              className="w-28 rounded border border-neutral-700 bg-neutral-950 px-1.5 py-0.5 tabular-nums text-neutral-100"
+            />
+            <button type="submit" disabled={!typedOk || busy} className="rounded bg-bull/80 px-2 py-0.5 font-semibold text-black disabled:opacity-40">
+              Set
+            </button>
+            {target != null && (
+              <button type="button" disabled={busy} onClick={() => save(null)} className="ml-auto rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100">
+                No target
+              </button>
+            )}
+          </form>
+          {confirm !== undefined && (
+            <div className="mt-2 rounded border border-warn/50 bg-warn/10 p-2 text-warn">
+              {confirm == null ? "Clear the target" : `Raise it to ${fmtWhole(confirm)}`}? You reached your target today - this lets
+              trading start again right now.
+              <div className="mt-1.5 flex gap-1">
+                <button type="button" disabled={busy} onClick={() => save(confirm, true)} className="rounded bg-warn px-2 py-0.5 font-semibold text-black">
+                  Yes, trade on
+                </button>
+                <button type="button" onClick={() => setConfirm(undefined)} className="rounded px-2 py-0.5 text-neutral-300 hover:bg-neutral-800">
+                  Keep it
+                </button>
+              </div>
+            </div>
+          )}
+          {err && <p className="mt-2 text-bear">{err}</p>}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 /**
  * Full-width alert strips under the header. Only states that stop orders from going through get a
  * strip; everything else is a number in the KPI strip. One strip per cause, never two for the same
@@ -188,6 +374,13 @@ export function AccountAlerts({ account, risk, settings }: Omit<Props, "position
       {ks && (
         <div className="bg-warn px-4 py-1.5 text-center text-sm font-medium text-black">
           ⛔ Kill-switch engaged — no new orders will be submitted (open positions are still managed).
+        </div>
+      )}
+      {/* The day's target reached (2026-11-16): orders are refused for the rest of the day - say why, in green. */}
+      {!ks && risk?.daily_target?.hit && (
+        <div className="border-b border-bull/40 bg-bull/15 px-4 py-1.5 text-center text-sm font-medium text-bull">
+          🎯 Daily target reached - {fmtUsd(risk.daily_target.hit_pnl ?? 0, { sign: true })} closed today (target{" "}
+          {fmtUsd(risk.daily_target.target)}). No new trades until {utcMidnightHere()}; open trades keep their stop and target.
         </div>
       )}
       {!ks && paused && (

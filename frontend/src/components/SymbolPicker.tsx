@@ -97,7 +97,7 @@ export function SymbolPicker({
       <button
         onClick={() => setOpen((o) => !o)}
         title={descriptions[value] || value}
-        className="flex w-48 items-center justify-between rounded bg-neutral-800 px-2 py-1.5 text-left text-sm"
+        className="flex w-48 items-center justify-between rounded bg-neutral-800 px-2 py-1 text-left text-sm"
       >
         <span className="flex min-w-0 items-baseline gap-1.5">
           <span className="font-medium">{value || "Select…"}</span>
