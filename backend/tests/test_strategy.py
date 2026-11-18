@@ -2074,5 +2074,6 @@ def test_the_engine_writes_the_entrys_fingerprint_into_its_opened_log(db_session
     assert st.run_strategy(db_session, cfg, now=NOW)[0].get("opened") == "long"
     run = db_session.scalars(select(AgentRun).where(AgentRun.event == "opened")).one()
     fp = run.detail["fp"]
-    assert fp["v"] == 1 and fp["streak"] >= 1 and fp["hour"] == NOW.hour and fp["session"] == "london"
+    assert fp["v"] == 2 and fp["streak"] >= 1 and fp["hour"] == NOW.hour and fp["session"] == "london"
+    assert fp["chan1m"] is not None and fp["chan1m_up"] in (True, False)
     assert fp["spread_pct"] is not None and fp["ext20"] > 0

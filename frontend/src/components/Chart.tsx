@@ -23,7 +23,7 @@ import { TradeZonesPrimitive, type TradeZone } from "./chartZones";
 import { OrderBlockPrimitive, type ObZone } from "./orderBlockZones";
 import { EmaRibbonPrimitive } from "./emaRibbon";
 import { TradeHistoryPrimitive, type HistTrade } from "./tradeHistory";
-import { AutoFibPrimitive, autoFib, fibExplain, fibPosition, fibStatus, liveFib, type AutoFib } from "./autoFib";
+import { AutoFibPrimitive, FIB_LADDER_ROOM, autoFib, fibExplain, fibPosition, fibStatus, liveFib, type AutoFib } from "./autoFib";
 import { RSI_PERIOD_EVENT } from "../rsiPeriod";
 import { OrderFlowPane } from "./OrderFlowPane";
 import { SessionLegend } from "./SessionLegend";
@@ -1332,6 +1332,28 @@ function PaneResizer({ height, onChange, label }: { height: number; onChange: (h
 
 // Keyed by mode, so switching to scalp remounts with the scalp layout's saved toggles instead of
 // writing one layout's state under the other's keys.
+// "This hour so far" (2026-11-17): a buy after the hour had already run this many ATR (1h) up comes late - the cap of
+// strategy 1's "Not stretched · 1h · 1 bar back" (its real trades: 45% of 20 won, -3.8R).
+const HOUR_LATE_ATR = 1.0;
+
+// A candle's open time in UTC seconds (a time without a zone is UTC, as toTime reads it).
+function candleSec(c: Candle): number {
+  return Math.floor(Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(c.ts) ? c.ts : `${c.ts}Z`) / 1000);
+}
+
+// ATR 14 at the last of ``cs`` as the engine reads it (indicators.atr_series: true ranges, Wilder's smoothing).
+function wilderAtr(cs: Candle[], period = 14): number | null {
+  if (cs.length < period + 1) return null;
+  const tr: number[] = [];
+  for (let i = 1; i < cs.length; i++) {
+    const c = cs[i], pc = cs[i - 1].close;
+    tr.push(Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc)));
+  }
+  let a = tr.slice(0, period).reduce((x, y) => x + y, 0) / period;
+  for (let i = period; i < tr.length; i++) a = (a * (period - 1) + tr[i]) / period;
+  return a > 0 ? a : null;
+}
+
 export function Chart(props: Props) {
   return <ChartView key={props.scalp ? "scalp" : "std"} {...props} />;
 }
@@ -1590,6 +1612,40 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const [showBand, setShowBand] = usePersisted(sk("chart.showBand"), !scalp);
   const [showStructure, setShowStructure] = usePersisted(sk("chart.showStructure"), false);
   const [showChannel, setShowChannel] = usePersisted(sk("chart.showChannel"), false);
+  // This hour so far (2026-11-17, the user: "show me on the chart the ATR reading we added, on any pair I trade"): how
+  // far price has gone since the last CLOSED 1h bar, in ATR 14 of 1h - the reading of the strategy rule "Not
+  // stretched · 1h · 1 bar back". The 1h bars are read for a new pair and again once each hour has closed; the price
+  // is the live quote (the same broker symbol only, so a switch of pair never mixes two).
+  const [showHourRun, setShowHourRun] = usePersisted(sk("chart.showHourRun"), true);
+  const [hourBase, setHourBase] = useState<{ sym: string; close: number; atr: number } | null>(null);
+  useEffect(() => {
+    setHourBase(null);
+    if (!showHourRun || !symbol) return;
+    let dead = false;
+    let hour = -1;
+    const load = async () => {
+      const h = Math.floor(Date.now() / 3_600_000);
+      if (h === hour) return;
+      try {
+        const s = await api.ohlcv(symbol, assetClass, "1h", 300);
+        if (dead) return;
+        const now = Date.now() / 1000;
+        const closed = s.candles.filter((c) => candleSec(c) + 3600 <= now);   // the bar still forming repaints
+        const atr = wilderAtr(closed, 14);
+        const last = closed[closed.length - 1];
+        setHourBase(atr && last ? { sym: s.symbol, close: last.close, atr } : null);
+        hour = h;
+      } catch {
+        /* no 1h bars just now: tried again on the next round */
+      }
+    };
+    void load();
+    const id = window.setInterval(() => void load(), 15_000);
+    return () => {
+      dead = true;
+      window.clearInterval(id);
+    };
+  }, [symbol, assetClass, showHourRun]);
   // Auto Fibonacci: the leg it measured (for the toolbar tag); the primitive draws the same one.
   const [showFib, setShowFib] = usePersisted(sk("chart.showFib"), false);
   const [fib, setFib] = useState<AutoFib | null>(null);
@@ -1750,6 +1806,8 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
         if (!ts.length || !lb) return null;
         return { index: ts.length - 1 + ((lb.time as number) > ts[ts.length - 1] ? 1 : 0), high: lb.high, low: lb.low, close: lb.close };
       },
+      // The open trade's tags win the open space: the Fibonacci's ladder keeps its words off them.
+      avoid: () => zones.labelRects(),
     });
     series.attachPrimitive(fibPrim);
     fibRef.current = fibPrim;
@@ -1831,6 +1889,8 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       // A past trade's arrow under the pointer: drawn stronger, with its details beside it.
       const hit = param.point ? histPrim.hit(param.point.x, param.point.y) : null;
       histPrim.setHover(hit?.key ?? null);
+      // The Fibonacci zone under the pointer (in the open space or its ladder) lights up across the candles.
+      fibPrim.setPointer(param.point ? { x: param.point.x, y: param.point.y } : null);
       setHistTip((was) => (!hit ? null : was && was.key === hit.key && was.x === hit.x && was.y === hit.y ? was : hit));
       // A watch signal's candle under the pointer: its details and what price did after it (sigTip).
       const pt = param.point;
@@ -2148,9 +2208,11 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           const n = candleData.length;
           if (ts && n) {
             const VISIBLE = 110;
-            const GAP = 6;                     // empty bars right of the newest one
-            const kept = !first && was ? Math.round(was.to - was.from) - GAP : VISIBLE;
-            const show = Math.max(20, Math.min(n, kept));
+            // Bars across the width (the zoom), and the empty ones right of the newest bar: 6, or room for
+            // the Fibonacci's ladder while it is on (fewer bars then, the candles keep their size).
+            const total = !first && was ? Math.round(was.to - was.from) : VISIBLE + 6;
+            const GAP = Math.min(Math.floor(total / 3), rightGapBars(ts.width() / Math.max(1, total)));
+            const show = Math.max(20, Math.min(n, total - GAP));
             ts.setVisibleLogicalRange({ from: Math.max(0, n - show), to: n + GAP });
           }
           // Re-fit the price (y) axis to the NEW pair. autoScale gets turned OFF the moment the user
@@ -2238,6 +2300,14 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   useEffect(() => {
     applyFib(candlesRef.current);
+    // Switched on while the newest candle is in view: slide the chart left (same zoom) until the ladder
+    // has its room beside price. Someone looking back in history is left where they are.
+    const ts = chartRef.current?.timeScale();
+    if (showFib && ts && candlesRef.current.length) {
+      const at = ts.scrollPosition();
+      const need = rightGapBars(ts.options().barSpacing);
+      if (at >= -0.5 && at < need) ts.scrollToPosition(need, true);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showFib]);
 
@@ -2634,6 +2704,12 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
 
   // Regression channel = the algorithmic trend line (mid) + dynamic resistance/support (bands), drawn
   // over the last LB bars. Mirrors the backend indicators.regression_channel the engine reads.
+  // Empty bars to keep right of the newest candle at this bar spacing (px): 6, or - with the Fibonacci on -
+  // enough for its ladder (autoFib.ts) to stand in the open beside price instead of on the candles.
+  function rightGapBars(spacing: number) {
+    return showFib && spacing > 0 ? Math.max(6, Math.ceil(FIB_LADDER_ROOM / spacing)) : 6;
+  }
+
   // Auto Fibonacci (autoFib.ts): the trend on THIS timeframe's candles and the leg it is drawn on,
   // found again on every reload - so a new swing or a switch of timeframe redraws it.
   function applyFib(candles: Candle[]) {
@@ -4623,7 +4699,9 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
     const ts = chartRef.current?.timeScale();
     if (ts && n) {
       const VISIBLE = 110;
-      ts.setVisibleLogicalRange({ from: Math.max(0, n - VISIBLE), to: n + 6 });
+      const total = VISIBLE + 6;
+      const gap = Math.min(Math.floor(total / 3), rightGapBars(ts.width() / total));
+      ts.setVisibleLogicalRange({ from: Math.max(0, n - (total - gap)), to: n + gap });
     }
     seriesRef.current?.priceScale().applyOptions({ autoScale: true });
   };
@@ -5214,7 +5292,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           </ToolMenu>
 
           <ToolMenu icon={<Icon name="bars" />} label="Indicators"
-                    count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel, showFib].filter(Boolean).length}
+                    count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel, showFib, showHourRun].filter(Boolean).length}
                     open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))} width="w-72">
             <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI {RSI_P}</MenuItem>
             <div
@@ -5271,8 +5349,12 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
               Structure (HH/HL)
             </MenuItem>
             <MenuItem on={showChannel} onClick={() => setShowChannel((v) => !v)} dot="#a78bfa"
-                      tip="Regression channel: the algorithmic trend line (mid) + dynamic resistance/support bands. Shown for your read; tested and NOT used to gate trades.">
+                      tip="Regression channel: the algorithmic trend line (mid) + dynamic resistance/support bands - the line through the last 60 closes, bands 2 standard deviations either side. The strategy rule 'Channel place' reads this same channel on its own timeframe; on its own it gates nothing.">
               Regression channel
+            </MenuItem>
+            <MenuItem on={showHourRun} onClick={() => setShowHourRun((v) => !v)} dot="#f59e0b"
+                      tip="This hour so far: a chip on the chart's top line - how far price has gone since the last 1h close, in ATR 14 of 1h, the reading of the strategy rule 'Not stretched · 1h · 1 bar back'. Amber from 0.5, red at 1.0+: a buy (down: a sell) then comes late.">
+              This hour so far (1h ATR)
             </MenuItem>
             <MenuItem on={showFib} onClick={() => setShowFib((v) => !v)} dot="#34d399"
                       tip="Finds the trend on THIS timeframe and draws the Fibonacci on the swing that matters - on any timeframe. Uptrend (higher highs and lows): from the swing low of the latest push up to its high. Downtrend: from the swing high of the latest drop to its low. A squeeze: the move price is still inside. 0.236 to 0.786 are where a pullback often stalls (0.618 thick); ext 1.272 / 1.618 beyond the swing are targets. Drawn on the last FINISHED swing, so its levels and targets stay put while price runs to them; it moves to the next swing once that one is finished (price turned 3 x ATR off it). Past the 1 the swing is broken: 1.272 / 1.618 beyond the 1 show where a break runs. Shown for your read; not used to gate trades.">
@@ -5370,6 +5452,41 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
               </>
             )}
             <span className="pointer-events-auto flex flex-wrap items-center gap-1 rounded-md bg-neutral-950/55 px-0.5 backdrop-blur-[2px]">
+        {showHourRun && hourBase && liveQuote && liveQuote.symbol === hourBase.sym && (() => {
+          const mid = liveQuote.price;
+          // The rule reads the ask for a buy and the bid for a sell: scalp mode has them live (a pair switch's
+          // stale pair is left out: its middle must be this quote's).
+          const ba = bidAsk && bidAsk.ask >= bidAsk.bid
+            && Math.abs((bidAsk.ask + bidAsk.bid) / 2 - mid) <= Math.max(bidAsk.ask - bidAsk.bid, mid * 1e-4) ? bidAsk : null;
+          const run = (mid - hourBase.close) / hourBase.atr;
+          const buyRun = ((ba ? ba.ask : mid) - hourBase.close) / hourBase.atr;
+          const sellRun = (hourBase.close - (ba ? ba.bid : mid)) / hourBase.atr;
+          const late = buyRun >= HOUR_LATE_ATR ? "buy" : sellRun >= HOUR_LATE_ATR ? "sell" : null;
+          const signed = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)} ATR`;
+          return (
+            <span
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${
+                late ? "bg-rose-500/15 text-rose-300" : Math.max(buyRun, sellRun) >= 0.5 ? "bg-amber-500/15 text-amber-300" : "bg-neutral-800 text-neutral-300"
+              }`}
+              title={`This hour so far: price against the last 1h close (${fmtPrice(hourBase.close, priceDec)}), in ATR 14 of 1h (${fmtPrice(hourBase.atr, priceDec)}) - what the strategy rule "Not stretched · 1h · 1 bar back" reads. At +${HOUR_LATE_ATR.toFixed(1)} or more a buy comes late, and strategy 1 skips it; at -${HOUR_LATE_ATR.toFixed(1)} or less, a sell. On strategy 1's real trades, entries after the hour had already run 1+ ATR their way won 45% (-3.8R over 20).` +
+                (ba
+                  ? ` As the rule reads it now: a buy (at the ask) ${signed(buyRun)}, a sell (at the bid) ${signed(sellRun)}.`
+                  : " This is the mid price; the rule reads the ask for a buy and the bid for a sell, so while the spread is wide (the daily rollover) a buy reads higher than this.")}
+            >
+              <span>⏱ 1h {run >= 0 ? "▲ +" : "▼ "}{run.toFixed(2)} ATR{late ? ` · late to ${late}` : ""}</span>
+              <button
+                type="button"
+                onClick={() => setShowHourRun(false)}
+                title="Hide it (📊 Indicators → This hour so far brings it back)"
+                aria-label="Hide this hour so far"
+                className="rounded px-0.5 leading-none text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100"
+              >
+                ✕
+              </button>
+            </span>
+          );
+        })()}
+
         {showFib && (() => {
           // Where price is on the leg NOW (a live bar past the 1 breaks it at once, as the drawing shows).
           const lb = lastBarRef.current;

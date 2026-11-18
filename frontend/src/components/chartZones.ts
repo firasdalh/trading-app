@@ -104,6 +104,8 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
   private chart: IChartApiBase<Time> | null = null;
   private series: ISeriesApi<SeriesType, Time> | null = null;
   private request: (() => void) | null = null;
+  // The tags as last drawn (pane pixels): the Fibonacci's ladder keeps its words off them.
+  private tagRects: { x: number; y: number; w: number; h: number }[] = [];
   // Same array every call: the library caches pane views by reference.
   private readonly views: readonly ISeriesPrimitivePaneView[];
 
@@ -132,11 +134,17 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
 
   setZones(zones: TradeZone[]) {
     this.zones = zones;
+    if (!zones.length) this.tagRects = [];
     this.request?.();
   }
 
   updateAllViews() {
     /* geometry is computed at draw time — see the header comment */
+  }
+
+  /** Where the trade's tags were last drawn (pane pixels). */
+  labelRects(): readonly { x: number; y: number; w: number; h: number }[] {
+    return this.zones.length ? this.tagRects : [];
   }
 
   paneViews() {
@@ -462,6 +470,7 @@ export class TradeZonesPrimitive implements ISeriesPrimitive<Time> {
         if (sp.chip) place({ ...sp.chip, x: Math.min(e.x + e.w + LABEL_GAP, W - sp.chip.w - 4), y: e.y });
       }
       for (const sp of specs) sp.edges.forEach(place);
+      this.tagRects = placed.map((l) => ({ x: l.x, y: l.y, w: l.w, h: LABEL_H }));
 
       for (const l of placed) {
         const x = Math.round(l.x * hpr);

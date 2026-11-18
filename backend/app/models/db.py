@@ -691,6 +691,8 @@ class StrategyTradeFact(Base):
     the strategy learn from itself"): the broker's result ($, and R where the app's row holds the risk taken), what
     the market looked like at the entry (``fp``: from the engine's 'opened' log, or MT5's 1m history for older
     trades - ``fp_from``), and what other targets / stop sizes would have made (``whatif``: {"t0.9|s1": R}).
+    ``path``: where it stood minute by minute while it was open, [[minutes, R], ...] (learning.trade_path,
+    2026-11-17) - the position advisor's odds for an open trade come from these (scalp_advice).
     ``key`` = strategy | symbol | side | open time: each trade once."""
 
     __tablename__ = "strategy_trade_facts"
@@ -711,6 +713,8 @@ class StrategyTradeFact(Base):
     fp_tries: Mapped[int | None] = mapped_column(Integer)
     whatif: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     whatif_tries: Mapped[int | None] = mapped_column(Integer)
+    path: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
+    path_tries: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -399,6 +399,17 @@ class PositionAdvice(BaseModel):
     event_label: str | None = None
     minutes_to_event: int | None = None
     events_soon: str | None = None    # SOFT heads-up: upcoming medium-impact events (display only)
+    # How it was read (2026-11-17): "scalp" = from its own numbers (scalp_advice: odds, risks; no trend or daily
+    # reads), "swing" = trend on its plan's timeframe + the bigger chart (a plan on 1h or above).
+    style: str = "swing"
+    odds: float | None = None          # chance it ends in profit (history) / reaches the target first (distance)
+    odds_from: str | None = None       # history | distance
+    odds_n: int | None = None          # the strategy's past trades behind a history figure
+    odds_plain: float | None = None    # from the distances to the stop and the target alone
+    hold_edge: float | None = None     # in those trades: final R - R at this point (holding vs closing here)
+    hold_t: float | None = None
+    minutes_open: float | None = None
+    minutes_left: float | None = None  # median time the strategy's trades this old still took
 
 
 class RiskConfigView(BaseModel):

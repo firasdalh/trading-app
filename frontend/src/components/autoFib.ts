@@ -29,6 +29,9 @@
 // 0.618-0.786 (the last stop before the swing fails at the RED 1), BLUE the shallow zone 0.236-0.382 (a
 // strong trend's pullback), VIOLET the target zone ext 1.272-1.618.
 //
+// Where the words go (2026-11-18): not on the candles - in the LADDER right of the newest candle (see
+// FIB_LADDER_ROOM below).
+//
 // Drawn as a series primitive (like chartZones.ts): painted by the chart in the candles' own frame, so it
 // never lags a pan, and never part of the autoscale - the price axis keeps fitting the candles.
 import type {
@@ -94,14 +97,14 @@ export function fibLevels(f: { broken: boolean }): readonly FibLevel[] {
 }
 
 // The zones that matter, each in its own colour (a / b: the levels that bound it; `alpha`: its fill).
-export interface FibZone { label: string; a: number; b: number; color: string; alpha: number; ext?: boolean }
+export interface FibZone { label: string; short: string; a: number; b: number; color: string; alpha: number; ext?: boolean }
 const PULLBACK_ZONES: readonly FibZone[] = [
-  { label: "Shallow zone", a: 0.236, b: 0.382, color: "#38bdf8", alpha: 0.12 },
-  { label: "Golden zone", a: 0.5, b: 0.618, color: "#fbbf24", alpha: 0.22 },
-  { label: "Deep zone", a: 0.618, b: 0.786, color: "#2dd4bf", alpha: 0.15 },
+  { label: "Shallow zone", short: "SHALLOW", a: 0.236, b: 0.382, color: "#38bdf8", alpha: 0.12 },
+  { label: "Golden zone", short: "GOLDEN", a: 0.5, b: 0.618, color: "#fbbf24", alpha: 0.22 },
+  { label: "Deep zone", short: "DEEP", a: 0.618, b: 0.786, color: "#2dd4bf", alpha: 0.15 },
 ];
-const TARGET_ZONE: FibZone = { label: "Target zone", a: 1.272, b: 1.618, color: "#a78bfa", alpha: 0.14, ext: true };
-const BREAK_ZONE: FibZone = { label: "Break zone", a: 1.272, b: 1.618, color: "#fb7185", alpha: 0.14 };
+const TARGET_ZONE: FibZone = { label: "Target zone", short: "TARGET", a: 1.272, b: 1.618, color: "#a78bfa", alpha: 0.14, ext: true };
+const BREAK_ZONE: FibZone = { label: "Break zone", short: "BREAK", a: 1.272, b: 1.618, color: "#fb7185", alpha: 0.14 };
 export function fibZones(f: { broken: boolean }): readonly FibZone[] {
   return [...PULLBACK_ZONES, f.broken ? BREAK_ZONE : TARGET_ZONE];
 }
@@ -292,7 +295,38 @@ export function fibStatus(f: AutoFib, pos: number | null): { text: string; zone:
 export interface FibSources {
   // The newest bar INCLUDING the provisional one the quote handler opens, with its live high / low / close.
   liveBar: () => { index: number; high: number; low: number; close: number } | null;
+  // Tags another overlay has already put on the chart (the open trade's entry / TP / SL tags), in pane
+  // pixels: the ladder keeps its own words off them - the trade's numbers matter more.
+  avoid?: () => readonly Rect[];
 }
+
+type Rect = { x: number; y: number; w: number; h: number };
+
+// THE LADDER (2026-11-18, the user: "the Fibonacci is hidden in the small details and the candles"). Every
+// name, ratio and price of the Fibonacci now stands in ONE column in the open space right of the newest
+// candle - ahead of price, where it is heading - in price order, beside the price axis it is read against.
+// Nothing is printed over the candles any more: there the zones are soft tints and the levels thin lines, so
+// the candles stay readable, and the same zones turn strong ahead of price, where nothing else is drawn.
+// - The column hugs the right side, short of the strip where the chart prints its price lines' titles
+//   (Ask, Bid, VWAP, PWL...). Chart.tsx leaves FIB_LADDER_ROOM open right of the newest candle while the
+//   Fibonacci is on, so the full ladder fits there on a fresh chart.
+// - Narrower room: short names and ratios without prices; too narrow (scrolled up to the newest candle): a
+//   thin colour rail against the axis, and the top-line tag still says which zone price is in.
+// - Names on the left of the column (a pill in the zone's colour), ratio + price on the right, so the two
+//   never fight for a row; when levels crowd (zoomed out), the more important tag keeps its place.
+// - The zone price is in: lit and outlined, "●" on its name, and a pointer at price on the column's edge.
+// - A zone off the screen (the targets often are: the price axis fits the candles only) gets a chip at the
+//   column's top or bottom edge, with its nearest price.
+// - Pointer over the open space or the ladder: the zone under it lights up right across the candles, to see
+//   how price behaved at it.
+const TITLE_KEEP = 44;      // kept clear at the right end of the pane for the price lines' titles
+const LADDER_W = 216;       // the column at its widest
+const LADDER_FULL = 170;    // narrower than this: short names, ratios without prices
+const LADDER_MIN = 70;      // narrower still: just a colour rail
+const FREE_GAP = 14;        // between the newest candle and the open space's start
+const TOP_KEEP = 34;        // the chart's top-right buttons (Read, Scenarios, Alert, Full screen) cover this strip
+/** Room (px) the full ladder needs right of the newest candle. Chart.tsx leaves it open when the Fib is on. */
+export const FIB_LADDER_ROOM = LADDER_W + TITLE_KEEP + FREE_GAP + 8;
 
 const FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif";
 const rgba = (hex: string, a: number) => {
@@ -302,14 +336,29 @@ const rgba = (hex: string, a: number) => {
 const rTxt = (r: number) => (r === 0 || r === 1 ? String(r) : r.toFixed(3).replace(/0+$/, ""));
 
 function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const rr = Math.min(r, w / 2, h / 2);
   g.beginPath();
-  g.moveTo(x + r, y);
-  g.arcTo(x + w, y, x + w, y + h, r);
-  g.arcTo(x + w, y + h, x, y + h, r);
-  g.arcTo(x, y + h, x, y, r);
-  g.arcTo(x, y, x + w, y, r);
+  g.moveTo(x + rr, y);
+  g.arcTo(x + w, y, x + w, y + h, rr);
+  g.arcTo(x + w, y + h, x, y + h, rr);
+  g.arcTo(x, y + h, x, y, rr);
+  g.arcTo(x, y, x + w, y, rr);
   g.closePath();
 }
+
+type Mode = "full" | "compact" | "rail";
+/** Where the open space starts (right of the newest candle) and where the ladder stands in it. */
+function ladderBox(W: number, lastRight: number | null, x0: number): { mode: Mode; free: number; x: number; r: number } {
+  const r = W - TITLE_KEEP;
+  const free = lastRight == null ? W : Math.max(x0, lastRight + FREE_GAP);
+  const room = r - free;
+  if (room < LADDER_MIN) return { mode: "rail", free: Math.min(W, free), x: W - 5, r: W };
+  const w = Math.min(LADDER_W, room);
+  return { mode: w >= LADDER_FULL ? "full" : "compact", free, x: r - w, r };
+}
+
+const overlap = (a: Rect, b: Rect, pad = 2) =>
+  a.x < b.x + b.w + pad && a.x + a.w + pad > b.x && a.y < b.y + b.h + pad && a.y + a.h + pad > b.y;
 
 export class AutoFibPrimitive implements ISeriesPrimitive<Time> {
   private fib: AutoFib | null = null;
@@ -317,9 +366,12 @@ export class AutoFibPrimitive implements ISeriesPrimitive<Time> {
   private series: ISeriesApi<SeriesType, Time> | null = null;
   private request: (() => void) | null = null;
   private readonly views: readonly ISeriesPrimitivePaneView[];
+  private hover: string | null = null;                 // the zone under the pointer (its label)
+  private drawn: { label: string; y1: number; y2: number; x: number }[] = [];   // zones as last painted
 
   constructor(private readonly src: FibSources) {
-    // The zones sit UNDER the candles (they keep their true colours); lines and tags on top.
+    // Tints and the ladder's blocks sit UNDER the candles and the trade's tags (the candles keep their true
+    // colours); lines and words on top.
     const fills: ISeriesPrimitivePaneRenderer = { draw: (t) => this.draw(t, false) };
     const lines: ISeriesPrimitivePaneRenderer = { draw: (t) => this.draw(t, true) };
     this.views = [
@@ -342,6 +394,17 @@ export class AutoFibPrimitive implements ISeriesPrimitive<Time> {
 
   setFib(fib: AutoFib | null) {
     this.fib = fib;
+    if (!fib) this.drawn = [];
+    this.request?.();
+  }
+
+  /** The crosshair in pane pixels (null = off the chart). Over the open space or the ladder, the zone under
+   *  it lights up across the chart; repainted only when that zone changes. */
+  setPointer(p: { x: number; y: number } | null) {
+    const z = p ? this.drawn.find((d) => p.x >= d.x && p.y >= d.y1 && p.y <= d.y2) : undefined;
+    const key = z?.label ?? null;
+    if (key === this.hover) return;
+    this.hover = key;
     this.request?.();
   }
 
@@ -361,6 +424,7 @@ export class AutoFibPrimitive implements ISeriesPrimitive<Time> {
     const fib = liveFib(this.fib, live);
     const pos = live ? fibPosition(fib, live.close) : null;
     const ts = chart.timeScale();
+    const fmt = series.priceFormatter();
     const xOf = (i: number) => {
       const c = ts.logicalToCoordinate(i as Logical);
       return c == null ? null : Number(c);
@@ -372,11 +436,24 @@ export class AutoFibPrimitive implements ISeriesPrimitive<Time> {
     const xA = xOf(fib.from.i);
     const xB = xOf(fib.to.i);
     if (xA == null || xB == null) return;
+    const xLive = live ? xOf(live.index) : null;
+    const lastRight = xLive == null ? null : xLive + Math.max(2, ts.options().barSpacing / 2);
     const zones = fibZones(fib).map((z) => {
       const ya = yOf(fibPrice(fib, z.a, z.ext));
       const yb = yOf(fibPrice(fib, z.b, z.ext));
       const [lo, hi] = zoneSpan(z);
-      return { ...z, ya, yb, here: pos != null && pos >= lo && pos <= hi };
+      return {
+        ...z,
+        y1: ya == null || yb == null ? null : Math.min(ya, yb),
+        y2: ya == null || yb == null ? null : Math.max(ya, yb),
+        // the price edge nearest to the leg's end (for an off-screen chip): a / b in price
+        pa: fibPrice(fib, z.a, z.ext),
+        pb: fibPrice(fib, z.b, z.ext),
+        here: pos != null && pos >= lo && pos <= hi,
+        hover: this.hover === z.label,
+        // A broken leg's pullback zones are history: faded, so its break zone is what reads.
+        faded: fib.broken && z.label !== "Break zone",
+      };
     });
     target.useBitmapCoordinateSpace((sc: Scope) => {
       const { context: g, horizontalPixelRatio: hpr, verticalPixelRatio: vpr } = sc;
@@ -384,22 +461,48 @@ export class AutoFibPrimitive implements ISeriesPrimitive<Time> {
       const H = sc.mediaSize.height;
       const x0 = Math.max(0, xA);
       if (x0 >= W - 4) return;
+      const L = ladderBox(W, lastRight, x0);
+      const xf = Math.min(W, L.free);
 
       if (!top) {
-        // The zones: each in its own colour, strongest at the swing and fading to the right. The zone
-        // price is in right now is lit up.
+        this.drawn = zones.flatMap((z) => (z.y1 == null || z.y2 == null ? [] : [{ label: z.label, y1: z.y1, y2: z.y2, x: Math.min(xf, L.x) }]));
         for (const z of zones) {
-          if (z.ya == null || z.yb == null) continue;
-          const y1 = Math.min(z.ya, z.yb);
-          const h = Math.abs(z.yb - z.ya);
-          if (y1 > H || y1 + h < 0 || h < 0.5) continue;
-          // A broken leg's pullback zones are history: faded, so its break zone is what reads.
-          const a = z.here ? Math.min(0.42, z.alpha * 2) : fib.broken && z.label !== "Break zone" ? z.alpha * 0.5 : z.alpha;
-          const grad = g.createLinearGradient(x0 * hpr, 0, W * hpr, 0);
-          grad.addColorStop(0, rgba(z.color, a));
-          grad.addColorStop(1, rgba(z.color, a * 0.35));
-          g.fillStyle = grad;
-          g.fillRect(x0 * hpr, y1 * vpr, (W - x0) * hpr, h * vpr);
+          if (z.y1 == null || z.y2 == null) continue;
+          const h = z.y2 - z.y1;
+          if (z.y1 > H || z.y2 < 0 || h < 0.5) continue;
+          // Over the candles: a soft tint, so the candles stay readable (the hovered zone lights up).
+          const past = z.hover ? Math.min(0.4, z.alpha * 2) : z.faded ? z.alpha * 0.35 : z.here ? z.alpha * 0.9 : z.alpha * 0.55;
+          // Ahead of price: the zone stands out - nothing else is drawn there.
+          const ahead = z.hover ? Math.min(0.45, z.alpha * 2.2) : z.faded ? z.alpha * 0.5 : z.here ? Math.min(0.4, z.alpha * 2) : z.alpha * 1.25;
+          if (xf > x0) {
+            g.fillStyle = rgba(z.color, past);
+            g.fillRect(x0 * hpr, z.y1 * vpr, (xf - x0) * hpr, h * vpr);
+          }
+          if (xf < W) {
+            const grad = g.createLinearGradient(xf * hpr, 0, Math.min(W, xf + 36) * hpr, 0);
+            grad.addColorStop(0, rgba(z.color, past));
+            grad.addColorStop(1, rgba(z.color, ahead));
+            g.fillStyle = grad;
+            g.fillRect(xf * hpr, z.y1 * vpr, (W - xf) * hpr, h * vpr);
+          }
+        }
+        if (L.mode === "rail") return;
+        // The ladder's blocks: a stronger panel per zone in the column, a solid edge on its left.
+        const lw = L.r - L.x;
+        for (const z of zones) {
+          if (z.y1 == null || z.y2 == null) continue;
+          const y1 = Math.max(0, z.y1);
+          const y2 = Math.min(H, z.y2);
+          if (y2 - y1 < 1) continue;
+          g.fillStyle = rgba(z.color, z.here ? 0.3 : z.hover ? 0.28 : z.faded ? 0.06 : 0.14);
+          g.fillRect(L.x * hpr, y1 * vpr, lw * hpr, (y2 - y1) * vpr);
+          g.fillStyle = rgba(z.color, z.faded ? 0.4 : 0.95);
+          g.fillRect(L.x * hpr, y1 * vpr, 3 * hpr, (y2 - y1) * vpr);
+          if (z.here || z.hover) {
+            g.strokeStyle = rgba(z.color, 0.9);
+            g.lineWidth = Math.max(1, Math.floor(hpr));
+            g.strokeRect(L.x * hpr + 0.5, y1 * vpr + 0.5, lw * hpr - 1, (y2 - y1) * vpr - 1);
+          }
         }
         return;
       }
@@ -429,76 +532,178 @@ export class AutoFibPrimitive implements ISeriesPrimitive<Time> {
         }
       }
 
-      // The levels, from the start of the leg to the right edge. 0.618 thick; 0 and 1 a little heavier;
-      // the extensions dashed.
-      const rows = fibLevels(fib).map((lv) => ({ ...lv, price: fibPrice(fib, lv.r, lv.ext), y: yOf(fibPrice(fib, lv.r, lv.ext)) }));
-      const tags: { text: string; y: number; color: string; pri: number }[] = [];
+      // The levels: thin lines from the leg's start to the right edge (0.618 a little heavier, 0 and 1 too,
+      // the extensions dashed). No words on them over the candles - those are in the ladder.
+      const rows = fibLevels(fib).map((lv) => {
+        const price = fibPrice(fib, lv.r, lv.ext);
+        return { ...lv, price, y: yOf(price) };
+      });
       for (const r of rows) {
-        if (r.y == null || r.y < -20 || r.y > H + 20) continue;
+        if (r.y == null || r.y < -2 || r.y > H + 2) continue;
+        const strong = r.key || r.r === 0 || r.r === 1;
         const yy = Math.round(r.y * vpr) + 0.5;
-        g.strokeStyle = rgba(r.color, r.key || r.r === 0 || r.r === 1 ? 0.95 : 0.6);
-        g.lineWidth = (r.key ? 2 : r.r === 0 || r.r === 1 ? 1.5 : 1) * vpr;
+        g.strokeStyle = rgba(r.color, strong ? 0.85 : 0.5);
+        g.lineWidth = Math.max(1, (r.key ? 1.75 : strong ? 1.25 : 1) * vpr);
         g.setLineDash(r.ext ? [6 * hpr, 4 * hpr] : []);
         g.beginPath();
         g.moveTo(x0 * hpr, yy);
         g.lineTo(W * hpr, yy);
         g.stroke();
-        tags.push({ text: `${r.ext ? "ext " : ""}${rTxt(r.r)} (${series.priceFormatter().format(r.price)})`, y: r.y, color: r.color, pri: r.pri });
       }
       g.setLineDash([]);
 
-      // A colour bar down the left edge of each zone, tying its tag to its band.
+      // A colour bar down the leg's start for each zone: where the drawing begins.
       for (const z of zones) {
-        if (z.ya == null || z.yb == null) continue;
-        const y1 = Math.max(-2, Math.min(z.ya, z.yb));
-        const y2 = Math.min(H + 2, Math.max(z.ya, z.yb));
+        if (z.y1 == null || z.y2 == null) continue;
+        const y1 = Math.max(-2, z.y1);
+        const y2 = Math.min(H + 2, z.y2);
         if (y2 - y1 < 1) continue;
-        g.fillStyle = rgba(z.color, 0.95);
+        g.fillStyle = rgba(z.color, z.faded ? 0.4 : 0.9);
         g.fillRect(x0 * hpr, y1 * vpr, 3 * hpr, (y2 - y1) * vpr);
       }
 
-      // Level tags left of the leg's start when there is room (TradingView's place), else just inside it.
-      // Zoomed out, the levels sit closer than a tag is tall: the more important tag keeps its place and
-      // one that would overlap it is left out (its line is still drawn).
-      g.font = `${10 * vpr}px ${FONT}`;
-      g.textBaseline = "middle";
-      const GAP = 14;
-      const placed: typeof tags = [];
-      for (const l of [...tags].sort((a, b) => a.pri - b.pri)) {
-        if (placed.every((q) => Math.abs(q.y - l.y) >= GAP)) placed.push(l);
-      }
-      const pad = 4;
-      let insideW = 0;                     // how far tags placed INSIDE the leg reach, for the zone names
-      for (const l of placed) {
-        const w = g.measureText(l.text).width / hpr;
-        const outside = x0 - w - 2 * pad - 4 >= 0 && xA >= 0;
-        const lx = outside ? x0 - w - 2 * pad - 4 : x0 + 6;
-        if (!outside) insideW = Math.max(insideW, w + 2 * pad + 6);
-        g.fillStyle = "rgba(10,10,10,0.82)";
-        roundRect(g, lx * hpr, (l.y - 7) * vpr, (w + 2 * pad) * hpr, 14 * vpr, 3 * hpr);
-        g.fill();
-        g.fillStyle = l.color;
-        g.fillText(l.text, (lx + pad) * hpr, l.y * vpr);
+      if (L.mode === "rail") {
+        // No room beside price: a thin rail against the axis keeps the zones' colours in sight.
+        for (const z of zones) {
+          if (z.y1 == null || z.y2 == null) continue;
+          const y1 = Math.max(0, z.y1);
+          const y2 = Math.min(H, z.y2);
+          if (y2 - y1 < 1) continue;
+          g.fillStyle = rgba(z.color, z.here || z.hover ? 1 : z.faded ? 0.35 : 0.75);
+          g.fillRect(L.x * hpr, y1 * vpr, 5 * hpr, (y2 - y1) * vpr);
+        }
+        return;
       }
 
-      // The zone names, inside each zone just right of its colour bar: a solid pill in the zone's colour.
-      // The zone price is in now says so.
-      g.font = `bold ${10 * vpr}px ${FONT}`;
-      for (const z of zones) {
-        if (z.ya == null || z.yb == null) continue;
-        const h = Math.abs(z.yb - z.ya);
-        const yc = (z.ya + z.yb) / 2;
-        if (h < 15 || yc < 8 || yc > H - 8) continue;      // too thin to name, or off screen
-        const text = `${z.label.toUpperCase()}  ${z.ext ? "ext " : ""}${rTxt(z.a)}–${rTxt(z.b)}${z.here ? "  ● PRICE HERE" : ""}`;
-        const w = g.measureText(text).width / hpr;
-        const lx = x0 + 8 + insideW;
-        if (lx + w + 2 * pad > W) continue;
-        g.fillStyle = rgba(z.color, z.here ? 1 : 0.88);
-        roundRect(g, lx * hpr, (yc - 7.5) * vpr, (w + 2 * pad) * hpr, 15 * vpr, 7.5 * Math.min(hpr, vpr));
+      // --- the ladder's words ---------------------------------------------------------------------------
+      const full = L.mode === "full";
+      const lw = L.r - L.x;
+      const TAG_H = 15;
+      const PAD = 5;
+      const tagFont = `${11 * vpr}px ${FONT}`;
+      const tagBold = `600 ${11 * vpr}px ${FONT}`;
+      const nameFont = `700 ${10.5 * vpr}px ${FONT}`;
+      const wOf = (font: string, t: string) => {
+        g.font = font;
+        return g.measureText(t).width / hpr;
+      };
+      g.textBaseline = "middle";
+      const taken: Rect[] = [...(this.src.avoid?.() ?? [])];
+      const fits = (r: Rect) => r.y >= TOP_KEEP && r.y + r.h <= H - 1 && taken.every((o) => !overlap(r, o));
+
+      // Price's pointer on the column's left edge, in the colour of the zone it is in.
+      const yNow = live ? yOf(live.close) : null;
+      const inZone = zones.find((z) => z.here);
+      if (yNow != null && yNow > 0 && yNow < H) {
+        g.fillStyle = inZone ? inZone.color : "#e5e5e5";
+        g.beginPath();
+        g.moveTo((L.x - 7) * hpr, (yNow - 5) * vpr);
+        g.lineTo((L.x - 1) * hpr, yNow * vpr);
+        g.lineTo((L.x - 7) * hpr, (yNow + 5) * vpr);
+        g.closePath();
         g.fill();
-        g.fillStyle = "#0a0a0a";
-        g.fillText(text, (lx + pad) * hpr, yc * vpr);
       }
+
+      // Zones by importance: the one price is in, golden, target / break, deep, shallow.
+      const order = (z: (typeof zones)[number]) =>
+        z.here ? 0 : z.label === "Golden zone" ? 1 : z.ext || z.label === "Break zone" ? 2 : z.label === "Deep zone" ? 3 : 4;
+      const named = [...zones].sort((a, b) => order(a) - order(b));
+
+      // Zones off the screen (placed first): a chip at the column's top or bottom edge, with the zone's
+      // nearest price.
+      const off = { up: 0, down: 0 };
+      for (const z of named) {
+        if (z.y1 == null || z.y2 == null || z.faded) continue;
+        const above = z.y2 < 0;
+        const below = z.y1 > H;
+        if (!above && !below) continue;
+        const k = above ? off.up : off.down;
+        if (k >= 2) continue;
+        const near = above ? Math.min(z.pa, z.pb) : Math.max(z.pa, z.pb);
+        // Left in the column, where the zone names go: the level tags on the right keep their rows.
+        const text = `${above ? "▲" : "▼"} ${z.short}${full ? `  ${fmt.format(near)}` : ""}`;
+        const w = Math.min(lw - 10, wOf(nameFont, text) + 2 * PAD);
+        const rect = { x: L.x + 7, y: above ? TOP_KEEP + k * (TAG_H + 3) : H - 4 - TAG_H - k * (TAG_H + 3), w, h: TAG_H };
+        if (!taken.every((o) => !overlap(rect, o))) continue;
+        taken.push(rect);
+        if (above) off.up++; else off.down++;
+        g.fillStyle = "rgba(12,12,12,0.9)";
+        roundRect(g, rect.x * hpr, rect.y * vpr, rect.w * hpr, rect.h * vpr, 7.5 * Math.min(hpr, vpr));
+        g.fill();
+        g.strokeStyle = rgba(z.color, 0.9);
+        g.lineWidth = Math.max(1, Math.floor(hpr));
+        g.stroke();
+        g.font = nameFont;
+        g.fillStyle = z.color;
+        g.save();
+        g.beginPath();
+        g.rect(rect.x * hpr, rect.y * vpr, rect.w * hpr, rect.h * vpr);
+        g.clip();
+        g.fillText(text, (rect.x + PAD) * hpr, (rect.y + TAG_H / 2) * vpr);
+        g.restore();
+      }
+
+      // Ratio (+ price when there is room) tags, right-aligned in the column. The more important first.
+      const tags = rows
+        .filter((r) => r.y != null && r.y > 4 && r.y < H - 4)
+        .map((r) => {
+          const ratio = rTxt(r.r);
+          const price = full ? fmt.format(r.price) : "";
+          const wr = wOf(tagBold, ratio);
+          const wp = price ? wOf(tagFont, price) : 0;
+          const w = wr + (price ? 6 + wp : 0) + 2 * PAD;
+          return { r, ratio, price, wr, w };
+        });
+      const tagW = tags.reduce((m, t) => Math.max(m, t.w), 0);
+      for (const t of [...tags].sort((a, b) => a.r.pri - b.r.pri)) {
+        const rect = { x: L.r - 2 - t.w, y: (t.r.y as number) - TAG_H / 2, w: t.w, h: TAG_H };
+        if (!fits(rect)) continue;
+        taken.push(rect);
+        g.fillStyle = "rgba(12,12,12,0.86)";
+        roundRect(g, rect.x * hpr, rect.y * vpr, rect.w * hpr, rect.h * vpr, 3 * hpr);
+        g.fill();
+        g.font = tagBold;
+        g.fillStyle = t.r.color;
+        g.fillText(t.ratio, (rect.x + PAD) * hpr, (t.r.y as number) * vpr);
+        if (t.price) {
+          g.font = tagFont;
+          g.fillStyle = "#d4d4d4";
+          g.fillText(t.price, (rect.x + PAD + t.wr + 6) * hpr, (t.r.y as number) * vpr);
+        }
+      }
+
+      // Zone names, left in the column, mid-zone: a pill in the zone's colour ("●" = price is in it). The
+      // full name when it fits beside the tags, else the short one, else none (the colour still reads).
+      const nameRoom = lw - tagW - 14;
+      for (const z of named) {
+        if (z.y1 == null || z.y2 == null) continue;
+        const y1 = Math.max(0, z.y1);
+        const y2 = Math.min(H, z.y2);
+        if (y2 - y1 < 6) continue;
+        const dot = z.here ? "● " : "";
+        const long = `${dot}${z.label.toUpperCase()}`;
+        const short = `${dot}${z.short}`;
+        const text = full && wOf(nameFont, long) + 2 * PAD <= nameRoom ? long
+          : wOf(nameFont, short) + 2 * PAD <= Math.max(nameRoom, full ? 0 : lw - 10) ? short : null;
+        if (!text) continue;
+        const w = wOf(nameFont, text) + 2 * PAD;
+        const yc = (y1 + y2) / 2;
+        let rect: Rect | null = null;
+        for (const dy of [0, -4, 4, -8, 8, -12, 12]) {
+          const r = { x: L.x + 7, y: yc + dy - TAG_H / 2, w, h: TAG_H };
+          if (r.y + r.h / 2 < y1 - 8 || r.y + r.h / 2 > y2 + 8) continue;     // stays by its zone
+          if (fits(r)) { rect = r; break; }
+        }
+        if (!rect) continue;
+        taken.push(rect);
+        g.fillStyle = rgba(z.color, z.faded ? 0.5 : z.here || z.hover ? 1 : 0.9);
+        roundRect(g, rect.x * hpr, rect.y * vpr, rect.w * hpr, rect.h * vpr, 7.5 * Math.min(hpr, vpr));
+        g.fill();
+        g.font = nameFont;
+        g.fillStyle = "#0a0a0a";
+        g.fillText(text, (rect.x + PAD) * hpr, (rect.y + TAG_H / 2) * vpr);
+      }
+
     });
   }
 }

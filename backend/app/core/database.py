@@ -145,6 +145,11 @@ _SQLITE_ADDED_COLUMNS = {
         ("last_scanned", "INTEGER DEFAULT 0"),
         ("last_candidates", "TEXT"),
     ],
+    # 2026-11-17: each closed strategy trade's minute-by-minute path (the position advisor's odds).
+    "strategy_trade_facts": [
+        ("path", "JSON"),
+        ("path_tries", "INTEGER"),
+    ],
 }
 
 

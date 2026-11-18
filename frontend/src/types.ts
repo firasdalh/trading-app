@@ -312,6 +312,18 @@ export interface PositionAdvice {
   events_soon?: string | null;
   opened_at?: string | null;   // when the position was opened
   source?: string | null;      // who opened it (manual / rsi_over / armed / hybrid / auto_trade / …)
+  // How it was read (2026-11-17): "scalp" = from its own numbers (the odds from the strategy's past trades, the
+  // risks of a trade of a few minutes - no trend or daily-chart reads); "swing" = the trend on its plan's timeframe
+  // and the bigger chart (a plan on 1h or above).
+  style?: "scalp" | "swing";
+  odds?: number | null;              // chance it ends in profit (history) / reaches the target first (distance)
+  odds_from?: "history" | "distance" | null;
+  odds_n?: number | null;            // the strategy's past trades behind a history figure
+  odds_plain?: number | null;        // from the distances to the stop and the target alone
+  hold_edge?: number | null;         // in those trades: final R minus R at this point (holding vs closing here)
+  hold_t?: number | null;
+  minutes_open?: number | null;
+  minutes_left?: number | null;      // median time the strategy's trades this old still took
 }
 
 export interface AdvisorAction {

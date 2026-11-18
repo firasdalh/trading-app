@@ -8,12 +8,17 @@ Every couple of minutes (learning_tick), for every strategy with closed trades:
        - its result: the broker's $, and R where the app's own row holds the risk taken;
        - its FINGERPRINT (fingerprint()): what the market looked like at the entry - how many 1m closes in a row
          had already gone the trade's way, how far price stood from its average, the RSI, how busy the market
-         was, the spread, the hour and session. The engine writes it into its 'opened' log as it opens a trade
-         (since 2026-11-13); older trades get it from MT5's 1-minute history, read the same way.
+         was, the spread, the hour and session, its place in the 1m regression channel and how far the hour had
+         already gone (version 2, 2026-11-17). The engine writes it into its 'opened' log as it opens a trade
+         (since 2026-11-13); older trades get it from MT5's history, read the same way - and a version-1 one gets
+         the parts version 2 added.
        - its WHAT-IFS: the same entry replayed with other targets and stop sizes (WHATIF_TARGETS x WHATIF_STOPS)
          on the broker's own prices - the ticks of its first minute, then 1-minute candles (as the journal's
          signal review does: signal_review.simulate). A bigger stop means smaller lots, so each outcome is in R:
          -1 at the stop, the target's R at the target. Replayed once, a day after the entry.
+       - its PATH (trade_path(), 2026-11-17): where it stood minute by minute while it was open - the R it would
+         have closed at, at PATH_MINUTES - from the same 1-minute candles, once it has closed. The position
+         advisor reads an open trade's odds from these (scalp_advice).
   2. REVIEW (find_parts()) - the trades split by each part of the fingerprint. A part becomes a LESSON only when
      it is far from luck: at least MIN_TRADES trades in it and as many outside it, the same verdict in the older
      AND the newer half of them, and a Welch t of STRONG_T or more. Weaker ones show as "watching". The what-ifs
@@ -41,7 +46,10 @@ from app.models.db import AgentRun, StrategyConfig, StrategyTradeFact
 
 log = logging.getLogger(__name__)
 
-FP_VERSION = 1
+FP_VERSION = 2           # 2 (2026-11-17): + chan1m, chan1m_up, h1run - added to an older one from history
+FP2_KEYS = ("chan1m", "chan1m_up", "h1run")
+CHAN_BARS = 60           # the 1m channel the fingerprint reads: the chart's (Chart.tsx applyChannel: 60 bars, 2 sd)
+H1_DAYS = 21             # 1h history read back for an old trade's "hour so far" (ATR 14 of 1h, ~300+ bars)
 MIN_TRADES = 25          # a part of the fingerprint is judged with at least this many trades in it and outside it
 MIN_TOTAL = 60           # nothing is judged before the strategy has this many closed trades with an R
 STRONG_T = 2.6           # |Welch t| for a lesson (~0.5% one-sided: across ~40 parts, about one review in five
@@ -54,6 +62,8 @@ WHATIF_HORIZON_S = 24 * 3600
 HISTORY_MIN = 300        # 1m bars read back for an old trade's fingerprint
 MATCH_OPEN_S = 120       # the engine's 'opened' log and the broker's open time this near = the same trade
 FILL_BUDGET = 40         # fingerprints / what-ifs filled from the broker's history per tick
+PATH_MINUTES = (1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 75, 90, 120, 150, 180, 240)
+PATH_MAX_S = 6 * 3600    # a trade's path is read for at most this long after its entry
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -70,7 +80,8 @@ def _r(x: float | None, nd: int = 2) -> float | None:
 #  The fingerprint
 # --------------------------------------------------------------------------- #
 
-def fingerprint(side: int, candles: list, entry: float, spread: float | None, at: datetime) -> dict | None:
+def fingerprint(side: int, candles: list, entry: float, spread: float | None, at: datetime,
+                h1: list | None = None) -> dict | None:
     """What the market looked like when a ``side`` trade (1 buy, -1 sell) opened at ``entry`` at ``at``, from the
     1-minute candles CLOSED by then (oldest first; at least 60). Every number reads the trade's way: for a sell, a
     fall counts as "our way", RSI 30 reads as 70, and the bottom of the last hour as its top.
@@ -80,10 +91,15 @@ def fingerprint(side: int, candles: list, entry: float, spread: float | None, at
       rsi        RSI 14 on 1m, our side
       atr_rel    the 1m ATR against its own 50-bar average: under 1 = a quiet market
       pos60      where the entry sits in the last hour's range: 1 = at its top (its bottom for a sell)
+      chan1m     where the bid sits in the chart's regression channel on 1m (the last 60 closes, the bar still
+                 forming at the bid, as the chart draws it; bands 2 sd either side): 0 = on its lower band, 1 = on
+                 its upper one - the other way round for a sell. chan1m_up: the channel sloping our way
+      h1run      how far price has gone our way since the last 1h close - this hour so far - in ATR 14 of 1h, as
+                 'Not stretched' 1 bar back on 1h reads it (``h1``: the 1h candles closed by then; None without)
       spread_pct the spread as % of the 1m ATR
       hour / session / weekday   on the UTC clock (app.core.sessions)
     None with too few candles or no ATR."""
-    from app.agents.strategy import Bars
+    from app.agents.strategy import Bars, reg_channel
 
     if len(candles) < 60 or entry is None:
         return None
@@ -105,6 +121,14 @@ def fingerprint(side: int, candles: list, entry: float, spread: float | None, at
     hour_bars = b.c[-60:]
     hi, lo = max(c.high for c in hour_bars), min(c.low for c in hour_bars)
     at = _utc(at)
+    bid = entry - spread if side > 0 and spread else entry
+    ch = reg_channel(list(closes[-(CHAN_BARS - 1):]) + [bid])
+    h1run = None
+    if h1 and len(h1) >= 15:
+        hb = Bars("1h", list(h1))
+        ha = hb.atr(14)[-1]
+        if ha and ha > 0:
+            h1run = _r(side * (entry - hb.c[-1].close) / ha, 3)
     return {
         "v": FP_VERSION,
         "streak": streak,
@@ -113,6 +137,9 @@ def fingerprint(side: int, candles: list, entry: float, spread: float | None, at
         "rsi": _r(rsi if side > 0 else 100 - rsi, 1) if rsi is not None else None,
         "atr_rel": _r(a / (sum(tail) / len(tail)), 3) if tail else None,
         "pos60": _r(((entry - lo) if side > 0 else (hi - entry)) / (hi - lo), 3) if hi > lo else None,
+        "chan1m": _r(ch["pos"] if side > 0 else 1 - ch["pos"], 3) if ch else None,
+        "chan1m_up": (side * ch["slope"] > 0) if ch else None,
+        "h1run": h1run,
         "spread_pct": _r(100 * spread / a, 1) if spread else None,
         "hour": at.hour,
         "session": session_of(at),
@@ -121,8 +148,8 @@ def fingerprint(side: int, candles: list, entry: float, spread: float | None, at
 
 
 def entry_fingerprint(broker, symbol: str, side: int, data: dict | None, entry: float, ctx) -> dict | None:
-    """The fingerprint of a trade the engine is opening now: its own closed 1m bars when its rules read 1m, else
-    1m read for it (strategy.load_bars). Never raises - a fingerprint must not stand in the way of a trade."""
+    """The fingerprint of a trade the engine is opening now: its own closed 1m and 1h bars when its rules read them,
+    else read for it (strategy.load_bars). Never raises - a fingerprint must not stand in the way of a trade."""
     try:
         from app.agents.strategy import load_bars
 
@@ -131,14 +158,17 @@ def entry_fingerprint(broker, symbol: str, side: int, data: dict | None, entry: 
             m1 = load_bars(broker, symbol, {"1m"}, ctx.now).get("1m")
         if m1 is None:
             return None
-        return fingerprint(side, m1.c, entry, getattr(ctx, "spread", None), ctx.now)
+        h1 = (data or {}).get("1h")
+        if h1 is None or len(h1) < 15:
+            h1 = load_bars(broker, symbol, {"1h"}, ctx.now).get("1h")
+        return fingerprint(side, m1.c, entry, getattr(ctx, "spread", None), ctx.now, h1.c if h1 is not None else None)
     except Exception as exc:  # noqa: BLE001
         log.info("learning: no fingerprint at entry", extra={"symbol": symbol, "error": str(exc)})
         return None
 
 
 def history_fingerprint(broker, symbol: str, side: int, entry: float, at: datetime) -> dict | None:
-    """The same fingerprint for a trade opened in the past, from MT5's history: the 1m candles that closed by
+    """The same fingerprint for a trade opened in the past, from MT5's history: the 1m and 1h candles that closed by
     ``at``, and the spread from the ticks around it."""
     from app.agents.signal_review import _bars, _ticks
 
@@ -148,7 +178,9 @@ def history_fingerprint(broker, symbol: str, side: int, entry: float, at: dateti
     ticks = _ticks(broker, symbol, at - timedelta(seconds=30), at + timedelta(seconds=30))
     spreads = sorted(a - b for _t, b, a in ticks)
     spread = spreads[len(spreads) // 2] if spreads else None
-    return fingerprint(side, candles, entry, spread, at)
+    hour = at.replace(minute=0, second=0, microsecond=0)
+    h1 = _bars(broker, symbol, "1h", hour - timedelta(days=H1_DAYS), hour)
+    return fingerprint(side, candles, entry, spread, at, h1)
 
 
 # --------------------------------------------------------------------------- #
@@ -211,6 +243,51 @@ def history_whatifs(broker, symbol: str, side: int, entry: float, risk: float, a
     return whatifs(side, entry, risk, path, horizon_end, now, at=at)
 
 
+def trade_path(side: int, entry: float, risk: float, at: datetime, closed: datetime, bars: list,
+               spread: float = 0.0) -> list | None:
+    """Where a closed trade stood minute by minute (2026-11-17, for the position advisor's odds - scalp_advice):
+    [[minutes since the entry, R had it been closed then], ...] at each of PATH_MINUTES while it was still open, from
+    the close of the last 1m candle finished by then (bid prices: a sell buys back at the ask, so it pays
+    ``spread``). [] for a trade closed inside its first minute; None without a risk."""
+    if not risk or risk <= 0:
+        return None
+    at, closed = _utc(at), _utc(closed)
+    ends = sorted((_utc(c.ts) + timedelta(minutes=1), float(c.close)) for c in bars)
+    out: list = []
+    j = -1
+    for m in PATH_MINUTES:
+        t = at + timedelta(minutes=m)
+        if t >= closed:
+            break
+        while j + 1 < len(ends) and ends[j + 1][0] <= t:
+            j += 1
+        if j < 0 or ends[j][0] <= at:            # no candle has finished since the entry yet
+            continue
+        r = (side * (ends[j][1] - entry) - (spread if side < 0 else 0.0)) / risk
+        out.append([m, round(r, 3)])
+    return out
+
+
+def history_path(broker, symbol: str, side: int, entry: float, risk: float, at: datetime,
+                 closed: datetime) -> list | None:
+    """A closed trade's path (trade_path) from the broker's 1m candles; a sell's spread from its first minute's
+    ticks, as the what-ifs read it. None when the broker has no candles for it."""
+    from app.agents.signal_review import _bars, _ticks
+
+    at, closed = _utc(at), _utc(closed)
+    start = at.replace(second=0, microsecond=0)
+    spread = 0.0
+    if side < 0:
+        ticks = _ticks(broker, symbol, at, start + timedelta(minutes=1))
+        spreads = sorted(a - b for _t, b, a in ticks)
+        spread = spreads[len(spreads) // 2] if spreads else 0.0
+    end = min(closed, at + timedelta(seconds=PATH_MAX_S))
+    bars = _bars(broker, symbol, "1m", start, end + timedelta(minutes=1))
+    if not bars:
+        return None
+    return trade_path(side, entry, risk, at, closed, bars, spread)
+
+
 # --------------------------------------------------------------------------- #
 #  The parts of a fingerprint the review splits trades by
 # --------------------------------------------------------------------------- #
@@ -250,6 +327,41 @@ def _hour_label(h) -> str:
     return f"opened {int(h):02d}:00-{(int(h) + 1) % 24:02d}:00 UTC"
 
 
+def _market_name(k: str) -> str:
+    from app.agents.strategy import MARKET_NAMES
+
+    return MARKET_NAMES.get(k, k)
+
+
+def _market_part(f: dict):
+    m = f.get("market")
+    return None if not m else (m, f"trades on {_market_name(m)}")
+
+
+def _market_side_part(f: dict):
+    m = f.get("market")
+    if not m:
+        return None
+    return f"{m}:{f['side']}", f"{'buys' if f['side'] == 'long' else 'sells'} on {_market_name(m)}"
+
+
+CHAN_LOW = 0.7            # the 1m channel's part "low" ends here - the Channel place rule's default (70%)
+CHAN_ANY = 200            # the Channel place rule's "no real limit": only the slope counts
+H1RUN_HIGH = 1.0          # where the "hour so far" part "high" starts (ATR of 1h)
+
+
+def _chan_part(f: dict):
+    fp = f.get("fp") or {}
+    v, up = fp.get("chan1m"), fp.get("chan1m_up")
+    if v is None or up is None:
+        return None
+    if not up:
+        return "against", "the 1m channel sloping against the trade"
+    if v < CHAN_LOW:
+        return "low", "the entry in the lower 70% of a 1m channel sloping our way (our side)"
+    return "high", "the entry in the top 30% of the 1m channel or above it (our side)"
+
+
 # key -> (what the board calls it, how a trade is placed in it)
 FEATURES: dict[str, tuple[str, object]] = {
     "streak": ("1m closes already our way", _streak),
@@ -268,10 +380,18 @@ FEATURES: dict[str, tuple[str, object]] = {
         "the entry in the lower 80% of the last hour's range (our side)", "the entry in the top 80-95% of the "
         "last hour's range (our side)", "the entry at the very top of the last hour's range (bottom for a "
         "sell)"))),
+    # 2026-11-17, the user: "buy at the bottom of the channel?" and "the 1h candle should support us" (version 2)
+    "chan1m": ("place in the 1m channel", _chan_part),
+    "h1run": ("the hour so far", _three("h1run", (0.5, H1RUN_HIGH), (
+        "this hour so far under 0.5 ATR (1h) our way", "this hour so far 0.5-1 ATR (1h) our way",
+        "this hour had already run 1+ ATR (1h) our way"))),
     "spread": ("spread", _three("spread_pct", (10, 20), (
         "spread under 10% of the 1m ATR", "spread 10-20% of the 1m ATR", "spread 20%+ of the 1m ATR"))),
     "pair": ("pair", lambda f: (f["symbol"], f["symbol"])),
     "side": ("side", lambda f: (f["side"], "buys" if f["side"] == "long" else "sells")),
+    # 2026-11-16, the user: "let it watch the markets themselves too" (each trade's market: markets_of)
+    "market": ("market", _market_part),
+    "market_side": ("market & side", _market_side_part),
     "session": ("session", _fp_field("session", lambda k: f"the {session_name(k)} session")),
     "hour": ("hour (UTC)", _fp_field("hour", _hour_label)),
 }
@@ -317,14 +437,49 @@ def _chase_cap(cfg: dict) -> int | None:
 RUN15_HIGH = 3.5          # where the run15 part "high" starts (FEATURES: _three("run15", (1.5, 3.5), ...))
 
 
-def _run_cap(cfg: dict, bars: int = 15) -> float | None:
-    """The loosest 'Not stretched' cap (``bars`` bars back, on 1m) across the BUY groups that trade (None when one
-    has none)."""
+def _side_groups(cfg: dict, side: str) -> list[tuple[str, int]]:
+    """The groups that open ``side`` trades and are on: the BUY groups for a buy - and for a sell too while the
+    SELL rules mirror them; else the SELL groups."""
+    if side == "long" or cfg.get("mirror_short", True):
+        return [("entry_long", i) for i in _on_entry_groups(cfg)]
+    off = set((cfg.get("off_groups") or {}).get("entry_short") or [])
+    return [("entry_short", i) for i, g in enumerate(cfg.get("entry_short") or []) if g and i not in off]
+
+
+def _market_key(market: str, side: str) -> str:
+    """The "Markets" rule's chip for ``side`` trades on ``market``: b_crypto (buys), s_crypto (sells)."""
+    return ("b_" if side == "long" else "s_") + market
+
+
+def _market_off(cfg: dict, where: str, i: int, key: str) -> bool:
+    return any(c.get("type") == "markets" and not int((c.get("params") or {}).get(key, 1)) for c in cfg[where][i])
+
+
+def _of_market(cfg: dict, market: str) -> list[str]:
+    return [p.get("symbol") for p in cfg.get("pairs") or [] if str(p.get("asset_class") or "").lower() == market]
+
+
+def _run_cap(cfg: dict, bars: int = 15, tf: str = "1m") -> float | None:
+    """The loosest 'Not stretched' cap (``bars`` bars back, on ``tf``) across the BUY groups that trade (None when
+    one has none)."""
     caps = []
     for i in _on_entry_groups(cfg):
         mine = [float((c.get("params") or {}).get("atr", RUN15_HIGH)) for c in cfg["entry_long"][i]
-                if c.get("type") == "max_run" and c.get("tf") == "1m"
+                if c.get("type") == "max_run" and c.get("tf") == tf
                 and int((c.get("params") or {}).get("bars", 15)) == bars]
+        if not mine:
+            return None
+        caps.append(min(mine))
+    return max(caps) if caps else None
+
+
+def _chan_cap(cfg: dict) -> float | None:
+    """The loosest 'Channel place' limit on 1m that asks for the slope, across the BUY groups that trade (None when
+    one has none)."""
+    caps = []
+    for i in _on_entry_groups(cfg):
+        mine = [float((c.get("params") or {}).get("place", 70)) for c in cfg["entry_long"][i]
+                if c.get("type") == "channel" and c.get("tf") == "1m" and int((c.get("params") or {}).get("slope", 1))]
         if not mine:
             return None
         caps.append(min(mine))
@@ -384,6 +539,24 @@ def action_for(lesson: dict, cfg: dict) -> dict | None:
                 "text": f"Add “Not chasing: at most {cap} close{'s' if cap != 1 else ''} in a row our way · 1m” "
                         "to the BUY rules (sells read it mirrored)",
                 "done": have is not None and have <= cap}
+    if feat == "market" and weak:
+        mine = _of_market(cfg, bucket)
+        return {"op": "remove_market", "market": bucket,
+                "text": f"Stop trading {_market_name(bucket)}" + (f": take {', '.join(mine)} off" if mine else ""),
+                "done": not mine}
+    if feat == "market_side" and weak:
+        market, side = bucket.split(":", 1)
+        groups = _side_groups(cfg, side)
+        if not groups:
+            return None
+        key = _market_key(market, side)
+        way, other = ("buys", "sells") if side == "long" else ("sells", "buys")
+        done = (not _of_market(cfg, market) or cfg.get("sides") not in ("both", side)
+                or all(_market_off(cfg, w, i, key) for w, i in groups))
+        return {"op": "market_side", "market": market, "side": side,
+                "text": f"Stop opening {way} on {_market_name(market)} - {other} only there (a “Markets” rule in the "
+                        f"{'BUY' if groups[0][0] == 'entry_long' else 'SELL'} rules)",
+                "done": done}
     if feat == "run15" and weak and bucket == "high":
         if not _on_entry_groups(cfg):
             return None
@@ -392,6 +565,23 @@ def action_for(lesson: dict, cfg: dict) -> dict | None:
                 "text": f"Add “Not stretched: at most {RUN15_HIGH:g} ATR our way over the last 15 bars · 1m” "
                         "to the BUY rules (sells read it mirrored)",
                 "done": have is not None and have <= RUN15_HIGH}
+    if feat == "h1run" and weak and bucket == "high":
+        if not _on_entry_groups(cfg):
+            return None
+        have = _run_cap(cfg, bars=1, tf="1h")
+        return {"op": "hour_run", "atr": H1RUN_HIGH,
+                "text": f"Add “Not stretched: at most {H1RUN_HIGH:g} ATR our way since the last 1h close (this hour "
+                        "so far) · 1h” to the BUY rules (sells read it mirrored)",
+                "done": have is not None and have <= H1RUN_HIGH}
+    if feat == "chan1m" and ((weak and bucket in ("high", "against")) or (kind == "sweet" and bucket == "low")):
+        if not _on_entry_groups(cfg):
+            return None
+        place = CHAN_ANY if bucket == "against" else round(CHAN_LOW * 100)
+        have = _chan_cap(cfg)
+        what = ("“Channel place: the 1m regression channel sloping our way”" if bucket == "against" else
+                f"“Channel place: in the lower {place}% of the 1m regression channel, sloping our way”")
+        return {"op": "channel", "place": place, "text": f"Add {what} to the BUY rules (sells read it mirrored)",
+                "done": have is not None and have <= place}
     if feat == "spread" and weak and bucket in ("mid", "high"):
         if not _on_entry_groups(cfg):
             return None
@@ -411,7 +601,7 @@ def action_for(lesson: dict, cfg: dict) -> dict | None:
 def apply_change(cfg: dict, op: dict) -> dict:
     """``cfg`` (a strategy as plain data) with the change ``op`` made - a new dict; the caller validates it
     (StrategyIn) before anything is saved. Raises ValueError when it can't be made."""
-    from app.agents.strategy import _MAX_CONDITIONS
+    from app.agents.strategy import _MAX_CONDITIONS, MARKETS
 
     out = copy.deepcopy(cfg)
     kind = op["op"]
@@ -431,24 +621,56 @@ def apply_change(cfg: dict, op: dict) -> dict:
             raise ValueError("it would leave the strategy no hour to open trades in")
         h = out.get("hours") or {}
         out["hours"] = {"hours_utc": left, "tz": h.get("tz"), **({"crypto_24h": True} if h.get("crypto_24h") else {})}
-    elif kind in ("dont_chase", "spread_max", "atr_min", "max_run"):
-        type_, params = {"dont_chase": ("dont_chase", {"max": op.get("max", 1)}),
-                         "max_run": ("max_run", {"bars": 15, "atr": op.get("atr", RUN15_HIGH)}),
-                         "spread_max": ("spread", {"max_pct": op.get("pct", 20)}),
-                         "atr_min": ("atr", {"period": 14, "mult": op.get("mult", 0.9), "avg": 50, "bars": 1})}[kind]
+    elif kind in ("dont_chase", "spread_max", "atr_min", "max_run", "hour_run", "channel"):
+        type_, tf, params = {
+            "dont_chase": ("dont_chase", "1m", {"max": op.get("max", 1)}),
+            "max_run": ("max_run", "1m", {"bars": 15, "atr": op.get("atr", RUN15_HIGH)}),
+            "hour_run": ("max_run", "1h", {"bars": 1, "atr": op.get("atr", H1RUN_HIGH)}),
+            "channel": ("channel", "1m", {"place": op.get("place", round(CHAN_LOW * 100)), "bars": CHAN_BARS,
+                                          "sd": 2.0, "slope": 1}),
+            "spread_max": ("spread", "1m", {"max_pct": op.get("pct", 20)}),
+            "atr_min": ("atr", "1m", {"period": 14, "mult": op.get("mult", 0.9), "avg": 50, "bars": 1})}[kind]
         groups = _on_entry_groups(out)
         if not groups:
             raise ValueError("no BUY group is on to add it to")
         for i in groups:
             g = out["entry_long"][i]
-            mine = [c for c in g if c.get("type") == type_ and c.get("tf") == "1m"]
+            # "This hour so far" is a Not stretched of its own (1 bar back on 1h): any other one is left alone.
+            mine = [c for c in g if c.get("type") == type_ and c.get("tf") == tf
+                    and (kind != "hour_run" or int((c.get("params") or {}).get("bars", 15)) == 1)]
             if mine:
                 for c in mine:
-                    c["params"] = {**(c.get("params") or {}), **params}
+                    old = c.get("params") or {}
+                    c["params"] = {**old, **params}
+                    if kind == "channel" and old.get("place") is not None:   # a stricter place of the user's stays
+                        c["params"]["place"] = min(float(old["place"]), float(params["place"]))
             elif len(g) >= _MAX_CONDITIONS:
                 raise ValueError(f"BUY group {i + 1} already has {_MAX_CONDITIONS} conditions")
             else:
-                g.append({"type": type_, "tf": "1m", "params": dict(params)})
+                g.append({"type": type_, "tf": tf, "params": dict(params)})
+    elif kind == "remove_market":
+        keep = [p for p in out.get("pairs") or [] if str(p.get("asset_class") or "").lower() != op["market"]]
+        if not keep:
+            raise ValueError("it would leave the strategy no pair to trade")
+        out["pairs"] = keep
+    elif kind == "market_side":
+        key = _market_key(op["market"], op["side"])
+        groups = _side_groups(out, op["side"])
+        if not groups:
+            raise ValueError("no group is on to add it to")
+        for where, i in groups:
+            g = out[where][i]
+            mine = [c for c in g if c.get("type") == "markets"]
+            if mine:
+                for c in mine:
+                    c["params"] = {**(c.get("params") or {}), key: 0}
+            elif len(g) >= _MAX_CONDITIONS:
+                raise ValueError(f"{'BUY' if where == 'entry_long' else 'SELL'} group {i + 1} already has "
+                                 f"{_MAX_CONDITIONS} conditions")
+            else:
+                params = {f"{pre}{k}": 1 for pre in ("b_", "s_") for k, _n in MARKETS}
+                params[key] = 0
+                g.append({"type": "markets", "tf": out.get("timeframe") or "1m", "params": params})
     elif kind == "levels":
         out["target_r"] = op["target"]
         out["stop_atr"] = op["stop_atr"]
@@ -634,7 +856,26 @@ def fact_key(sid: int, symbol: str, direction: str, opened_at: datetime) -> str:
 
 def _fact_view(row: StrategyTradeFact) -> dict:
     return {"id": row.id, "symbol": row.symbol, "side": row.side, "opened_at": _utc(row.opened_at),
-            "closed_at": _utc(row.closed_at), "pnl": row.pnl, "r": row.r, "fp": row.fp, "whatif": row.whatif}
+            "closed_at": _utc(row.closed_at), "pnl": row.pnl, "r": row.r, "fp": row.fp, "whatif": row.whatif,
+            "path": row.path}
+
+
+def markets_of(session: Session, cfg: StrategyConfig) -> dict[str, str]:
+    """Each symbol the strategy traded (normalised) -> its market: the app's rows of its trades, then its pairs' own
+    (a pair taken off the strategy since keeps its trades' market)."""
+    from app.agents.strategy import strategy_source
+    from app.models.db import Position
+    from app.risk.service import _norm_symbol
+
+    out: dict[str, str] = {}
+    for sym, ac in session.execute(select(Position.symbol, Position.asset_class)
+                                   .where(Position.source == strategy_source(cfg)).distinct()).all():
+        if sym and ac:
+            out.setdefault(_norm_symbol(sym), str(getattr(ac, "value", ac)).lower())
+    for p in cfg.pairs or []:
+        if p.get("symbol") and p.get("asset_class"):
+            out[_norm_symbol(p["symbol"])] = str(p["asset_class"]).lower()
+    return out
 
 
 def facts_of(session: Session, sid: int) -> list[dict]:
@@ -706,15 +947,23 @@ def sync_facts(session: Session, cfg: StrategyConfig, trades: list) -> int:
 def fill_from_history(session: Session, cfg: StrategyConfig, broker_for, now: datetime,
                       budget: int = FILL_BUDGET) -> int:
     """Give up to ``budget`` facts what they still miss, from the broker's history: a fingerprint (older trades,
-    opened before the engine wrote one), and the what-ifs once their day is over. Returns the work done."""
+    opened before the engine wrote one) or the parts a version-1 one lacks (the 1m channel, the hour so far), the
+    path once the trade has closed, and the what-ifs once their day is over. Returns the work done."""
     classes = {p.get("symbol"): p.get("asset_class") for p in cfg.pairs or []}
     ripe = (now - timedelta(seconds=WHATIF_HORIZON_S)).replace(tzinfo=None)
     need_fp = StrategyTradeFact.fp.is_(None) & (func.coalesce(StrategyTradeFact.fp_tries, 0) < 3)
+    # A version-1 fingerprint: the parts version 2 added, from the same history (its own parts are kept as they were).
+    need_fp2 = (StrategyTradeFact.fp.is_not(None) & StrategyTradeFact.entry.is_not(None)
+                & (func.coalesce(func.json_extract(StrategyTradeFact.fp, "$.v"), 0) < FP_VERSION)
+                & (func.coalesce(StrategyTradeFact.fp_tries, 0) < 3))
     # What-ifs once the replay window is over (a day after the entry): one read each, final at once.
     need_wi = (StrategyTradeFact.whatif.is_(None) & StrategyTradeFact.risk_dist.is_not(None)
                & (StrategyTradeFact.opened_at <= ripe) & (func.coalesce(StrategyTradeFact.whatif_tries, 0) < 3))
+    # The path once the trade has closed (the position advisor's odds, 2026-11-17).
+    need_path = (StrategyTradeFact.path.is_(None) & StrategyTradeFact.risk_dist.is_not(None)
+                 & StrategyTradeFact.closed_at.is_not(None) & (func.coalesce(StrategyTradeFact.path_tries, 0) < 3))
     rows = session.scalars(select(StrategyTradeFact)
-                           .where(StrategyTradeFact.strategy_id == cfg.id, need_fp | need_wi)
+                           .where(StrategyTradeFact.strategy_id == cfg.id, need_fp | need_fp2 | need_wi | need_path)
                            .order_by(StrategyTradeFact.opened_at.desc())).all()
     done = 0
     for row in rows:
@@ -737,6 +986,32 @@ def fill_from_history(session: Session, cfg: StrategyConfig, broker_for, now: da
                 row.fp, row.fp_from = fp, "history"
             else:
                 row.fp_tries = (row.fp_tries or 0) + 1
+        if (row.fp is not None and int((row.fp or {}).get("v") or 0) < FP_VERSION and row.entry
+                and (row.fp_tries or 0) < 3):
+            done += 1
+            try:
+                new = history_fingerprint(broker, row.symbol, side, float(row.entry), o)
+            except Exception as exc:  # noqa: BLE001
+                log.info("learning: history fingerprint (version 2 parts) failed",
+                         extra={"symbol": row.symbol, "error": str(exc)})
+                new = None
+            if new and any(new.get(k) is not None for k in FP2_KEYS):
+                row.fp = {**row.fp, **{k: new.get(k) for k in FP2_KEYS}, "v": FP_VERSION}
+            else:
+                row.fp_tries = (row.fp_tries or 0) + 1
+        if (row.path is None and row.risk_dist and row.entry and row.closed_at is not None
+                and (row.path_tries or 0) < 3 and now >= _utc(row.closed_at) + timedelta(minutes=2)):
+            done += 1
+            try:
+                pth = history_path(broker, row.symbol, side, float(row.entry), float(row.risk_dist), o,
+                                   _utc(row.closed_at))
+            except Exception as exc:  # noqa: BLE001
+                log.info("learning: path failed", extra={"symbol": row.symbol, "error": str(exc)})
+                pth = None
+            if pth is not None:
+                row.path = pth
+            else:
+                row.path_tries = (row.path_tries or 0) + 1
         if row.whatif is None and row.risk_dist and row.entry and (row.whatif_tries or 0) < 3:
             if now < o + timedelta(seconds=WHATIF_HORIZON_S):
                 continue
@@ -803,8 +1078,13 @@ def _version(session: Session, sid: int, facts: list[dict]) -> dict:
 def build(session: Session, cfg: StrategyConfig, config: dict, now: datetime | None = None) -> dict:
     """Everything the board's "What the strategy learned" card shows for one strategy. ``config``: the strategy
     as plain data (strategy_routes._config_of), to tell which lessons it already follows."""
+    from app.risk.service import _norm_symbol
+
     now = now or datetime.now(timezone.utc)
     facts = facts_of(session, cfg.id)
+    mk = markets_of(session, cfg)
+    for f in facts:
+        f["market"] = mk.get(_norm_symbol(f["symbol"]))
     with_r = [f for f in facts if f.get("r") is not None]
     dec = decisions(session, cfg.id)
     parts = find_parts(with_r) if len(with_r) >= MIN_TOTAL else []

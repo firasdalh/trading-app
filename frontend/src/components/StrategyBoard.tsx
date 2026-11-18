@@ -39,7 +39,8 @@ const NAMES: Record<string, string> = {
   stoch_room: "Stochastic with room (our way, not overbought / oversold)", vwap: "VWAP side", volume: "Volume spike",
   bb_break: "Bollinger breakout", candles: "Candle colour", clean_candle: "Candle with us (no doji / star / hammer)", structure: "Structure (HH / HL)", sr_room: "Room to S/R (1h / 4h / 1d)",
   zone_room: "Room to supply / demand", fib_zone: "Fibonacci zone (room to the target)",
-  dont_chase: "Not chasing (a fresh push only)", max_run: "Not stretched (not after a big run)", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter",
+  channel: "Channel place (buy low in the regression channel)",
+  dont_chase: "Not chasing (a fresh push only)", max_run: "Not stretched (not after a big run)", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter", markets: "Markets (buys / sells per market)",
   rsi_extreme: "Take profit: RSI stretched", profit_r: "Take profit: at +R", time_stop: "Time stop",
 };
 
@@ -636,9 +637,23 @@ function Wait({ label, value, options, onChange, title }: {
   );
 }
 
+// "Markets" (2026-11-16) read as the log reads it: "Markets - buys on every market but crypto · sells on every market".
+function marketsSentence(spec: StrategyConditionSpec, params: Record<string, number>): string {
+  const side = (pre: string) => {
+    const ps = spec.params.filter((p) => p.key.startsWith(pre));
+    const on = ps.filter((p) => (params[p.key] ?? p.default) >= 1).map((p) => p.label);
+    const off = ps.filter((p) => (params[p.key] ?? p.default) < 1).map((p) => p.label);
+    if (!off.length) return "every market";
+    if (!on.length) return "no market";
+    return off.length <= on.length ? `every market but ${off.join(", ")}` : on.join(", ");
+  };
+  return `Markets - buys on ${side("b_")} · sells on ${side("s_")}`;
+}
+
 // A sentence with its {params} filled in (read-only), as the mirrored SELL rules and the log show it.
 function sentence(spec: StrategyConditionSpec | undefined, where: Where, params: Record<string, number>): string {
   if (!spec) return "?";
+  if (spec.type === "markets") return marketsSentence(spec, params);
   const text = spec[where] || spec.long;
   return text
     .replace(/\{(~?)(\w+)\}/g, (_m, flip: string, k: string) => {
@@ -782,15 +797,19 @@ function ConditionRow({ cond, where, catalog, tfs, onChange, onRemove, states }:
             );
           }
           if (p.kind === "pick") {
-            // A place a trade may open in (Fibonacci zone): violet like the chart's Fibonacci targets.
+            // A place a trade may open in (Fibonacci zone), a market buys / sells may open on (Markets): violet
+            // like the chart's Fibonacci targets.
             const on = v >= 1;
+            const market = cond.type === "markets" ? (p.key.startsWith("b_") ? "Buys" : "Sells") : null;
             return (
               <button
                 key={i}
                 type="button"
                 aria-pressed={on}
                 onClick={() => set(on ? 0 : 1)}
-                title={on ? `A trade may open ${p.label} - click to rule it out` : `Ruled out - click to let a trade open ${p.label} too`}
+                title={market
+                  ? `${market} on ${p.label}: ${on ? "on - click to switch them off" : "off - click to allow them again"}`
+                  : on ? `A trade may open ${p.label} - click to rule it out` : `Ruled out - click to let a trade open ${p.label} too`}
                 className={`mx-px rounded border px-1 text-[10px] font-semibold ${
                   on ? "border-violet-400/60 bg-violet-500/20 text-violet-200" : "border-neutral-700 text-neutral-500 line-through hover:text-neutral-300"
                 }`}

@@ -288,6 +288,14 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
         </div>
       )}
 
+      {/* How a scalp is read (2026-11-17, "it compares with the DAY while we scalp on a small timeframe"). */}
+      {advice.some((a) => a.style === "scalp") && (
+        <div className="mb-2 text-[11px] leading-relaxed text-neutral-500">
+          Scalps are read from their own numbers: the odds from this strategy's past trades that stood the same way
+          at the same age, and the risks of a few-minute trade (news, the market closing, the spread). No trend or
+          daily-chart reads - on 281 past trades they didn't tell how a trade would end.
+        </div>
+      )}
       {advice.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-neutral-800 py-8 text-center">
           <span className="text-2xl opacity-40">🛡️</span>
@@ -332,7 +340,30 @@ export function PositionAdvicePanel({ refreshSignal, lang }: Props) {
                   )}
                   <AnalysisText text={a.headline} lang={lang}
                                 className="text-sm font-medium" />
-                  <span className={`text-[10px] font-semibold uppercase ${th.cls}`}>{th.text}</span>
+                  {a.style === "scalp" ? (
+                    a.odds != null && (
+                      <span
+                        className={`rounded bg-neutral-800 px-1 py-0.5 text-[10px] font-semibold tabular-nums ${
+                          a.odds >= 0.5 ? "text-bull" : "text-bear"
+                        }`}
+                        title={
+                          a.odds_from === "history"
+                            ? `Odds it ends in profit, from the ${a.odds_n} past trades of this strategy that stood ` +
+                              "like this at about this age" +
+                              (a.odds_plain != null
+                                ? `, weighed with the distances to the stop and the target (alone: ${Math.round(
+                                    a.odds_plain * 100,
+                                  )}%)`
+                                : "")
+                            : "Odds of reaching the target before the stop, from the distances alone"
+                        }
+                      >
+                        odds {Math.round(a.odds * 100)}%
+                      </span>
+                    )
+                  ) : (
+                    <span className={`text-[10px] font-semibold uppercase ${th.cls}`}>{th.text}</span>
+                  )}
                   {a.r_multiple != null && (
                     <span
                       className={`rounded bg-neutral-800 px-1 py-0.5 text-[10px] tabular-nums ${

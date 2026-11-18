@@ -12,6 +12,11 @@ It runs two checks per position:
 
 Advisory only: it suggests; the user acts via the positions table (Set SL/TP, Close). It
 never moves money on its own. Can be run on demand or on a user-set auto-watch interval.
+
+SCALPS (2026-11-17, the user: "it compares with the DAY while we scalp on a small timeframe"): a trade that is not
+planned on 1h or above - the strategies' 1m trades, the desk's tickets, a phone trade - is read by scalp_advice
+instead: its odds from the strategy's own past trades, and the risks of a trade of a few minutes. The trend and
+daily-chart reads below predicted nothing on 281 of strategy 1's trades (study 2026-11-17).
 """
 from __future__ import annotations
 
@@ -381,6 +386,21 @@ def _scenario_awareness(p, ctx: dict | None) -> tuple[str, str] | None:
     return note, lean
 
 
+def _trade_style(session: Session, p, dbp=None) -> str:
+    """'swing' for a trade the app opened on a plan of 1h or above (Hybrid, the 1h analysis): the read below.
+    Everything else is read as a 'scalp' (scalp_advice): the strategies' 1m trades, the desk's tickets
+    (timeframe "manual"), a trade the app has no row of. No database (or an unreadable plan): 'swing', as before."""
+    if session is None:
+        return "swing"
+    try:
+        from app.agents.scalp_advice import is_swing, plan_of
+
+        plan = plan_of(session, p, dbp)
+        return "swing" if plan is not None and is_swing(plan.timeframe) else "scalp"
+    except Exception:  # noqa: BLE001
+        return "swing"
+
+
 def advise_positions(session: Session) -> list[PositionAdvice]:
     """Advisories for the panel/endpoint (the per-position fresh read is discarded)."""
     return _advise_with_context(session)[0]
@@ -415,6 +435,14 @@ def _advise_with_context(session: Session) -> tuple[list[PositionAdvice], dict[s
             events = cal.get_events(p.symbol, lookahead_hours=12, include_medium=True)
         except Exception:  # noqa: BLE001
             events = []
+        if _trade_style(session, p, dbp) == "scalp":
+            try:
+                from app.agents.scalp_advice import advise as scalp_advise
+
+                out.append(scalp_advise(session, p, dbp, events, now))
+                continue
+            except Exception as exc:  # noqa: BLE001 - never lose a trade's advice: the swing read below instead
+                log.warning("scalp advice failed - swing read instead", extra={"symbol": p.symbol, "error": str(exc)})
 
         ev_label: str | None = None
         ev_mins: int | None = None

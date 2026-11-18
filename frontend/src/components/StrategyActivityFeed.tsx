@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { api } from "../api/client";
 import { displaySymbol, fmtPrice, fmtUsd } from "../format";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import type { AssetClass, StrategyActivity } from "../types";
 
@@ -9,7 +10,8 @@ import type { AssetClass, StrategyActivity } from "../types";
  * why (a close rule, the stop, the target, a hand close), the signals refused or held back, and the signals
  * of a group on watch only (it opens nothing - asked 2026-11-06). A row
  * opens to show the details. Shared by the Strategies board (one strategy) and the desk's sidebar (every
- * strategy, so the board needn't be opened to find out - asked for 2026-11-02).
+ * strategy, so the board needn't be opened to find out - asked for 2026-11-02). On the desk it comes in two tabs,
+ * Notifications and Trade history, each with its count (2026-11-18, see DeskStrategyActivity).
  */
 
 const TONE: Record<string, string> = {
@@ -29,7 +31,7 @@ const sameReason = (r: unknown) => String(r ?? "").replace(/\d+(?:\.\d+)?/g, "#"
 const STOP_MOVES = new Set(["stop_moved", "stop_move_failed"]);
 const STOP_GAP_MS = 30 * 60_000;
 const FRESH_MS = 120_000;
-const DESK_FEED = 100;
+const DESK_FEED = 200;      // the API's most: refusals and signals are many, the trades few
 const DESK_POLL_MS = 5000;
 
 interface Row {
@@ -218,37 +220,185 @@ function ActivityRow({ row, fresh, onPick }: {
   );
 }
 
-export function ActivityFeed({ items, onPick, empty }: {
+export function ActivityFeed({ items, onPick, empty, newSince }: {
   items: StrategyActivity[] | null | undefined;
   onPick?: (symbol: string, ac: AssetClass) => void;
   empty: string;
+  /** Rows after this time are marked new (the desk: what arrived since you last looked at the tab). */
+  newSince?: string | null;
 }) {
   const rows = rowsOf(items ?? []);
   if (!rows.length) return <p className="py-1 text-xs text-neutral-600">{empty}</p>;
   const now = Date.now();
+  const since = newSince ? Date.parse(newSince) : null;
   return (
     <div>
-      {rows.map((r) => (
-        <ActivityRow key={r.key} row={r} onPick={onPick} fresh={!!r.a.at && now - Date.parse(r.a.at) < FRESH_MS} />
-      ))}
+      {rows.map((r) => {
+        const t = r.a.at ? Date.parse(r.a.at) : null;
+        // Your own edits are never "new" on the desk (they are not counted there either).
+        const fresh = t != null && (now - t < FRESH_MS || (since != null && t > since && r.a.event !== "edited"));
+        return <ActivityRow key={r.key} row={r} onPick={onPick} fresh={fresh} />;
+      })}
     </div>
   );
 }
 
-/** The desk sidebar's copy: every strategy's activity, read every few seconds. */
+// THE DESK'S TWO TABS (asked 2026-11-18: "the notifications and the trade history are mixed here - make them
+// separate, notifications in one tab and the other in another, with the number of notifications there").
+// TRADE HISTORY = what happened to a trade: opened, closed (by its rule, the stop, the target or by hand), its
+// stop moved, a close or a stop move that failed. NOTIFICATIONS = everything else the strategies tell you: the
+// 👁 watch-only signals (the ones that pop up), signals refused or held back, an order not filled, the daily
+// target reached, a strategy started, stopped or edited.
+type Tab = "notes" | "trades";
+const TRADE_EVENTS = new Set(["opened", "closed", "stop_moved", "stop_move_failed", "close_failed"]);
+const tabOf = (a: StrategyActivity): Tab => (TRADE_EVENTS.has(a.event) ? "trades" : "notes");
+// Your own edits are listed, never counted: they are not news to you.
+const counted = (a: StrategyActivity) => a.event !== "edited";
+const TABS: { id: Tab; icon: string; label: string; empty: string; hint: string }[] = [
+  {
+    id: "notes", icon: "🔔", label: "Notifications",
+    empty: "No notifications yet - your strategies' 👁 signals, the signals held back and their notices land here.",
+    hint: "What the strategies tell you: 👁 watch-only signals, signals refused or held back, an order not filled, the daily target, started / stopped / edited",
+  },
+  {
+    id: "trades", icon: "📒", label: "Trade history",
+    empty: "No trades yet - what your strategies open and close lands here, with the reason.",
+    hint: "What happened to the strategies' trades: opened, closed (its rule, the stop, the target or by hand), stop moved",
+  },
+];
+const tms = (at: string | null | undefined) => (at ? Date.parse(at) : NaN);
+
+/** On screen: its section unfolded, scrolled into the sidebar's view, and the page in front. */
+function useShown(ref: RefObject<HTMLElement>) {
+  const [inView, setInView] = useState(false);
+  const [pageOn, setPageOn] = useState(() => document.visibilityState === "visible");
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setInView(true);
+      return;
+    }
+    const io = new IntersectionObserver(([e]) => setInView(e.isIntersecting));
+    io.observe(el);
+    return () => io.disconnect();
+  }, [ref]);
+  useEffect(() => {
+    const on = () => setPageOn(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  return inView && pageOn;
+}
+
+/** The desk sidebar's copy: every strategy's activity, read every few seconds, in two tabs. */
 export function DeskStrategyActivity({ onPick }: { onPick?: (symbol: string, ac: AssetClass) => void }) {
   const { data, error } = usePolling(() => api.strategyActivityAll(DESK_FEED), DESK_POLL_MS);
+  const [tab, setTab] = useLocalStorage<Tab>("desk.activity.tab", "notes");
+  // The newest row each tab had when you last had it on screen: anything later is "new" (its count).
+  const [seen, setSeen] = useLocalStorage<Record<Tab, string | null>>("desk.activity.seen", { notes: null, trades: null });
+  const seenRef = useRef(seen);
+  seenRef.current = seen;
+  const boxRef = useRef<HTMLDivElement>(null);
+  const shown = useShown(boxRef);
+  // While a tab is on screen, the rows that were new when you opened it stay marked new.
+  const [since, setSince] = useState<{ tab: Tab; at: string | null } | null>(null);
+
+  const items = useMemo(() => data ?? [], [data]);
+  const byTab = useMemo(() => ({
+    notes: items.filter((a) => tabOf(a) === "notes"),
+    trades: items.filter((a) => tabOf(a) === "trades"),
+  }), [items]);
+  const newest = (t: Tab) =>
+    byTab[t].reduce<string | null>((m, a) => (a.at && (m == null || tms(a.at) > tms(m)) ? a.at : m), null);
+
+  // The very first time: what is already there counts as seen (no count of 40 old rows on day one).
+  useEffect(() => {
+    if (!data) return;
+    const s = seenRef.current;
+    if (s.notes != null && s.trades != null) return;
+    const now = new Date().toISOString();
+    setSeen({ notes: s.notes ?? newest("notes") ?? now, trades: s.trades ?? newest("trades") ?? now });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+  // The tab on screen is read: its count clears, and what was new when you opened it stays marked.
+  useEffect(() => {
+    if (!shown) {
+      setSince(null);
+      return;
+    }
+    const at = seenRef.current[tab];          // read NOW: the updater runs after this render's seen has moved on
+    setSince((s) => (s && s.tab === tab ? s : { tab, at }));
+  }, [shown, tab]);
+  useEffect(() => {
+    if (!data || !shown) return;
+    const n = newest(tab);
+    const was = seenRef.current[tab];
+    if (n && (was == null || tms(n) > tms(was))) setSeen((s) => ({ ...s, [tab]: n }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, shown, tab]);
+
+  // Per tab: how many rows arrived since you last looked, and how many today (a run of the same refusal is
+  // one row, as listed). "+" when the feed's window does not reach back to midnight.
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const reachesMidnight = items.length < DESK_FEED || items.some((a) => tms(a.at) < midnight.getTime());
+  const tally = (t: Tab) => {
+    const rows = rowsOf(byTab[t]).filter((r) => counted(r.a));
+    const s = seen[t];
+    return {
+      fresh: s == null ? 0 : rows.filter((r) => tms(r.a.at) > tms(s)).length,
+      today: rows.filter((r) => tms(r.a.at) >= midnight.getTime()).length,
+    };
+  };
+
+  const cur = TABS.find((t) => t.id === tab) ?? TABS[0];
   return (
-    <div className="max-h-96 overflow-y-auto overscroll-contain px-3 py-1">
-      {data == null && error ? (
-        <p className="py-1 text-xs text-amber-300/80">Can't read the strategies' activity: {error}</p>
-      ) : (
-        <ActivityFeed
-          items={data}
-          onPick={onPick}
-          empty={data == null ? "Loading…" : "Nothing yet - what your strategies open, close and are refused shows here."}
-        />
-      )}
+    <div ref={boxRef}>
+      <div role="tablist" aria-label="Strategy activity" className="flex gap-1 border-b border-neutral-800/80 px-2 py-1.5">
+        {TABS.map((t) => {
+          const on = t.id === cur.id;
+          const { fresh, today } = tally(t.id);
+          const todayTxt = `${today}${reachesMidnight ? "" : "+"}`;
+          const tip = `${t.hint}.${fresh ? ` ${fresh} new since you last looked.` : ""} ${todayTxt} today${t.id === "notes" ? " (your own edits not counted)" : ""}.`;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              onClick={() => setTab(t.id)}
+              title={tip}
+              className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition
+                focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50
+                ${on ? "bg-neutral-800 text-neutral-100 ring-1 ring-inset ring-neutral-700" : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200"}`}
+            >
+              <span aria-hidden="true">{t.icon}</span>
+              <span className="truncate">{t.label}</span>
+              {fresh > 0 ? (
+                <span className="shrink-0 rounded bg-warn px-1.5 py-px text-[11px] font-bold leading-4 tabular-nums text-black">
+                  {fresh} new
+                </span>
+              ) : today > 0 ? (
+                <span className="shrink-0 rounded bg-neutral-800 px-1.5 py-px text-[11px] leading-4 tabular-nums text-neutral-400 ring-1 ring-inset ring-neutral-700/60">
+                  {todayTxt}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+      <div role="tabpanel" aria-label={cur.label} className="max-h-96 overflow-y-auto overscroll-contain px-3 py-1">
+        {data == null && error ? (
+          <p className="py-1 text-xs text-amber-300/80">Can't read the strategies' activity: {error}</p>
+        ) : (
+          <ActivityFeed
+            items={byTab[cur.id]}
+            onPick={onPick}
+            newSince={since && since.tab === cur.id ? since.at : null}
+            empty={data == null ? "Loading…" : cur.empty}
+          />
+        )}
+      </div>
     </div>
   );
 }

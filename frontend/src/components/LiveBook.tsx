@@ -392,7 +392,14 @@ function PositionCard({
             title={`${advice.headline}${advice.detail ? ` — ${advice.detail}` : ""}`}
           >
             {tone.label}
-            {THESIS_TEXT[advice.thesis] ? ` · ${THESIS_TEXT[advice.thesis]}` : ""}
+            {/* A scalp shows its odds (2026-11-17): its trend read told nothing on 281 past trades. */}
+            {advice.style === "scalp"
+              ? advice.odds != null
+                ? ` · ${Math.round(advice.odds * 100)}%`
+                : ""
+              : THESIS_TEXT[advice.thesis]
+                ? ` · ${THESIS_TEXT[advice.thesis]}`
+                : ""}
           </button>
         )}
       </div>

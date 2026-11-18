@@ -253,6 +253,7 @@ class Ctx:
     ask: float | None = None
     risk: float | None = None      # one R: how far the order's stop would go (_stop_distance)
     bars: dict = field(default_factory=dict)   # every timeframe the rules read, for a rule over several
+    asset_class: str | None = None  # the pair's market (stock / crypto / forex / metal / energy / index): "Markets"
 
 
 Result = tuple[bool | None, str]
@@ -526,7 +527,10 @@ def _c_max_run(p, s, b, ctx) -> Result:
     at (the ask for a buy, the bid for a sell) against that close: on 1m with 15 bars it is the learner's own run15
     (learning.fingerprint), the same number. Strategy 1, Nov 4-16: after a run of 3.5+ ATR in 15 minutes 41% of 80
     trades won, -12.9R; the rest 56% of 201, +25.5R - and the 39 trades after the lesson first showed (Nov 13 10:04)
-    went the same way (-2.9R on the 15 it would have skipped, +1.6R on the 24 it keeps)."""
+    went the same way (-2.9R on the 15 it would have skipped, +1.6R on the 24 it keeps).
+    1 bar back (2026-11-17, the user: "the 1h candle should support us") is the bar forming now: on 1h, how far this
+    hour has already gone our way since the last 1h close. Strategy 1's 239 trades that Not stretched keeps: after
+    the hour had already run 1+ ATR (1h) our way 45% of 20 won, -3.8R (both weeks lost); the rest +33.0R."""
     n = int(p["bars"])
     if len(b) < max(n, 15):
         return None, "not enough bars"
@@ -541,6 +545,54 @@ def _c_max_run(p, s, b, ctx) -> Result:
     cap = float(p["atr"])
     return run <= cap, (f"{run:+.2f} ATR {'up' if s > 0 else 'down'} since the close {n} bars back "
                         f"(at most {cap:g})")
+
+
+def reg_channel(ys: list[float], k: float = 2.0) -> dict | None:
+    """The chart's regression channel (Chart.tsx applyChannel; indicators.regression_channel) on ``ys``, oldest first,
+    the last one = the price now: the least-squares line through them, its bands ``k`` residual standard deviations
+    either side, read at the last point. pos 0 = on the lower band, 1 = on the upper one (under 0 / over 1 =
+    outside); slope = price per bar. None for under 3 points or a flat line (no band)."""
+    m = len(ys)
+    if m < 3:
+        return None
+    mx = (m - 1) / 2.0
+    my = sum(ys) / m
+    sxx = sum((x - mx) ** 2 for x in range(m))
+    slope = sum((x - mx) * (ys[x] - my) for x in range(m)) / sxx
+    icpt = my - slope * mx
+    sd = math.sqrt(sum((ys[x] - (icpt + slope * x)) ** 2 for x in range(m)) / m)
+    if not sd > 0:
+        return None
+    mid = icpt + slope * (m - 1)
+    lo, up = mid - k * sd, mid + k * sd
+    return {"pos": (ys[-1] - lo) / (up - lo), "slope": slope, "mid": mid, "lower": lo, "upper": up, "sd": sd}
+
+
+def _c_channel(p, s, b, ctx) -> Result:
+    """Channel place (2026-11-17, the user after a day of late entries: "we go in with the move and it turns - would
+    buying at the bottom of the channel help?"): where the price stands in the chart's regression channel on this
+    timeframe (Indicators -> Regression channel) - the last ``bars`` - 1 CLOSED bars with the bid now as the bar still
+    forming, as the chart draws it. A buy holds in the lower ``place``% of the channel (0 = its lower band, 100 = its
+    upper one; more lets price stand above it), a sell in the upper ``place``%; with ``slope`` the channel itself must
+    run the trade's way. Strategy 1's 319 real trades (Nov 4-17), 1m: in the lower 70% of a channel sloping their way
+    60% won (+22.8R over 145); its top 30% or above it 51% (+2.7R over 114); a channel sloping against the trade 38%
+    (-9.2R over 60). With Not stretched on, the gap is smaller (+0.16R vs +0.07R a trade, t 0.9): a hint."""
+    n = int(p["bars"])
+    if len(b) < n - 1:
+        return None, "not enough bars"
+    if not ctx.bid:
+        return None, "no quote"
+    ch = reg_channel(b.close[-(n - 1):] + [ctx.bid], float(p["sd"]))
+    if ch is None:
+        return None, "no channel (flat prices)"
+    place = ch["pos"] if s > 0 else 1 - ch["pos"]
+    cap = float(p["place"])
+    with_us = s * ch["slope"] > 0
+    need_slope = bool(int(p["slope"]))
+    way = "up" if ch["slope"] > 0 else "down" if ch["slope"] < 0 else "flat"
+    text = (f"price {place * 100:.0f}% of the way {'up' if s > 0 else 'down'} the channel (at most {cap:g}%) · "
+            f"the channel {way}" + (f" - needs {'up' if s > 0 else 'down'}" if need_slope and not with_us else ""))
+    return place * 100 <= cap and (with_us or not need_slope), text
 
 
 def _c_clean_candle(p, s, b, ctx) -> Result:
@@ -669,6 +721,37 @@ def _c_session(p, s, b, ctx) -> Result:
     if not picked:
         return None, "no session picked"
     return bool(on), (f"{' + '.join(on)} open" if on else f"{h:02d}:00 UTC, outside")
+
+
+# The markets a pair can be in (AssetClass), as the "Markets" rule and the learner name them.
+MARKETS = (("stock", "stocks"), ("crypto", "crypto"), ("forex", "forex"), ("metal", "metals"), ("energy", "energy"),
+           ("index", "indices"))
+MARKET_NAMES = dict(MARKETS)
+
+
+def _c_markets(p, s, b, ctx) -> Result:
+    """Which markets buys and which sells may open on (2026-11-16, the user: "let it watch the markets themselves
+    too, so we get control in the strategy per market" - sells had done better than buys on crypto): the pair's
+    market has to be ticked for the trade's side, "buys on" for a buy, "sells on" for a sell."""
+    ac = (ctx.asset_class or "").lower()
+    if ac not in MARKET_NAMES:
+        return None, "no market for this pair"
+    way = "buys" if s > 0 else "sells"
+    ok = bool(p.get(("b_" if s > 0 else "s_") + ac))
+    return ok, f"{way} on {MARKET_NAMES[ac]}: {'on' if ok else 'switched off'}"
+
+
+def _markets_label(p: dict) -> str:
+    """How a "Markets" rule reads in the log: "Markets - buys on every market but crypto · sells on every market"."""
+    def side(prefix: str) -> str:
+        on = [n for k, n in MARKETS if p.get(prefix + k)]
+        off = [n for k, n in MARKETS if not p.get(prefix + k)]
+        if not off:
+            return "every market"
+        if not on:
+            return "no market"
+        return f"every market but {', '.join(off)}" if len(off) <= len(on) else ", ".join(on)
+    return f"Markets - buys on {side('b_')} · sells on {side('s_')}"
 
 
 def _c_sr_room(p, s, b, ctx) -> Result:
@@ -1060,12 +1143,14 @@ CATALOG: dict[str, Spec] = {s.type: s for s in (
     Spec("max_run", "Price action", "entry",
          "Not stretched: price at most {atr} ATR above the close {bars} bars back",
          "Not stretched: price at most {atr} ATR below the close {bars} bars back", "",
-         (Param("bars", "bars back", 15, 2, 100), Param("atr", "ATR", 3.5, 0.5, 20, 0.1)), _c_max_run,
+         (Param("bars", "bars back", 15, 1, 100), Param("atr", "ATR", 3.5, 0.5, 20, 0.1)), _c_max_run,
          "Skips an entry when price has already run far the trade's way: how far the live price is past the close "
          "N bars back, in ATR 14 of this timeframe (a fall, for a sell). 15 bars on 1m at 3.5 ATR is the strategy "
          "learner's own lesson on strategy 1's real trades (2026-11-16): after a run of 3.5+ ATR in 15 minutes 41% "
          "won (-12.9R over 80 trades), the rest 56% (+25.5R over 201) - and it held on the 39 trades after the "
-         "lesson first showed. Different from 'Not chasing', which counts closes in a row and did not hold.",
+         "lesson first showed. Different from 'Not chasing', which counts closes in a row and did not hold. "
+         "1 bar back = the bar forming now: on 1h, how far this hour has gone so far (since the last 1h close) - "
+         "after the hour had already run 1+ ATR the trade's way, 45% of 20 such trades won (-3.8R; 2026-11-17).",
          default_tf="1m"),
     Spec("clean_candle", "Price action", "both",
          "The last {bars} candle(s) closed green with a real body (at least {body}% of its range) and an upper "
@@ -1137,6 +1222,25 @@ CATALOG: dict[str, Spec] = {s.type: s for s in (
          "49% (-9R); on 1h the same way, weaker; on 1m / 3m / 5m where price stood made no difference. Not "
          "backtested as a rule.",
          tfs=("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"), default_tf="5m"),
+    Spec("channel", "Levels & zones", "entry",
+         "Channel place: in the lower {place}% of the regression channel ({bars} bars, {sd} sd) · the channel "
+         "sloping up: {slope}",
+         "Channel place: in the upper {place}% of the regression channel ({bars} bars, {sd} sd) · the channel "
+         "sloping down: {slope}",
+         "",
+         (Param("place", "%", 70, 5, 200, 5), Param("bars", "bars", 60, 20, 300), Param("sd", "sd", 2.0, 0.5, 4, 0.1),
+          Param("slope", "sloping the trade's way", 1, 0, 1, 1, "bool")), _c_channel,
+         "Buys the bottom of the channel instead of its top: where price stands in the chart's regression channel "
+         "(Indicators -> Regression channel: the line through the last 60 closes, bands 2 standard deviations either "
+         "side, on the chart's timeframe - this rule reads it on its own). 0% = on the lower band, 100% = on the "
+         "upper one. A buy may open in the lower N% of it, a sell in the upper N%; over 100 lets price stand above "
+         "the band too (200 = no real limit, only the slope counts). Sloping: the channel itself runs the trade's "
+         "way - up for a buy. Strategy 1's 319 real trades (2026-11-17), 1m: in the lower 70% of a channel sloping "
+         "their way 60% won (+22.8R over 145), in its top 30% or above it 51% (+2.7R over 114), with the channel "
+         "sloping against the trade 38% (-9.2R over 60). With Not stretched on the gap is smaller (+0.16R vs "
+         "+0.07R a trade, t 0.9): a hint, not proven. Waiting after a signal for price to come down to the "
+         "channel's bottom did NOT help (better in the week to Nov 10, worse after).",
+         default_tf="1m"),
     Spec("atr", "Filters", "entry",
          "ATR {period} is at least {mult}x its {avg}-bar average on each of the last {bars} bar(s)",
          "ATR {period} is at least {mult}x its {avg}-bar average on each of the last {bars} bar(s)", "",
@@ -1158,6 +1262,18 @@ CATALOG: dict[str, Spec] = {s.type: s for s in (
           Param("newyork", "New York", 1, 0, 1, 1, "bool")), _c_session,
          "Breakouts in thin hours fail far more often: trade the busy sessions.", suggested=True,
          per_side=False),
+    Spec("markets", "Filters", "entry",
+         "Markets - buys on: {b_stock}{b_crypto}{b_forex}{b_metal}{b_energy}{b_index} · sells on: {s_stock}"
+         "{s_crypto}{s_forex}{s_metal}{s_energy}{s_index}",
+         "Markets - buys on: {b_stock}{b_crypto}{b_forex}{b_metal}{b_energy}{b_index} · sells on: {s_stock}"
+         "{s_crypto}{s_forex}{s_metal}{s_energy}{s_index}",
+         "",
+         tuple(Param(f"{pre}{k}", name, 1, 0, 1, 1, "pick") for pre in ("b_", "s_") for k, name in MARKETS),
+         _c_markets,
+         "Which markets the strategy may BUY on and which it may SELL on - each pair's market (stocks, crypto, "
+         "forex, metals, energy, indices). Tick crypto off under 'buys on' and it only sells crypto; off on both "
+         "sides and it doesn't open crypto at all. The strategy's learner offers it when a market's buys or sells "
+         "lose for sure (its 'market & side' parts). Its timeframe doesn't matter."),
     Spec("rsi_extreme", "Take profit", "exit", "", "",
          "RSI {period} stretched in the trade's favour: over {level} on a buy, under {~level} on a sell",
          (Param("period", "RSI", 7, 2, 50), Param("level", "level", 80, 55, 99)), _c_rsi_extreme,
@@ -1207,6 +1323,8 @@ def label(cond: dict, where: str) -> str:
         return _align_label(p, where)
     if spec.type == "fib_zone":
         return f"{_fib_label(p, where)} · {cond.get('tf', '?')}"
+    if spec.type == "markets":
+        return _markets_label(p)
     text = getattr(spec, where) or spec.long
     shown = {k: ("on" if v == 1 else "off") if any(q.key == k and q.kind == "bool" for q in spec.params) else v
              for k, v in p.items()}
@@ -1944,7 +2062,8 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
     if base is None or len(base) < _MIN_BARS:
         return _note(state, symbol, f"reading the {cfg.timeframe} candles", now)
     q = _quote(broker, symbol)
-    ctx = Ctx(now=now, base_tf=cfg.timeframe, risk=_stop_distance(session, cfg.stop_atr, base, q), **_quote_ctx(q))
+    ctx = Ctx(now=now, base_tf=cfg.timeframe, risk=_stop_distance(session, cfg.stop_atr, base, q), asset_class=ac,
+              **_quote_ctx(q))
     own = strategy_source(cfg)
     try:
         _watch(session, cfg, rules, symbol, data, ctx, q, now)
@@ -2117,7 +2236,7 @@ def check_now(session: Session, rules: Rules, symbol: str, asset_class: str, now
     data = load_bars(broker, symbol, rules.tfs(), now, rules.sizes())
     q = _quote(broker, symbol)
     ctx = Ctx(now=now, base_tf=rules.timeframe, risk=_stop_distance(session, rules.stop_atr, data.get(rules.timeframe), q),
-              **_quote_ctx(q))
+              asset_class=asset_class, **_quote_ctx(q))
     out: dict = {"symbol": symbol, "paper": bool(getattr(broker, "is_paper", False)),
                  "bars": {tf: len(b) for tf, b in data.items()},
                  "hours": hours_now(pair_hours(rules.hours, asset_class), now)}

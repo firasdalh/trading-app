@@ -1065,7 +1065,7 @@ export function Dashboard({
               screen, where this column is hidden. */}
           <SideSection
             title="Strategy activity"
-            hint="What your strategies opened and closed and why, newest first - click a row for the details"
+            hint="Two tabs: 🔔 Notifications (signals, held-back signals, notices) and 📒 Trade history (opened, closed, stop moves) - newest first, click a row for the details"
             body="bare"
             // Scalp mode has the Strategies section right below, with its own "Board ›": one link, not two.
             actions={scalp ? undefined : (

@@ -496,7 +496,7 @@ def _config_of(row: StrategyConfig) -> dict:
 _NOT_LEARNED = ("risk_pct", "cooldown_minutes", "loss_cooldown_minutes", "max_trades_day", "live", "daily_target",
                 "manage_manual")
 # What a lesson can change - kept before / after so an undo can put it back.
-_LEARNED = ("pairs", "sides", "hours", "entry_long", "target_r", "stop_atr")
+_LEARNED = ("pairs", "sides", "hours", "entry_long", "entry_short", "target_r", "stop_atr")
 
 
 class LearningAct(BaseModel):

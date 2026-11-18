@@ -375,7 +375,9 @@ def test_the_tick_keeps_each_trade_once_with_its_fingerprint_and_what_ifs(db_ses
     a, b = facts[t_old], facts[t_new]
     assert a.r == 0.9 and b.r == -1.0
     assert a.fp_from == "history" and a.fp["streak"] > 4 and a.fp["hour"] == t_old.hour
-    assert b.fp_from == "entry" and b.fp == {"v": 1, "streak": 2, "hour": 10}
+    # the engine's own (version 1) parts stay as it wrote them; version 2's are added from the history
+    assert b.fp_from == "entry" and {k: b.fp[k] for k in ("streak", "hour")} == {"streak": 2, "hour": 10}
+    assert b.fp["v"] == L.FP_VERSION and b.fp["chan1m"] is not None and set(L.FP2_KEYS) <= set(b.fp)
     assert abs(a.risk_dist - 1.0) < 1e-9 and a.whatif["t0.9|s1"][0] == 0.9 and a.whatif["t2|s1.5"][0] == 2.0
     assert b.whatif is None                                   # its 24 h are not over: replayed later, once
     again = L.learning_tick(db_session, now=NOW, broker_for=lambda ac: broker, config_of=_config_of, book=book)
