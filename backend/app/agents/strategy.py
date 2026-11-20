@@ -94,6 +94,14 @@ _TURN_STEPS = 400
 # "Fibonacci zone" reads the candles the chart loads (400), so its leg is the one the chart's Auto Fibonacci draws.
 _FIB_BARS = 400
 _BARS_NEEDED = {"zone_room": _ZONE_BARS, "tf_align": _ALIGN_BARS, "fib_zone": _FIB_BARS}   # conditions that read further back than _BARS
+# Follow the target (StrategyConfig.follow_target, 2026-11-19). Replayed on the ticks of strategy 1's 141 real trades
+# and two 13-pair backtests (scratchpad st/tpx.py, tpx_delay.py): +3.1R / +4.9R / +5.2R against taking the target,
+# about +0.01-0.05R a trade that reached it - 46 of the 69 real ones came back and gave 0.1R, the rest ran on. Acting
+# 1-5 s after the touch barely changed it. The user's own variant (pushing the target up from 0.8R) lost in all three.
+FOLLOW_TF = "30s"
+FOLLOW_ST = (10, 2.7)        # the chart's SuperTrend
+FOLLOW_LOCK_R = 0.1          # following starts with the stop this far (in R) under the target
+FOLLOW_SAFETY_R = 2.0        # the broker's take profit sits this far (in R) past the target - a safety net only
 
 
 def _utc(ts: datetime) -> datetime:
@@ -545,6 +553,39 @@ def _c_max_run(p, s, b, ctx) -> Result:
     cap = float(p["atr"])
     return run <= cap, (f"{run:+.2f} ATR {'up' if s > 0 else 'down'} since the close {n} bars back "
                         f"(at most {cap:g})")
+
+
+def _c_ema_dist(p, s, b, ctx) -> Result:
+    """Near the average (2026-11-18). The user asked for what other traders use to block losing trades, and the
+    common scalping advice is "don't chase: skip an entry far from the fast EMA".
+
+    How far the live price a trade would fill at (the ask for a buy, the bid for a sell) stands past EMA ``period``
+    of this timeframe's closed bars, in ATR 14 of this timeframe. It must be at most ``atr``. A price on the other
+    side of the EMA (a pullback) passes. On 1m with EMA 20 it is the learner's own ext20 (learning.fingerprint),
+    the same number.
+
+    Strategy 1's 350 real trades, Nov 4-18, more than 2 ATR past EMA 20:
+    - those 121 trades: 55 won / 66 lost, -11.0R (-$869);
+    - the rest: 57% won, +26.6R;
+    - the blocked ones lost in the first 60% and the last 40% and in 3 of 4 quarters (t 2.2);
+    - 18 of them came after Not stretched, 12 lost.
+    1.5 ATR fails the first part; 2.5 and 3 are weaker (t ~1)."""
+    n = int(p["period"])
+    if len(b) < n + 1:
+        return None, "not enough bars"
+    price = ctx.ask if s > 0 else ctx.bid
+    if not price:
+        return None, "no quote"
+    e = b.ema(n)[-1]
+    if e is None:
+        return None, "not enough bars"
+    atr_s = b.atr(14)
+    a = atr_s[-1] if atr_s else None
+    if not a or a <= 0:
+        return None, "no ATR"
+    ext = s * (price - e) / a
+    cap = float(p["atr"])
+    return ext <= cap, f"{ext:+.2f} ATR {'above' if s > 0 else 'below'} EMA {n} (at most {cap:g})"
 
 
 def reg_channel(ys: list[float], k: float = 2.0) -> dict | None:
@@ -1151,6 +1192,17 @@ CATALOG: dict[str, Spec] = {s.type: s for s in (
          "lesson first showed. Different from 'Not chasing', which counts closes in a row and did not hold. "
          "1 bar back = the bar forming now: on 1h, how far this hour has gone so far (since the last 1h close) - "
          "after the hour had already run 1+ ATR the trade's way, 45% of 20 such trades won (-3.8R; 2026-11-17).",
+         default_tf="1m"),
+    Spec("ema_dist", "Price action", "entry",
+         "Near the average: price at most {atr} ATR above EMA {period}",
+         "Near the average: price at most {atr} ATR below EMA {period}", "",
+         (Param("period", "EMA", 20, 2, 400), Param("atr", "ATR", 2.0, 0.3, 20, 0.1)), _c_ema_dist,
+         "Skips an entry when the price is already far past the fast average - 'don't chase', the usual scalping "
+         "advice. The distance is from the live price (the ask for a buy, the bid for a sell) to EMA N, in ATR 14 of "
+         "this timeframe; a price back on the other side of the EMA passes. On strategy 1's 350 real trades (Nov "
+         "4-18, 1m, EMA 20), more than 2 ATR past it: 121 trades, 55 won / 66 lost, -11.0R (-$869); the rest won "
+         "57%, +26.6R; the blocked ones lost in both the earlier and the later trades. Different from 'Not "
+         "stretched', which measures from a past close.",
          default_tf="1m"),
     Spec("clean_candle", "Price action", "both",
          "The last {bars} candle(s) closed green with a real body (at least {body}% of its range) and an upper "
@@ -1856,10 +1908,13 @@ def _open(session: Session, cfg: StrategyConfig, symbol: str, ac: str, side: str
     digits = int(q.get("digits") or 6)
     stop = round(entry - s * dist, digits)
     target = round(entry + s * cfg.target_r * dist, digits) if cfg.target_r else None
+    # Follow the target: the app keeps the target (follow_targets); the broker's sits FOLLOW_SAFETY_R further out.
+    follow = bool(getattr(cfg, "follow_target", False)) and target is not None
+    broker_tp = round(entry + s * (cfg.target_r + FOLLOW_SAFETY_R) * dist, digits) if follow else target
     prop = TradeProposal(
         symbol=symbol, asset_class=AssetClass(ac), timeframe=cfg.timeframe,
         direction=Direction.LONG if s > 0 else Direction.SHORT, entry=round(entry, digits),
-        stop_loss=stop, take_profit=target, confidence=1.0,
+        stop_loss=stop, take_profit=broker_tp, confidence=1.0,
         rationale=f"Strategy '{cfg.name}': " + "; ".join(why), strategy="strategy",
     )
     # The strategy's own cooldowns (set on the board, never under scalp mode's 0 / 5 min). They go into
@@ -1907,11 +1962,18 @@ def _open(session: Session, cfg: StrategyConfig, symbol: str, ac: str, side: str
 
     fp = entry_fingerprint(broker, symbol, s, data, float(record.entry), ctx) if record.entry else None
     _log(session, cfg, symbol, "opened", side=side, lots=record.approved_qty, entry=record.entry,
-         stop=record.stop_loss, target=record.take_profit, rules=why,
-         **({"stop_on": f"{rules.stop.get('tf')} SuperTrend"} if rules.stop else {}), **({"fp": fp} if fp else {}))
+         stop=record.stop_loss, target=target if follow else record.take_profit, rules=why,
+         **({"stop_on": f"{rules.stop.get('tf')} SuperTrend"} if rules.stop else {}), **({"fp": fp} if fp else {}),
+         **({"follow": True, "broker_tp": record.take_profit} if follow else {}))
     session.commit()
     log.warning("strategy opened a trade", extra={"strategy": cfg.id, "symbol": symbol, "side": side})
-    return {"symbol": symbol, "opened": side, "lots": record.approved_qty}
+    out = {"symbol": symbol, "opened": side, "lots": record.approved_qty}
+    if follow:
+        # What follow_targets keeps for this trade, in the strategy's state (it survives a restart).
+        out["follow"] = {"side": side, "mode": "waiting", "target": target, "risk": dist,
+                         "lock": round(target - s * FOLLOW_LOCK_R * dist, digits),
+                         "at": (ctx.now or datetime.now(timezone.utc)).isoformat()}
+    return out
 
 
 def _trail(session: Session, cfg: StrategyConfig, rules: Rules, pos: Position, data: dict[str, Bars], broker,
@@ -1966,6 +2028,162 @@ def _close(session: Session, cfg: StrategyConfig, pos: Position, broker, why: li
     session.commit()
     log.warning("strategy closed a trade", extra={"strategy": cfg.id, "symbol": pos.symbol, "why": why})
     return {"symbol": pos.symbol, "closed": pos.direction, "pnl": pos.realized_pnl}
+
+
+# --------------------------------------------------------------------------- #
+#  Follow the target (StrategyConfig.follow_target)
+# --------------------------------------------------------------------------- #
+
+def _has_follow(cfg: StrategyConfig) -> bool:
+    return any(isinstance(v, dict) and v.get("follow") for v in (cfg.state or {}).values())
+
+
+def follow_levels(session: Session) -> dict[tuple[str, str], dict]:
+    """(symbol, side) -> what the app keeps for every strategy trade that follows its target (its state entry):
+    ``target``, ``lock``, ``mode`` ("waiting" for the target / "following" past it)."""
+    out: dict[tuple[str, str], dict] = {}
+    for cfg in session.scalars(select(StrategyConfig)).all():
+        for sym, v in (cfg.state or {}).items():
+            fe = v.get("follow") if isinstance(v, dict) else None
+            if fe and fe.get("side"):
+                out[(sym, fe["side"])] = fe
+    return out
+
+
+def _follow_note(fe: dict) -> str:
+    """The board's line for a trade whose target the app keeps."""
+    if fe.get("mode") == "following":
+        return (f"in a trade - past its target, following: stop locked at {fe.get('lock'):g}, then on the {FOLLOW_TF} "
+                "SuperTrend line; it closes when the line turns")
+    if fe.get("mode") == "shared":
+        return ("in a trade - another trade shares its side, so the app can't take its target without touching that "
+                "one: it keeps its stop and the broker's safety target")
+    return f"in a trade - the app keeps its target {fe.get('target'):g} (the broker's is a safety net further out)"
+
+
+def _follow_read(broker, symbol: str, now: datetime) -> tuple[int, float | None] | None:
+    """The 30s SuperTrend (the chart's 10 / 2.7) on CLOSED bars: (direction, line). None = it can't be read now."""
+    b = load_bars(broker, symbol, {FOLLOW_TF}, now, {FOLLOW_TF: 120}).get(FOLLOW_TF)
+    if b is None or len(b) < FOLLOW_ST[0] + 2:
+        return None
+    sts = b.st(*FOLLOW_ST)
+    d, line = sts["dir"][-1], sts["line"][-1]
+    return (int(d), None if line is None else float(line)) if d else None
+
+
+def _follow_one(session: Session, cfg: StrategyConfig, symbol: str, state: dict, now: datetime) -> dict | None:
+    """One trade whose target the app keeps (``state``: the strategy's, being edited). Waiting: once the price
+    reaches the target, with the 30s SuperTrend still the trade's way the stop is locked FOLLOW_LOCK_R under the
+    target and following starts; otherwise the trade is closed there - the target taken, as the broker's would.
+    Following: at each 30s close the stop moves up the line (only toward the trade), and the trade is closed when
+    the line turns. The trade gone (its stop, the safety target, a close rule, by hand): the entry is dropped."""
+    from app.brokers.registry import get_broker_for
+    from app.core.state import get_or_create_settings
+
+    st_ = state.setdefault(symbol, {})
+    fe = dict(st_.get("follow") or {})
+    side = fe.get("side")
+    s = 1 if side == "long" else -1
+    own = strategy_source(cfg)
+    held = _open_positions(session, symbol)
+    pos = next((p for p in held if p.source == own and p.direction == side), None)
+    if pos is None:
+        st_.pop("follow", None)
+        return None
+    if fe.get("wait_until") and now.isoformat() < fe["wait_until"]:
+        return None
+    broker = get_broker_for(AssetClass(pos.asset_class or "forex"), get_or_create_settings(session).broker_map)
+    q = _quote(broker, symbol)
+    if not q:
+        return None
+    price = float(q["bid"] if s > 0 else q["ask"])
+    digits = int(q.get("digits") or 6)
+    room = float(q.get("stops_level") or 0.0)
+
+    def take(why: list[str]) -> dict | None:
+        done = _close(session, cfg, pos, broker, why)
+        if done and done.get("close_failed"):
+            st_["follow"] = {**fe, "wait_until": (now + timedelta(seconds=10)).isoformat()}   # again in 10 s
+        else:
+            st_.pop("follow", None)
+        return done
+
+    if fe.get("mode") in ("waiting", None):
+        target = float(fe["target"])
+        if s * (price - target) < 0:
+            return None
+        if any(p.id != pos.id and p.direction == pos.direction for p in held):
+            # The broker closes and moves every ticket on a side: taking this target would take the other's too.
+            st_["follow"] = {**fe, "mode": "shared"}
+            st_["note"], st_["at"] = _follow_note(st_["follow"]), now.isoformat()
+            _log(session, cfg, symbol, "follow_shared", side=side, price=price, target=target)
+            return None
+        read = _follow_read(broker, symbol, now)
+        if read is None or read[0] != s:
+            return take([f"target reached - the {FOLLOW_TF} SuperTrend is not with the trade, so it is taken"])
+        lock = round(float(fe["lock"]), digits)
+        if s * (price - lock) <= room:
+            return take(["target reached - too close to the price to lock the stop, so it is taken"])
+        if pos.stop_loss is not None and s * (lock - pos.stop_loss) <= 0:
+            lock = pos.stop_loss                      # already past the lock (moved by hand): left as it is
+        else:
+            res = broker.set_sl_tp(symbol, stop_loss=lock, take_profit=None, direction=pos.direction)
+            if res.status.value in ("error", "rejected"):
+                _log(session, cfg, symbol, "stop_move_failed", side=side, reason=res.error, to=lock)
+                return take(["target reached - the stop could not be locked, so it is taken"])
+            pos.stop_loss = lock
+            pos.risk_amount = 0.0
+        fe.update(mode="following", mark=bar_mark(FOLLOW_TF, now), since=now.isoformat(), lock=lock)
+        fe.pop("wait_until", None)
+        st_["follow"] = fe
+        st_["note"], st_["at"] = _follow_note(fe), now.isoformat()
+        _log(session, cfg, symbol, "follow_started", side=side, price=price, target=target, stop=lock, line=read[1])
+        log.warning("strategy follows past a target", extra={"strategy": cfg.id, "symbol": symbol, "side": side})
+        return {"symbol": symbol, "following": side}
+    if fe.get("mode") != "following":
+        return None                                  # "shared": nothing the app may do on that side
+    mark = bar_mark(FOLLOW_TF, now)
+    if mark == fe.get("mark"):
+        return None
+    read = _follow_read(broker, symbol, now)
+    if read is None:
+        return None
+    fe["mark"] = mark
+    st_["follow"] = fe
+    if read[0] != s:
+        return take([f"following past the target: the {FOLLOW_TF} SuperTrend turned against the trade"])
+    if read[1] is None:
+        return None
+    level = round(read[1], digits)
+    if (pos.stop_loss is not None and s * (level - pos.stop_loss) <= 0) or s * (price - level) <= room:
+        return None
+    res = broker.set_sl_tp(symbol, stop_loss=level, take_profit=None, direction=pos.direction)
+    if res.status.value in ("error", "rejected"):
+        _log(session, cfg, symbol, "stop_move_failed", side=side, reason=res.error, to=level)
+        return None
+    was, pos.stop_loss = pos.stop_loss, level
+    _log(session, cfg, symbol, "stop_moved", side=side, frm=was, to=level, line=read[1], tf=FOLLOW_TF, follow=True)
+    return {"symbol": symbol, "stop": level}
+
+
+def follow_targets(session: Session, cfg: StrategyConfig, now: datetime | None = None) -> list[dict]:
+    """Every second (strategy_tick), before anything else: the trades whose target this strategy keeps itself -
+    a stopped strategy's too, since their broker target is only a safety net far out."""
+    now = now or datetime.now(timezone.utc)
+    state = copy.deepcopy(cfg.state or {})
+    out = []
+    for symbol in [k for k, v in state.items() if isinstance(v, dict) and v.get("follow")]:
+        try:
+            r = _follow_one(session, cfg, symbol, state, now)
+        except Exception as exc:  # noqa: BLE001 - one pair never stops the others
+            log.warning("follow target failed", extra={"strategy": cfg.id, "symbol": symbol, "error": str(exc)})
+            continue
+        if r:
+            out.append(r)
+    if state != (cfg.state or {}):
+        cfg.state = state                 # a new object, so the JSON column is written
+    session.commit()
+    return out
 
 
 def _note(state: dict, symbol: str, text: str, now: datetime) -> dict:
@@ -2090,7 +2308,8 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
         for pos in mine:
             _trail(session, cfg, rules, pos, data, broker, q)
     if any(p.source == own for p in mine):
-        return _note(state, symbol, "in a trade - watching the close rules", now)
+        fol = (state.get(symbol) or {}).get("follow")
+        return _note(state, symbol, _follow_note(fol) if fol else "in a trade - watching the close rules", now)
     if mine:
         return _note(state, symbol, "your trade on this pair - its close rules"
                                     f"{' and SuperTrend stop' if rules.stop else ''} are on it; no new entry", now)
@@ -2154,6 +2373,8 @@ def _run_pair(session: Session, cfg: StrategyConfig, pair: dict, state: dict, no
             why = [c["label"] for c in ev["groups"][ev["group"]]["conditions"]]
             res = _open(session, cfg, symbol, pair.get("asset_class") or "forex", side, ev, base, side_ctx, broker,
                         why, data=data)
+            if res.get("follow"):
+                st["follow"] = res.pop("follow")     # the target the app keeps for it (follow_targets)
             st["note"] = (f"opened {side}" if res.get("opened")
                           else f"{side} signal refused: {res.get('refused') or res.get('blocked') or res.get('skipped')}")
             st["at"] = now.isoformat()
@@ -2207,6 +2428,14 @@ def strategy_tick(session: Session, now: datetime | None = None) -> dict:
     closed on any timeframe its rules read (GRACE seconds after the close), and HEARTBEAT seconds
     after its last look otherwise - in between there is nothing new to read."""
     now = now or datetime.now(timezone.utc)
+    # The targets the app keeps itself (follow_target): every second, first, and a stopped strategy's trades too.
+    for cfg in session.scalars(select(StrategyConfig)).all():
+        if _has_follow(cfg):
+            try:
+                follow_targets(session, cfg, now)
+            except Exception as exc:  # noqa: BLE001 - never in the way of the strategies' own looks
+                session.rollback()
+                log.warning("follow targets failed", extra={"strategy": cfg.id, "error": str(exc)})
     running = session.scalars(select(StrategyConfig).where(StrategyConfig.enabled.is_(True))).all()
     out, alive = {}, set()
     for cfg in running:

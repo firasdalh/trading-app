@@ -27,7 +27,7 @@ news). Be candid but constructive. You do NOT and cannot place trades. Return st
 matching the schema (summary, patterns, lessons)."""
 
 
-def _closed_positions(session: Session, limit: int = 200) -> list[Position]:
+def _closed_positions(session: Session, limit: int = 200, hide_manual: bool = False) -> list[Position]:
     # Only trades with a booked $ result count: a NULL realized_pnl (closed broker-side before the
     # P&L was recovered) is NOT a break-even — counting it would dilute the win rate. Respect the
     # journal reset too, so reflection matches the stats/breakdown windows.
@@ -37,6 +37,8 @@ def _closed_positions(session: Session, limit: int = 200) -> list[Position]:
     reset = get_or_create_settings(session).journal_reset_at
     if reset is not None:
         conds.append(Position.closed_at >= reset)
+    if hide_manual:                      # the Journal hides the trades opened by hand (2026-11-18)
+        conds.append(Position.source.is_(None) | ~Position.source.like("manual%"))
     return list(session.scalars(
         select(Position).where(*conds).order_by(Position.closed_at.desc()).limit(limit)
     ).all())
@@ -103,8 +105,8 @@ def _deterministic_insights(stats: dict) -> ReflectionInsights:
     return ReflectionInsights(summary=summary, patterns=patterns, lessons=lessons)
 
 
-def run_reflection(session: Session, limit: int = 200) -> ReflectionReport:
-    trades = _closed_positions(session, limit)
+def run_reflection(session: Session, limit: int = 200, hide_manual: bool = False) -> ReflectionReport:
+    trades = _closed_positions(session, limit, hide_manual)
     stats = _stats(trades)
 
     insights: ReflectionInsights | None = None

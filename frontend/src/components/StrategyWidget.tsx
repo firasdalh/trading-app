@@ -24,7 +24,7 @@ const SHORT: Record<string, string> = {
   ema_cross: "EMA×", ema_above: "EMA>", price_ema: "vs EMA", trend: "Trend", tf_align: "TFs", supertrend: "ST", adx: "ADX",
   rsi_rising: "RSI↗", rsi_level: "RSI", macd: "MACD", stoch_cross: "Stoch×", stoch_room: "Stoch", vwap: "VWAP", volume: "Vol",
   bb_break: "BB", candles: "Candles", clean_candle: "Bar", structure: "HH/HL", sr_room: "S/R", zone_room: "Zone",
-  fib_zone: "Fib", channel: "Chan", dont_chase: "Chase", max_run: "Run", atr: "ATR", spread: "Spread", session: "Session",
+  fib_zone: "Fib", channel: "Chan", dont_chase: "Chase", max_run: "Run", ema_dist: "Avg", atr: "ATR", spread: "Spread", session: "Session",
   markets: "Mkt",
   rsi_extreme: "RSI TP", profit_r: "+R", time_stop: "Time",
 };

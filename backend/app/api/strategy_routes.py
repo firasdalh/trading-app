@@ -158,6 +158,9 @@ class StrategyIn(BaseModel):
     off_groups: dict[RuleSet, list[int]] = Field(default_factory=dict)
     # It trades a REAL account too, not only a demo (RISK.md 2026-11-04). Off by default.
     live: bool = False
+    # Follow the target (StrategyConfig.follow_target): the app keeps the target and follows past it while the 30s
+    # SuperTrend is with the trade. Off by default; needs a target.
+    follow_target: bool = False
 
     @model_validator(mode="after")
     def _rules_are_known(self) -> "StrategyIn":
@@ -227,6 +230,7 @@ class StrategyView(BaseModel):
     daily_target: float | None = None
     off_groups: dict[str, list[int]] = {}   # every rule set's switched-off groups (off_groups_of)
     live: bool = False                    # it trades a real account too
+    follow_target: bool = False           # it keeps its target itself and follows past it (StrategyConfig.follow_target)
     pnl_today: float = 0.0                # what the trades it closed today made (engine.today_result)
     target_hit: dict | None = None        # {"at", "pnl"}: it reached its daily target today - no new trades
     state: dict | None = None
@@ -261,7 +265,7 @@ def _view(session: Session, row: StrategyConfig) -> StrategyView:
                    if row.hours and p.get("symbol") and engine.pair_hours(row.hours, p.get("asset_class")) is None],
         cooldown_until={sym: _iso(t) for sym, t in waits.items() if sym and t and t > now},
         daily_target=row.daily_target, off_groups=off_groups_of(row.off_groups), live=bool(row.live),
-        pnl_today=day["pnl"],
+        follow_target=bool(row.follow_target), pnl_today=day["pnl"],
         target_hit={"at": _iso(day["hit_at"]), "pnl": day["pnl"]} if day["hit_at"] else None,
         state=row.state, last_run_at=_iso(row.last_run_at),
         last_result=row.last_result, open_trades=open_n,
@@ -283,6 +287,7 @@ def _apply(row: StrategyConfig, req: StrategyIn) -> None:
     row.daily_target = req.daily_target
     row.off_groups = off_groups_of(req.off_groups)
     row.live = req.live
+    row.follow_target = bool(req.follow_target and req.target_r)   # nothing to follow without a target
 
 
 def _get(session: Session, sid: int) -> StrategyConfig:
@@ -489,12 +494,13 @@ def _config_of(row: StrategyConfig) -> dict:
             "loss_cooldown_minutes": row.loss_cooldown_minutes if row.loss_cooldown_minutes is not None else 5,
             "hours": copy.deepcopy(row.hours) if row.hours else None,
             "stop": copy.deepcopy(row.stop) if row.stop else None, "daily_target": row.daily_target,
-            "off_groups": off_groups_of(row.off_groups), "live": bool(row.live)}
+            "off_groups": off_groups_of(row.off_groups), "live": bool(row.live),
+            "follow_target": bool(row.follow_target)}
 
 
 # A lesson never touches these (RISK.md): what it risks, how often it may trade, the live switch.
 _NOT_LEARNED = ("risk_pct", "cooldown_minutes", "loss_cooldown_minutes", "max_trades_day", "live", "daily_target",
-                "manage_manual")
+                "manage_manual", "follow_target")
 # What a lesson can change - kept before / after so an undo can put it back.
 _LEARNED = ("pairs", "sides", "hours", "entry_long", "entry_short", "target_r", "stop_atr")
 

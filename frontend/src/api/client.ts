@@ -56,6 +56,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// The Journal can leave your manual trades out of its cards (2026-11-18): the page asks with hide_manual=true.
+// Everything else (the desk's loss run, the scalp ticket's day, the celebrations) reads every trade, as before.
+const hideQ = (hide: boolean, first = true) => (hide ? `${first ? "?" : "&"}hide_manual=true` : "");
+
 export const api = {
   health: () => request<{ status: string }>("/health"),
   settings: () => request<SettingsResponse>("/api/settings"),
@@ -431,7 +435,8 @@ export const api = {
       }),
     }),
 
-  journalTrades: (limit = 100) => request<PositionView[]>(`/api/journal/trades?limit=${limit}`),
+  journalTrades: (limit = 100, hideManual = false) =>
+    request<PositionView[]>(`/api/journal/trades?limit=${limit}${hideQ(hideManual, false)}`),
   // One pair's past trades - where each opened and every exit - for the chart's MT5-style history.
   chartTrades: (symbol: string, assetClass: AssetClass, days: number) =>
     request<import("../types").ChartTrade[]>(
@@ -440,20 +445,25 @@ export const api = {
     request<{ journal_reset_at: string | null }>("/api/journal/reset", { method: "POST" }),
   restoreJournal: () =>
     request<{ journal_reset_at: string | null }>("/api/journal/reset", { method: "DELETE" }),
-  reflect: () => request<ReflectionReport>("/api/journal/reflect", { method: "POST" }),
+  reflect: (hideManual = false) =>
+    request<ReflectionReport>(`/api/journal/reflect${hideQ(hideManual)}`, { method: "POST" }),
   backfillJournal: () =>
     request<{ sources_labelled: number; pnl_recovered: number; pnl_corrected?: number }>("/api/journal/backfill", {
       method: "POST",
     }),
   reflectionLatest: () => request<ReflectionReport | null>("/api/journal/reflection/latest"),
   journalCalibration: () => request<CalibrationBucket[]>("/api/journal/calibration"),
-  journalStats: () => request<import("../types").JournalStats>("/api/journal/stats"),
+  journalStats: (hideManual = false) =>
+    request<import("../types").JournalStats>(`/api/journal/stats${hideQ(hideManual)}`),
   // Every closed trade, oldest first, in a few fields - the Journal's performance charts (2026-11-11).
-  journalEquity: () => request<import("../types").EquityTrade[]>("/api/journal/equity"),
-  journalBreakdown: () => request<import("../types").JournalBreakdown>("/api/journal/breakdown"),
-  journalSessions: () => request<import("../types").SessionsView>("/api/journal/sessions"),
+  journalEquity: (hideManual = false) =>
+    request<import("../types").EquityTrade[]>(`/api/journal/equity${hideQ(hideManual)}`),
+  journalBreakdown: (hideManual = false) =>
+    request<import("../types").JournalBreakdown>(`/api/journal/breakdown${hideQ(hideManual)}`),
+  journalSessions: (hideManual = false) =>
+    request<import("../types").SessionsView>(`/api/journal/sessions${hideQ(hideManual)}`),
   // Today's trades with your own reasons + avg R per tag (daily review).
-  journalReview: () =>
+  journalReview: (hideManual = false) =>
     request<{
       date: string;
       trades: { symbol: string; direction: string; source: string | null; pnl: number; r: number | null;
@@ -463,7 +473,7 @@ export const api = {
       longest_losing_run: number;
       by_tag: { tag: string; trades: number; avg_r: number }[];
       tags_below_10: string[];
-    }>("/api/journal/review"),
+    }>(`/api/journal/review${hideQ(hideManual)}`),
   // Latest price for one symbol (price alerts).
   quote: (symbol: string, assetClass: AssetClass) =>
     request<{ symbol: string; price: number; ts: string }>(

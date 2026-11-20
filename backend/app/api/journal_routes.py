@@ -177,9 +177,20 @@ def _journal_book(session: Session) -> list[tuple[PositionView, Position | None]
     return book
 
 
-def _journal_trades(session: Session, limit: int | None = None) -> list[PositionView]:
-    """The journal's closed trades (_journal_book), newest first - the newest ``limit``."""
-    trades = [v for v, _row in _journal_book(session)]
+def _view_book(session: Session, hide_manual: bool = False) -> list[tuple[PositionView, Position | None]]:
+    """What a Journal card shows: _journal_book, without the trades opened by hand when the page asks
+    (``hide_manual``). The user, 2026-11-18, after a big manual BTC loss: "remove the manual history ... I don't want
+    to see this loss in my journal". A view only, kept per browser on the page: nothing is deleted, and the broker's
+    history, the risk limits, the header's DAY P&L, the strategy's learner and the desk's own checks (loss run, the
+    scalp ticket's day) always read every trade. Manual = the 'manual' family: the desk's ticket and an untagged
+    trade from the phone or the terminal."""
+    book = _journal_book(session)
+    return [(v, r) for v, r in book if _family(v.source) != "manual"] if hide_manual else book
+
+
+def _journal_trades(session: Session, limit: int | None = None, hide_manual: bool = False) -> list[PositionView]:
+    """The journal's closed trades (_view_book), newest first - the newest ``limit``."""
+    trades = [v for v, _row in _view_book(session, hide_manual)]
     return trades if limit is None else trades[:limit]
 
 class EquityTrade(BaseModel):
@@ -193,13 +204,13 @@ class EquityTrade(BaseModel):
 
 
 @router.get("/equity", response_model=list[EquityTrade])
-def equity(session: Session = Depends(get_session)) -> list[EquityTrade]:
+def equity(session: Session = Depends(get_session), hide_manual: bool = False) -> list[EquityTrade]:
     """Every closed trade of the journal (_journal_book), OLDEST first, in a few fields: what the Journal's
     performance charts draw (2026-11-11, "enhance the performance visualization") - the equity curve and its
     drawdown, each day's P&L and the spread of the results, for the whole account or one source. The broker's $
     (swap and commission in), the source MT5 recorded, R where the app's own row holds the risk taken."""
     out: list[EquityTrade] = []
-    for v, row in _journal_book(session):
+    for v, row in _view_book(session, hide_manual):
         if v.realized_pnl is None or v.closed_at is None:
             continue
         risk = entry_risk(row) if row is not None else None
@@ -214,9 +225,10 @@ def equity(session: Session = Depends(get_session)) -> list[EquityTrade]:
 def closed_trades(
     limit: int = Query(100, ge=1, le=500),
     session: Session = Depends(get_session),
+    hide_manual: bool = False,
 ) -> list[PositionView]:
     """Closed-trade log: the newest ``limit`` of the journal's trades (_journal_trades)."""
-    return _journal_trades(session, limit)
+    return _journal_trades(session, limit, hide_manual)
 
 
 @router.get("/chart-trades")
@@ -277,7 +289,7 @@ class JournalStats(BaseModel):
 
 
 @router.get("/stats", response_model=JournalStats)
-def stats(session: Session = Depends(get_session)) -> JournalStats:
+def stats(session: Session = Depends(get_session), hide_manual: bool = False) -> JournalStats:
     """Expectancy + R-multiple performance over the journal's closed trades that carry a recorded risk: the ones
     the app placed on this account (its own row holds the risk taken; a phone or terminal trade has none). The $
     are the broker's, swap and commission in. Answers 'what's the edge, in R?' and 'how deep was the worst
@@ -286,7 +298,7 @@ def stats(session: Session = Depends(get_session)) -> JournalStats:
     from types import SimpleNamespace
 
     rows = [SimpleNamespace(realized_pnl=v.realized_pnl, closed_at=_utc(v.closed_at), risk_amount=entry_risk(r))
-            for v, r in _journal_book(session)
+            for v, r in _view_book(session, hide_manual)
             if r is not None and v.realized_pnl is not None and entry_risk(r)]
     rows.sort(key=lambda x: x.closed_at or datetime.min.replace(tzinfo=timezone.utc))   # oldest first: the R curve
     n = len(rows)
@@ -390,7 +402,7 @@ def _periods(rows: list, key, limit: int) -> list[PeriodBreakdown]:
 
 
 @router.get("/breakdown", response_model=JournalBreakdown)
-def breakdown(session: Session = Depends(get_session)) -> JournalBreakdown:
+def breakdown(session: Session = Depends(get_session), hide_manual: bool = False) -> JournalBreakdown:
     """Closed-trade performance broken down by SOURCE (who opened it) and PAIR, plus a daily/weekly/
     monthly time split - over the journal's trades (_journal_book): the broker's history, the phone's trades in,
     each with the source MT5 recorded; R where the app's own row holds the risk taken. Until 2026-11-11 it read
@@ -399,7 +411,7 @@ def breakdown(session: Session = Depends(get_session)) -> JournalBreakdown:
 
     rows = [SimpleNamespace(realized_pnl=v.realized_pnl, source=v.source, symbol=v.symbol, closed_at=_utc(v.closed_at),
                             risk_amount=entry_risk(r) if r is not None else None)
-            for v, r in _journal_book(session) if v.realized_pnl is not None and v.closed_at is not None]
+            for v, r in _view_book(session, hide_manual) if v.realized_pnl is not None and v.closed_at is not None]
 
     def _iso_week(r) -> str:
         y, w, _ = r.closed_at.isocalendar()
@@ -484,11 +496,11 @@ def _source_split(rows: list[PositionView]) -> list[SourceStat]:
 
 
 @router.get("/sessions", response_model=SessionsView)
-def by_session(session: Session = Depends(get_session)) -> SessionsView:
+def by_session(session: Session = Depends(get_session), hide_manual: bool = False) -> SessionsView:
     """Which session pays: the trade log's own closed trades (broker truth, the journal's window) grouped by
     the trading session each one OPENED in, and by its UTC hour, each split by who opened them. In $, as the
     log - the broker's rows carry no risk to read R from."""
-    rows = _journal_trades(session)
+    rows = _journal_trades(session, hide_manual=hide_manual)
     counted = [r for r in rows if r.opened_at is not None and r.realized_pnl is not None]
     hours: dict[int, list[PositionView]] = {h: [] for h in range(24)}
     for r in counted:
@@ -575,8 +587,9 @@ def backfill(session: Session = Depends(get_session)) -> BackfillResult:
 
 
 @router.post("/reflect", response_model=ReflectionReport)
-def reflect(session: Session = Depends(get_session)) -> ReflectionReport:
-    return run_reflection(session)
+def reflect(session: Session = Depends(get_session), hide_manual: bool = False) -> ReflectionReport:
+    """Run the read-only Reflection agent now - without the trades opened by hand when the page hides them."""
+    return run_reflection(session, hide_manual=hide_manual)
 
 
 @router.get("/scorecard", response_model=ScorecardView)
@@ -620,7 +633,7 @@ def reflection_latest(session: Session = Depends(get_session)) -> ReflectionRepo
 
 
 @router.get("/review")
-def daily_review(session: Session = Depends(get_session)) -> dict:
+def daily_review(session: Session = Depends(get_session), hide_manual: bool = False) -> dict:
     """The day in one card: today's closed trades with their R, source and the trader's own reason
     and tags; today's totals and longest losing run; and avg R per tag over the whole journal (only
     once a tag has 10+ trades). The data to tell planned trades from impulsive ones was never
@@ -632,7 +645,8 @@ def daily_review(session: Session = Depends(get_session)) -> dict:
     only: no phone trade, the app's estimate of each P&L, and the demo account's trades in the per-tag averages."""
     now = datetime.now(timezone.utc)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    book = [(v, row) for v, row in _journal_book(session) if v.realized_pnl is not None and v.closed_at is not None]
+    book = [(v, row) for v, row in _view_book(session, hide_manual)
+            if v.realized_pnl is not None and v.closed_at is not None]
     book.sort(key=lambda vr: _utc(vr[0].closed_at))                 # oldest first: the losing run
 
     def r_of(v, row):

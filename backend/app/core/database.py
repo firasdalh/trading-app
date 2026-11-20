@@ -132,6 +132,7 @@ _SQLITE_ADDED_COLUMNS = {
         ("daily_target", "FLOAT"),
         ("off_groups", "JSON"),
         ("live", "BOOLEAN DEFAULT 0"),
+        ("follow_target", "BOOLEAN DEFAULT 0"),
     ],
     "rsi_over_config": [
         ("macd", "BOOLEAN DEFAULT 0"),

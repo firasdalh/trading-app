@@ -3075,8 +3075,12 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       const tpUsd = zonesOn ? "" : usdAtLevel(p, p.take_profit);
       const dragCue = zonesOn ? "" : " · drag";
       add(p.entry_price, "#3b82f6", be ? `${arrow} entry·SL ${slUsd}`.trim() : `${arrow} entry`);
-      const slLine = be ? null : add(p.stop_loss, "#ef5350", `SL ${slUsd}`.trim() + dragCue);
-      const tpLine = add(p.take_profit, "#26a69a", `TP ${tpUsd}`.trim() + dragCue);
+      // A strategy trade whose target the app keeps (follow the target): this TP is only the broker's safety net
+      // further out, so the real target is drawn too until it is reached - after that the stop follows the 30s SuperTrend.
+      const kept = p.follow_target != null;
+      const slLine = be ? null : add(p.stop_loss, "#ef5350", `${p.following ? "SL following" : "SL"} ${slUsd}`.trim() + dragCue);
+      const tpLine = add(p.take_profit, "#26a69a", `${kept ? "TP safety" : "TP"} ${tpUsd}`.trim() + dragCue);
+      if (kept && !p.following) add(p.follow_target, "#f59e0b", "🎯 target · the app keeps it");
       // Levels are validated against the CURRENT PRICE, not the entry.
       //
       // Against the entry, a long's stop could never be placed above it — so you could never

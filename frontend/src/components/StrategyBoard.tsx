@@ -40,7 +40,7 @@ const NAMES: Record<string, string> = {
   bb_break: "Bollinger breakout", candles: "Candle colour", clean_candle: "Candle with us (no doji / star / hammer)", structure: "Structure (HH / HL)", sr_room: "Room to S/R (1h / 4h / 1d)",
   zone_room: "Room to supply / demand", fib_zone: "Fibonacci zone (room to the target)",
   channel: "Channel place (buy low in the regression channel)",
-  dont_chase: "Not chasing (a fresh push only)", max_run: "Not stretched (not after a big run)", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter", markets: "Markets (buys / sells per market)",
+  dont_chase: "Not chasing (a fresh push only)", max_run: "Not stretched (not after a big run)", ema_dist: "Near the average (not far past EMA 20)", atr: "ATR filter (moving enough)", spread: "Spread filter", session: "Session filter", markets: "Markets (buys / sells per market)",
   rsi_extreme: "Take profit: RSI stretched", profit_r: "Take profit: at +R", time_stop: "Time stop",
 };
 
@@ -93,6 +93,7 @@ function template(symbol: string, assetClass: AssetClass): StrategyDraft {
     daily_target: null,
     off_groups: offGroupsOf(null),
     live: false,
+    follow_target: false,
   };
 }
 
@@ -112,6 +113,7 @@ export function draftOf(s: StrategyView): StrategyDraft {
     hours: s.hours ?? null, stop: s.stop ?? null, daily_target: s.daily_target ?? null,
     off_groups: offGroupsOf(s.off_groups),
     live: s.live ?? false,
+    follow_target: s.follow_target ?? false,
   };
 }
 
@@ -1487,6 +1489,19 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
             <input type="checkbox" checked={draft.target_r == null} onChange={(e) => set({ target_r: e.target.checked ? null : 2 })} className="accent-amber-500" />
             no target
           </label>
+          {draft.target_r != null && (
+            <label
+              className="flex items-center gap-1 text-xs text-neutral-400"
+              title={"The app keeps the target itself; the broker's take profit goes 2R further out as a safety net. At the target, " +
+                "if the 30s SuperTrend is still with the trade, the stop is locked 0.1R under the target and then follows the 30s " +
+                "SuperTrend line - the trade closes when the line turns. Otherwise it takes the target there, as now. " +
+                "Replayed on the real trades and two backtests: a small gain (+3 to +5R over two weeks). The app must be running: " +
+                "if it stops, the trade keeps its stop and the far safety target."}
+            >
+              <input type="checkbox" checked={!!draft.follow_target} onChange={(e) => set({ follow_target: e.target.checked })} className="accent-amber-500" />
+              🎯 follow past it
+            </label>
+          )}
         </span>
         <Num label="At most" value={draft.max_trades_day} onChange={(v) => set({ max_trades_day: v })} min={1} max={200} step={1} suffix="trades a day" />
         <TargetRow value={draft.daily_target} onChange={(v) => set({ daily_target: v })} saved={saved ?? null} />
@@ -1579,6 +1594,10 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
         ${draft.stop.buffer} × ATR beyond it, then follows the line at each ${draft.stop.tf} close - only ever toward the trade.
         A break of the line is confirmed by your SuperTrend close rule's candles; the stop is the backstop. Your own trades keep
         the stops you set.`}
+        {draft.follow_target && draft.target_r != null && ` The app keeps its ${draft.target_r}R target itself - the broker's
+        take profit sits 2R further out as a safety net, so the app must be running. At the target, if the 30s SuperTrend is
+        still with the trade, the stop is locked 0.1R under the target and follows the 30s SuperTrend line until it turns;
+        otherwise the target is taken there, as before.`}
         {draft.daily_target != null && ` Once the trades it closed today have made +${fmtUsd(draft.daily_target)} it opens
         nothing more until 00:00 UTC (${utcDayEnd()} on your clock),
         even if a trade still open then closes at a loss; the trades it holds keep their close rules, stop and target. Your own

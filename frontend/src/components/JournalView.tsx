@@ -5,7 +5,7 @@ import { useLocalStorage } from "../hooks/useLocalStorage";
 import { usePolling } from "../hooks/usePolling";
 import type { CalibrationBucket, GroupStat, JournalBreakdown, PeriodBreakdown, ReflectionReport } from "../types";
 import { ResultTag, SessionStatsCard, SessionTag } from "./SessionStats";
-import { SignalReviewCard } from "./SignalReview";
+import { SignalReviewCard, StrategyReviewCard } from "./SignalReview";
 import { FoldButton, FoldProvider, useFold, type Fold } from "./JournalFold";
 import { PerformanceCard } from "./PerformanceCharts";
 import { srcLabel, srcColor } from "./sourceMeta";
@@ -47,6 +47,7 @@ const SECTIONS = [
   { id: "reflection", name: "Reflection" },
   { id: "performance", name: "Performance" },
   { id: "sessions", name: "Sessions" },
+  { id: "strategy", name: "Strategy review" },
   { id: "signals", name: "Signal review" },
   { id: "breakdown", name: "Breakdown" },
   { id: "calibration", name: "Score vs result" },
@@ -61,19 +62,24 @@ export function JournalView() {
   // starts folded, as it always did.
   const [hidden, setHidden] = useLocalStorage<string[]>("ta.journal.hidden", []);
   const [folded, setFolded] = useLocalStorage<string[]>("ta.journal.folded", ["reflection"]);
+  // Your manual trades - the desk's ticket, the phone, the MT5 terminal - left out of every card (2026-11-18, after a
+  // big manual BTC loss: "remove the manual history ... I don't want to see this loss in my journal"). A view only,
+  // kept in this browser: nothing is deleted, and the account, the header and the risk limits still count them.
+  const [manual, setManual] = useLocalStorage<"hide" | "show">("ta.journal.manual", "hide");
+  const hideManual = manual === "hide";
   const foldOf = (id: SectionId): Fold => ({
     folded: folded.includes(id),
     toggle: () => setFolded((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id])),
   });
   const section = (id: SectionId, node: ReactNode) =>
     hidden.includes(id) ? null : <FoldProvider value={foldOf(id)}>{node}</FoldProvider>;
-  const { data: trades } = usePolling(() => api.journalTrades(100), 8000, [bump]);
+  const { data: trades } = usePolling(() => api.journalTrades(100, hideManual), 8000, [bump, hideManual]);
   // The backend tags each row with the session it opened in (2026-11-10). An older one sends no `session` at all:
   // then the column stays away rather than reading "—" all the way down.
   const withSessions = !!trades?.some((t) => t.session !== undefined);
   const { data: calib } = usePolling(() => api.journalCalibration(), 10000, [bump]);
-  const { data: perf } = usePolling(() => api.journalStats(), 10000, [bump]);
-  const { data: breakdown } = usePolling(() => api.journalBreakdown(), 10000, [bump]);
+  const { data: perf } = usePolling(() => api.journalStats(hideManual), 10000, [bump, hideManual]);
+  const { data: breakdown } = usePolling(() => api.journalBreakdown(hideManual), 10000, [bump, hideManual]);
   const [reflection, setReflection] = useState<ReflectionReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -141,7 +147,7 @@ export function JournalView() {
     setBusy(true);
     setError(null);
     try {
-      setReflection(await api.reflect());
+      setReflection(await api.reflect(hideManual));
       setOpen(true);  // show the fresh result
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -181,6 +187,24 @@ export function JournalView() {
             </button>
           );
         })}
+        <span aria-hidden="true" className="mx-1 h-4 w-px bg-neutral-700" />
+        <button
+          type="button"
+          aria-pressed={!hideManual}
+          onClick={() => setManual(hideManual ? "show" : "hide")}
+          className={`rounded-full border px-2 py-0.5 transition ${
+            hideManual
+              ? "border-dashed border-neutral-700 text-neutral-500 line-through hover:text-neutral-300"
+              : "border-neutral-600 bg-neutral-800/60 text-neutral-200 hover:border-neutral-400"
+          }`}
+          title={
+            hideManual
+              ? "Your manual trades (the desk's ticket, your phone, the MT5 terminal) are left out of every card on this page. Click to show them again. Nothing is deleted: your account, the header's DAY P&L and the risk limits still count them."
+              : "Click to leave your manual trades (the desk's ticket, your phone, the MT5 terminal) out of every card on this page. Kept in this browser; nothing is deleted."
+          }
+        >
+          ✋ Manual trades
+        </button>
         <span className="ml-auto flex items-center gap-3 text-neutral-500">
           <button type="button" onClick={() => setFolded(SECTIONS.map((s) => s.id))} className="hover:text-neutral-200" title="Fold every section to its title line">
             ▸ Fold all
@@ -191,7 +215,7 @@ export function JournalView() {
         </span>
       </div>
 
-      {section("today", <DailyReview />)}
+      {section("today", <DailyReview hideManual={hideManual} />)}
       {section("reflection", (
       <div className="card space-y-3">
         <div className="flex items-center justify-between gap-2">
@@ -279,15 +303,18 @@ export function JournalView() {
       ))}
 
       {/* Drawn (2026-11-11, "enhance the performance visualization"): the equity curve, P&L by day, each trade's result. */}
-      {section("performance", <PerformanceCard perf={perf} bump={bump} />)}
+      {section("performance", <PerformanceCard perf={perf} bump={bump} hideManual={hideManual} />)}
 
       {/* Which session pays: the closed trades by the session each one opened in (2026-11-10). */}
-      {section("sessions", <SessionStatsCard />)}
+      {section("sessions", <SessionStatsCard hideManual={hideManual} />)}
+
+      {/* The strategy's real trades in the same summary, split at each change to it (2026-11-19). */}
+      {section("strategy", <StrategyReviewCard />)}
 
       {/* What each watch signal would have done if traded, split at each change to the strategy (2026-11-08). */}
       {section("signals", <SignalReviewCard />)}
 
-      {section("breakdown", <BreakdownCard breakdown={breakdown} />)}
+      {section("breakdown", <BreakdownCard breakdown={breakdown} hideManual={hideManual} />)}
 
       {section("calibration", <CalibrationCard calib={calib} />)}
 
@@ -407,7 +434,7 @@ function StatTable({ rows, firstCol, nameFn, nameCls }: {
   );
 }
 
-function BreakdownCard({ breakdown }: { breakdown: JournalBreakdown | null }) {
+function BreakdownCard({ breakdown, hideManual }: { breakdown: JournalBreakdown | null; hideManual: boolean }) {
   const fold = useFold();
   const [period, setPeriod] = useState<"daily" | "weekly" | "monthly">("daily");
   // Whose trades By pair shows - "By pair (all-time) - I want it also for the strategy" (2026-11-11). Kept per browser.
@@ -431,8 +458,10 @@ function BreakdownCard({ breakdown }: { breakdown: JournalBreakdown | null }) {
         </div>
         {!fold?.folded && (
           <p className="text-xs text-neutral-500">
-            Your broker's history: every trade on this account, your phone's included - never the demo account's. Who
-            opened each one is MT5's own record of it; R only where the app recorded the risk taken.
+            {hideManual
+              ? "Your broker's history, your manual trades left out (✋ Manual trades, at the top) - never the demo account's."
+              : "Your broker's history: every trade on this account, your phone's included - never the demo account's."}
+            {" "}Who opened each one is MT5's own record of it; R only where the app recorded the risk taken.
           </p>
         )}
       </div>
@@ -588,11 +617,11 @@ function Tile({ label, value, valueClass }: { label: string; value: string; valu
  * losing run, and avg R per tag once a tag has 10+ trades. The manual book could not learn before -
  * nothing recorded WHY a trade was taken (full review 2026-10-20).
  */
-function DailyReview() {
+function DailyReview({ hideManual }: { hideManual: boolean }) {
   const [data, setData] = useState<Awaited<ReturnType<typeof api.journalReview>> | null>(null);
   useEffect(() => {
-    void api.journalReview().then(setData).catch(() => setData(null));
-  }, []);
+    void api.journalReview(hideManual).then(setData).catch(() => setData(null));
+  }, [hideManual]);
   const fold = useFold();
   if (!data) return null;
   const r = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`);
@@ -601,7 +630,9 @@ function DailyReview() {
       <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
         <span className="flex items-center gap-1 text-sm font-semibold">
           <FoldButton name="Today's review" />
-          <span title="The broker's day - from 00:00 UTC, as the header's DAY P&L: every trade closed on the account, your phone's too, in the broker's $">
+          <span title={hideManual
+            ? "The broker's day - from 00:00 UTC, in the broker's $: the trades closed on the account, your manual ones left out (✋ Manual trades, at the top). The header's DAY P&L still counts every trade."
+            : "The broker's day - from 00:00 UTC, as the header's DAY P&L: every trade closed on the account, your phone's too, in the broker's $"}>
             Today&apos;s review · {data.date}
           </span>
         </span>

@@ -271,6 +271,10 @@ export interface PositionView {
   // The per-trade ceiling it falls under when not the configured one: 0.06 for a scalp-mode or strategy
   // trade (RISK.md override 2026-11-02). Absent / null = the configured per-trade risk.
   risk_ceiling?: number | null;
+  // A strategy trade whose target the APP keeps (follow the target): take_profit is then only the broker's safety net
+  // further out. following = the target was reached and the stop now follows the 30s SuperTrend.
+  follow_target?: number | null;
+  following?: boolean;
 }
 
 /** One exit deal of a past trade (a partial close is one of its own). */
@@ -1259,6 +1263,10 @@ export interface StrategyDraft {
   // It trades a REAL account too (RISK.md 2026-11-04); false = demo only. A new real-money order also needs LIVE
   // trading confirmed - typed, again after every restart.
   live: boolean;
+  // Follow the target (2026-11-19): the app keeps the target itself - the broker's take profit sits further out as a
+  // safety net - and at the target, with the 30s SuperTrend still the trade's way, locks the stop just under it and
+  // follows that line. Absent on an older backend (= off).
+  follow_target?: boolean;
 }
 export type StrategyOffGroups = Record<"entry_long" | "entry_short" | "exit_rules", number[]>;
 // A stop that follows a SuperTrend line (backend StopIn): it starts on the `tf` SuperTrend (`period`, `mult`),

@@ -53,18 +53,20 @@ export function ResultTag({ pnl }: { pnl: number | null }) {
   return <span className={`rounded px-1.5 py-px text-[11px] font-bold tracking-wide ${cls}`}>{text}</span>;
 }
 
-export function SessionStatsCard() {
+export function SessionStatsCard({ hideManual = false }: { hideManual?: boolean }) {
   const fold = useFold();
-  const { data } = usePolling(() => api.journalSessions(), 30000, []);
-  const [who, setWho] = useState("all");
+  const { data } = usePolling(() => api.journalSessions(hideManual), 30000, [hideManual]);
+  const [chosen, setWho] = useState("all");
   if (!data || data.trades === 0) return null;
 
-  const pick = (total: SessionStat, sources: SessionSourceStat[]) =>
-    who === "all" ? total : sources.find((x) => x.source === who)?.stat ?? EMPTY;
   // Who opened them, the most trades first: the filter's choices.
   const counts = new Map<string, number>();
   for (const s of data.sessions) for (const x of s.sources) counts.set(x.source, (counts.get(x.source) ?? 0) + x.stat.trades);
   const whos: [string, number][] = [["all", data.trades], ...[...counts.entries()].sort((a, b) => b[1] - a[1])];
+  // A choice that is no longer there (its trades hidden) reads All.
+  const who = whos.some(([k]) => k === chosen) ? chosen : "all";
+  const pick = (total: SessionStat, sources: SessionSourceStat[]) =>
+    who === "all" ? total : sources.find((x) => x.source === who)?.stat ?? EMPTY;
 
   const rows = data.sessions.map((s) => ({ s, rgb: sessionByKey(s.key)?.rgb ?? "163,163,163", stat: pick(s.total, s.sources) }));
   const shown = rows.reduce((n, r) => n + r.stat.trades, 0);

@@ -360,6 +360,11 @@ class PositionView(BaseModel):
     # or strategy trade (RISK.md override 2026-11-02), filled in by GET /api/positions/live. None = the
     # configured per-trade risk applies.
     risk_ceiling: float | None = None
+    # A strategy trade whose target the APP keeps (strategy follow_target), filled in by GET /api/positions/live:
+    # the broker's take_profit is then only a safety net further out. following = the target was reached and the
+    # stop now follows the 30s SuperTrend. None / False for every other trade.
+    follow_target: float | None = None
+    following: bool = False
     swap: float = 0.0           # accrued overnight swap (account ccy), NOT in unrealized_pnl
     opened_at: datetime | None = None   # when the position was opened (app-tracked rows)
     # Margin required to hold the position, in the account currency (USD) — the "cost to open".

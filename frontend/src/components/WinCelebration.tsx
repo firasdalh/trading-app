@@ -13,7 +13,9 @@ import { entryStopOf, usdAtLevel } from "./LiveBook";
  * a take-profit hit did. Now any trade that leaves the book in profit gets a card and a show, however it closed:
  * the target, by hand on the desk or the phone, a strategy's close rule, or a trailed stop that locked a profit.
  *
- * - How it closed picks the headline: 🎯 TARGET HIT / 💰 PROFIT TAKEN / 🤖 STRATEGY WIN / 🛡️ LOCKED IN PROFIT.
+ * - How it closed picks the headline: 🎯 TARGET HIT / 💰 PROFIT TAKEN / 🤖 STRATEGY WIN / 🛡️ LOCKED IN PROFIT, and
+ *   🚀 RODE PAST THE TARGET for a trade that followed past the target the app keeps (2026-11-20: the last act of
+ *   its ride, TargetRide.tsx) - always fireworks.
  * - How BIG it was picks the show: a sparkle burst for a small win, gold coins or confetti (taking turns) for a
  *   solid one, fireworks from 1R. A target hit is never less than confetti.
  * - A different line of encouragement every time, the win streak when there is one, the amount counting up.
@@ -31,7 +33,7 @@ const LOOKUP_GAP_MS = 3000;
 const SHOW_MS = 6500;
 const SHOW_MS_QUEUED = 3500;   // another win is waiting: make room for it
 
-export type WinKind = "target" | "locked" | "strategy" | "manual";
+export type WinKind = "target" | "locked" | "strategy" | "manual" | "rode";
 export type Show = Jingle;
 
 export interface Win {
@@ -54,6 +56,7 @@ interface Snapshot {
   stop: number | null;
   riskUsd: number | null;   // what its entry stop risked - kept from earlier polls once the stop trails past entry
   source: string | null;
+  rode: boolean;            // it followed past the target the app keeps (kept once seen)
 }
 
 const keyOf = (p: PositionView) => `${p.id ?? ""}|${p.symbol.toUpperCase()}|${p.direction}|${p.entry_price}`;
@@ -63,6 +66,7 @@ const HEAD: Record<WinKind, { icon: string; title: string }> = {
   locked: { icon: "🛡️", title: "Locked in profit" },
   strategy: { icon: "🤖", title: "Strategy win" },
   manual: { icon: "💰", title: "Profit taken" },
+  rode: { icon: "🚀", title: "Rode past the target" },
 };
 
 const LINES: Record<WinKind | "any", string[]> = {
@@ -75,6 +79,7 @@ const LINES: Record<WinKind | "any", string[]> = {
   locked: ["Protected, then paid.", "The trailing stop did its job."],
   strategy: ["Your rules did the work.", "The strategy delivered.", "Rules over emotions."],
   manual: ["Good call on the exit.", "You read it right.", "Taken at the right time."],
+  rode: ["Past the target - and paid more.", "Let the winner run. 🏁", "The target was only the start.", "Rode it all the way."],
 };
 
 let lastLine = "";
@@ -88,6 +93,7 @@ function pickLine(kind: WinKind): string {
 
 function pickShow(kind: WinKind, r: number | null, pnl: number): Show {
   // Sized by R when the entry risk is known; by dollars otherwise (a ~$1,000 account: $4 is a solid scalp).
+  if (kind === "rode") return (lastShow = "fireworks");
   const big = r != null ? r >= 1 : pnl >= 20;
   const solid = r != null ? r >= 0.3 : pnl >= 4;
   const show: Show = big ? "fireworks"
@@ -99,6 +105,7 @@ function pickShow(kind: WinKind, r: number | null, pnl: number): Show {
 }
 
 function kindOf(s: Snapshot, t: PositionView): WinKind {
+  if (s.rode) return "rode";
   const exit = t.last_price;
   const long = s.direction === "long";
   if (exit != null && s.tp != null) {
@@ -136,8 +143,9 @@ export function useWinningCloses(positions: PositionView[] | null | undefined): 
   const [wins, setWins] = useState<Win[]>(() => {
     const q = new URLSearchParams(window.location.search).get("celebrate");
     if (q == null) return [];
-    const show = SHOWS.find((s) => s === q) ?? "confetti";
-    const kind: WinKind = show === "confetti" ? "target" : show === "coins" ? "manual" : show === "sparkle" ? "strategy" : "locked";
+    const show = SHOWS.find((s) => s === q) ?? (q === "rode" ? "fireworks" : "confetti");
+    const kind: WinKind = q === "rode" ? "rode"
+      : show === "confetti" ? "target" : show === "coins" ? "manual" : show === "sparkle" ? "strategy" : "locked";
     return [{
       key: "preview", symbol: "EURUSDm", direction: "short", pnl: show === "sparkle" ? 2.4 : 29.47, kind,
       r: show === "fireworks" ? 1.6 : show === "sparkle" ? 0.12 : 0.62, streak: 3, show, line: pickLine(kind),
@@ -166,6 +174,7 @@ export function useWinningCloses(positions: PositionView[] | null | undefined): 
         symbol: p.symbol, direction: p.direction, entry: p.entry_price, tp: p.take_profit, stop: p.stop_loss,
         riskUsd: (at != null && at < 0 ? -at : null) ?? before?.get(k)?.riskUsd ?? null,
         source: p.source,
+        rode: !!p.following || !!before?.get(k)?.rode,
       });
     }
     // Back in the book (a broker read that briefly came back empty): watch it again.
@@ -235,7 +244,7 @@ export function WinCelebration({ win, queued, onDone }: { win: Win | null; queue
     if (!win) return;
     // An ElevenLabs clip for this amount if there are any; otherwise the show's own jingle. Either is heard
     // once per win: the ticket that saw the same close may have played it already.
-    if (soundOn()) void playCelebration(win.pnl, { target: win.kind === "target" }).then((ok) => { if (!ok) winJingle(win.show); });
+    if (soundOn()) void playCelebration(win.pnl, { target: win.kind === "target" || win.kind === "rode" }).then((ok) => { if (!ok) winJingle(win.show); });
     const t = setTimeout(() => onDone(win.key), queued > 0 ? SHOW_MS_QUEUED : SHOW_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -244,7 +253,7 @@ export function WinCelebration({ win, queued, onDone }: { win: Win | null; queue
   if (!win) return null;
   const head = HEAD[win.kind];
   const long = win.direction === "long";
-  const gold = win.kind === "target";
+  const gold = win.kind === "target" || win.kind === "rode";
   const host = (document.fullscreenElement as HTMLElement | null) ?? document.body;
   return createPortal(
     <div className="pointer-events-none fixed inset-0 z-[100] flex items-start justify-center pt-[30vh]">

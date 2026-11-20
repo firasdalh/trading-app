@@ -736,6 +736,19 @@ def live_positions(session: Session = Depends(get_session)) -> list[PositionView
     except Exception as exc:  # noqa: BLE001
         log.warning("source lookup failed", extra={"error": str(exc)})
 
+    # The target the app keeps itself for a strategy trade that follows it (strategy follow_target): the broker's
+    # take profit is only a safety net further out, so the chart draws this one as well. Best effort.
+    try:
+        from app.agents.strategy import follow_levels
+
+        lv = {(_norm_symbol(sym), side): fe for (sym, side), fe in follow_levels(session).items()}
+        for p in out:
+            fe = lv.get((_norm_symbol(p.symbol), p.direction))
+            if fe:
+                p.follow_target, p.following = fe.get("target"), fe.get("mode") == "following"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("follow target lookup failed", extra={"error": str(exc)})
+
     for i, p in enumerate(out):
         p.id = i + 1
     return out

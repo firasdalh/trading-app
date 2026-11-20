@@ -100,16 +100,16 @@ function useWidth<T extends HTMLElement>() {
 // ------------------------------------------------------------------ the data
 interface Pt { t: number; pnl: number; src: string; sym: string; dir: string; r: number | null }
 
-async function loadTrades(): Promise<{ pts: Pt[]; capped: boolean }> {
+async function loadTrades(hideManual = false): Promise<{ pts: Pt[]; capped: boolean }> {
   try {
-    const rows = await api.journalEquity();
+    const rows = await api.journalEquity(hideManual);
     const pts = rows.map((r) => ({ t: Date.parse(asUtc(r.closed_at)), pnl: r.pnl, src: r.source || "unknown",
                                    sym: r.symbol, dir: r.direction, r: r.r ?? null }));
     return { pts: pts.filter((p) => Number.isFinite(p.t)).sort((a, b) => a.t - b.t), capped: false };
   } catch (e) {
     if (!(e instanceof Error) || !e.message.startsWith("404")) throw e;
     // A backend without /equity yet: the trade log's newest 500 (no R there).
-    const rows = await api.journalTrades(500);
+    const rows = await api.journalTrades(500, hideManual);
     const pts: Pt[] = [];
     for (const r of rows) {
       if (!r.closed_at || r.realized_pnl == null) continue;
@@ -194,9 +194,11 @@ const RANGES = [
 ] as const;
 const MAX_DAYS = 120;
 
-export function PerformanceCard({ perf, bump = 0 }: { perf: JournalStats | null; bump?: number }) {
+export function PerformanceCard({ perf, bump = 0, hideManual = false }: {
+  perf: JournalStats | null; bump?: number; hideManual?: boolean;
+}) {
   const fold = useFold();
-  const { data } = usePolling(loadTrades, 30_000, [bump]);
+  const { data } = usePolling(() => loadTrades(hideManual), 30_000, [bump, hideManual]);
   const [who, setWho] = useLocalStorage<string>("ta.journal.perfWho", "all");
   const [range, setRange] = useLocalStorage<string>("ta.journal.perfRange", "all");
   const now = Date.now();
@@ -227,14 +229,15 @@ export function PerformanceCard({ perf, bump = 0 }: { perf: JournalStats | null;
         others.push(curveOf(src, srcLabel(src), c, inRange.filter((p) => p.src === src), t0));
       }
     }
-    const context = pick === "all" ? null : curveOf("account", "Whole account", COL.context, inRange, t0);
+    const context = pick === "all" ? null
+      : curveOf("account", hideManual ? "All shown" : "Whole account", COL.context, inRange, t0);
     let peak = 0;
     const dd = main.v.map((v) => { peak = Math.max(peak, v); return v - peak; });
     const nDays = (dayStart(now) - dayStart(t0)) / DAY + 1;
     const dStart = nDays > MAX_DAYS ? dayStart(now) - (MAX_DAYS - 1) * DAY : t0;
     const days = daysOf(mine, dStart, now);
     return { main, others, context, dd, days, cut: dStart > t0 };
-  }, [pick, mine, inRange, counts, t0, now]);
+  }, [pick, mine, inRange, counts, t0, now, hideManual]);
 
   const traded = view.days.filter((d) => d.n > 0);
   const best = traded.reduce<Day | null>((b, d) => (b == null || d.net > b.net ? d : b), null);
@@ -270,8 +273,10 @@ export function PerformanceCard({ perf, bump = 0 }: { perf: JournalStats | null;
         </div>
         {!fold?.folded && (
           <p className="text-xs text-neutral-500">
-            Your broker's history: every closed trade on this account, your phone's included, in $ as the broker booked it
-            (swap and commission in). Days are the broker's - from 00:00 UTC ({utcMidnightHere()} your time), the day the
+            {hideManual
+              ? "Your broker's history, your manual trades left out (✋ Manual trades, at the top): every other closed trade on this account, in $ as the broker booked it"
+              : "Your broker's history: every closed trade on this account, your phone's included, in $ as the broker booked it"}
+            {" "}(swap and commission in). Days are the broker's - from 00:00 UTC ({utcMidnightHere()} your time), the day the
             header's DAY P&amp;L counts. Every number here is also in Breakdown and the trade log below.
             {data.capped && " (The newest 500 trades - the backend update that sends them all is on its way.)"}
           </p>

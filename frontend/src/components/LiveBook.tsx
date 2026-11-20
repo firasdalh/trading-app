@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { displaySymbol, fmtPrice, fmtUsd } from "../format";
 import type { PositionAdvice, PositionView } from "../types";
+import { FollowRail, RideBanner, RideRail, rideCard, useRide, type RailLevel } from "./TargetRide";
 
 /**
  * The desk's right-hand sidebar building blocks: the live book you must always be able to see.
@@ -337,11 +338,29 @@ function PositionCard({
   const widened = stopWidening(p);
   const over = overCapRisk(p, equity, riskCap);
   const tone = advice ? ADVICE_TONE[advice.severity] : null;
+  // A strategy trade whose target the app keeps: the rail runs to THAT target, and past it the card rides
+  // (TargetRide.tsx - the break's show, then the ride until it closes).
+  const target = p.follow_target ?? null;
+  const targetUsd = usdAtLevel(p, target);
+  const ride = useRide(p, targetUsd);
+  const riding = ride.phase === "riding";
+  const card = rideCard(ride);
+  // A level's price, $ and R from the entry (on the risk taken at entry, as positionR without the advisor).
+  const r0 = lossSideDist(p, entryStopOf(p) ?? sl);
+  const lv = (price: number | null): RailLevel => ({
+    price,
+    usd: usdAtLevel(p, price),
+    r: price == null || r0 == null ? null : (isLong ? price - p.entry_price : p.entry_price - price) / r0,
+  });
 
   return (
-    <li className={`relative px-3 py-2.5 transition ${active ? "bg-brand-500/[0.07]" : ""}`}>
+    <li
+      className={`relative px-3 py-2.5 transition ${active && !riding ? "bg-brand-500/[0.07]" : ""} ${card.className}`}
+      style={card.style}
+    >
       {/* The charted position gets an accent rail, so the sidebar and the chart visibly agree. */}
       {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-brand-500" aria-hidden="true" />}
+      {riding && <RideBanner ride={ride} />}
       <div className="flex items-baseline gap-2">
         <span
           className={`rounded px-1.5 py-px text-[10px] font-bold ${isLong ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"}`}
@@ -380,7 +399,7 @@ function PositionCard({
             {r.toFixed(2)}R
           </span>
         )}
-        {locked != null && (
+        {locked != null && !riding && (
           <span className={locked >= 0 ? "text-bull" : "text-neutral-400"} title="What the stop locks in if it is hit">
             stop locks {fmtUsd(locked, { sign: true })}
           </span>
@@ -413,15 +432,27 @@ function PositionCard({
         </div>
       )}
 
-      <TradeRail
-        entry={p.entry_price}
-        sl={sl}
-        tp={tp}
-        last={last}
-        slUsd={usdAtLevel(p, sl)}
-        tpUsd={usdAtLevel(p, tp)}
-        pnl={p.unrealized_pnl}
-      />
+      {riding ? (
+        <RideRail last={last} stop={lv(sl)} target={lv(target)} tp={lv(tp)} />
+      ) : ride.phase === "waiting" && sl != null && tp != null && target != null && tp !== sl ? (
+        <FollowRail
+          entry={p.entry_price}
+          last={last}
+          stop={{ ...lv(sl), price: sl }}
+          target={{ ...lv(target), price: target }}
+          tp={{ ...lv(tp), price: tp }}
+        />
+      ) : (
+        <TradeRail
+          entry={p.entry_price}
+          sl={sl}
+          tp={tp ?? target}
+          last={last}
+          slUsd={usdAtLevel(p, sl)}
+          tpUsd={usdAtLevel(p, tp ?? target)}
+          pnl={p.unrealized_pnl}
+        />
+      )}
 
       <div className="mt-2 flex items-center gap-1.5">
         <button

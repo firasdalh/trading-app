@@ -572,6 +572,11 @@ class StrategyConfig(Base):
     # Trades a REAL account too (RISK.md, 2026-11-04, at the user's explicit request). Off = demo only. Real-money
     # orders still need the typed live confirmation, re-typed after every restart (the executor's gate).
     live: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Follow the target (2026-11-19, the user: "when we catch a trend, ride it until it ends"): the broker's take
+    # profit goes further out as a safety net and the engine keeps the real target itself (strategy.follow_targets).
+    # At the target, with the 30s SuperTrend still the trade's way, the stop is locked just under the target and then
+    # follows that line; otherwise the trade is closed there, as the broker's target would. Off = a normal target.
+    follow_target: Mapped[bool] = mapped_column(Boolean, default=False)
     state: Mapped[dict | None] = mapped_column(JSON)                 # per pair: last note, last bar acted on
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)
