@@ -577,6 +577,10 @@ class StrategyConfig(Base):
     # At the target, with the 30s SuperTrend still the trade's way, the stop is locked just under the target and then
     # follows that line; otherwise the trade is closed there, as the broker's target would. Off = a normal target.
     follow_target: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Stop past a nearby 5m level (2026-11-20, the user: "if the ATR stop lands near a level price may bounce from, put
+    # it a bit past it"): a 5m swing low (a sell: high) within 0.3R of the ATR stop moves the stop 0.1R past it, and
+    # the target with it (strategy.level_stop). Only with the ATR stop. Off = the ATR stop as it is.
+    level_stop: Mapped[bool] = mapped_column(Boolean, default=False)
     state: Mapped[dict | None] = mapped_column(JSON)                 # per pair: last note, last bar acted on
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_result: Mapped[str | None] = mapped_column(Text)

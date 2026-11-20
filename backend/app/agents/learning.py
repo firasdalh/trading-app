@@ -11,7 +11,8 @@ Every couple of minutes (learning_tick), for every strategy with closed trades:
          was, the spread, the hour and session, its place in the 1m regression channel and how far the hour had
          already gone (version 2, 2026-11-17). The engine writes it into its 'opened' log as it opens a trade
          (since 2026-11-13); older trades get it from MT5's history, read the same way - and a version-1 one gets
-         the parts version 2 added.
+         the parts version 2 added. Its NOISE AREA reading (2026-11-19, history_noise) is always added afterwards
+         from MT5's history - it needs 14 days of 1m candles, too much to read while a trade opens.
        - its WHAT-IFS: the same entry replayed with other targets and stop sizes (WHATIF_TARGETS x WHATIF_STOPS)
          on the broker's own prices - the ticks of its first minute, then 1-minute candles (as the journal's
          signal review does: signal_review.simulate). A bigger stop means smaller lots, so each outcome is in R:
@@ -36,7 +37,9 @@ from __future__ import annotations
 import copy
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from array import array
+from bisect import bisect_right
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -64,6 +67,18 @@ MATCH_OPEN_S = 120       # the engine's 'opened' log and the broker's open time 
 FILL_BUDGET = 40         # fingerprints / what-ifs filled from the broker's history per tick
 PATH_MINUTES = (1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 75, 90, 120, 150, 180, 240)
 PATH_MAX_S = 6 * 3600    # a trade's path is read for at most this long after its entry
+# The noise area (2026-11-19, the user: "put the noise area in the learner, let it watch it on the trades";
+# Zarattini, Aziz & Barbon 2024, "Beat the Market"): a day's move from its open is noise until it passes the move a
+# day usually makes from its open by this time of day. Tested 2026-11-19 on 390 real trades + 2 backtests: the
+# trades inside it (noise <= 1) lost in all three - but the line was sensitive, so it is watched, not applied.
+NOISE_DAYS = 14          # the usual move: the average over this many earlier UTC days with candles
+NOISE_LOOKBACK_DAYS = 30  # calendar days walked back to find them (weekends and holidays have none)
+NOISE_LOW = 0.5          # the noise part's "low" ends here (the clearest losers of the test: under 0.5)
+NOISE_OUT = 1.0          # past this = outside the noise area, our way (the paper's line)
+NOISE_TRIES = 3
+NOISE_BUDGET = 40        # noise readings per tick (fill_noise), apart from FILL_BUDGET
+_DAY_CACHE: dict[tuple[str, str], tuple[float, array, array] | None] = {}   # (symbol, UTC day) -> a past day's 1m
+_DAY_CACHE_MAX = 1000                                                          # (open, minutes, closes), ~14 KB each
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -181,6 +196,86 @@ def history_fingerprint(broker, symbol: str, side: int, entry: float, at: dateti
     hour = at.replace(minute=0, second=0, microsecond=0)
     h1 = _bars(broker, symbol, "1h", hour - timedelta(days=H1_DAYS), hour)
     return fingerprint(side, candles, entry, spread, at, h1)
+
+
+def noise_of(side: int, entry: float, minute: int, day_open: float | None, earlier: list) -> float | None:
+    """The noise-area reading of a ``side`` trade (1 buy, -1 sell) opened at ``entry`` at ``minute`` of its UTC day
+    (0-1439): the day's move from its open (``day_open``) our way, over the move the earlier days usually made from
+    their open by that minute - the average |close / open - 1| of each of ``earlier`` ((open, minutes, closes) of
+    one UTC day's 1m candles) at its last candle that opened by that minute. Over 1 = outside the noise area, our
+    way; under -1 = outside it against us. None without a usual move."""
+    moves = []
+    for o, mins, closes in earlier:
+        j = bisect_right(mins, minute) - 1
+        if j >= 0 and o:
+            moves.append(abs(closes[j] / o - 1.0))
+    if not moves or not day_open:
+        return None
+    usual = sum(moves) / len(moves)
+    if usual <= 0:
+        return None
+    return _r(side * (entry / day_open - 1.0) / usual, 3)
+
+
+def _day_candles(broker, symbol: str, day: date, today: date):
+    """One UTC day's 1m candles as (the day's open, the minute of the day each candle opened, its close) - None
+    when it has none. A day before ``today`` is kept in memory: its candles no longer change. On MT5 the rates are
+    read as they come (0.2 ms a day; building ~1440 Candles took ~20 ms), and a failed read raises - it must not be
+    kept as a day without candles."""
+    from app.agents.signal_review import _bars, _is_mt5
+
+    key = (symbol, day.isoformat())
+    if key in _DAY_CACHE:
+        return _DAY_CACHE[key]
+    start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    out = None
+    if _is_mt5(broker):
+        rates = broker._mt5.copy_rates_range(broker._resolve_symbol(symbol), broker._tf("1m"), start, end)
+        if rates is None:
+            raise RuntimeError(f"MT5 gave no 1m rates for {symbol} on {day}: {broker._mt5.last_error()}")
+        s0 = int(start.timestamp())
+        if hasattr(rates, "dtype"):                       # MT5's numpy rates: whole columns at once
+            cols = zip(rates["time"].tolist(), rates["open"].tolist(), rates["close"].tolist())
+        else:
+            cols = ((r["time"], r["open"], r["close"]) for r in rates)
+        rows = sorted((int(t) - s0, float(o), float(c)) for t, o, c in cols if 0 <= int(t) - s0 < 86400)
+        if rows:
+            out = (rows[0][1], array("H", (x[0] // 60 for x in rows)), array("d", (x[2] for x in rows)))
+    else:
+        bars = sorted(_bars(broker, symbol, "1m", start, end), key=lambda c: _utc(c.ts))
+        if bars:
+            mins = array("H", ((_utc(c.ts) - start).seconds // 60 for c in bars))
+            out = (float(bars[0].open), mins, array("d", (float(c.close) for c in bars)))
+    if day < today:
+        if len(_DAY_CACHE) >= _DAY_CACHE_MAX:
+            for k in list(_DAY_CACHE)[: _DAY_CACHE_MAX // 4]:
+                _DAY_CACHE.pop(k, None)
+        _DAY_CACHE[key] = out
+    return out
+
+
+def history_noise(broker, symbol: str, side: int, entry: float, at: datetime,
+                  now: datetime | None = None) -> float | None:
+    """The noise-area reading (noise_of) of a trade opened at ``at``, from MT5's 1m history: its own UTC day's open,
+    and the NOISE_DAYS earlier days with candles (up to NOISE_LOOKBACK_DAYS back). Only candles that opened by the
+    entry's minute count, on the earlier days; the trade's own day gives only its open. None without them."""
+    at = _utc(at)
+    today = _utc(now or datetime.now(timezone.utc)).date()
+    day = at.date()
+    own = _day_candles(broker, symbol, day, today)
+    if not own or own[1][0] * 60 > at.hour * 3600 + at.minute * 60 + at.second:
+        return None
+    earlier = []
+    for k in range(1, NOISE_LOOKBACK_DAYS + 1):
+        dc = _day_candles(broker, symbol, day - timedelta(days=k), today)
+        if dc:
+            earlier.append(dc)
+            if len(earlier) >= NOISE_DAYS:
+                break
+    if len(earlier) < NOISE_DAYS:
+        return None
+    return noise_of(side, entry, at.hour * 60 + at.minute, own[0], earlier)
 
 
 # --------------------------------------------------------------------------- #
@@ -385,7 +480,12 @@ FEATURES: dict[str, tuple[str, object]] = {
     "h1run": ("the hour so far", _three("h1run", (0.5, H1RUN_HIGH), (
         "this hour so far under 0.5 ATR (1h) our way", "this hour so far 0.5-1 ATR (1h) our way",
         "this hour had already run 1+ ATR (1h) our way"))),
-    "spread": ("spread", _three("spread_pct", (10, 20), (
+    # 2026-11-19, the user: "put the noise area in the learner and let it watch it on the trades" (history_noise)
+    "noise": ("the noise area (the day's move from its open)", _three("noise", (NOISE_LOW, NOISE_OUT), (
+        "deep in the noise area: the day had moved under half its usual move from the open our way (or against us)",
+        "in the noise area: the day had moved 0.5-1x its usual move from the open our way",
+        "outside the noise area: the day had already moved more than usual from its open, our way"))),
+    "spread":("spread", _three("spread_pct", (10, 20), (
         "spread under 10% of the 1m ATR", "spread 10-20% of the 1m ATR", "spread 20%+ of the 1m ATR"))),
     "pair": ("pair", lambda f: (f["symbol"], f["symbol"])),
     "side": ("side", lambda f: (f["side"], "buys" if f["side"] == "long" else "sells")),
@@ -1029,6 +1129,40 @@ def fill_from_history(session: Session, cfg: StrategyConfig, broker_for, now: da
     return done
 
 
+def fill_noise(session: Session, cfg: StrategyConfig, broker_for, now: datetime, budget: int = NOISE_BUDGET) -> int:
+    """Give up to ``budget`` fingerprints their noise-area reading (history_noise), once each - the engine's own
+    ones too: it is never read while a trade opens. A failed read is tried NOISE_TRIES times ("noise_tries" in the
+    fingerprint), then left out. Its own budget, apart from fill_from_history's. Returns the reads made."""
+    classes = {p.get("symbol"): p.get("asset_class") for p in cfg.pairs or []}
+    need = (StrategyTradeFact.fp.is_not(None) & StrategyTradeFact.entry.is_not(None)
+            & func.json_type(StrategyTradeFact.fp, "$.noise").is_(None)
+            & (func.coalesce(func.json_extract(StrategyTradeFact.fp, "$.noise_tries"), 0) < NOISE_TRIES))
+    rows = session.scalars(select(StrategyTradeFact).where(StrategyTradeFact.strategy_id == cfg.id, need)
+                           .order_by(StrategyTradeFact.opened_at.desc()).limit(max(0, budget))).all()
+    done = 0
+    for row in rows:
+        try:
+            broker = broker_for(classes.get(row.symbol) or "forex")
+        except Exception:  # noqa: BLE001
+            continue
+        done += 1
+        side = 1 if row.side == "long" else -1
+        try:
+            nz = history_noise(broker, row.symbol, side, float(row.entry), _utc(row.opened_at), now)
+        except Exception as exc:  # noqa: BLE001
+            log.info("learning: noise area failed", extra={"symbol": row.symbol, "error": str(exc)})
+            nz = None
+        fp = dict(row.fp or {})
+        if nz is not None:
+            fp.pop("noise_tries", None)
+            fp["noise"] = nz
+        else:
+            fp["noise_tries"] = int(fp.get("noise_tries") or 0) + 1
+        row.fp = fp
+    session.flush()
+    return done
+
+
 # --------------------------------------------------------------------------- #
 #  The view the board shows
 # --------------------------------------------------------------------------- #
@@ -1164,8 +1298,8 @@ def learning_tick(session: Session, now: datetime | None = None, broker_for=None
         from app.api.strategy_routes import _config_of as config_of
     if book is None:
         book = _book(session)
-    out = {"strategies": len(cfgs), "new": 0, "filled": 0, "found": []}
-    budget = FILL_BUDGET
+    out = {"strategies": len(cfgs), "new": 0, "filled": 0, "noise": 0, "found": []}
+    budget, noise_budget = FILL_BUDGET, NOISE_BUDGET
     for cfg in cfgs:
         src = strategy_source(cfg)
         trades = [(v, row) for v, row in book if (v.source or "") == src]
@@ -1177,6 +1311,10 @@ def learning_tick(session: Session, now: datetime | None = None, broker_for=None
             n = fill_from_history(session, cfg, broker_for, now, budget)
             budget -= n
             out["filled"] += n
+        if noise_budget > 0:
+            n = fill_noise(session, cfg, broker_for, now, noise_budget)
+            noise_budget -= n
+            out["noise"] += n
         view = build(session, cfg, config_of(cfg), now)
         seen = decisions(session, cfg.id)["seen"]
         for p in view["lessons"] + view["ignored"]:

@@ -102,6 +102,19 @@ FOLLOW_TF = "30s"
 FOLLOW_ST = (10, 2.7)        # the chart's SuperTrend
 FOLLOW_LOCK_R = 0.1          # following starts with the stop this far (in R) under the target
 FOLLOW_SAFETY_R = 2.0        # the broker's take profit sits this far (in R) past the target - a safety net only
+# Stop past a nearby 5m level (StrategyConfig.level_stop, 2026-11-20). The user, after a BTC stop was hit right at a
+# level and price turned back: "if the ATR stop lands near a level price may bounce from, put it a bit past it". On
+# ticks (scratchpad st/stoplvl.py, stoplvl2.py, money5m.py), 5m swing lows / highs beat 15m, 1h and Fibonacci levels:
+# +10.7R on 164 real trades (84 -> 90 winners), +20.6R / +28.3R in two 13-pair backtests, in both halves of each, and
+# ahead of the same stop sizes shuffled at random (58 of 60 draws); Fibonacci levels did nothing. The target moves
+# with it - kept at the old price, the gain was mostly gone. The lots shrink with the wider stop: the same $ at risk.
+LEVEL_TF = "5m"
+LEVEL_K = 3                  # a swing low / high: the lowest low / highest high of LEVEL_K bars on either side
+LEVEL_LOOK = 150             # among the last this many closed LEVEL_TF bars
+LEVEL_NEAR_R = 0.3           # a level this near the ATR stop (either side of it, in R) moves the stop
+LEVEL_PAST_R = 0.1           # the stop goes this far (in R of the ATR stop) past the level
+LEVEL_MIN_X = 0.5            # never a stop under half the ATR one
+LEVEL_BARS = 200             # LEVEL_TF bars read for it
 
 
 def _utc(ts: datetime) -> datetime:
@@ -1407,6 +1420,7 @@ class Rules:
     hours: dict | None = None      # its trading hours (hours_now); None = around the clock
     stop: dict | None = None       # a SuperTrend stop (st_stop); None = stop_atr x ATR
     off: dict = field(default_factory=dict)   # rule set -> the places of its groups switched off on the board
+    level: bool = False            # the ATR stop goes past a nearby LEVEL_TF swing (level_stop)
 
     @classmethod
     def of(cls, src) -> "Rules":
@@ -1414,7 +1428,8 @@ class Rules:
                    entry_short=list(src.entry_short or []), mirror_short=bool(src.mirror_short),
                    exit_rules=list(src.exit_rules or []), stop_atr=float(src.stop_atr or 1.5),
                    hours=src.hours or None, stop=getattr(src, "stop", None) or None,
-                   off=getattr(src, "off_groups", None) or {})
+                   off=getattr(src, "off_groups", None) or {},
+                   level=bool(getattr(src, "level_stop", False)) and not getattr(src, "stop", None))
 
     def buy_rules(self) -> list:
         return self.entry_long
@@ -1443,6 +1458,8 @@ class Rules:
             out.update(_reads(c, self.timeframe))
         if self.stop:
             out.add(self.stop.get("tf") or self.timeframe)    # the stop follows a line on it
+        if self.level:
+            out.add(LEVEL_TF)                                  # the swings its stop goes past
         return {t for t in out if t in TF_SECONDS}
 
     def sizes(self) -> dict[str, int]:
@@ -1452,6 +1469,8 @@ class Rules:
             for tf in _reads(c, self.timeframe):
                 if tf in out:
                     out[tf] = max(out[tf], _BARS_NEEDED.get(c.get("type", ""), _BARS))
+        if self.level and LEVEL_TF in out:
+            out[LEVEL_TF] = max(out[LEVEL_TF], LEVEL_BARS)
         return out
 
 
@@ -1622,6 +1641,64 @@ def _side_risk(session: Session, rules: Rules, data: dict[str, Bars], q: dict | 
         return None
     dist = side * (float(q["ask"] if side > 0 else q["bid"]) - want["level"])
     return max(dist, _stop_floor(session, q)) if dist > 0 else None
+
+
+def swing_levels(b: Bars | None, side: int, k: int = LEVEL_K, look: int = LEVEL_LOOK) -> list[float]:
+    """The swing lows (``side`` 1: a buy's supports) or highs (-1: a sell's) among the last ``look`` closed bars of
+    ``b``: a bar's low that is the lowest of the ``k`` bars on either side of it (ties count) - so only ones that
+    ``k`` closed bars have confirmed since. Oldest first; [] with too few bars."""
+    if b is None:
+        return []
+    c = b.c
+    j = len(c) - 1
+    if j < 2 * k + 5:
+        return []
+    out = []
+    for m in range(max(k, j - look), j - k + 1):
+        win = c[m - k:m + k + 1]
+        if side > 0 and c[m].low == min(x.low for x in win):
+            out.append(float(c[m].low))
+        elif side < 0 and c[m].high == max(x.high for x in win):
+            out.append(float(c[m].high))
+    return out
+
+
+def level_stop(side: int, entry: float, dist: float, b: Bars | None) -> dict | None:
+    """Where a ``side`` trade's stop goes when a LEVEL_TF swing sits near its ATR stop (``dist`` from ``entry``):
+    of the swings (swing_levels of ``b``) on the stop's side of the entry and within LEVEL_NEAR_R x ``dist`` of that
+    stop, the one furthest from the entry - the stop LEVEL_PAST_R x ``dist`` past it. {"dist": the new one R,
+    "level", "atr_dist", "x": new / ATR one}; None when no swing is near (the ATR stop stays as it is) or the new one
+    would be under LEVEL_MIN_X of it. As replayed in the study (scratchpad st/stoplvl2.py size_for)."""
+    if not dist or dist <= 0 or entry is None:
+        return None
+    stop = entry - side * dist
+    near = [L for L in swing_levels(b, side) if side * (entry - L) > 0 and abs(L - stop) <= LEVEL_NEAR_R * dist]
+    if not near:
+        return None
+    level = min(near) if side > 0 else max(near)
+    new = side * (entry - (level - side * LEVEL_PAST_R * dist))
+    if new < LEVEL_MIN_X * dist:
+        return None
+    return {"dist": new, "level": level, "atr_dist": dist, "x": round(new / dist, 3), "tf": LEVEL_TF}
+
+
+def _level_risk(session: Session, rules: Rules, data: dict[str, Bars], q: dict | None, side: int,
+                entry: float | None, dist: float | None) -> tuple[float | None, dict | None]:
+    """One R, moved past a nearby LEVEL_TF swing when the strategy's level_stop is on (level_stop) - never closer
+    than the floor a new trade's stop keeps. Never raises: without a swing near, its bars, or on any error, the ATR
+    stop stays."""
+    if not rules.level or not dist or entry is None:
+        return dist, None
+    try:
+        lv = level_stop(side, float(entry), float(dist), data.get(LEVEL_TF))
+    except Exception as exc:  # noqa: BLE001 - the ATR stop stays
+        log.warning("strategy level stop unavailable", extra={"error": str(exc)})
+        return dist, None
+    if lv is None:
+        return dist, None
+    if q:
+        lv["dist"] = max(lv["dist"], _stop_floor(session, q))
+    return lv["dist"], lv
 
 
 def _quote_ctx(q: dict | None) -> dict:
@@ -1906,6 +1983,9 @@ def _open(session: Session, cfg: StrategyConfig, symbol: str, ac: str, side: str
         return {"symbol": symbol, "skipped": "no quote / ATR to set the stop from"}
     entry = float(q["ask"] if s > 0 else q["bid"])
     digits = int(q.get("digits") or 6)
+    # Stop past a nearby 5m level (level_stop): one R moves with it - the target, the safety target, the follow lock
+    # and the lots (sized on the stop) follow.
+    dist, lvl = _level_risk(session, rules, data or {cfg.timeframe: base}, q, s, entry, dist)
     stop = round(entry - s * dist, digits)
     target = round(entry + s * cfg.target_r * dist, digits) if cfg.target_r else None
     # Follow the target: the app keeps the target (follow_targets); the broker's sits FOLLOW_SAFETY_R further out.
@@ -1964,7 +2044,9 @@ def _open(session: Session, cfg: StrategyConfig, symbol: str, ac: str, side: str
     _log(session, cfg, symbol, "opened", side=side, lots=record.approved_qty, entry=record.entry,
          stop=record.stop_loss, target=target if follow else record.take_profit, rules=why,
          **({"stop_on": f"{rules.stop.get('tf')} SuperTrend"} if rules.stop else {}), **({"fp": fp} if fp else {}),
-         **({"follow": True, "broker_tp": record.take_profit} if follow else {}))
+         **({"follow": True, "broker_tp": record.take_profit} if follow else {}),
+         **({"level_stop": {"level": round(lvl["level"], digits), "atr_stop": round(entry - s * lvl["atr_dist"], digits),
+                            "x": lvl["x"], "tf": lvl["tf"]}} if lvl else {}))
     session.commit()
     log.warning("strategy opened a trade", extra={"strategy": cfg.id, "symbol": symbol, "side": side})
     out = {"symbol": symbol, "opened": side, "lots": record.approved_qty}
@@ -2254,7 +2336,8 @@ def _signal_levels(session: Session, cfg: StrategyConfig, rules: Rules, data: di
         return {}
     if not risk or risk <= 0 or entry is None:
         return {}
-    out = {"stop": round(entry - side * risk, 8), "risk": round(risk, 8)}
+    risk, lvl = _level_risk(session, rules, data, q, side, entry, risk)     # the strategy's stop, as it would place it
+    out = {"stop": round(entry - side * risk, 8), "risk": round(risk, 8), **({"level_x": lvl["x"]} if lvl else {})}
     if cfg.target_r:
         out["target"] = round(entry + side * float(cfg.target_r) * risk, 8)
     return out

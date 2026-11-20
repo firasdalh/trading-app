@@ -267,7 +267,8 @@ def review(session: Session, days: int, now: datetime | None = None, broker_for=
 
 _SNAP_FIELDS = ("name", "pairs", "timeframe", "sides", "mirror_short", "entry_long", "entry_short", "exit_rules",
                 "risk_pct", "stop_atr", "target_r", "max_trades_day", "manage_manual", "cooldown_minutes",
-                "loss_cooldown_minutes", "stop", "hours", "daily_target", "off_groups", "live", "follow_target")
+                "loss_cooldown_minutes", "stop", "hours", "daily_target", "off_groups", "live", "follow_target",
+                "level_stop")
 
 
 def snapshot(row: StrategyConfig) -> dict:
@@ -344,6 +345,7 @@ def describe_changes(before: dict, after: dict) -> list[str]:
         ("daily_target", "daily target", lambda v: "none" if v is None else f"${_num(v)}"),
         ("live", "trades the real account", lambda v: "on" if v else "off"),
         ("follow_target", "follow the target", lambda v: "on" if v else "off"),
+        ("level_stop", "stop past a nearby 5m level", lambda v: "on" if v else "off"),
         ("manage_manual", "manages your own trades", lambda v: "on" if v else "off"),
     ]
     for key, name, fmt in scalars:

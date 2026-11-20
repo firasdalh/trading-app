@@ -94,6 +94,7 @@ function template(symbol: string, assetClass: AssetClass): StrategyDraft {
     off_groups: offGroupsOf(null),
     live: false,
     follow_target: false,
+    level_stop: false,
   };
 }
 
@@ -114,6 +115,7 @@ export function draftOf(s: StrategyView): StrategyDraft {
     off_groups: offGroupsOf(s.off_groups),
     live: s.live ?? false,
     follow_target: s.follow_target ?? false,
+    level_stop: s.level_stop ?? false,
   };
 }
 
@@ -529,6 +531,18 @@ function StopRow({ draft, set, tfs, now }: {
           <NumberBox value={draft.stop_atr} min={0.3} max={10} step={0.1} label="Stop, in ATR"
                      onChange={(v) => set({ stop_atr: v })} className={`w-16 ${box}`} />
           × ATR of the {draft.timeframe} bars, pushed further out when the spread gate needs it
+          <label
+            className="ml-1 flex items-center gap-1 text-neutral-400"
+            title={"When a 5m swing low (for a sell: a swing high) of the last 150 closed 5m candles sits within 0.3R of this stop, " +
+              "the stop goes 0.1R past the furthest one - so a bounce off that level does not take the trade out. The target " +
+              "moves with it (the same R of the new stop) and the lots shrink, so the $ at risk stays the same. No swing near: " +
+              "the ATR stop as it is. Replayed on 164 real trades: 84 -> 90 winners, +10.7R; +20.6R / +28.3R in two backtests. " +
+              "Fibonacci, 15m and 1h levels did not help."}
+          >
+            <input type="checkbox" checked={!!draft.level_stop} onChange={(e) => set({ level_stop: e.target.checked })}
+                   className="accent-amber-500" />
+            📍 past a nearby 5m swing
+          </label>
         </>
       ) : (
         <>
@@ -1594,6 +1608,9 @@ export function StrategyBoard({ assetClass }: { assetClass: AssetClass }) {
         ${draft.stop.buffer} × ATR beyond it, then follows the line at each ${draft.stop.tf} close - only ever toward the trade.
         A break of the line is confirmed by your SuperTrend close rule's candles; the stop is the backstop. Your own trades keep
         the stops you set.`}
+        {draft.level_stop && !draft.stop && ` When a 5m swing low (a sell: high) sits within 0.3R of that stop, the stop goes
+        0.1R past the furthest one and the target moves with it${draft.target_r != null ? ` (${draft.target_r}R of the new stop)` : ""};
+        the lots shrink, so the $ at risk stays the same.`}
         {draft.follow_target && draft.target_r != null && ` The app keeps its ${draft.target_r}R target itself - the broker's
         take profit sits 2R further out as a safety net, so the app must be running. At the target, if the 30s SuperTrend is
         still with the trade, the stop is locked 0.1R under the target and follows the 30s SuperTrend line until it turns;

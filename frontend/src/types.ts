@@ -1267,6 +1267,9 @@ export interface StrategyDraft {
   // safety net - and at the target, with the 30s SuperTrend still the trade's way, locks the stop just under it and
   // follows that line. Absent on an older backend (= off).
   follow_target?: boolean;
+  // Stop past a nearby 5m level (2026-11-20): a 5m swing low (a sell: high) within 0.3R of the ATR stop moves the stop
+  // 0.1R past it, and the target with it. Only with the ATR stop. Absent on an older backend (= off).
+  level_stop?: boolean;
 }
 export type StrategyOffGroups = Record<"entry_long" | "entry_short" | "exit_rules", number[]>;
 // A stop that follows a SuperTrend line (backend StopIn): it starts on the `tf` SuperTrend (`period`, `mult`),
