@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { fmtUsd } from "../format";
 import { usePolling } from "../hooks/usePolling";
+import { localHour } from "../sessions";
 import type { LearningLesson, LearningPart, StrategyLearning as Learning, WhatIfTable } from "../types";
 
 /**
@@ -16,6 +17,24 @@ const r1 = (v: number | null | undefined) => (v == null ? "–" : `${v >= 0 ? "+
 const pct = (v: number | null | undefined) => (v == null ? "–" : `${Math.round(v * 100)}%`);
 const when = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "–";
+
+/**
+ * "opened 12:00-13:00 UTC" -> "opened 16:00-17:00 your clock (12:00-13:00 UTC)" in every text of the view. The board's
+ * hour chips are drawn on the viewer's clock while the learner writes UTC: on 2026-11-20 the user read "12" in a lesson
+ * and switched on the board's 12 - 08:00 UTC, not the hour the lesson meant. Display only.
+ */
+const HOURS_UTC = /\b(\d{2}):00-(\d{2}):00 UTC\b/g;
+function onClock<T>(v: T): T {
+  if (typeof v === "string") {
+    return v.replace(HOURS_UTC, (all: string, a: string, b: string) => {
+      const from = localHour(Number(a));
+      return from === `${a}:00` ? all : `${from}-${localHour(Number(b))} your clock (${a}:00-${b}:00 UTC)`;
+    }) as T;
+  }
+  if (Array.isArray(v)) return v.map(onClock) as T;
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, onClock(x)])) as T;
+  return v;
+}
 
 function Sure({ p, strongT }: { p: { strength: string | null; t: number }; strongT: number }) {
   if (p.strength === "strong")
@@ -163,7 +182,8 @@ export function StrategyLearning({ strategyId, dirty }: { strategyId: number; di
   const [showAll, setShowAll] = useState(false);
   const [moreWatching, setMoreWatching] = useState(false);
   const [view, setView] = useState<Learning | null>(null);
-  const L = view && view.strategy_id === strategyId && data && view.now >= data.now ? view : data;
+  const raw = view && view.strategy_id === strategyId && data && view.now >= data.now ? view : data;
+  const L = raw ? onClock(raw) : raw;
 
   if (error && !L) {
     return /404|not found/i.test(error) ? null : (

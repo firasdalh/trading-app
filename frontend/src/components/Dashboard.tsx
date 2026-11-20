@@ -80,6 +80,7 @@ import { WatchlistPanel } from "./WatchlistPanel";
 import { DeskStrategyActivity } from "./StrategyActivityFeed";
 import { SIGNAL_PICK_EVENT } from "./StrategySignals";
 import { StrategyWidget } from "./StrategyWidget";
+import { TodayBoard } from "./TodayBoard";
 import { MarketMonitor } from "./MarketMonitor";
 import { PriceAlerts } from "./PriceAlerts";
 
@@ -1020,44 +1021,15 @@ export function Dashboard({
             />
           </SideSection>
 
-          {/* Decisions waiting on you, then setups armed to fire. Opens itself when something
-              arrives and folds away when there is nothing, so it never pushes the watchlist down
-              for no reason. The pending panel stays MOUNTED while folded — it plays the chime.
-              Empty, it says so ONCE: the header already reads "nothing", and the old body added a
-              nested "Pending approval 0" header and two more empty messages under it. */}
+          {/* Today (asked 2026-11-20): each strategy pair up or down from today's open, and how big that move is
+              against its usual move by this hour - the learner's noise reading. Display only. Not mounted in full
+              screen, where this column is hidden, so it never polls for nothing. */}
           <SideSection
-            title="Waiting for you"
-            hint="Risk-approved setups awaiting your approval, and armed 'wait for the break' setups"
-            body="flush"
-            autoOpen={pendingN + armedN > 0}
-            empty="nothing"
-            badges={[
-              { n: pendingN, label: "to approve", tone: "warn" },
-              { n: armedN, label: "armed", tone: "neutral" },
-            ]}
-            actions={
-              <button
-                onClick={() => setChime((v) => !v)}
-                className={`rounded px-1.5 py-0.5 text-xs ${
-                  chime ? "text-amber-300 hover:bg-neutral-800" : "text-neutral-600 hover:text-neutral-400"
-                }`}
-                title={chime
-                  ? "Sound is ON — a chime plays when a new approval arrives. Click to mute."
-                  : "Sound is OFF — new approvals arrive silently. Click to unmute."}
-                aria-label={chime ? "Mute the approval chime" : "Unmute the approval chime"}
-                aria-pressed={chime}
-              >
-                {chime ? "🔔" : "🔕"}
-              </button>
-            }
+            title="Today"
+            hint="Each strategy pair since today's open (00:00 UTC): up or down, and how big that is against its usual move by this hour (the learner's noise reading). Display only - it changes nothing in trading"
+            body="bare"
           >
-            <PendingProposalsPanel embedded sound={chime} onSelect={openPositionSymbol} onChanged={onPositionsChanged} />
-            {armedN > 0 && <ConditionalsPanel onSelect={openPositionSymbol} />}
-            {pendingN + armedN === 0 && (
-              <div className="px-3 py-2.5 text-xs text-neutral-500">
-                Nothing to approve and nothing armed — new approvals land here{chime ? " with a chime" : ""}.
-              </div>
-            )}
+            {!chartFull && <TodayBoard chartSymbol={symbol} onPick={pickStrategyPair} />}
           </SideSection>
 
           {/* What the strategies did - what they opened and closed and why, what was refused - so the board
@@ -1139,6 +1111,48 @@ export function Dashboard({
 
           <SideSection title="Price alerts" hint="Be told when price reaches a level - never places an order" body="flush">
             <PriceAlerts symbol={symbol} assetClass={assetClass} />
+          </SideSection>
+
+          {/* At the bottom since 2026-11-20 (the user: "not needed now - put it last"); still mounted, so the
+              approval chime keeps working. */}
+          {/* Decisions waiting on you, then setups armed to fire. Opens itself when something
+              arrives and folds away when there is nothing, so it never pushes the watchlist down
+              for no reason. The pending panel stays MOUNTED while folded — it plays the chime.
+              Empty, it says so ONCE: the header already reads "nothing", and the old body added a
+              nested "Pending approval 0" header and two more empty messages under it. */}
+          <SideSection
+            title="Waiting for you"
+            hint="Risk-approved setups awaiting your approval, and armed 'wait for the break' setups"
+            body="flush"
+            autoOpen={pendingN + armedN > 0}
+            empty="nothing"
+            badges={[
+              { n: pendingN, label: "to approve", tone: "warn" },
+              { n: armedN, label: "armed", tone: "neutral" },
+            ]}
+            actions={
+              <button
+                onClick={() => setChime((v) => !v)}
+                className={`rounded px-1.5 py-0.5 text-xs ${
+                  chime ? "text-amber-300 hover:bg-neutral-800" : "text-neutral-600 hover:text-neutral-400"
+                }`}
+                title={chime
+                  ? "Sound is ON — a chime plays when a new approval arrives. Click to mute."
+                  : "Sound is OFF — new approvals arrive silently. Click to unmute."}
+                aria-label={chime ? "Mute the approval chime" : "Unmute the approval chime"}
+                aria-pressed={chime}
+              >
+                {chime ? "🔔" : "🔕"}
+              </button>
+            }
+          >
+            <PendingProposalsPanel embedded sound={chime} onSelect={openPositionSymbol} onChanged={onPositionsChanged} />
+            {armedN > 0 && <ConditionalsPanel onSelect={openPositionSymbol} />}
+            {pendingN + armedN === 0 && (
+              <div className="px-3 py-2.5 text-xs text-neutral-500">
+                Nothing to approve and nothing armed — new approvals land here{chime ? " with a chime" : ""}.
+              </div>
+            )}
           </SideSection>
         </aside>
 

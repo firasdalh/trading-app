@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api/client";
 import { displaySymbol, fmtPrice } from "../format";
 import { play } from "../hooks/useApprovalChime";
@@ -188,17 +188,21 @@ function SignalCard({ s, onPick, onClose }: {
   );
 }
 
-/** The pop-ups, newest on top, under the header on the right. */
-export function SignalToasts({ signals, onPick, onDismiss }: {
+/** The pop-ups, newest on top, under the header on the right. ``children`` go above the signals in the same
+ * column - the market-open alerts (OpenAlerts, 2026-11-20), which keep their own state and render nothing when
+ * there is no open near. */
+export function SignalToasts({ signals, onPick, onDismiss, children }: {
   signals: Signal[]; onPick: (symbol: string, ac: AssetClass) => void; onDismiss: (id: number) => void;
+  children?: ReactNode;
 }) {
-  if (!signals.length) return null;
+  if (!signals.length && !children) return null;
   return (
     <div
       className="pointer-events-none fixed right-4 z-[60] flex flex-col gap-2"
       style={{ top: "calc(var(--hdr-h, 56px) + 0.5rem)" }}
       aria-live="polite"
     >
+      {children}
       {signals.map((s) => (
         <SignalCard key={s.id} s={s} onPick={onPick} onClose={() => onDismiss(s.id)} />
       ))}

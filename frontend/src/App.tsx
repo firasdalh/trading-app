@@ -11,6 +11,7 @@ import { RiskDashboard } from "./components/RiskDashboard";
 import { ScorecardPanel } from "./components/ScorecardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StrategyBoard } from "./components/StrategyBoard";
+import { OpenAlerts } from "./components/OpenAlerts";
 import { SIGNAL_PICK_EVENT, SignalToasts, useStrategySignals } from "./components/StrategySignals";
 import { WinCelebration, useWinningCloses } from "./components/WinCelebration";
 import type { NavItem } from "./components/Tabs";
@@ -336,7 +337,10 @@ export default function App() {
 
       {/* One at a time: wins that close together celebrate back to back. */}
       <WinCelebration win={wins[0] ?? null} queued={wins.length - 1} onDone={dismissWin} />
-      <SignalToasts signals={signals} onPick={pickSignal} onDismiss={dismissSignal} />
+      {/* Market-open alerts ride on top of the signals' column (asked 2026-11-20; display only). */}
+      <SignalToasts signals={signals} onPick={pickSignal} onDismiss={dismissSignal}>
+        <OpenAlerts />
+      </SignalToasts>
     </div>
   );
 }
