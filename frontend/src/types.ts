@@ -1544,3 +1544,50 @@ export interface SessionsView {
   sessions: SessionRow[];         // Asia, Middle East, London, New York, between sessions
   hours: SessionHourRow[];        // UTC 0-23
 }
+
+// The Withdraw page (GET /api/broker/funds, 2026-11-21): the account's money in and out from MT5's balance deals.
+export interface FundsOp {
+  ticket: number;
+  time: string;
+  amount: number;                 // + in, - out, in the account currency
+  kind: "deposit" | "withdrawal" | "transfer_in" | "transfer_out" | "protection" | "dividend" | "credit" | "other";
+  method: string | null;          // "card", "Exness account transfer", or Exness's own code
+  comment: string;                // Exness's reference, e.g. W-CC-USD-492573167623
+  balance_after: number | null;
+  returned: boolean;              // a withdrawal that came straight back as a deposit (and that deposit)
+  pair: number | null;
+  back_after_s: number | null;
+}
+
+export interface FundsTotals {
+  deposits: number;
+  withdrawals: number;
+  transfers_in: number;
+  transfers_out: number;
+  money_in: number;
+  money_out: number;
+  net_in: number;
+  protection: number;             // Exness putting a negative balance back to 0
+  protection_n: number;
+  dividends: number;
+  returned_n: number;
+  trading_result: number | null;  // balance minus net put in
+  trading_result_equity: number | null;
+  withdrawals_n: number;
+  last_withdrawal: { time: string; amount: number; method: string | null } | null;
+}
+
+export interface Funds {
+  currency: string;
+  balance: number;
+  equity: number;
+  margin: number;
+  margin_free: number;
+  margin_level: number | null;
+  open_positions: number;
+  floating: number;
+  ops: FundsOp[];                 // newest first
+  totals: FundsTotals;
+  withdrawable: number;           // Exness pays out up to the free margin
+  read_at: string;
+}

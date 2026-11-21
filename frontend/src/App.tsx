@@ -7,6 +7,7 @@ import { BacktestView } from "./components/BacktestView";
 import { DESK_CHANNEL, DRAWER_IDS, Drawer, type DrawerId } from "./components/Drawer";
 import { EntryFiltersPanel } from "./components/EntryFiltersPanel";
 import { JournalView } from "./components/JournalView";
+import { WithdrawView } from "./components/WithdrawView";
 import { RiskDashboard } from "./components/RiskDashboard";
 import { ScorecardPanel } from "./components/ScorecardPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -20,8 +21,8 @@ import { usePolling } from "./hooks/usePolling";
 import type { AssetClass } from "./types";
 
 /** Full-page views. Everything else is a drawer over the desk. */
-type View = "desk" | "journal" | "backtest";
-const VIEWS: View[] = ["desk", "journal", "backtest"];
+type View = "desk" | "journal" | "backtest" | "withdraw";
+const VIEWS: View[] = ["desk", "journal", "backtest", "withdraw"];
 
 // Values older layouts saved in `ta.view`. Trade/Scan/Book all live on the desk now, and Risk is a
 // drawer — someone who last left the app on Risk gets the desk with the Risk drawer open.
@@ -244,6 +245,15 @@ export default function App() {
       onClick: () => goView("backtest"),
       hint: "Replay the engine over historical candles",
     },
+    {
+      id: "withdraw",
+      label: "Withdraw",
+      icon: "withdraw",
+      kind: "view",
+      active: view === "withdraw",
+      onClick: () => goView("withdraw"),
+      hint: "How much you can withdraw now, a button to the Exness withdrawal, and the record of every deposit and withdrawal from MT5",
+    },
   ];
 
   return (
@@ -310,6 +320,7 @@ export default function App() {
       )}
       {view === "journal" && <JournalView />}
       {view === "backtest" && <BacktestView />}
+      {view === "withdraw" && <WithdrawView />}
 
       {/* Risk is configuration you change rarely and should never meet by accident mid-trade — so it
           is a pop-up you open on purpose, over whatever view you are on. */}

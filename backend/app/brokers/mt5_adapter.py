@@ -1380,6 +1380,62 @@ class Mt5BrokerAdapter(BrokerAdapter):
             total += float(getattr(d, "commission", 0) or 0)
         return round(total, 2)
 
+    def get_funds(self) -> dict | None:
+        """Every non-trade BALANCE deal on the account (deposits, withdrawals, transfers, Exness's
+        negative-balance resets, index dividends) with the balance right after it, and the balance,
+        equity and free margin now - app.brokers.funds.build words and totals them. READ-ONLY: MT5 can't
+        move money (2026-11-21: a withdrawal is asked for in the Exness Personal Area). None when the
+        terminal can't be read."""
+        from datetime import timedelta
+
+        from app.brokers.funds import build
+
+        mt5 = self._mt5
+        try:
+            acct = mt5.account_info()
+            deals = mt5.history_deals_get(datetime(2000, 1, 1, tzinfo=timezone.utc),
+                                          datetime.now(timezone.utc) + timedelta(days=1))
+            positions = self._positions()
+        except Exception:  # noqa: BLE001 - read-only; the page says the record can't be read
+            return None
+        if acct is None or deals is None:
+            return None
+        trade = (getattr(mt5, "DEAL_TYPE_BUY", 0), getattr(mt5, "DEAL_TYPE_SELL", 1))
+
+        def when(d) -> tuple[int, int]:
+            ms = int(getattr(d, "time_msc", 0) or 0) or int(getattr(d, "time", 0) or 0) * 1000
+            return ms, int(getattr(d, "ticket", 0) or 0)
+
+        bal = 0.0
+        raw = []
+        # The whole history, oldest first: the running sum of every deal is the balance after each one
+        # (it matched MT5's balance to the cent on the real account, 2026-11-21).
+        for d in sorted(deals, key=when):
+            amount = float(getattr(d, "profit", 0) or 0)
+            bal += (amount + float(getattr(d, "swap", 0) or 0) + float(getattr(d, "commission", 0) or 0)
+                    + float(getattr(d, "fee", 0) or 0))
+            if getattr(d, "symbol", "") or getattr(d, "type", None) in trade:
+                continue   # a trade deal
+            raw.append({
+                "ticket": int(getattr(d, "ticket", 0) or 0),
+                "time": datetime.fromtimestamp(int(getattr(d, "time", 0) or 0), tz=timezone.utc),
+                "amount": amount,
+                "comment": str(getattr(d, "comment", "") or ""),
+                "mt5_type": int(getattr(d, "type", -1)),
+                "balance_after": bal,
+            })
+        return build(raw, {
+            "currency": getattr(acct, "currency", None) or "USD",
+            "balance": float(getattr(acct, "balance", 0) or 0),
+            "equity": float(getattr(acct, "equity", 0) or 0),
+            "margin": float(getattr(acct, "margin", 0) or 0),
+            "margin_free": float(getattr(acct, "margin_free", 0) or 0),
+            "margin_level": float(getattr(acct, "margin_level", 0) or 0) or None,
+            "open_positions": len(positions),
+            "floating": round(sum(float(getattr(p, "profit", 0) or 0) + float(getattr(p, "swap", 0) or 0)
+                                  for p in positions), 2),
+        })
+
     # ---- symbol discovery ----
 
     # Keywords matched (case-insensitive) against the symbol's MT5 path to group by asset class.

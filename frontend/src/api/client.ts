@@ -130,6 +130,8 @@ export const api = {
 
   account: (assetClass: AssetClass) =>
     request<AccountState>(`/api/broker/account?asset_class=${assetClass}`),
+  // The Withdraw page: every deposit / withdrawal from MT5's balance deals + the free margin (read-only).
+  funds: () => request<import("../types").Funds>("/api/broker/funds"),
   // Live bid/ask, lot value and margin, and the account's leverage + free margin, for the scalp
   // ticket (read-only - it places nothing).
   scalpSpec: (symbol: string, assetClass: AssetClass) =>

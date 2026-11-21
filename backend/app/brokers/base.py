@@ -134,6 +134,12 @@ class BrokerAdapter(ABC):
         """
         return None
 
+    def get_funds(self) -> dict | None:
+        """The account's money in and out (deposits, withdrawals, transfers) and what it holds now, for the
+        Withdraw page. Default None = the broker can't report it. MT5 overrides this; see
+        ``Mt5BrokerAdapter.get_funds``. Read-only: no adapter can move money."""
+        return None
+
     def list_symbols(self, asset_class: AssetClass | None = None) -> list[str]:
         """Available tradable symbols for an asset class. Default: none (free-text entry).
 

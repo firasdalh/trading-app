@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type NavIcon = "desk" | "monitor" | "scanner" | "strategy" | "risk" | "journal" | "backtest";
+export type NavIcon = "desk" | "monitor" | "scanner" | "strategy" | "risk" | "journal" | "backtest" | "withdraw";
 
 export interface NavItem {
   id: string;
@@ -119,6 +119,14 @@ function Icon({ name }: { name: NavIcon }) {
         <path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V4z" />
         <path d="M5 18a2 2 0 0 1 2-2h11" />
         <path d="M9 8h5" />
+      </>
+    ),
+    // A wallet with money leaving it.
+    withdraw: (
+      <>
+        <path d="M4 7h13a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a1 1 0 0 1-1-1V7z" />
+        <path d="M4 7l10-3v3" />
+        <path d="M15 13.5h4" />
       </>
     ),
     backtest: (

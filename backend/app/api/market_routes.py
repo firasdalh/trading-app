@@ -268,6 +268,22 @@ def account(
     return broker.get_account()
 
 
+@router.get("/broker/funds")
+def funds(
+    asset_class: AssetClass = Query(AssetClass.FOREX),
+    session: Session = Depends(get_session),
+) -> dict:
+    """The Withdraw page (2026-11-21): every deposit / withdrawal / transfer on the account from the broker's
+    balance deals, the totals, and what can be withdrawn now (the free margin). READ-ONLY - it moves no
+    money; the withdrawal itself is made in the Exness Personal Area."""
+    broker = _broker_for(asset_class, session)
+    out = broker.get_funds()
+    if out is None:
+        raise HTTPException(status_code=503,
+                            detail=f"{broker.name} can't report the account's deposits and withdrawals right now")
+    return out
+
+
 @router.get("/broker/positions", response_model=list[PositionView])
 def positions(
     asset_class: AssetClass = Query(AssetClass.STOCK),
