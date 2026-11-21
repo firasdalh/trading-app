@@ -32,6 +32,12 @@ def _force_deterministic_agents(monkeypatch):
     # The reconciler's "missing since" memory is keyed by position id; fresh test DBs reuse ids.
     from app.execution import monitor
     monitor._MISSING_SINCE.clear()
+    # The learner's crypto flow reads Binance's public candles (learning.history_flow): never from a test.
+    from app.agents import learning
+
+    def _no_network(url):
+        raise RuntimeError("no network in tests")
+    monkeypatch.setattr(learning, "_get_json", _no_network)
     # Offline data providers — never hit the network (e.g. the live economic calendar).
     from app.data import providers
     providers.set_providers(

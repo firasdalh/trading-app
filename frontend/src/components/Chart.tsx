@@ -26,6 +26,8 @@ import { TradeHistoryPrimitive, type HistTrade } from "./tradeHistory";
 import { AutoFibPrimitive, FIB_LADDER_ROOM, autoFib, fibExplain, fibPosition, fibStatus, liveFib, type AutoFib } from "./autoFib";
 import { RSI_PERIOD_EVENT } from "../rsiPeriod";
 import { OrderFlowPane } from "./OrderFlowPane";
+import { CryptoPulsePane } from "./CryptoPulsePane";
+import { perpOf } from "../cryptoFeeds";
 import { SessionLegend } from "./SessionLegend";
 import { sessionAtHour } from "../sessions";
 import { addAlert, moveAlert, usePriceAlerts } from "../hooks/priceAlerts";
@@ -1382,6 +1384,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const [rsiH, setRsiH] = useState(() => storedPaneH("chart.rsiH"));
   const [macdH, setMacdH] = useState(() => storedPaneH("chart.macdH"));
   const [flowH, setFlowH] = useState(() => storedPaneH("chart.flowH"));
+  const [pulseH, setPulseH] = useState(() => storedPaneH("chart.pulseH"));
   const [mainH, setMainH] = useState(MAIN_DEFAULT);
   const mainHRef = useRef(MAIN_DEFAULT);   // read by the fit below without re-rendering to compare
   const rsiContainerRef = useRef<HTMLDivElement>(null);
@@ -1607,6 +1610,11 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const [showMacd, setShowMacd] = usePersisted(sk("chart.showMacd"), true);
   // Buyers vs sellers from the ticks, in a pane right under the price chart (OrderFlowPane.tsx).
   const [showFlow, setShowFlow] = usePersisted(sk("chart.showFlow"), true);
+  // The futures crowd under a crypto chart - liquidations, open interest, funding (CryptoPulsePane.tsx, asked
+  // 2026-11-21 for manual BTC trading). Only crypto charts have it.
+  const [showPulse, setShowPulse] = usePersisted(sk("chart.showPulse"), true);
+  const canPulse = assetClass === "crypto" && perpOf(symbol) != null;
+  const pulseOn = showPulse && canPulse;
   const [showSt, setShowSt] = usePersisted(sk("chart.showSt"), !scalp);
   const [showPb, setShowPb] = usePersisted(sk("chart.showPb"), !scalp);
   const [showBand, setShowBand] = usePersisted(sk("chart.showBand"), !scalp);
@@ -1963,10 +1971,11 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       localStorage.setItem("chart.rsiH", String(rsiH));
       localStorage.setItem("chart.macdH", String(macdH));
       localStorage.setItem("chart.flowH", String(flowH));
+      localStorage.setItem("chart.pulseH", String(pulseH));
     } catch {
       /* private mode / quota — the heights just won't survive a reload */
     }
-  }, [rsiH, macdH, flowH]);
+  }, [rsiH, macdH, flowH, pulseH]);
 
   // Create/destroy the RSI sub-pane chart when toggled; sync its time axis to the main chart.
   useEffect(() => {
@@ -2093,7 +2102,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [rsiBand, dataV, showMacd, showFlow, RSI_P]);
+  }, [rsiBand, dataV, showMacd, showFlow, pulseOn, RSI_P]);
 
   // Create/destroy the MACD sub-pane (histogram + macd/signal lines) when toggled; sync its time
   // axis to the main chart the same way the RSI pane does.
@@ -2267,10 +2276,10 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   // costs a row of chart.
   useEffect(() => {
     const secondsVisible = isSecondsTf(timeframe);
-    chartRef.current?.applyOptions({ timeScale: { secondsVisible, visible: !(scalp && (showFlow || showMacd || rsiPane)) } });
+    chartRef.current?.applyOptions({ timeScale: { secondsVisible, visible: !(scalp && (showFlow || showMacd || rsiPane || pulseOn)) } });
     rsiChartRef.current?.applyOptions({ timeScale: { secondsVisible, visible: !(scalp && showMacd) } });
     macdChartRef.current?.applyOptions({ timeScale: { secondsVisible } });
-  }, [timeframe, showRsi, showMacd, showFlow, rsiPane, scalp]);
+  }, [timeframe, showRsi, showMacd, showFlow, rsiPane, scalp, pulseOn]);
 
   useEffect(() => {
     // ovl.vwap is a dependency too: applyEmas draws the VWAP line, so without it the toggle would
@@ -5296,7 +5305,7 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           </ToolMenu>
 
           <ToolMenu icon={<Icon name="bars" />} label="Indicators"
-                    count={[showRsi, showRsi && showStoch, showMacd, showFlow, showSt, showPb, showStructure, showChannel, showFib, showHourRun].filter(Boolean).length}
+                    count={[showRsi, showRsi && showStoch, showMacd, showFlow, pulseOn, showSt, showPb, showStructure, showChannel, showFib, showHourRun].filter(Boolean).length}
                     open={menu === "ind"} onToggle={() => setMenu((m) => (m === "ind" ? null : "ind"))} width="w-72">
             <MenuItem on={showRsi} onClick={() => setShowRsi((v) => !v)} dot="#c084fc">RSI {RSI_P}</MenuItem>
             <div
@@ -5340,6 +5349,12 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
                       tip="Who pushed the price, buyers or sellers: each tick that lifted the price counts as buying, each that dropped it as selling. Exness sends no real volume, so this is an estimate from the ticks. Bars for each candle, buyers' share over the last N candles, and a quick check of whether a strong share was followed by price going the same way.">
               Order flow pane (buyers vs sellers)
             </MenuItem>
+            {canPulse && (
+              <MenuItem on={showPulse} onClick={() => setShowPulse((v) => !v)} dot="#fbbf24"
+                        tip="The futures crowd behind this coin, from the free public feeds: liquidations on each candle (OKX - green up = shorts forced out, red down = longs forced out), open interest (Binance, the amber line) and funding. The legend reads the last 15 min or 1 h: who is coming in or getting out. Display only, untested on our trades.">
+                Crypto pulse pane (liquidations · OI · funding)
+              </MenuItem>
+            )}
             <MenuItem on={showSt} onClick={() => setShowSt((v) => !v)} dot="#26a69a"
                       tip="SuperTrend (ATR 10 ×2.7) — green band = uptrend (support), red = downtrend (resistance)">
               SuperTrend
@@ -6357,6 +6372,20 @@ Click for the full breakdown. Info only — it gates nothing.`}
       })()}
       {/* Each pane keeps its dragged height in full screen too, so the price chart (flex-1) simply
           absorbs whatever height the indicators don't claim. */}
+      {pulseOn && (
+        <>
+          <PaneResizer height={pulseH} onChange={setPulseH} label="crypto pulse" />
+          <div className="relative shrink-0" style={{ height: pulseH }}>
+            <CryptoPulsePane
+              symbol={symbol} timeframe={timeframe} mainChart={chartRef} candles={candlesRef}
+              lastBarTime={() => (lastBarRef.current ? (lastBarRef.current.time as number) : null)}
+              dataV={dataV} toTime={toTime} toDisp={utcToDisp}
+              timeAxis={!(scalp && (showFlow || rsiPane || showMacd))} secondsVisible={isSecondsTf(timeframe)}
+              storeKey={sk}
+            />
+          </div>
+        </>
+      )}
       {showFlow && (
         <>
           <PaneResizer height={flowH} onChange={setFlowH} label="order flow" />

@@ -12,7 +12,8 @@ Every couple of minutes (learning_tick), for every strategy with closed trades:
          already gone (version 2, 2026-11-17). The engine writes it into its 'opened' log as it opens a trade
          (since 2026-11-13); older trades get it from MT5's history, read the same way - and a version-1 one gets
          the parts version 2 added. Its NOISE AREA reading (2026-11-19, history_noise) is always added afterwards
-         from MT5's history - it needs 14 days of 1m candles, too much to read while a trade opens.
+         from MT5's history - it needs 14 days of 1m candles, too much to read while a trade opens. A crypto
+         trade's AGGRESSIVE FLOW (2026-11-21, history_flow) is added the same way, from Binance's public 1m candles.
        - its WHAT-IFS: the same entry replayed with other targets and stop sizes (WHATIF_TARGETS x WHATIF_STOPS)
          on the broker's own prices - the ticks of its first minute, then 1-minute candles (as the journal's
          signal review does: signal_review.simulate). A bigger stop means smaller lots, so each outcome is in R:
@@ -35,8 +36,11 @@ Read-only on the broker: candles and ticks of the past (copy_rates_range / copy_
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import math
+import re
+import urllib.request
 from array import array
 from bisect import bisect_right
 from datetime import date, datetime, timedelta, timezone
@@ -77,6 +81,18 @@ NOISE_LOW = 0.5          # the noise part's "low" ends here (the clearest losers
 NOISE_OUT = 1.0          # past this = outside the noise area, our way (the paper's line)
 NOISE_TRIES = 3
 NOISE_BUDGET = 40        # noise readings per tick (fill_noise), apart from FILL_BUDGET
+# Aggressive flow on crypto (2026-11-21, the user: "add both: the flow on the pane, and let the learner watch it"):
+# of the volume traded in the FLOW_BARS finished 1m candles before the entry on Binance's USDT perpetual, the share
+# that was market BUYING (taker buys), minus a half, from the trade's side: + = the market orders went our way.
+# Studied 2026-11-21 on 6 months of 1m entries like ours (6,129, BTC + ETH) and the 64 real crypto trades: over the
+# last 15 min it made no difference; over the last 5, entries with the flow against them did a little worse in all
+# three 2-month periods (t -1.6) and on the real trades (18, -6.4R, t -1.85) - a hint, not proven. Watched only.
+FLOW_BARS = 5
+FLOW_CUT = 0.025        # within +-2.5 points of 50% = balanced
+FLOW_TRIES = 3
+FLOW_BUDGET = 30        # flow readings per tick (fill_flow), apart from the others
+FLOW_TIMEOUT_S = 6
+BINANCE_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 _DAY_CACHE: dict[tuple[str, str], tuple[float, array, array] | None] = {}   # (symbol, UTC day) -> a past day's 1m
 _DAY_CACHE_MAX = 1000                                                          # (open, minutes, closes), ~14 KB each
 
@@ -282,6 +298,46 @@ def history_noise(broker, symbol: str, side: int, entry: float, at: datetime,
 #  The what-ifs
 # --------------------------------------------------------------------------- #
 
+def perp_of(symbol: str) -> str | None:
+    """Exness "BTCUSDm" -> Binance's "BTCUSDT" perpetual; None for a symbol that is not COIN + USD."""
+    m = re.match(r"^([A-Z0-9]{2,10})USD$", re.sub(r"m$", "", (symbol or "").strip()).upper())
+    return f"{m.group(1)}USDT" if m else None
+
+
+def flow_of(side: int, rows: list, at_ms: int, bars: int = FLOW_BARS) -> float | None:
+    """The aggressive-flow reading of a ``side`` trade (1 buy, -1 sell) opened at ``at_ms``, from Binance 1m klines
+    ([open time, open, high, low, close, volume, close time, quote volume, trades, taker buy volume, ...]): the
+    taker-buy share of the ``bars`` candles that had FINISHED by then, minus 0.5, signed to the trade. None with
+    fewer candles or no volume."""
+    done = [r for r in rows or [] if int(r[0]) + 60_000 <= at_ms][-bars:]
+    if len(done) < bars:
+        return None
+    vol = sum(float(r[5]) for r in done)
+    buy = sum(float(r[9]) for r in done)
+    if vol <= 0:
+        return None
+    return round((buy / vol - 0.5) * side, 4)
+
+
+def _get_json(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": "trading-app"})
+    with urllib.request.urlopen(req, timeout=FLOW_TIMEOUT_S) as r:   # noqa: S310 - a fixed https host
+        return json.load(r)
+
+
+def history_flow(symbol: str, side: int, at: datetime, fetch=None) -> float | None:
+    """flow_of from Binance's public 1m klines (no key; nothing about the account is sent). Raises when Binance
+    does not answer, so the caller counts a try."""
+    perp = perp_of(symbol)
+    if not perp:
+        return None
+    at_ms = int(_utc(at).timestamp() * 1000)
+    start = at_ms - (FLOW_BARS + 3) * 60_000
+    rows = (fetch or _get_json)(f"{BINANCE_KLINES}?symbol={perp}&interval=1m&startTime={start}&endTime={at_ms}"
+                                f"&limit={FLOW_BARS + 5}")
+    return flow_of(side, rows, at_ms)
+
+
 def whatif_key(target: float, stop: float) -> str:
     return f"t{target:g}|s{stop:g}"
 
@@ -485,6 +541,11 @@ FEATURES: dict[str, tuple[str, object]] = {
         "deep in the noise area: the day had moved under half its usual move from the open our way (or against us)",
         "in the noise area: the day had moved 0.5-1x its usual move from the open our way",
         "outside the noise area: the day had already moved more than usual from its open, our way"))),
+    # 2026-11-21, the user: "let the learner watch the aggressive flow" (crypto only: history_flow)
+    "flow": ("aggressive flow (crypto, last 5 min)", _three("flow", (-FLOW_CUT, FLOW_CUT), (
+        "aggressive flow AGAINST the trade: market orders mostly the other way in the last 5 min (Binance)",
+        "aggressive flow balanced in the last 5 min (Binance)",
+        "aggressive flow WITH the trade: market orders mostly our way in the last 5 min (Binance)"))),
     "spread":("spread", _three("spread_pct", (10, 20), (
         "spread under 10% of the 1m ATR", "spread 10-20% of the 1m ATR", "spread 20%+ of the 1m ATR"))),
     "pair": ("pair", lambda f: (f["symbol"], f["symbol"])),
@@ -1163,6 +1224,45 @@ def fill_noise(session: Session, cfg: StrategyConfig, broker_for, now: datetime,
     return done
 
 
+def fill_flow(session: Session, cfg: StrategyConfig, now: datetime, budget: int = FLOW_BUDGET, fetch=None) -> int:
+    """Give up to ``budget`` crypto fingerprints their aggressive-flow reading (history_flow), once each. A failed
+    read is tried FLOW_TRIES times ("flow_tries"); the first failure ends this tick's reads, so a Binance outage
+    costs one timeout, not ``budget``. Returns the reads made."""
+    from app.risk.service import _norm_symbol
+
+    markets = markets_of(session, cfg)
+    need = (StrategyTradeFact.fp.is_not(None)
+            & func.json_type(StrategyTradeFact.fp, "$.flow").is_(None)
+            & (func.coalesce(func.json_extract(StrategyTradeFact.fp, "$.flow_tries"), 0) < FLOW_TRIES))
+    rows = session.scalars(select(StrategyTradeFact).where(StrategyTradeFact.strategy_id == cfg.id, need)
+                           .order_by(StrategyTradeFact.opened_at.desc())).all()
+    done = 0
+    for row in rows:
+        if done >= budget:
+            break
+        if markets.get(_norm_symbol(row.symbol)) != "crypto" or not perp_of(row.symbol):
+            continue
+        done += 1
+        side = 1 if row.side == "long" else -1
+        failed = False
+        try:
+            fl = history_flow(row.symbol, side, _utc(row.opened_at), fetch)
+        except Exception as exc:  # noqa: BLE001
+            log.info("learning: flow failed", extra={"symbol": row.symbol, "error": str(exc)})
+            fl, failed = None, True
+        fp = dict(row.fp or {})
+        if fl is not None:
+            fp.pop("flow_tries", None)
+            fp["flow"] = fl
+        else:
+            fp["flow_tries"] = int(fp.get("flow_tries") or 0) + 1
+        row.fp = fp
+        if failed:
+            break
+    session.flush()
+    return done
+
+
 # --------------------------------------------------------------------------- #
 #  The view the board shows
 # --------------------------------------------------------------------------- #
@@ -1298,8 +1398,8 @@ def learning_tick(session: Session, now: datetime | None = None, broker_for=None
         from app.api.strategy_routes import _config_of as config_of
     if book is None:
         book = _book(session)
-    out = {"strategies": len(cfgs), "new": 0, "filled": 0, "noise": 0, "found": []}
-    budget, noise_budget = FILL_BUDGET, NOISE_BUDGET
+    out = {"strategies": len(cfgs), "new": 0, "filled": 0, "noise": 0, "flow": 0, "found": []}
+    budget, noise_budget, flow_budget = FILL_BUDGET, NOISE_BUDGET, FLOW_BUDGET
     for cfg in cfgs:
         src = strategy_source(cfg)
         trades = [(v, row) for v, row in book if (v.source or "") == src]
@@ -1315,6 +1415,10 @@ def learning_tick(session: Session, now: datetime | None = None, broker_for=None
             n = fill_noise(session, cfg, broker_for, now, noise_budget)
             noise_budget -= n
             out["noise"] += n
+        if flow_budget > 0:
+            n = fill_flow(session, cfg, now, flow_budget)
+            flow_budget -= n
+            out["flow"] += n
         view = build(session, cfg, config_of(cfg), now)
         seen = decisions(session, cfg.id)["seen"]
         for p in view["lessons"] + view["ignored"]:
