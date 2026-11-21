@@ -9,7 +9,9 @@ import type { FundsOp } from "../types";
  * MT5 cannot move money, so the withdrawal itself is made in the Exness Personal Area (login + code): the page
  * opens it, says how much Exness will pay out now (the free margin), works out what a withdrawal does to the
  * account, and keeps the record of every deposit and withdrawal straight from MT5's balance deals (GET
- * /api/broker/funds) - a new one shows up within seconds of Exness booking it. Read-only. */
+ * /api/broker/funds) - a new one shows up within seconds of Exness booking it. Read-only. A withdrawal that came
+ * straight back (and the deposit that brought it back) is not shown at all (the user, same night: "clean out
+ * anything that went wrong and came back"); the totals never counted them. */
 
 // The Personal Area's address. Exness sends a signed-out visitor to its sign-in and then to the Personal Area,
 // whose menu has Withdrawal; the user can pin the exact page once (kept in this browser).
@@ -49,10 +51,6 @@ function fmtUtc(iso: string): string {
   return `${new Date(iso).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
-function fmtGap(s: number): string {
-  return s < 120 ? `${s} s` : `${Math.round(s / 60)} min`;
-}
-
 function Tile({ label, value, tone = "text-neutral-100", sub, hint }: {
   label: string; value: string; tone?: string; sub?: string; hint?: string;
 }) {
@@ -81,7 +79,6 @@ export function WithdrawView() {
   const [draft, setDraft] = useState("");
   const [amountText, setAmountText] = useState("");
   const [filter, setFilter] = useLocalStorage<Filter>("ta.withdrawFilter", "all");
-  const [showReturned, setShowReturned] = useLocalStorage<boolean>("ta.withdrawShowReturned", false);
 
   // Rows that appear while the page is open (a withdrawal just made on Exness) are lit for a while.
   const seenRef = useRef<Set<number> | null>(null);
@@ -117,8 +114,8 @@ export function WithdrawView() {
   const rows = useMemo(() => {
     if (!data) return [];
     const kinds = FILTERS.find((f) => f.id === filter)?.kinds ?? [];
-    return data.ops.filter((o) => (kinds.length === 0 || kinds.includes(o.kind)) && (showReturned || !o.returned));
-  }, [data, filter, showReturned]);
+    return data.ops.filter((o) => !o.returned && (kinds.length === 0 || kinds.includes(o.kind)));
+  }, [data, filter]);
 
   const tot = data?.totals;
   const cur = data?.currency && data.currency !== "USD" ? ` ${data.currency}` : "";
@@ -276,7 +273,7 @@ export function WithdrawView() {
                       hint="Deposits plus transfers in from your other Exness accounts" />
                 <Tile label="Taken out" value={money(tot.money_out)} tone="text-bear"
                       sub={`${tot.withdrawals_n} withdrawal${tot.withdrawals_n === 1 ? "" : "s"}${tot.transfers_out ? ` (${money(tot.transfers_out)} transfers)` : ""}`}
-                      hint="Withdrawals plus transfers out to your other Exness accounts. Withdrawals that came straight back are not counted." />
+                      hint="Withdrawals plus transfers out to your other Exness accounts." />
                 <Tile label="Net put in" value={money(tot.net_in)} hint="Put in minus taken out" />
                 <Tile label="Balance now" value={money(data!.balance)} sub={`equity ${money(data!.equity)}`} />
                 <Tile
@@ -304,11 +301,6 @@ export function WithdrawView() {
                   </span>
                 )}
                 {tot.dividends !== 0 && <span title={KIND.dividend.hint}>index dividends {money(tot.dividends, true)}</span>}
-                {tot.returned_n > 0 && (
-                  <span title="A withdrawal followed within minutes by a deposit of the same amount to the same method: the money came back to the account, so neither is counted.">
-                    {tot.returned_n} withdrawal{tot.returned_n > 1 ? "s" : ""} came straight back (not counted)
-                  </span>
-                )}
               </div>
             </>
           ) : (
@@ -334,12 +326,6 @@ export function WithdrawView() {
               {f.label}
             </button>
           ))}
-          {!!tot?.returned_n && (
-            <label className="ml-1 flex cursor-pointer items-center gap-1 text-xs text-neutral-400">
-              <input type="checkbox" checked={showReturned} onChange={(e) => setShowReturned(e.target.checked)} />
-              show the {tot.returned_n * 2} that came straight back
-            </label>
-          )}
           <span className="ml-auto text-[11px] text-neutral-500">
             from MT5 · times on your clock{data ? ` · read ${new Date(data.read_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}
           </span>
@@ -365,20 +351,15 @@ export function WithdrawView() {
                   return (
                     <tr
                       key={o.ticket}
-                      className={`border-t border-neutral-800/70 ${o.returned ? "text-neutral-500" : ""} ${fresh.has(o.ticket) ? "bg-amber-400/10" : ""}`}
+                      className={`border-t border-neutral-800/70 ${fresh.has(o.ticket) ? "bg-amber-400/10" : ""}`}
                     >
                       <td className="py-1.5 pr-3 tabular-nums" title={fmtUtc(o.time)}>{fmtWhen(o.time)}</td>
                       <td className="py-1.5 pr-3">
-                        <span className={o.returned ? "" : k.tone} title={k.hint}>{k.label}</span>
-                        {o.returned && o.back_after_s != null && (
-                          <span className="ml-1.5 text-[11px]" title="A withdrawal and a deposit of the same amount to the same method minutes apart: the money came back, so neither is counted in the totals.">
-                            ↩ {o.kind === "withdrawal" ? `came back ${fmtGap(o.back_after_s)} later` : "the money coming back"}
-                          </span>
-                        )}
+                        <span className={k.tone} title={k.hint}>{k.label}</span>
                         {fresh.has(o.ticket) && <span className="ml-1.5 rounded bg-amber-400/20 px-1 text-[10px] text-amber-200">new</span>}
                       </td>
                       <td className="py-1.5 pr-3 text-neutral-400">{o.method ?? "—"}</td>
-                      <td className={`py-1.5 pr-3 text-right font-medium tabular-nums ${o.returned ? "" : o.amount >= 0 ? "text-bull" : "text-bear"}`}>
+                      <td className={`py-1.5 pr-3 text-right font-medium tabular-nums ${o.amount >= 0 ? "text-bull" : "text-bear"}`}>
                         {money(o.amount, true)}
                       </td>
                       <td className="py-1.5 pr-3 text-right tabular-nums text-neutral-300">{money(o.balance_after)}</td>
