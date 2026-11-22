@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
@@ -99,23 +101,28 @@ def _pair_app_rows(session: Session, trades: list[PositionView]) -> dict[int, Po
         select(Position).where(Position.status == PositionStatus.CLOSED.value,
                                Position.source.is_not(None))
     ).all()
-    by_key: dict[tuple[str, str], list[int]] = {}
+    # Each row's values read once (2026-11-22): read off the ORM rows inside the trades x rows loop they cost
+    # ~110k attribute reads and _family() calls - a quarter of a second on every Journal card's request.
+    by_key: dict[tuple[str, str], list[tuple[int, str, float, datetime | None, datetime | None]]] = {}
     for i, p in enumerate(rows):
-        by_key.setdefault((_norm_symbol(p.symbol), p.direction), []).append(i)
+        by_key.setdefault((_norm_symbol(p.symbol), p.direction), []).append(
+            (i, _family(p.source), p.entry_price or 0.0, _utc(p.opened_at), _utc(p.closed_at)))
     pairs = []
     for j, bt in enumerate(trades):
         tag = bt.source or "app"
-        for i in by_key.get((_norm_symbol(bt.symbol), bt.direction), ()):
-            p = rows[i]
-            if tag != "app" and _family(p.source) != _family(tag):
+        ftag = _family(tag)
+        bent = bt.entry_price or 0.0
+        be = max(abs(bent), 1e-9)
+        bop, bcl = _utc(bt.opened_at), _utc(bt.closed_at)
+        for i, fam, pent, pop, pcl in by_key.get((_norm_symbol(bt.symbol), bt.direction), ()):
+            if tag != "app" and fam != ftag:
                 continue                         # the broker's record says someone else opened it
-            be = abs(bt.entry_price or 0.0)
-            rel = abs((p.entry_price or 0.0) - (bt.entry_price or 0.0)) / max(be, 1e-9)
+            rel = abs(pent - bent) / be
             if rel > 0.005:
                 continue
-            pt, bt_t = _utc(p.opened_at), _utc(bt.opened_at)
+            pt, bt_t = pop, bop
             if not (pt and bt_t):
-                pt, bt_t = _utc(p.closed_at), _utc(bt.closed_at)
+                pt, bt_t = pcl, bcl
             if not (pt and bt_t):
                 continue
             dt = abs((pt - bt_t).total_seconds())
@@ -151,7 +158,35 @@ def _attribute_sources(session: Session, broker_trades: list[PositionView]) -> d
     return pairs
 
 
+# The journal book is built once and shared by the cards for this long (2026-11-22, the user: "the Journal is slow"):
+# its 7 cards each rebuilt it - the broker's 120-day history read and paired with the app's rows - on their own
+# 8-30 s polls, all at once when the page opens. The rows are detached from the request that read them and only
+# read after that (nothing here writes a journal row). A trade closed a moment ago shows within this.
+_BOOK_TTL_S = 6.0
+_BOOK_LOCK = threading.Lock()
+_BOOK: dict = {}
+
+
+def _forget_book() -> None:
+    with _BOOK_LOCK:
+        _BOOK.clear()
+
+
 def _journal_book(session: Session) -> list[tuple[PositionView, Position | None]]:
+    """_build_book, shared for _BOOK_TTL_S (one build at a time: the cards that ask together wait for it). Each
+    caller gets its own copies of the trades."""
+    key = str(get_or_create_settings(session).journal_reset_at)
+    with _BOOK_LOCK:
+        if not (_BOOK.get("key") == key and time.monotonic() - _BOOK.get("at", -1e9) < _BOOK_TTL_S):
+            book = _build_book(session)
+            for _v, row in book:
+                if row is not None and row in session:
+                    session.expunge(row)
+            _BOOK.update(key=key, at=time.monotonic(), book=book)
+        return [(v.model_copy(), row) for v, row in _BOOK["book"]]
+
+
+def _build_book(session: Session) -> list[tuple[PositionView, Position | None]]:
     """Every closed trade of the journal, newest first, each tagged with the trading session it OPENED in
     (app.core.sessions), with the app's own row for it when the app placed it (None: a phone / terminal trade).
 
@@ -525,6 +560,7 @@ def reset_journal(session: Session = Depends(get_session)) -> JournalResetView:
     """Start a FRESH journal from now: the trade log, stats, and calibration then only count trades
     closed at/after this moment. Non-destructive — the broker's full deal history is untouched; call
     DELETE /journal/reset to show everything again."""
+    _forget_book()
     settings = get_or_create_settings(session)
     settings.journal_reset_at = datetime.now(timezone.utc)
     session.commit()
@@ -534,6 +570,7 @@ def reset_journal(session: Session = Depends(get_session)) -> JournalResetView:
 @router.delete("/reset", response_model=JournalResetView)
 def clear_journal_reset(session: Session = Depends(get_session)) -> JournalResetView:
     """Undo the reset marker — show the full trade history again (nothing was ever deleted)."""
+    _forget_book()
     settings = get_or_create_settings(session)
     settings.journal_reset_at = None
     session.commit()
@@ -561,6 +598,7 @@ def backfill(session: Session = Depends(get_session)) -> BackfillResult:
 
     Idempotent: a second run changes nothing.
     """
+    _forget_book()
     from app.execution.monitor import correct_realized_pnl_from_broker, fill_realized_pnl_from_broker
 
     # 1. Source: legacy NULL -> "analysis" (the recorded source of the analysis pipeline).

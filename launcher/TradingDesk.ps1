@@ -3,7 +3,8 @@ AI Trading Desk launcher (2026-11-21, the user: "start the app without VS Code -
 start / stop button").
 
 Opens a small window that starts what is not running yet - MetaTrader 5, the backend (uvicorn on 8001, with
---reload as in development) and the desk's screen server (vite on 5173) - then opens the desk in Chrome. The
+--reload as in development) and the desk's screen server (vite on 5173) - then opens the desk in its app window
+(the web app Chrome installed for it, see Open-Desk). The
 window shows what runs, the LIVE state and the open trades, with Open desk / Start / Stop.
 
 Closing the window does NOT stop the app: the backend is what manages the trades (strategy, close rules, follow
@@ -28,7 +29,8 @@ $ErrorActionPreference = "Continue"
 $Root = Split-Path -Parent $PSScriptRoot
 $BackendDir = Join-Path $Root "backend"
 $FrontendDir = Join-Path $Root "frontend"
-$LogDir = Join-Path $Root "logs"
+# Logs outside OneDrive (2026-11-22): OneDrive re-uploaded the growing log - and the database - all the time.
+$LogDir = Join-Path $env:LOCALAPPDATA "AITradingDesk\logs"
 $Py = Join-Path $BackendDir ".venv\Scripts\python.exe"
 $Runner = Join-Path $PSScriptRoot "run_backend.py"
 $Vite = Join-Path $FrontendDir "node_modules\vite\bin\vite.js"
@@ -56,10 +58,16 @@ function Test-Listening([int]$Port) {
 
 function Get-DeskState {
   $s = @{ Mt5 = $false; BackendPort = $false; BackendOk = $false; Reconfirm = $false; BrokerEnv = $null; Kill = $false
-          FrontPort = $false; Trades = $null }
+          FrontPort = $false; Trades = $null; BackendProc = $false; FrontProc = $false }
   $s.Mt5 = [bool](Get-Process terminal64 -ErrorAction SilentlyContinue)
   $s.BackendPort = Test-Listening $BackendPort
   $s.FrontPort = Test-Listening $FrontPort
+  # The processes too: a starting backend has no listening port for its first ~15-20 s (uvicorn's reloader binds
+  # the port, its worker only listens once the app has started) - judged by the port alone, a second Start then
+  # started a second backend (2026-11-21 10:14; the scheduler lock put it in standby).
+  # Process lists (WMI) only while a port is not up yet: asked every 3 s they cost the window ~13% of a core.
+  $s.BackendProc = if ($s.BackendPort) { $true } else { (Get-BackendRoots).Count -gt 0 }
+  $s.FrontProc = if ($s.FrontPort) { $true } else { (Get-FrontendRoots).Count -gt 0 }
   if ($s.BackendPort) {
     try {
       $set = Invoke-RestMethod "$Api/api/settings" -TimeoutSec 3
@@ -110,7 +118,8 @@ function Start-Mt5 {
 }
 
 function Start-Backend {
-  if (Test-Listening $BackendPort) { return $null }
+  # Not when one runs or is starting (its port only listens once the app is up - see Get-DeskState).
+  if ((Test-Listening $BackendPort) -or (Get-BackendRoots).Count -gt 0) { return $null }
   if (-not (Test-Path $Py)) { return "The backend's Python was not found: $Py" }
   New-Item -ItemType Directory -Force $LogDir | Out-Null
   $log = Join-Path $LogDir "backend.log"
@@ -127,7 +136,8 @@ function Start-Backend {
 }
 
 function Start-Frontend([int]$Port = $FrontPort, [string]$LogName = "frontend") {
-  if (Test-Listening $Port) { return $null }
+  $mine = if ($Port -eq $FrontPort) { Get-FrontendRoots } else { Get-FrontendRoots -Port $Port }
+  if ((Test-Listening $Port) -or $mine.Count -gt 0) { return $null }
   if (-not $Node) { return "Node.js was not found." }
   New-Item -ItemType Directory -Force $LogDir | Out-Null
   $argv = @("`"$Vite`"", "--port", "$Port", "--strictPort")
@@ -136,8 +146,19 @@ function Start-Frontend([int]$Port = $FrontPort, [string]$LogName = "frontend") 
   return $p
 }
 
+# The desk in its own app window (2026-11-22, the user: "don't open it in the browser for me to click Open in app -
+# open the app straight away"): the web app Chrome installed for it ("Open in app"), found by its Start menu
+# shortcut. Without one, Chrome's app mode on the desk's address; without Chrome, the default browser.
+function Find-DeskApp {
+  $dir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Chrome Apps"
+  return Get-ChildItem $dir -Filter "*Trading Desk*.lnk" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+}
+
 function Open-Desk {
-  if ($Chrome) { Start-Process -FilePath $Chrome -ArgumentList $DeskUrl } else { Start-Process $DeskUrl }
+  $app = Find-DeskApp
+  if ($app) { Start-Process -FilePath $app }
+  elseif ($Chrome) { Start-Process -FilePath $Chrome -ArgumentList "--app=$DeskUrl" }
+  else { Start-Process $DeskUrl }
 }
 
 function Stop-Desk([scriptblock]$Pump) {
@@ -184,6 +205,7 @@ if ($Status) {
   "Stop would end : backend " + ((Get-BackendRoots | ForEach-Object { "$($_.ProcessId)" }) -join ",") +
     " | screen server " + ((Get-FrontendRoots | ForEach-Object { "$($_.ProcessId)" }) -join ",")
   "Python $Py | Node $Node | Chrome $Chrome"
+  "Desk app (opened by Open desk): " + $(if (Find-DeskApp) { Find-DeskApp } else { "none installed - Chrome app mode on $DeskUrl" })
   exit 0
 }
 
@@ -332,28 +354,30 @@ function Update-View {
 
   if ($s.BackendOk) {
     if ($s.Kill) { Set-Row $rowBe $cRed "running $Mid kill-switch ON" }
-    elseif ($s.BrokerEnv -eq "live" -and $s.Reconfirm) { Set-Row $rowBe $cAmber "running $Mid type LIVE in the desk to trade" }
+    elseif ($s.BrokerEnv -eq "live" -and $s.Reconfirm) { Set-Row $rowBe $cAmber "running $Mid press Confirm LIVE in the desk" }
     elseif ($s.BrokerEnv -eq "live") { Set-Row $rowBe $cGreen "running $Mid LIVE on" }
     else { Set-Row $rowBe $cGreen "running $Mid $($s.BrokerEnv)" }
   }
-  elseif ($starting) { Set-Row $rowBe $cAmber ("starting" + $Ell + " (about 20 s)") }
+  elseif ($starting -or ($s.BackendProc -and -not $s.BackendPort)) { Set-Row $rowBe $cAmber ("starting" + $Ell + " (about 20 s)") }
   elseif ($s.BackendPort) { Set-Row $rowBe $cAmber "not answering - Stop, then Start" }
   else { Set-Row $rowBe $cRed "stopped" }
 
   if ($s.FrontPort) { Set-Row $rowFe $cGreen "running $Mid localhost:$FrontPort" }
-  elseif ($starting) { Set-Row $rowFe $cAmber ("starting" + $Ell) }
+  elseif ($starting -or $s.FrontProc) { Set-Row $rowFe $cAmber ("starting" + $Ell) }
   else { Set-Row $rowFe $cRed "stopped" }
 
   if ($s.BackendOk -and $null -ne $s.Trades) { $lblTrades.Text = "Open trades: $($s.Trades)" } else { $lblTrades.Text = "" }
 
   $allUp = $s.Mt5 -and $s.BackendOk -and $s.FrontPort
   if ($allUp) { $lblSub.Text = "Everything is running." }
-  elseif ($starting) { $lblSub.Text = "Starting - the desk opens in Chrome when it is ready." }
+  elseif ($starting) { $lblSub.Text = "Starting - the desk opens in its app window when it is ready." }
   elseif (-not ($s.BackendPort -or $s.FrontPort)) { $lblSub.Text = "The app is off. Start turns it on." }
   else { $lblSub.Text = "Part of the app is not running - Start starts the rest." }
 
-  $btnStart.Enabled = (-not $allUp) -and (-not $script:busy)
-  $btnStop.Enabled = ($s.BackendPort -or $s.FrontPort) -and (-not $script:busy)
+  # Start stays off while a start is under way (the second backend of 2026-11-21 came from a Start during one).
+  $startingNow = $starting -or ($s.BackendProc -and -not $s.BackendOk -and -not $s.BackendPort)
+  $btnStart.Enabled = (-not $allUp) -and (-not $script:busy) -and (-not $startingNow)
+  $btnStop.Enabled = ($s.BackendPort -or $s.FrontPort -or $s.BackendProc -or $s.FrontProc) -and (-not $script:busy)
   $btnOpen.Enabled = $s.FrontPort -and (-not $script:busy)
   foreach ($b in @($btnOpen, $btnStart, $btnStop)) { if ($b.Enabled) { $b.ForeColor = [System.Drawing.Color]::White } else { $b.ForeColor = $cGrey } }
 

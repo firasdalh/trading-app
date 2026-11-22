@@ -34,6 +34,10 @@ function detailText(detail: unknown): string {
     .join("; ");
 }
 
+/** The phrase the server checks before LIVE trading (config.live_confirm_phrase). Typed once to switch from paper to
+ * LIVE; a re-confirm after a restart is one click and sends it (api.liveReconfirm). */
+export const LIVE_PHRASE = "I understand this trades real money";
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -283,6 +287,32 @@ export const api = {
     request<SettingsResponse>("/api/settings/broker-env", {
       method: "POST",
       body: JSON.stringify({ env, confirm_phrase: confirmPhrase }),
+    }),
+  // Re-confirm LIVE after a restart in one click (2026-11-22, the user: "I don't want to write this confirmation
+  // every time - just a confirm button"): the phrase the server checks (config.live_confirm_phrase) is sent for you.
+  liveReconfirm: () =>
+    request<SettingsResponse>("/api/settings/live-confirm", {
+      method: "POST",
+      body: JSON.stringify({ confirm_phrase: LIVE_PHRASE }),
+    }),
+  // Follow the target on a manual trade (2026-11-22): on (target = its take profit now unless given), move the
+  // target (the chart's 🎯 line), off.
+  followOn: (symbol: string, assetClass: AssetClass, direction: string, target?: number) =>
+    request<Record<string, unknown>>("/api/positions/follow", {
+      method: "POST", body: JSON.stringify({ symbol, asset_class: assetClass, direction, target: target ?? null }),
+    }),
+  followMove: (symbol: string, assetClass: AssetClass, direction: string, target: number) =>
+    request<Record<string, unknown>>("/api/positions/follow/target", {
+      method: "POST", body: JSON.stringify({ symbol, asset_class: assetClass, direction, target }),
+    }),
+  followSettings: () => request<import("../types").ManualFollowSettings>("/api/positions/follow/settings"),
+  saveFollowSettings: (patch: Partial<import("../types").ManualFollowSettings>) =>
+    request<import("../types").ManualFollowSettings>("/api/positions/follow/settings", {
+      method: "POST", body: JSON.stringify(patch),
+    }),
+  followOff: (symbol: string, assetClass: AssetClass, direction: string) =>
+    request<{ off: boolean; take_profit?: number | null }>("/api/positions/follow/off", {
+      method: "POST", body: JSON.stringify({ symbol, asset_class: assetClass, direction }),
     }),
   liveConfirm: (confirmPhrase: string) =>
     request<SettingsResponse>("/api/settings/live-confirm", {

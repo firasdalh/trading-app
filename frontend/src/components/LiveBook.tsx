@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { api } from "../api/client";
 import { displaySymbol, fmtPrice, fmtUsd } from "../format";
-import type { PositionAdvice, PositionView } from "../types";
+import type { AssetClass, PositionAdvice, PositionView } from "../types";
 import { FollowRail, RideBanner, RideRail, rideCard, useRide, type RailLevel } from "./TargetRide";
+
+// Follow past the take profit on a manual trade (2026-11-22) - what it does, for the tooltips.
+const FOLLOW_HINT = "The app keeps this target - drag the 🎯 line on the chart to move it - and the broker's take profit moves 2R past it as a safety net. At the target: with the 30s SuperTrend on the trade's side the stop locks just short of the target and then trails the 30s line (it closes when the line turns); otherwise the profit is taken there. Same rule as the strategy's 🎯 follow past it.";
 
 /**
  * The desk's right-hand sidebar building blocks: the live book you must always be able to see.
@@ -260,6 +264,7 @@ export function OpenPositionsList({
   onChart,
   onClose,
   onAdvice,
+  onChanged,
 }: {
   positions: PositionView[] | null;
   /** The advisor's latest read per position (may be stale by one poll; null = not loaded). */
@@ -271,6 +276,8 @@ export function OpenPositionsList({
   onChart: (p: PositionView) => void;
   onClose: (p: PositionView) => Promise<void> | void;
   onAdvice: (p: PositionView) => void;
+  /** Re-read the positions (after the card's 🎯 Follow switch). */
+  onChanged?: () => void;
 }) {
   if (positions == null) {
     return <div className="px-3 py-3 text-xs text-neutral-500">Loading positions…</div>;
@@ -299,6 +306,7 @@ export function OpenPositionsList({
           onChart={onChart}
           onClose={onClose}
           onAdvice={onAdvice}
+          onChanged={onChanged}
         />
       ))}
     </ul>
@@ -314,6 +322,7 @@ function PositionCard({
   onChart,
   onClose,
   onAdvice,
+  onChanged,
 }: {
   p: PositionView;
   advice: PositionAdvice | null;
@@ -323,8 +332,26 @@ function PositionCard({
   onChart: (p: PositionView) => void;
   onClose: (p: PositionView) => Promise<void> | void;
   onAdvice: (p: PositionView) => void;
+  onChanged?: () => void;
 }) {
   const isLong = p.direction === "long";
+  // Follow the target on a manual trade (2026-11-22): the card's switch. A strategy's trade follows with its board.
+  const manual = !(p.source ?? "").startsWith("strategy:");
+  const [followBusy, setFollowBusy] = useState(false);
+  const [followErr, setFollowErr] = useState<string | null>(null);
+  const toggleFollow = async () => {
+    setFollowBusy(true);
+    setFollowErr(null);
+    try {
+      if (p.follow_manual) await api.followOff(p.symbol, p.asset_class as AssetClass, p.direction);
+      else await api.followOn(p.symbol, p.asset_class as AssetClass, p.direction);
+      onChanged?.();
+    } catch (e) {
+      setFollowErr(e instanceof Error ? e.message.replace(/^\d+: /, "") : String(e));
+    } finally {
+      setFollowBusy(false);
+    }
+  };
   const last = p.last_price;
   const sl = p.stop_loss;
   const tp = p.take_profit;
@@ -469,8 +496,29 @@ function PositionCard({
         >
           Advice
         </button>
+        {manual && (p.direction === "long" || p.direction === "short") && (
+          <button
+            onClick={() => void toggleFollow()}
+            disabled={followBusy}
+            aria-pressed={!!p.follow_manual}
+            className={`btn px-2 py-1 text-xs ${p.follow_manual ? "bg-amber-500/90 text-neutral-950 hover:bg-amber-400" : "btn-subtle"}`}
+            title={p.follow_manual
+              ? (p.following
+                ? "Past the target: the stop follows the 30s SuperTrend. Click to stop following (the stop and the safety take profit stay where they are)."
+                : "Following: the app keeps the 🎯 target (drag it on the chart). Click to stop - the take profit goes back to the target.")
+              : `Follow past the take profit. ${FOLLOW_HINT}`}
+          >
+            {followBusy ? "…" : p.follow_manual ? (p.following ? "🎯 Riding" : "🎯 Following") : "🎯 Follow"}
+          </button>
+        )}
         <CloseButton p={p} onClose={onClose} />
       </div>
+      {followErr && (
+        <div className="mt-1.5 flex items-start gap-2 rounded bg-warn/10 px-2 py-1 text-[11px] text-warn">
+          <span>🎯 {followErr}</span>
+          <button onClick={() => setFollowErr(null)} className="ml-auto text-neutral-400 hover:text-neutral-200" aria-label="Dismiss">✕</button>
+        </div>
+      )}
     </li>
   );
 }

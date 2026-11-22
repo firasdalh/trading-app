@@ -155,6 +155,17 @@ def _strategy_tick() -> None:
         log.warning("strategy tick failed", extra={"error": str(exc)})
 
 
+def _backup_tick() -> None:
+    """A copy of the database outside OneDrive (app/core/backup.py, 2026-11-22). Reads only."""
+    from app.core.backup import backup_now
+
+    try:
+        out = backup_now()
+        log.info("database backed up", extra={"to": str(out)})
+    except Exception as exc:  # noqa: BLE001 - a failed copy never touches the app
+        log.warning("database backup failed", extra={"error": str(exc)})
+
+
 def _conditional_tick() -> None:
     """Watch armed conditional setups: expire stale ones, and on a confirmed trigger re-check +
     open. Its own job/session so a firing setup (which runs the full analysis) never delays the
@@ -233,6 +244,11 @@ def _register_monitor_job() -> None:
     # Every 2 min: each strategy's study of its own closed trades (reads the broker's history, changes nothing).
     sched.add_job(_learning_tick, "interval", seconds=120, id="strategy_learning",
                   replace_existing=True, max_instances=1)
+    # Every day, and 2 minutes after a start: a copy of the database outside OneDrive (app/core/backup.py).
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    sched.add_job(_backup_tick, "interval", hours=24, id="db_backup", replace_existing=True, max_instances=1,
+                  next_run_time=_dt.now(_tz.utc) + _td(minutes=2))
     log.info("position monitor (10s) + scanner (20s) + advisor (30s) + hybrid (60s) + "
              "conditional watch (15s) + rsi-over watch (60s) + strategies (1s) + shadow-eval (600s) + "
              "strategy learning (120s) scheduled")

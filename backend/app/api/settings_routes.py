@@ -748,6 +748,18 @@ def live_positions(session: Session = Depends(get_session)) -> list[PositionView
                 p.follow_target, p.following = fe.get("target"), fe.get("mode") == "following"
     except Exception as exc:  # noqa: BLE001
         log.warning("follow target lookup failed", extra={"error": str(exc)})
+    # ... and for a manual trade the user switched it on for (manual_follow.py).
+    try:
+        from app.agents import manual_follow
+
+        mlv = manual_follow.levels(session)
+        for p in out:
+            fe = mlv.get((_norm_symbol(p.symbol), p.direction))
+            if fe:
+                p.follow_target, p.following = fe.get("target"), fe.get("mode") == "following"
+                p.follow_manual = True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("manual follow lookup failed", extra={"error": str(exc)})
 
     for i, p in enumerate(out):
         p.id = i + 1
@@ -993,6 +1005,70 @@ class LiveCloseRequest(BaseModel):
     # The side of the trade being closed. Without it every ticket on the symbol closed, including an
     # opposite hedge or a trade placed from the terminal (None = all, the old behaviour).
     direction: Literal["long", "short"] | None = None
+
+
+class FollowRequest(BaseModel):
+    symbol: str
+    asset_class: AssetClass = AssetClass.FOREX
+    direction: Literal["long", "short"]
+    target: float | None = None          # start: the take profit now when None; move: the new target
+
+
+def _follow_call(fn, *args) -> dict:
+    from app.agents.manual_follow import FollowRefused
+
+    try:
+        return fn(*args)
+    except FollowRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/positions/follow", tags=["positions"])
+def follow_on(req: FollowRequest, session: Session = Depends(get_session)) -> dict:
+    """Follow the target on a manual trade (2026-11-22): the app keeps the target (``target``, else its take
+    profit now) and moves the broker's take profit 2R past it as a safety net; at the target the strategy's rule
+    (30s SuperTrend with the trade -> lock + trail, else take it). See agents/manual_follow.py."""
+    from app.agents import manual_follow
+
+    return _follow_call(manual_follow.start, session, req.symbol, req.asset_class.value, req.direction, req.target)
+
+
+@router.post("/positions/follow/target", tags=["positions"])
+def follow_target_move(req: FollowRequest, session: Session = Depends(get_session)) -> dict:
+    """Move a followed trade's target (the chart's 🎯 line) - a manual one's, or a strategy's (2026-11-22); the
+    broker's safety take profit moves with it, 2R past."""
+    from app.agents import manual_follow
+    from app.agents.strategy import move_follow_target
+    from app.risk.service import _norm_symbol
+
+    if req.target is None:
+        raise HTTPException(status_code=400, detail="target is required")
+    if (_norm_symbol(req.symbol), req.direction) in manual_follow.levels(session):
+        return _follow_call(manual_follow.move, session, req.symbol, req.direction, req.target)
+    return _follow_call(move_follow_target, session, req.symbol, req.direction, req.target)
+
+
+@router.get("/positions/follow/settings", tags=["positions"])
+def follow_settings(session: Session = Depends(get_session)) -> dict:
+    """The manual trades' follow levels (SL1 / TP1 / TP2 / SL2) and the auto switch (2026-11-22)."""
+    from app.agents import manual_follow
+
+    return manual_follow.settings(session)
+
+
+@router.post("/positions/follow/settings", tags=["positions"])
+def follow_settings_save(patch: dict, session: Session = Depends(get_session)) -> dict:
+    from app.agents import manual_follow
+
+    return _follow_call(manual_follow.save_settings, session, patch)
+
+
+@router.post("/positions/follow/off", tags=["positions"])
+def follow_off(req: FollowRequest, session: Session = Depends(get_session)) -> dict:
+    """Stop following: still waiting, the take profit goes back to the target; past it, the levels stay."""
+    from app.agents import manual_follow
+
+    return _follow_call(manual_follow.stop, session, req.symbol, req.direction)
 
 
 class SlTpRequest(BaseModel):

@@ -542,10 +542,13 @@ def build_account_state(session: Session, broker: BrokerAdapter,
 
 
 def last_pair_close_at(session: Session, symbol: str) -> datetime | None:
+    # LIMIT 1: .first() on an ORM query still loaded every closed row of the pair (2026-11-22: ~13 ms a call,
+    # 12 pairs every 5 s in the strategy engine, and again on every board read).
     row = session.scalars(
         select(Position)
         .where(Position.symbol == symbol, Position.status == PositionStatus.CLOSED.value)
         .order_by(Position.closed_at.desc())
+        .limit(1)
     ).first()
     if row and row.closed_at:
         closed = row.closed_at
@@ -565,6 +568,7 @@ def last_dir_loss_at(session: Session, symbol: str, direction: str) -> datetime 
         .where(Position.symbol == symbol, Position.direction == direction,
                Position.status == PositionStatus.CLOSED.value)
         .order_by(Position.closed_at.desc())
+        .limit(1)                                   # see last_pair_close_at
     ).first()
     if not row or not row.closed_at:
         return None

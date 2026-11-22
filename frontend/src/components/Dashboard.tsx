@@ -66,6 +66,7 @@ import { MarketHoursChip } from "./MarketHoursChip";
 import { PairMonitor } from "./PairMonitor";
 import { Drawer, type DrawerId } from "./Drawer";
 import { OpenPositionsList, SideSection } from "./LiveBook";
+import { ManualFollowSettings } from "./ManualFollowSettings";
 import { RegimeBadge } from "./RegimeBadge";
 import { ConditionalsPanel } from "./ConditionalsPanel";
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
@@ -941,6 +942,14 @@ export function Dashboard({
                 positions={positions}
                 armed={armedLevels}
                 onSetSlTp={(sl, tp, direction) => setSlTp({ symbol, asset_class: assetClass, direction }, sl, tp)}
+                onMoveFollowTarget={async (target, direction) => {
+                  try {
+                    await api.followMove(symbol, assetClass, direction ?? "long", target);
+                  } catch (e) {
+                    refused(`Moving the 🎯 target on ${symbol} refused`, e);
+                  }
+                  onPositionsChanged();
+                }}
                 onSetArmedLevels={async (id, levels) => {
                   try {
                     await api.setConditionalLevels(id, levels);
@@ -998,6 +1007,7 @@ export function Dashboard({
                     {fmtUsd(floatingTotal, { sign: true })}
                   </span>
                 )}
+                <ManualFollowSettings />
                 {followButton}
                 <button
                   onClick={() => onOpenDrawer("advisor")}
@@ -1018,6 +1028,7 @@ export function Dashboard({
               onChart={openPositionSymbol}
               onClose={closePosition}
               onAdvice={() => onOpenDrawer("advisor")}
+              onChanged={onPositionsChanged}
             />
           </SideSection>
 

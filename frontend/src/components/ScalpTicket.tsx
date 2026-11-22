@@ -17,6 +17,9 @@ import type { AssetClass, PositionView, ScalpSpec } from "../types";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TugConfetti, TugOfWar, TugParty, winnerOf, type Kind } from "./TugOfWar";
 
+// Follow past the take profit on a manual trade (2026-11-22) - what it does, for the tooltips.
+const FOLLOW_HINT = "The app keeps this target - drag the 🎯 line on the chart to move it - and the broker's take profit moves 2R past it as a safety net. At the target: with the 30s SuperTrend on the trade's side the stop locks just short of the target and then trails the 30s line (it closes when the line turns); otherwise the profit is taken there. Same rule as the strategy's 🎯 follow past it.";
+
 const LEVEL_TONE: Record<ScalpLevel, string> = {
   low: "border-emerald-500 bg-emerald-500/20 text-emerald-300",
   medium: "border-amber-500 bg-amber-500/20 text-amber-300",
@@ -117,6 +120,11 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
   // which then follows the stop.
   const [levBy, setLevBy] = useLocalStorage<Partial<Record<ScalpLevel, number>>>("scalp.leverage", {});
   const [sound, setSound] = useLocalStorage("scalp.sound", true);
+  // Follow past the take profit (2026-11-22): switched on for the trade as soon as it fills.
+  const [follow, setFollow] = useLocalStorage("scalp.follow", false);
+  // With auto follow on (🎯 Auto by Open positions) the backend follows every new manual trade itself.
+  const { data: followCfg } = usePolling(() => api.followSettings(), 30_000, []);
+  const autoFollow = !!followCfg?.auto;
   // Each preset's risk per trade, in %, when changed from the preset's own (up to SCALP_MAX_RISK, the
   // Risk Manager's scalp ceiling - RISK.md override 2026-11-02).
   const [riskBy, setRiskBy] = useLocalStorage<Partial<Record<ScalpLevel, number>>>("scalp.riskPct", {});
@@ -203,7 +211,7 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
           : day?.locked
             ? `Daily stop hit: ${fmtUsd(-day.lost)} today, ${preset.label}'s limit is ${fmtUsd(-day.limit)} (${day.pct}% of the day's start). Sending unlocks at 00:00 UTC, in ${untilUtcMidnight()} - or raise the % / switch the daily stop off next to the Day meter.`
             : plan?.blocked
-              ?? (unconfirmed ? "Live trading isn't confirmed since the backend restarted - Settings › type the phrase › Re-confirm." : null);
+              ?? (unconfirmed ? "Live trading isn't confirmed since the backend restarted - press ✓ Confirm LIVE in the red strip at the top." : null);
   // The Risk Manager never opens a second trade on the side you already hold on this pair; say so
   // before the click rather than after it.
   const stacked = pre && mine.some((p) => p.direction === pre.dir)
@@ -336,9 +344,17 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
         tags: ["scalp", level], note: `scalp ${timeframe} ${p.leverage.toFixed(1)}x ${preset.label}`,
       });
       if (res.status !== "executed") throw new Error(`Refused by the Risk Manager: ${res.risk?.reason ?? res.status}`);
-      setFlash({ dir: pre.dir, text: `✓ ${p.lots} lot` });
+      const dir = pre.dir;
+      setFlash({ dir, text: `✓ ${p.lots} lot` });
       setPre(null);
       if (sound) play(FILL_NOTES, 0.12);
+      if (follow && !autoFollow) {
+        try {
+          await api.followOn(symbol, assetClass, dir);
+        } catch (e) {
+          say(`Filled - but 🎯 follow is not on: ${e instanceof Error ? e.message.replace(/^\d+: /, "") : String(e)}`);
+        }
+      }
       onOpened();
     } catch (e) {
       say(e instanceof Error ? e.message : String(e));
@@ -709,6 +725,16 @@ export function ScalpTicket({ symbol, assetClass, timeframe, spec, specError, po
                 {x}R
               </button>
             ))}
+            <button
+              onClick={(e) => { e.currentTarget.blur(); if (!autoFollow) setFollow(!follow); }}
+              aria-pressed={autoFollow || follow}
+              title={autoFollow
+                ? "Auto follow is ON (🎯 Auto by Open positions): every new manual trade follows past its target on your levels."
+                : `Follow past the take profit, switched on as the order fills. ${FOLLOW_HINT}`}
+              className={`rounded px-1.5 py-0.5 ${autoFollow || follow ? "bg-amber-500/90 font-semibold text-neutral-950" : "text-neutral-400 hover:bg-neutral-800"}`}
+            >
+              🎯 {autoFollow ? "auto" : "follow"}
+            </button>
             {plan && plan.lots > 0 && (
               <span className="ml-1 tabular-nums">
                 <b className="text-bull">+{fmtUsd(plan.rewardUsd)}</b>

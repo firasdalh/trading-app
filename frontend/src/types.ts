@@ -275,6 +275,19 @@ export interface PositionView {
   // further out. following = the target was reached and the stop now follows the 30s SuperTrend.
   follow_target?: number | null;
   following?: boolean;
+  // A MANUAL trade the user follows the same way (2026-11-22): its target is theirs to drag on the chart.
+  follow_manual?: boolean;
+}
+
+// The manual trades' follow levels and the auto switch (GET/POST /api/positions/follow/settings, 2026-11-22).
+export interface ManualFollowSettings {
+  auto: boolean;
+  sl1_mode: "keep" | "atr";   // SL1: the trade's own stop, or always x ATR (1m)
+  sl1_atr: number;
+  tp1_mode: "keep" | "r";     // TP1 (the app's target): the trade's own take profit, or always x R
+  tp1_r: number;
+  tp2_r: number;               // TP2 (the broker's safety take profit): R past TP1
+  sl2_r: number;               // SL2 (the lock at TP1): R short of it
 }
 
 /** One exit deal of a past trade (a partial close is one of its own). */

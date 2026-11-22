@@ -15,8 +15,9 @@ __mp_main__, so the worker sends its output to the same log.
 import os
 import sys
 
-LOG = os.environ.get("TRADING_DESK_LOG") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs",
-                                                         "backend.log")
+# Outside OneDrive (2026-11-22): OneDrive re-uploaded the growing log all the time.
+LOG = os.environ.get("TRADING_DESK_LOG") or os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                                                         "AITradingDesk", "logs", "backend.log")
 os.makedirs(os.path.dirname(LOG), exist_ok=True)
 _log = open(LOG, "a", encoding="utf-8", buffering=1)
 sys.stderr = _log

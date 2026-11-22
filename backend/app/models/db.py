@@ -128,6 +128,11 @@ class AppSettings(Base):
     # filters the view). None = show everything. Set it to start a clean test period.
     journal_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Manual trades whose target the APP keeps (agents/manual_follow.py, 2026-11-22): {"SYMBOL|side": entry}.
+    manual_follows: Mapped[dict | None] = mapped_column(JSON)
+    # Their levels (SL1 / TP1 / TP2 / SL2) and the auto switch, with the trades auto leaves alone (manual_follow.settings).
+    manual_follow_cfg: Mapped[dict | None] = mapped_column(JSON)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

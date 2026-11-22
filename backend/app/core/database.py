@@ -102,6 +102,8 @@ _SQLITE_ADDED_COLUMNS = {
         ("disabled_filters", "TEXT"),
         ("wait_entry_atr", "FLOAT DEFAULT 0.0"),
         ("analysis_language", "VARCHAR(4) DEFAULT 'en'"),
+        ("manual_follows", "TEXT"),
+        ("manual_follow_cfg", "TEXT"),
     ],
     "watch_items": [
         ("recommended", "BOOLEAN DEFAULT 0"),

@@ -212,6 +212,14 @@ export function ChartWindow() {
         positions={positions}
         armed={armed}
         onSetSlTp={setSlTp}
+        onMoveFollowTarget={async (target, direction) => {
+          try {
+            await api.followMove(symbol, assetClass, direction ?? "long", target);
+          } catch (e) {
+            refused(`Moving the 🎯 target on ${symbol} refused`, e);
+          }
+          setPosBump((b) => b + 1);
+        }}
         onSetArmedLevels={async (id, levels) => {
           try {
             await api.setConditionalLevels(id, levels);

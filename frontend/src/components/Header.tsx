@@ -33,6 +33,21 @@ interface Props {
  */
 export function Header({ settings, account, risk, positions, nav, automation, onKillSwitchChange, onOpenSettings, onOpenAutomation }: Props) {
   const [busy, setBusy] = useState(false);
+  // The red "LIVE not confirmed" strip's one-click confirm (2026-11-22).
+  const [confirming, setConfirming] = useState(false);
+  const [confirmErr, setConfirmErr] = useState<string | null>(null);
+  const confirmLive = async () => {
+    setConfirming(true);
+    setConfirmErr(null);
+    try {
+      await api.liveReconfirm();
+      onKillSwitchChange();        // re-reads the settings: the strip goes
+    } catch (e) {
+      setConfirmErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConfirming(false);
+    }
+  };
   // The account strip's box: the clock beside it steps aside when the account numbers need the room.
   const stripRef = useRef<HTMLDivElement>(null);
   // Two-step power off: the first click arms it, the second does it. A single click on a control
@@ -247,9 +262,18 @@ export function Header({ settings, account, risk, positions, nav, automation, on
         </div>
       )}
       {isLive && settings?.live_re_confirm_required && (
-        <div className="bg-bear px-4 py-1.5 text-center text-sm font-semibold text-white">
-          LIVE is not confirmed for this session (the app restarted) - every real-money order is refused.
-          Settings &gt; type the phrase &gt; Re-confirm.
+        <div className="flex flex-wrap items-center justify-center gap-3 bg-bear px-4 py-1.5 text-center text-sm font-semibold text-white">
+          <span>LIVE is not confirmed since the app restarted - every real-money order is refused until you confirm.</span>
+          <button
+            type="button"
+            onClick={() => void confirmLive()}
+            disabled={confirming}
+            className="rounded-md bg-white px-3 py-0.5 text-sm font-bold text-bear shadow hover:bg-neutral-100 disabled:opacity-60"
+            title="Trade the real account again, as before the restart (real money)"
+          >
+            {confirming ? "Confirming…" : "✓ Confirm LIVE"}
+          </button>
+          {confirmErr && <span className="font-normal">Could not confirm: {confirmErr}</span>}
         </div>
       )}
       {realAccount && !isLive && (

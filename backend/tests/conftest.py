@@ -21,6 +21,16 @@ def _force_deterministic_agents(monkeypatch):
             monkeypatch.setattr(mod, "llm_available", lambda: False, raising=False)
         except Exception:  # noqa: BLE001
             pass
+    # The journal book shared by the cards for a few seconds (journal_routes._BOOK) - each test has its own trades.
+    try:
+        importlib.import_module("app.api.journal_routes")._BOOK.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    # The second bars kept per (symbol, seconds) - tests reuse symbol names with different fake ticks.
+    try:
+        importlib.import_module("app.brokers.mt5_adapter")._SEC_CACHE.clear()
+    except Exception:  # noqa: BLE001
+        pass
     # Clear the per-symbol LLM-read caches so a cached read never leaks between tests.
     for mod_name, attr in (("fundamental", "_FUND_CACHE"), ("scenarios", "_CACHE"),
                            ("momentum_read", "_CACHE"), ("regime_read", "_CACHE"),

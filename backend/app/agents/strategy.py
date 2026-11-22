@@ -1723,8 +1723,10 @@ def _open_positions(session: Session, symbol: str) -> list[Position]:
 
 def _trades_today(session: Session, cfg: StrategyConfig, now: datetime) -> int:
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    rows = session.scalars(select(Position).where(Position.source == strategy_source(cfg))).all()
-    return sum(1 for p in rows if p.opened_at is not None and _utc(p.opened_at) >= start)
+    # Only the open times (2026-11-22): the whole rows of every trade it ever made - ~400, JSON decoded - cost
+    # ~50 ms a call, for each of 12 pairs every 5 s.
+    opened = session.scalars(select(Position.opened_at).where(Position.source == strategy_source(cfg))).all()
+    return sum(1 for t in opened if t is not None and _utc(t) >= start)
 
 
 def today_result(session: Session, cfg: StrategyConfig, now: datetime) -> dict:
@@ -2268,6 +2270,66 @@ def follow_targets(session: Session, cfg: StrategyConfig, now: datetime | None =
     return out
 
 
+def move_follow_target(session: Session, symbol: str, side: str, target: float) -> dict:
+    """Move the target a strategy keeps for its trade (the chart's 🎯 line, 2026-11-22: "let me control the
+    strategy's fake take profit from the chart too"): the lock moves with it, and the broker's safety take profit
+    to FOLLOW_SAFETY_R past it. Only while it waits for the target. Raises manual_follow.FollowRefused."""
+    from app.agents.manual_follow import FollowRefused
+    from app.brokers.registry import get_broker_for
+    from app.core.state import get_or_create_settings
+
+    s = 1 if side == "long" else -1
+    with STATE_LOCK:
+        hit = None
+        for cfg in session.scalars(select(StrategyConfig)).all():
+            session.refresh(cfg)                   # the tick may have written it a moment ago
+            for sym, v in (cfg.state or {}).items():
+                fe = v.get("follow") if isinstance(v, dict) else None
+                if fe and fe.get("side") == side and _norm(sym) == _norm(symbol):
+                    hit = (cfg, sym, dict(fe))
+        if hit is None:
+            raise FollowRefused("no strategy keeps this trade's target")
+        cfg, sym, fe = hit
+        if fe.get("mode") == "following":
+            raise FollowRefused("it is past its target already - the stop follows the 30s SuperTrend now")
+        if fe.get("mode") == "shared":
+            raise FollowRefused("another ticket shares its side, so the app leaves it to its stop and safety target")
+        pos = next((p for p in _open_positions(session, sym) if p.source == strategy_source(cfg) and p.direction == side),
+                   None)
+        if pos is None:
+            raise FollowRefused("the strategy's trade is not open any more")
+        broker = get_broker_for(AssetClass(pos.asset_class or "forex"), get_or_create_settings(session).broker_map)
+        q = _quote(broker, sym)
+        if not q:
+            raise FollowRefused(f"no live quote for {sym} now")
+        price = float(q["bid"] if s > 0 else q["ask"])
+        digits = int(q.get("digits") or 6)
+        target = round(float(target), digits)
+        if s * (target - float(pos.entry_price)) <= 0:
+            raise FollowRefused(f"the target must be on the profit side of the entry ({'above' if s > 0 else 'below'} "
+                                f"{pos.entry_price:g})")
+        if s * (target - price) <= float(q.get("stops_level") or 0.0):
+            raise FollowRefused(f"the target must stay {'above' if s > 0 else 'below'} the current price ({price:g}) - "
+                                "to take the profit now, close the trade")
+        risk = float(fe["risk"])
+        safety = round(target + s * FOLLOW_SAFETY_R * risk, digits)
+        res = broker.set_sl_tp(sym, stop_loss=None, take_profit=safety, direction=side)
+        if res.status.value in ("error", "rejected"):
+            raise FollowRefused(f"the broker refused the safety take profit at {safety:g}: {res.error}")
+        was = fe.get("target")
+        fe.update(target=target, lock=round(target - s * FOLLOW_LOCK_R * risk, digits))
+        state = copy.deepcopy(cfg.state or {})
+        state.setdefault(sym, {})["follow"] = fe
+        now = datetime.now(timezone.utc)
+        state[sym]["note"], state[sym]["at"] = _follow_note(fe), now.isoformat()
+        cfg.state = state
+        pos.take_profit = safety
+        _log(session, cfg, sym, "follow_target_moved", side=side, frm=was, to=target, broker_tp=safety, by="chart")
+        session.commit()
+    log.warning("strategy target moved from the chart", extra={"strategy": cfg.id, "symbol": sym, "to": target})
+    return {**fe, "broker_tp": safety, "strategy": cfg.id}
+
+
 def _note(state: dict, symbol: str, text: str, now: datetime) -> dict:
     """What the pair is doing, for the board - stamped only when it changes, so a quiet strategy
     doesn't rewrite its row every few seconds."""
@@ -2506,10 +2568,20 @@ def run_strategy(session: Session, cfg: StrategyConfig, now: datetime | None = N
 _LAST_LOOK: dict[tuple[int, str], tuple[tuple, float]] = {}
 
 
+# The strategies' state (cfg.state) is read and written back whole by the every-second tick; a 🎯 target moved from
+# the chart (move_follow_target, 2026-11-22) writes it too. One at a time, so neither writes over the other.
+STATE_LOCK = threading.Lock()
+
+
 def strategy_tick(session: Session, now: datetime | None = None) -> dict:
     """Scheduler entrypoint, every second. A running strategy's pair is looked at when a bar has just
     closed on any timeframe its rules read (GRACE seconds after the close), and HEARTBEAT seconds
     after its last look otherwise - in between there is nothing new to read."""
+    with STATE_LOCK:
+        return _strategy_tick(session, now)
+
+
+def _strategy_tick(session: Session, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     # The targets the app keeps itself (follow_target): every second, first, and a stopped strategy's trades too.
     for cfg in session.scalars(select(StrategyConfig)).all():
@@ -2519,6 +2591,14 @@ def strategy_tick(session: Session, now: datetime | None = None) -> dict:
             except Exception as exc:  # noqa: BLE001 - never in the way of the strategies' own looks
                 session.rollback()
                 log.warning("follow targets failed", extra={"strategy": cfg.id, "error": str(exc)})
+    # The manual trades the user follows the same way (manual_follow.py, 2026-11-22).
+    try:
+        from app.agents.manual_follow import tick as manual_follow_tick
+
+        manual_follow_tick(session, now)
+    except Exception as exc:  # noqa: BLE001 - never in the way of the strategies
+        session.rollback()
+        log.warning("manual follow failed", extra={"error": str(exc)})
     running = session.scalars(select(StrategyConfig).where(StrategyConfig.enabled.is_(True))).all()
     out, alive = {}, set()
     for cfg in running:

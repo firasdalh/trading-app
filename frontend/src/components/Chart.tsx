@@ -392,6 +392,8 @@ interface Props {
   armed?: ArmedLevel[];
   // Commit a dragged SL/TP for the charted symbol's open position (null = leave that one unchanged).
   onSetSlTp?: (sl: number | null, tp: number | null, direction?: string) => void;
+  // Commit a dragged 🎯 target of a manual trade that follows it (2026-11-22).
+  onMoveFollowTarget?: (target: number, direction?: string) => void;
   // Commit a dragged trigger/SL/TP for an armed setup (only the changed level is sent).
   onSetArmedLevels?: (id: number, levels: { trigger_price?: number; stop_loss?: number; take_profit?: number }) => void;
   // The AI scenario's cited S/R to plot on the chart — lifted to the Dashboard so BOTH the floating
@@ -1360,7 +1362,7 @@ export function Chart(props: Props) {
   return <ChartView key={props.scalp ? "scalp" : "std"} {...props} />;
 }
 
-function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onSetArmedLevels, scenLevels, isFullscreen, fill, onToggleFullscreen,
+function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positions, armed, onSetSlTp, onMoveFollowTarget, onSetArmedLevels, scenLevels, isFullscreen, fill, onToggleFullscreen,
                      scenLevelsShown, onToggleScenLevels, onArmed, onOpened, onPulse, scalp = false, bidAsk,
                      preOrder = null, onPreOrderDrag, hud = null, strategies }: Props) {
   // The timeframe the analysis reads and tickets/setups are placed on: this chart's, or 1m when the
@@ -1472,6 +1474,8 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
   const onSetSlTpRef = useRef<Props["onSetSlTp"]>(onSetSlTp);
   const onSetArmedRef = useRef<Props["onSetArmedLevels"]>(onSetArmedLevels);
   onSetSlTpRef.current = onSetSlTp;
+  const onMoveFollowRef = useRef<Props["onMoveFollowTarget"]>(onMoveFollowTarget);
+  onMoveFollowRef.current = onMoveFollowTarget;
   onSetArmedRef.current = onSetArmedLevels;
   const [dragHint, setDragHint] = useState<{ label: string; price: number; pos: PositionView | null; extra?: string | null } | null>(null);
   const [dragErr, setDragErr] = useState<string | null>(null);
@@ -3089,7 +3093,10 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
       const kept = p.follow_target != null;
       const slLine = be ? null : add(p.stop_loss, "#ef5350", `${p.following ? "SL following" : "SL"} ${slUsd}`.trim() + dragCue);
       const tpLine = add(p.take_profit, "#26a69a", `${kept ? "TP safety" : "TP"} ${tpUsd}`.trim() + dragCue);
-      if (kept && !p.following) add(p.follow_target, "#f59e0b", "🎯 target · the app keeps it");
+      // The 🎯 target the app keeps - a manual trade's or a strategy's (2026-11-22) - is the user's to drag.
+      const ftLine = kept && !p.following
+        ? add(p.follow_target, "#f59e0b", `🎯 target · the app keeps it${dragCue}`)
+        : null;
       // Levels are validated against the CURRENT PRICE, not the entry.
       //
       // Against the entry, a long's stop could never be placed above it — so you could never
@@ -3114,6 +3121,17 @@ function ChartView({ symbol, assetClass, timeframe, proposal, liveQuote, positio
           why: `a ${p.direction} target must stay ${isLong ? "above" : "below"} the current price — it would fill immediately`,
           confirm: true,
           commit: (x) => onSetSlTpRef.current?.(p.stop_loss ?? null, x, p.direction),
+        });
+      }
+      // The soft target of a trade that follows it (manual, or a strategy's): the broker's safety take profit moves
+      // with it, 2R past it. Confirmed like every live level (a stray touch must not move it).
+      if (ftLine && p.follow_target != null) {
+        handlesRef.current.push({
+          key: `pos-ft-${p.id ?? p.symbol}`, label: "🎯 target", refPos: p, line: ftLine, price: p.follow_target,
+          validate: (x) => (isLong ? x > mkt() && x > p.entry_price : x < mkt() && x < p.entry_price),
+          why: `the target must stay ${isLong ? "above" : "below"} the current price and the entry - to take the profit now, close the trade`,
+          confirm: true,
+          commit: (x) => onMoveFollowRef.current?.(x, p.direction),
         });
       }
     }

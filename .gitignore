@@ -47,3 +47,6 @@ logs/
 # SQLite WAL side files (journal_mode=WAL since 2026-10-21)
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Database copies kept aside by hand (e.g. trading.sqlite3.moved-<date>, 2026-11-22): they hold the MT5 login.
+*.sqlite3.*

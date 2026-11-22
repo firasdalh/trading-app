@@ -73,13 +73,13 @@ export function JournalView() {
   });
   const section = (id: SectionId, node: ReactNode) =>
     hidden.includes(id) ? null : <FoldProvider value={foldOf(id)}>{node}</FoldProvider>;
-  const { data: trades } = usePolling(() => api.journalTrades(100, hideManual), 8000, [bump, hideManual]);
+  const { data: trades } = usePolling(() => api.journalTrades(100, hideManual), 15000, [bump, hideManual]);
   // The backend tags each row with the session it opened in (2026-11-10). An older one sends no `session` at all:
   // then the column stays away rather than reading "—" all the way down.
   const withSessions = !!trades?.some((t) => t.session !== undefined);
-  const { data: calib } = usePolling(() => api.journalCalibration(), 10000, [bump]);
-  const { data: perf } = usePolling(() => api.journalStats(hideManual), 10000, [bump, hideManual]);
-  const { data: breakdown } = usePolling(() => api.journalBreakdown(hideManual), 10000, [bump, hideManual]);
+  const { data: calib } = usePolling(() => api.journalCalibration(), 30000, [bump]);
+  const { data: perf } = usePolling(() => api.journalStats(hideManual), 15000, [bump, hideManual]);
+  const { data: breakdown } = usePolling(() => api.journalBreakdown(hideManual), 15000, [bump, hideManual]);
   const [reflection, setReflection] = useState<ReflectionReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

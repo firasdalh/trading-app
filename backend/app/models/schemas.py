@@ -365,6 +365,9 @@ class PositionView(BaseModel):
     # stop now follows the 30s SuperTrend. None / False for every other trade.
     follow_target: float | None = None
     following: bool = False
+    # The same for a MANUAL trade the user switched it on for (manual_follow.py, 2026-11-22): its target is the
+    # user's to drag on the chart.
+    follow_manual: bool = False
     swap: float = 0.0           # accrued overnight swap (account ccy), NOT in unrealized_pnl
     opened_at: datetime | None = None   # when the position was opened (app-tracked rows)
     # Margin required to hold the position, in the account currency (USD) — the "cost to open".

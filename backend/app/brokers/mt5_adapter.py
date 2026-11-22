@@ -18,6 +18,7 @@ an injected fake module.
 """
 from __future__ import annotations
 
+import bisect
 import threading
 import time
 from datetime import datetime, timezone
@@ -44,7 +45,8 @@ _TF_ATTR = {
 }
 
 # Timeframes under a minute, in seconds. MT5 has no bar shorter than M1, so these are built from the
-# tick history (_bars_from_ticks). They exist for the chart; nothing in the engine reads them.
+# tick history (_bars_from_ticks). The chart reads them, and so does the strategy engine when its rules
+# use them (strategy 1: 5s, 10s and 30s x 500 bars on 12 pairs - see _SEC_CACHE).
 _SECOND_TFS = {"5s": 5, "10s": 10, "30s": 30}
 
 
@@ -135,6 +137,17 @@ def _flow_from_ticks(times: list, bids: list, seconds: int, prev: float | None =
 # bucket, even when the forming bar is a whole day. A few symbols' worth; the least recently used
 # goes first.
 _FLOW_SPAN_S = 24 * 3600
+
+# Second bars already built, per (symbol, seconds): the CLOSED ones, and where the first bar not yet final
+# starts. A read then fetches only the ticks from there. Before (2026-11-22) every read rebuilt its 500
+# bars from all the ticks behind them - for strategy 1, 42 min of ticks per pair every 5 s, 84 every 10 s
+# and 250 every 30 s - which kept the backend at a full core and every request slow. Kept: the longest
+# span any read asked for in the last _SEC_KEEP_S (a chart's 3-bar refresh must not cut the strategy's
+# 500). A few dozen keys; the least recently used goes first.
+_SEC_CACHE: dict[tuple[str, int], dict] = {}
+_SEC_CACHE_MAX = 64
+_SEC_KEEP_S = 900.0
+_SEC_LOCK = threading.Lock()
 _FLOW_CACHE: dict[tuple[str, int], dict] = {}
 _FLOW_CACHE_MAX = 12
 _FLOW_LOCK = threading.Lock()
@@ -494,12 +507,43 @@ class Mt5BrokerAdapter(BrokerAdapter):
         rates = mt5.copy_rates_from_pos(name, mt5.TIMEFRAME_M1, 0, minutes)
         if rates is None or len(rates) == 0:
             return []
-        # The end is past the forming minute on purpose: MT5 stops at the newest tick.
-        ticks = mt5.copy_ticks_range(name, int(rates[0]["time"]), int(rates[-1]["time"]) + 120,
-                                     mt5.COPY_TICKS_ALL)
-        if ticks is None:
-            return []
-        bars = _bars_from_ticks(_column(ticks, "time"), _column(ticks, "bid"), seconds)[-limit:]
+        start, newest = int(rates[0]["time"]), int(rates[-1]["time"])
+        key = (name, seconds)
+        with _SEC_LOCK:
+            c = _SEC_CACHE.pop(key, None)
+            # Rebuilt when this read reaches further back than what is kept, or what is kept ends before it.
+            if c is None or start < c["from"] or c["final"] < start:
+                c = {"from": start, "final": start, "bars": [], "span": 0, "span_at": 0.0}
+            # From the first bar not yet final; the end is past the forming minute on purpose: MT5 stops at
+            # the newest tick.
+            ticks = mt5.copy_ticks_range(name, c["final"], newest + 120, mt5.COPY_TICKS_ALL)
+            if ticks is None:
+                _SEC_CACHE[key] = c
+                return []
+            times = _column(ticks, "time") if len(ticks) else []
+            fresh = _bars_from_ticks(times, _column(ticks, "bid"), seconds) if times else []
+            # A bar is final once a tick a second past its start is in: the terminal hands ticks over in time
+            # order (as the order-flow buckets).
+            final = c["final"]
+            if times:
+                edge = int(times[-1]) - 1
+                final = max(final, edge - edge % seconds)
+            c["bars"].extend(b for b in fresh if b[0] < final)
+            c["final"] = final
+            forming = [b for b in fresh if b[0] >= final]
+            now_m = time.monotonic()
+            span = newest - start
+            if span >= c["span"] or now_m - c["span_at"] > _SEC_KEEP_S:
+                c["span"], c["span_at"] = span, now_m
+            floor = newest - c["span"]
+            if floor > c["from"]:
+                del c["bars"][:bisect.bisect_left(c["bars"], [floor])]
+                c["from"] = floor
+            kept = c["bars"]
+            bars = (kept[bisect.bisect_left(kept, [start]):] + forming)[-limit:]
+            _SEC_CACHE[key] = c
+            while len(_SEC_CACHE) > _SEC_CACHE_MAX:
+                _SEC_CACHE.pop(next(iter(_SEC_CACHE)))
         return [
             Candle(ts=datetime.fromtimestamp(t, tz=timezone.utc), open=float(o), high=float(h),
                    low=float(lo), close=float(c), volume=float(n))

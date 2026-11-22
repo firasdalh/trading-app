@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { api } from "../api/client";
+import { api, LIVE_PHRASE } from "../api/client";
 import { assetLabel } from "../format";
 import type { AssetClass, ExecutionMode, LlmStatus, Mt5Status, SettingsResponse } from "../types";
 
@@ -64,7 +64,6 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
   const isLive = settings?.app.broker_env === "live";
   // The server checks this exact phrase. Checked here as you type too: a typo ("trad") used to be
   // refused with the error printed at the TOP of this scrolled window, out of sight (2026-10-21).
-  const LIVE_PHRASE = "I understand this trades real money";
   const phraseOk = phrase.trim() === LIVE_PHRASE;
   const reconfirm = settings?.live_re_confirm_required;
 
@@ -237,6 +236,7 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
         </section>
 
         <section className="space-y-2">
+          {!isLive && (<>
           <div className="text-sm font-medium text-neutral-300">Live confirmation phrase</div>
           <input
             name="live-confirm-phrase"
@@ -255,6 +255,7 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               Not matching yet - type exactly: <span className="font-semibold">{LIVE_PHRASE}</span>
             </div>
           )}
+          </>)}
           {!isLive && (
             <button
               disabled={busy || !phraseOk}
@@ -271,14 +272,19 @@ export function SettingsPanel({ settings, onClose, onChanged }: Props) {
               Enable LIVE trading (real money)
             </button>
           )}
+          {/* One click after a restart (2026-11-22, the user: no typing every time); the phrase is typed once, to
+              switch from paper to LIVE. */}
           {isLive && reconfirm && (
             <button
-              disabled={busy || !phraseOk}
-              onClick={() => run(() => api.liveConfirm(phrase), "Live trading re-confirmed.")}
+              disabled={busy}
+              onClick={() => run(() => api.liveReconfirm(), "Live trading re-confirmed.")}
               className="btn bg-bear text-white hover:bg-red-700"
             >
-              Re-confirm live trading (required after restart)
+              ✓ Confirm LIVE (needed after a restart)
             </button>
+          )}
+          {isLive && !reconfirm && (
+            <div className="text-sm text-neutral-400">LIVE is on and confirmed for this session.</div>
           )}
           {/* The result of the LIVE buttons, right under them (the top-of-window strip is out of view). */}
           {error && <div className="rounded border border-bear/40 bg-bear/10 px-3 py-2 text-sm text-bear">{error}</div>}
